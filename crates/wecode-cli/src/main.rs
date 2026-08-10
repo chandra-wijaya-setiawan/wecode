@@ -287,8 +287,8 @@ fn guard(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Error>> 
     // Every decision is recorded, allowed or not.
     store.append_records(broker.ledger())?;
     Ok(render::decision(
-        &post.name,
-        &post.occupant,
+        post.name,
+        post.occupant,
         &action,
         &decision,
     ))
