@@ -1,8 +1,9 @@
 # wecode
 
-A Rust runtime for running coding agents as staff: you set direction and hold
-accountability, the system enforces what each agent may do and attenuates what
-reaches you.
+A Rust runtime for running coding agents as staff. You talk only to the
+orchestrator: it holds every project, task and goal in one hierarchy of intent,
+enforces what each agent may do, and attenuates what reaches you — so nothing
+drifts from the objective it was meant to serve.
 
 ## Docs
 

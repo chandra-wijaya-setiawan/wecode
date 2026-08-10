@@ -82,6 +82,22 @@ A responsibility-assignment matrix. **R**esponsible does the work;
 distinction matters because they are different failure modes. Omitted in the `solo`
 profile, where accountability is always the operator.
 
+### Goal and task hierarchies
+
+The intent ontology is assembled from three existing formalisms rather than invented.
+
+| Source | Contributes |
+|---|---|
+| **KAOS** (goal-oriented requirements engineering) | AND/OR goal refinement — `Link::Requires` and `Link::Alternative`. Also *obstacles*: things that block a goal, refinable like goals themselves |
+| **i\* / Tropos** | means-ends refinement; actor-dependency modelling. Strong on stakeholders, weak on multi-level decomposition, which is why KAOS supplies the tree |
+| **GRL** | **contribution links** with positive and negative polarity, plus satisfaction levels — `Link::Contributes { polarity }`. Also *correlation*: side effects rather than intended impact |
+| **HTN planning** | the **compound vs. primitive** distinction: compound tasks cannot execute and must decompose via methods until only primitive tasks remain. This is why only `Task` is executable and a compound intent without children is incomplete |
+| **OKRs** | objectives paired with measurable key results; `weight` for relative priority among siblings |
+
+Two things deliberately *not* taken: KAOS obstacles (worth adding later — see §3.11)
+and GRL's quantitative satisfaction propagation, which needs calibration the tree
+will not have.
+
 ---
 
 ## 2. Prior art
@@ -207,3 +223,23 @@ occupant kind — the kind of asymmetry that causes bugs later.
 It already implements S1–S5 with an algedonic channel in Elixir. Whether to target
 it, port from it, or ignore it depends on how much of its alpha status is nominal.
 Worth a day's investigation before building depth >1.
+
+### 3.11 The intent tree needs a gardener
+
+Ontologies rot. Goals get achieved and stay open; visions get restated; projects
+outlive the goal that justified them. `Trajectory` detects *starved* and *stalled*
+nodes but nothing prunes or merges. Unresolved: whether pruning is an operator chore
+surfaced in the digest, or an Intelligence function. The failure mode is a tree
+elaborate enough that alignment metrics look healthy while meaning nothing.
+
+Related: KAOS *obstacles* would give blockers first-class status (refinable, with
+their own mitigation subtrees) instead of the current flat `Exception`. Probably
+worth adding once real usage shows what blocks work.
+
+### 3.12 Classification is a model call on the critical path
+
+Intake proposes `kind`, `parent` and `link` with a model. Confirmation gates it, but
+a plausible-looking wrong parent is easy to accept — and a mis-parented intent
+corrupts every rollup above it. No mitigation beyond the confirm step, which relies
+on the operator caring at the moment of capture, exactly when they are least likely
+to.

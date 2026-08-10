@@ -1,8 +1,9 @@
 # wecode — Architecture
 
-A Rust runtime for running coding agents as staff: you set direction and hold
-accountability, the system enforces what each agent may do and attenuates what
-reaches you.
+A Rust runtime for running coding agents as staff. You talk only to the
+orchestrator: it holds every project, task and goal in one hierarchy of intent,
+enforces what each agent may do, and attenuates what reaches you — so nothing drifts
+from the objective it was meant to serve.
 
 - **Theory, prior art and open questions:** [`theory.md`](./theory.md)
 - **Design history and rationale for changes:** `git log`
@@ -35,7 +36,13 @@ flowchart TB
         p3["Post · aider"]
     end
 
-    op -->|"projects, goals"| ctl
+    subgraph INT["Intent (§2.1)"]
+        tree["Vision → Goal → Project → Task<br/>any node may stand alone"]
+    end
+
+    op -->|"one statement"| tree
+    tree -->|"assignments"| ctl
+    tree -.->|"trajectory · drift"| tui
     tui --> op
     ctl --> crd --> brk
     brk --> p1 & p2 & p3
@@ -52,10 +59,100 @@ Three rules the whole design follows:
    — never from an agent's account of its own work.
 3. **The operator's attention is the binding constraint.** Concurrency derives from
    it; the runtime throttles itself rather than flooding you.
+4. **Every unit of work knows what it serves.** Work that ladders to nothing is a
+   detected defect, not a normal state.
 
 ---
 
-## 2. Core types
+## 2. Intent and organization
+
+Two orthogonal hierarchies. **Intent** is demand — what we are trying to achieve.
+**Organization** is supply — who may do what. Assignments bind them.
+
+### 2.1 Intent — the task ontology
+
+One recursive node. Kind gates the grammar; nothing else changes by level.
+
+```rust
+pub struct Intent {
+    pub id: IntentId,
+    pub kind: IntentKind,
+    pub statement: String,           // one imperative sentence
+    pub parent: Option<IntentId>,    // None ⇒ root or ad-hoc
+    pub link: Link,                  // how it serves its parent
+    pub sphere: Sphere,
+    pub horizon: Horizon,
+    pub weight: f32,                 // relative priority among siblings
+    pub measures: Vec<Measure>,
+    pub status: Status,
+}
+
+/// Compound kinds must decompose; only Task is primitive (directly executable).
+pub enum IntentKind { Vision, Goal, Project, Task }
+
+pub enum Sphere { Org, Unit(UnitId), Personal }
+
+pub enum Horizon { Indefinite, Year, Quarter, Month, Week, Now }
+
+pub enum Link {
+    /// Serves the parent partially. Polarity allows negative contribution.
+    Contributes { rationale: String, polarity: Polarity },
+    Requires,        // AND — parent needs every such child
+    Alternative,     // OR  — any one such child satisfies the parent
+    Standalone { reason: StandaloneReason },  // deliberately unaligned
+    Unlinked,        // drift: needs triage, surfaced not tolerated
+}
+
+pub enum StandaloneReason { Maintenance, Urgent, Exploration, Personal }
+```
+
+**Grammar.** Enforced on write, so the tree cannot become incoherent.
+
+| Kind | Parent | Decomposes into | Measures | Assignable |
+|---|---|---|---|---|
+| `Vision` | none | Goals | `Proxy` only | no |
+| `Goal` | Vision, Goal | Goals, Projects | ≥1 `Command`/`Metric` | no |
+| `Project` | Goal, Project, none | Tasks | ≥1 | to units; budgeted |
+| `Task` | Project, Task, none | *primitive* | acceptance criteria | to one post |
+
+Rules: no cycles; a child's horizon never exceeds its parent's; a compound intent
+with no children is incomplete; `parent: None` is legal at every kind — that is how
+an ad-hoc task or an independent project exists.
+
+```rust
+pub enum Measure {
+    Command { cmd: String, expect_status: i32 },   // executable truth
+    Metric { name: String, target: f64, cmp: Cmp, source: MetricSource },
+    Deliverable { path: Glob },
+    Rollup,                                        // derived from children
+    Proxy { note: String },                        // human-judged; Vision only
+}
+```
+
+**Progress** uses own measures if present, else rolls up: `Requires` children
+combine as a weighted mean, `Alternative` children as the best child.
+
+### 2.2 Trajectory — not losing the thread
+
+Alignment is measured, not assumed. Computed each cycle from spend and progress:
+
+```rust
+pub struct Trajectory {
+    pub aligned_spend: f32,                  // share reaching a rooted ancestor
+    pub orphan_spend: f32,                   // share on Unlinked intents
+    pub starved: Vec<IntentId>,              // no active descendant for N cycles
+    pub divergence: Vec<(IntentId, f32)>,    // |spend share − weight|
+    pub stalled: Vec<IntentId>,              // spend rising, progress flat
+}
+```
+
+Each maps to a question the operator would otherwise have to remember to ask:
+*what am I paying for that ladders to nothing* (orphan), *which goal have I quietly
+abandoned* (starved), *does my effort match my stated priorities* (divergence),
+*what is burning money without moving* (stalled). `starved` and `divergence` become
+exceptions; the rest appear in the digest.
+
+### 2.3 Organization
 
 ```rust
 /// One recursive type at every scale: org, group, or a single seat.
@@ -132,37 +229,22 @@ pub enum Capability {
 Selection rule: if it cannot be checked *before* the action occurs, it is not a
 capability — it is advice, and belongs in the prompt.
 
-### Projects
-
-Units are supply; projects are demand. Allocation across them is arithmetic.
+### 2.4 Assignment — binding demand to supply
 
 ```rust
-pub struct Project {
-    pub id: ProjectId,
-    pub objective: String,
-    pub key_results: Vec<KeyResult>,
-    pub budget: Budget,
-    pub priority: Priority,
-    pub grant: Grant,                  // ceiling for any assignment here
-    pub assignments: Vec<Assignment>,
-}
-
 pub struct Assignment {
-    pub project: ProjectId,
+    pub intent: IntentId,              // a Project or Task
     pub unit: UnitId,
-    pub effective: Grant,              // unit.grant ∩ project.grant
+    pub effective: Grant,              // unit.grant ∩ intent.grant
     pub allocation: f32,               // share of unit capacity
+    pub budget: Budget,
     pub workflow: Option<WorkflowRef>, // how this unit discharges it
 }
-
-/// Ordered by trustworthiness.
-pub enum KeyResult {
-    Command { cmd: String, expect_status: i32 },
-    Metric  { name: String, target: f64, cmp: Cmp },
-    Artifact{ path: Glob },
-    Judged  { criteria: Vec<String> },   // last resort
-}
 ```
+
+Allocation across assignments is arithmetic (§3, Control). Only `Project` and
+`Task` intents are assignable — a Goal is reached by satisfying its children, never
+by being handed to a unit.
 
 ---
 
@@ -205,9 +287,9 @@ pub struct Session {
     pub id: SessionId,
     pub post: UnitId,
     pub occupant: AgentId,
-    pub project: ProjectId,
+    pub intent: IntentId,
     pub active_roles: Vec<RoleId>,
-    pub effective: Grant,      // ∩ of unit, role and project grants — never ∪
+    pub effective: Grant,      // ∩ of unit, role and intent grants — never ∪
     pub spent: SpendCounters,
 }
 ```
@@ -508,7 +590,7 @@ pub enum Signal {
 pub struct Rollup {
     pub cycle: CycleId,
     pub health: Health,
-    pub kr_progress: Vec<(KeyResultId, f32)>,
+    pub progress: Vec<(IntentId, f32)>,
     pub spend: SpendCounters,
     pub deliverables: Vec<ArtifactRef>,   // pointers, not content
     pub exceptions: Vec<ExceptionKind>,   // ≤ N, most severe first
@@ -597,17 +679,39 @@ the rest.
 ## 9. Commands
 
 ```
-wecode up                        # start the oversight TUI (default)
-wecode project add "<objective>" [--budget …] [--unit …]
-wecode project ls | show <id>
-wecode run <project>             # allocate and dispatch
-wecode run <project> --workflow feature
+wecode "<anything>"              # the only entry point you need — see §9.1
+wecode up                        # oversight TUI (default with no args)
+
+wecode intent ls | show <id> | tree     # inspect the ontology
+wecode intent link <id> --to <id>       # resolve drift
+wecode run <intent>              # allocate and dispatch
+wecode run <intent> --workflow feature
 wecode approve | deny <item>
 wecode ack <alarm>               # clear an alarm, resume dispatch
 wecode post ls | probe | staff <post> <agent>
 wecode audit <run-id>            # what happened, and under whose authority
 wecode resume <run-id>
 ```
+
+### 9.1 Intake
+
+`wecode "<anything>"` is the single control driver. The orchestrator classifies the
+statement, proposes where it belongs, and **the operator confirms before anything
+is committed** — silent placement is how a tree stops matching reality.
+
+```
+$ wecode "users keep hitting the 30s timeout on export"
+
+  kind    Project          parent  Goal: cut p99 latency below 500ms
+  link    Requires         sphere  Org        horizon  Month
+  measure cmd: `k6 run load/export.js`  →  p95 < 5s
+
+  [⏎] accept   [p] reparent   [k] change kind   [s] standalone   [e] edit
+```
+
+Placement is the one demand-side decision a model makes. If no parent fits, the
+proposal is `Standalone` with a reason — never `Unlinked`, which exists only as a
+detected defect for intents that arrived without triage.
 
 ---
 
@@ -646,9 +750,10 @@ you cannot.
 
 | # | Delivers |
 |---|---|
+| **0** | The intent ontology: `Intent`, grammar enforcement, `wecode "…"` intake with confirm, `intent tree` |
 | **1** | One post executes one task: adapter, supervision, worktree, event stream, JSONL log |
 | **2** | Broker with every §4 enforcement point, grants, sessions, audit log |
-| **3** | Oversight TUI: zoom L0–L4, computed health, stuck detection, attention budget, digest |
+| **3** | Oversight TUI: zoom L0–L4, computed health, stuck detection, attention budget, digest, `Trajectory` |
 | **4** | Retries with prior-failure context, scope rejection, sanctions, resume |
 | **5** | Projects and Control: ≥2 projects, deterministic allocation, budgets, capacity |
 | **6** | Coordination: cross-post scope arbitration, locks, shared conventions |
