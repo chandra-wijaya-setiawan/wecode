@@ -152,7 +152,38 @@ abandoned* (starved), *does my effort match my stated priorities* (divergence),
 *what is burning money without moving* (stalled). `starved` and `divergence` become
 exceptions; the rest appear in the digest.
 
-### 2.3 Organization
+### 2.3 Definition authority — who sets the deliverable
+
+**A post may never define the criteria it will be judged by.** Everything else here
+follows from that.
+
+| Kind | Defined by | Model's role |
+|---|---|---|
+| `Vision` | operator only; `Proxy` measures, human-judged | none |
+| `Goal` | operator authors | may propose, operator confirms |
+| `Project` | proposed at intake or by Intelligence; **operator ratifies** — it carries budget | propose |
+| `Task` | derived from the parent Project's measures + scope | propose where derivation is impossible |
+
+Rules:
+
+1. **Executor ≠ definer.** The post assigned a task cannot author or amend its
+   acceptance. Enforced as separation of duty on the `Define` capability.
+2. **Frozen at dispatch.** Amending a measure after work starts requires approval and
+   invalidates the attempt. Otherwise criteria drift to fit whatever was produced.
+3. **Must serve the parent.** Every task cites which parent measure it advances. New
+   criteria cannot appear at leaf level.
+4. **A `Judged` measure needs a different post to judge it** — a reviewer role, never
+   the executor.
+
+**Resolving this against the attention budget.** Requiring the operator to write
+acceptance for every task would consume the attention the design exists to protect.
+So authority concentrates where leverage is highest: the operator defines Goals and
+ratifies Projects; task-level acceptance is **derived** from the parent's `Command`
+measures and scope where possible, model-proposed otherwise, and **sampled by Audit**
+rather than individually approved. Definition is owned at the top and spot-checked at
+the bottom.
+
+### 2.4 Organization
 
 ```rust
 /// One recursive type at every scale: org, group, or a single seat.
@@ -224,13 +255,14 @@ pub enum Capability {
     Delegate(Box<Capability>),
     Staff(UnitKind),
     Introspect(IntrospectScope),   // read own intent / ancestors / conventions
+    Define(IntentKind),            // author or amend measures at this level (§2.3)
 }
 ```
 
 Selection rule: if it cannot be checked *before* the action occurs, it is not a
 capability — it is advice, and belongs in the prompt.
 
-### 2.4 Assignment — binding demand to supply
+### 2.5 Assignment — binding demand to supply
 
 ```rust
 pub struct Assignment {
