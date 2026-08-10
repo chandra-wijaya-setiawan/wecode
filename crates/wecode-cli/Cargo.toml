@@ -1,0 +1,22 @@
+[package]
+name = "wecode-cli"
+description = "The wecode command-line interface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wecode"
+path = "src/main.rs"
+
+# clap would be the obvious choice, but its derive is a host proc-macro and this
+# machine cannot link one. Arg parsing is ~80 lines in args.rs; swap it for clap
+# once `cc` exists.
+[dependencies]
+wecode-core = { workspace = true }
+wecode-gov = { path = "../wecode-gov" }
+wecode-store = { path = "../wecode-store" }
+
+[lints]
+workspace = true

@@ -212,6 +212,16 @@ fn check_statement(intent: &Intent, out: &mut Vec<Defect>) {
 }
 
 fn check_link(intent: &Intent, tree: &IntentTree, out: &mut Vec<Defect>) {
+    // A kind with no legal parent is inherently a root, so having no link is
+    // correct rather than drift. Only kinds that *could* be attached can dangle.
+    if intent.kind.valid_parents().is_empty() {
+        if let Some(parent) = &intent.parent {
+            out.push(Defect::ParentMissing {
+                parent: parent.clone(),
+            });
+        }
+        return;
+    }
     match (&intent.link, &intent.parent) {
         (Link::Unlinked, _) => out.push(Defect::NoParentLink),
         (link, None) if link.needs_parent() => out.push(Defect::NoParentLink),
@@ -405,6 +415,30 @@ mod tests {
                 .any(|d| matches!(d, Defect::StatementVague { term } if term == "faster")),
             "got {:?}",
             defects.defects()
+        );
+    }
+
+    #[test]
+    fn a_bare_vision_admits() {
+        // A vision has no legal parent, so being unlinked is correct, not drift.
+        // Regression: the gate used to refuse every vision.
+        let t = IntentTree::new();
+        let v = Intent::new("vis", IntentKind::Vision, "lead the market on export speed");
+        let a = Admission::decide(&v, &t, "operator", vec![]);
+        assert!(a.is_admitted(), "unexpected defects: {:?}", a.defects());
+    }
+
+    #[test]
+    fn a_vision_with_a_parent_is_a_defect() {
+        let t = base_tree();
+        let mut v = Intent::new("vis2", IntentKind::Vision, "another direction");
+        v.parent = Some(IntentId::new("vis"));
+        assert!(
+            Admission::check(&v, &t)
+                .defects()
+                .iter()
+                .any(|d| matches!(d, Defect::ParentMissing { .. })),
+            "a vision may not be parented"
         );
     }
 
