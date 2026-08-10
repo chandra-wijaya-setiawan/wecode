@@ -1,0 +1,15 @@
+[package]
+name = "wecode-gov"
+description = "Capability grants and the Broker that authorises every consequential action."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Dependency-free for the same reason as wecode-core: authorisation decisions must
+# be reproducible from their inputs alone.
+[dependencies]
+wecode-core = { workspace = true }
+
+[lints]
+workspace = true

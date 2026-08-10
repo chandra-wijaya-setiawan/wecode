@@ -6,7 +6,7 @@ use crate::id::IntentId;
 ///
 /// Borrowed from HTN planning: compound kinds cannot execute and must decompose;
 /// only [`IntentKind::Task`] is primitive.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum IntentKind {
     Vision,
     Goal,
