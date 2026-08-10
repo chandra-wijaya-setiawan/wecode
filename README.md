@@ -5,12 +5,35 @@ orchestrator: it holds every project, task and goal in one hierarchy of intent,
 enforces what each agent may do, and attenuates what reaches you — so nothing
 drifts from the objective it was meant to serve.
 
+```bash
+./wecode org show                  # your staff, and what each may do
+./wecode intent tree               # the hierarchy
+./wecode audit --path 'crates/**'  # who touched this, any agent
+```
+
 ## Docs
 
 | | |
 |---|---|
-| **[docs/architecture.md](docs/architecture.md)** | **The design.** Current state, authoritative. |
-| [docs/theory.md](docs/theory.md) | Grounding, prior art, open questions. Not needed to implement. |
+| **[Getting started](docs/getting-started.md)** | **Install, walkthrough, command reference.** Start here. |
+| [Architecture](docs/architecture.md) | The design. Current state, authoritative. |
+| [Theory](docs/theory.md) | Grounding, prior art, open questions. Not needed to implement. |
 | `git log` | How the design got here, and why it changed. |
 
-Status: design stage. No implementation yet — see architecture.md §11 for build order.
+## Three rules
+
+1. **Authority is enforced, never prompted.** A role is a set of checked
+   capabilities or it is nothing.
+2. **Ground truth over self-report.** Status comes from diffs, exit codes and
+   spend — never from an agent's account of its own work.
+3. **The operator's attention is the binding constraint.** Concurrency derives
+   from it; the runtime throttles itself rather than flooding you.
+
+## Status
+
+Working: the intent ontology, the admission gate, capability grants, the Broker,
+the audit ledger, and the CLI over all of it. 141 tests.
+
+Not yet built: agent execution — nothing spawns `claude` or `codex` yet. See
+[Status](docs/getting-started.md#status) for why, and
+[architecture.md §11](docs/architecture.md#11-build-order) for the build order.
