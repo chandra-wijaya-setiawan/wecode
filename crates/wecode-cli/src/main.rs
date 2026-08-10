@@ -1,6 +1,7 @@
 //! `wecode` — the single control driver.
 
 mod args;
+mod board;
 mod render;
 
 use std::process::ExitCode;
@@ -38,6 +39,9 @@ INTENT
         --personal  --force
   wecode intent tree | show <id> | check <id>
   wecode intent link <id> --parent <p>
+
+COCKPIT
+  wecode board [<id>]                  portfolio, or descend into one intent
 
 WORK
   wecode assign <intent> --to <post>   check the post may do it, then activate
@@ -84,6 +88,7 @@ fn run(a: &Args) -> Res {
         }
         ("intent", "check") => intent_check(a),
         ("intent", "link") => intent_link(a),
+        ("board", _) => board(a),
         ("assign", _) => assign(a),
         ("guard", _) => guard(a),
         ("audit", _) => audit(a),
@@ -323,7 +328,7 @@ fn assign(a: &Args) -> Res {
     let mut activated = intent.clone();
     activated.status = Status::Active;
     store.append_intent(&activated)?;
-    record(&store, &company, &post, &Action::Staff)?;
+    record(&store, &company, &post, &id, &Action::Staff)?;
 
     Ok(format!(
         "  assigned {id} to {post_name} ({}, occupied by {})\n  status: active\n",
@@ -350,6 +355,7 @@ fn record(
     store: &Store,
     company: &Company,
     post: &Post,
+    intent: &IntentId,
     action: &Action,
 ) -> Result<wecode_gov::Decision, Box<dyn std::error::Error>> {
     let mut broker = Broker::new(company.charter.clone());
@@ -357,7 +363,7 @@ fn record(
         format!("cli-{}", post.name),
         post.name.clone(),
         post.agent.clone(),
-        IntentId::new("cli"),
+        intent.clone(),
         company.effective(post),
     );
     let decision = broker.authorize(&session, action);
@@ -400,13 +406,26 @@ fn guard(a: &Args) -> Res {
     let (store, company) = open(a)?;
     let post = find_post(&company, require(a.cmd(1), "post")?)?;
     let action = parse_action(a)?;
-    let decision = record(&store, &company, &post, &action)?;
+    // Attribution matters: an audit record with no intent cannot be correlated.
+    let intent = IntentId::new(a.get("intent").unwrap_or("unattributed"));
+    let decision = record(&store, &company, &post, &intent, &action)?;
     Ok(render::decision(
         &post.name,
         &post.agent,
         &action,
         &decision,
     ))
+}
+
+/// The cockpit. No argument shows the portfolio; an id descends.
+fn board(a: &Args) -> Res {
+    let (store, _) = open(a)?;
+    let tree = store.load_tree()?;
+    let audit = store.load_audit()?;
+    match a.cmd(1) {
+        "" => Ok(board::portfolio(&tree, &audit)),
+        id => Ok(board::focus(&tree, &audit, &IntentId::new(id))),
+    }
 }
 
 fn audit(a: &Args) -> Res {
