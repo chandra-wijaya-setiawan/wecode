@@ -3,3 +3,4 @@
 .wecode/
 .claude/settings.local.json
 Cargo.lock
+.cargo/config.toml

@@ -6,32 +6,47 @@
 //! never hold a cycle or a task parented to a vision.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use crate::id::IntentId;
 use crate::intent::{Intent, IntentKind};
 
 /// Structural rejections. These make the tree incoherent, so they are errors
 /// rather than defects.
-#[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TreeError {
-    #[error("id is empty")]
     EmptyId,
-
-    #[error("intent `{0}` already exists")]
     Duplicate(IntentId),
-
-    #[error("parent `{0}` does not exist")]
     MissingParent(IntentId),
-
-    #[error("a {child} may not be parented to a {parent}")]
-    IllegalParentKind { child: IntentKind, parent: IntentKind },
-
-    #[error("`{0}` would create a cycle")]
+    IllegalParentKind {
+        child: IntentKind,
+        parent: IntentKind,
+    },
     Cycle(IntentId),
-
-    #[error("`{0}` is not in the tree")]
     NotFound(IntentId),
 }
+
+impl fmt::Display for TreeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyId => f.write_str("id is empty"),
+            Self::Duplicate(id) => write!(f, "intent `{id}` already exists"),
+            Self::MissingParent(id) => write!(f, "parent `{id}` does not exist"),
+            Self::IllegalParentKind { child, parent } => {
+                write!(
+                    f,
+                    "a {} may not be parented to a {}",
+                    child.as_str(),
+                    parent.as_str()
+                )
+            }
+            Self::Cycle(id) => write!(f, "`{id}` would create a cycle"),
+            Self::NotFound(id) => write!(f, "`{id}` is not in the tree"),
+        }
+    }
+}
+
+impl std::error::Error for TreeError {}
 
 /// An intent tree. Roots are intents with no parent.
 #[derive(Clone, Default, Debug)]
@@ -98,13 +113,22 @@ impl IntentTree {
         id: &IntentId,
         new_parent: Option<IntentId>,
     ) -> Result<(), TreeError> {
-        let kind = self.nodes.get(id).ok_or_else(|| TreeError::NotFound(id.clone()))?.kind;
+        let kind = self
+            .nodes
+            .get(id)
+            .ok_or_else(|| TreeError::NotFound(id.clone()))?
+            .kind;
 
         if let Some(pid) = &new_parent {
-            let parent =
-                self.nodes.get(pid).ok_or_else(|| TreeError::MissingParent(pid.clone()))?;
+            let parent = self
+                .nodes
+                .get(pid)
+                .ok_or_else(|| TreeError::MissingParent(pid.clone()))?;
             if !kind.valid_parents().contains(&parent.kind) {
-                return Err(TreeError::IllegalParentKind { child: kind, parent: parent.kind });
+                return Err(TreeError::IllegalParentKind {
+                    child: kind,
+                    parent: parent.kind,
+                });
             }
             if pid == id || self.ancestors(pid).any(|a| a.id == *id) {
                 return Err(TreeError::Cycle(id.clone()));
@@ -117,12 +141,17 @@ impl IntentTree {
 
     /// Direct children, in id order.
     pub fn children(&self, id: &IntentId) -> impl Iterator<Item = &Intent> {
-        self.nodes.values().filter(move |n| n.parent.as_ref() == Some(id))
+        self.nodes
+            .values()
+            .filter(move |n| n.parent.as_ref() == Some(id))
     }
 
     /// Ancestors, nearest first. Stops at a root or a dangling parent.
     pub fn ancestors(&self, id: &IntentId) -> impl Iterator<Item = &Intent> {
-        Ancestors { tree: self, next: self.nodes.get(id).and_then(|n| n.parent.clone()) }
+        Ancestors {
+            tree: self,
+            next: self.nodes.get(id).and_then(|n| n.parent.clone()),
+        }
     }
 
     /// Roots, in id order.
@@ -162,11 +191,10 @@ mod tests {
 
     fn tree() -> IntentTree {
         let mut t = IntentTree::new();
-        t.insert(Intent::new("vis", IntentKind::Vision, "be the best")).unwrap();
-        t.insert(
-            Intent::new("goal", IntentKind::Goal, "cut latency").under("vis", Link::Requires),
-        )
-        .unwrap();
+        t.insert(Intent::new("vis", IntentKind::Vision, "be the best"))
+            .unwrap();
+        t.insert(Intent::new("goal", IntentKind::Goal, "cut latency").under("vis", Link::Requires))
+            .unwrap();
         t.insert(
             Intent::new("proj", IntentKind::Project, "speed up export")
                 .under("goal", Link::Requires),
@@ -188,7 +216,10 @@ mod tests {
         let err = t
             .insert(Intent::new("t", IntentKind::Task, "do it").under("goal", Link::Requires))
             .unwrap_err();
-        assert!(matches!(err, TreeError::IllegalParentKind { .. }), "got {err:?}");
+        assert!(
+            matches!(err, TreeError::IllegalParentKind { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -204,24 +235,32 @@ mod tests {
     fn rejects_duplicates_and_empty_ids() {
         let mut t = tree();
         assert!(matches!(
-            t.insert(Intent::new("goal", IntentKind::Goal, "again")).unwrap_err(),
+            t.insert(Intent::new("goal", IntentKind::Goal, "again"))
+                .unwrap_err(),
             TreeError::Duplicate(_)
         ));
-        assert_eq!(t.insert(Intent::new("---", IntentKind::Goal, "x")).unwrap_err(), TreeError::EmptyId);
+        assert_eq!(
+            t.insert(Intent::new("---", IntentKind::Goal, "x"))
+                .unwrap_err(),
+            TreeError::EmptyId
+        );
     }
 
     #[test]
     fn ad_hoc_task_may_be_a_root() {
         let mut t = tree();
-        t.insert(Intent::new("chore", IntentKind::Task, "bump deps")).unwrap();
+        t.insert(Intent::new("chore", IntentKind::Task, "bump deps"))
+            .unwrap();
         assert_eq!(t.roots().count(), 2);
     }
 
     #[test]
     fn ancestors_are_nearest_first() {
         let t = tree();
-        let names: Vec<_> =
-            t.ancestors(&IntentId::new("proj")).map(|a| a.id.to_string()).collect();
+        let names: Vec<_> = t
+            .ancestors(&IntentId::new("proj"))
+            .map(|a| a.id.to_string())
+            .collect();
         assert_eq!(names, vec!["goal", "vis"]);
     }
 
@@ -235,14 +274,21 @@ mod tests {
     #[test]
     fn reparent_rejects_cycles() {
         let mut t = tree();
-        let err = t.reparent(&IntentId::new("vis"), Some(IntentId::new("proj"))).unwrap_err();
+        let err = t
+            .reparent(&IntentId::new("vis"), Some(IntentId::new("proj")))
+            .unwrap_err();
         // A vision cannot be parented at all, so kind check fires before the cycle check.
-        assert!(matches!(err, TreeError::IllegalParentKind { .. }), "got {err:?}");
+        assert!(
+            matches!(err, TreeError::IllegalParentKind { .. }),
+            "got {err:?}"
+        );
 
         // Project under its own descendant: build a task first, then try.
         t.insert(Intent::new("task", IntentKind::Task, "x").under("proj", Link::Requires))
             .unwrap();
-        let err = t.reparent(&IntentId::new("proj"), Some(IntentId::new("proj"))).unwrap_err();
+        let err = t
+            .reparent(&IntentId::new("proj"), Some(IntentId::new("proj")))
+            .unwrap_err();
         assert!(matches!(err, TreeError::Cycle(_)), "got {err:?}");
     }
 
@@ -251,7 +297,8 @@ mod tests {
         let mut t = tree();
         t.insert(Intent::new("goal2", IntentKind::Goal, "other").under("vis", Link::Requires))
             .unwrap();
-        t.reparent(&IntentId::new("proj"), Some(IntentId::new("goal2"))).unwrap();
+        t.reparent(&IntentId::new("proj"), Some(IntentId::new("goal2")))
+            .unwrap();
         assert_eq!(t.children(&IntentId::new("goal2")).count(), 1);
         assert_eq!(t.children(&IntentId::new("goal")).count(), 0);
     }
@@ -261,7 +308,8 @@ mod tests {
         let t = tree();
         assert!(t.reaches_kind(&IntentId::new("proj"), IntentKind::Vision));
         let mut t2 = t.clone();
-        t2.insert(Intent::new("orphan", IntentKind::Task, "x")).unwrap();
+        t2.insert(Intent::new("orphan", IntentKind::Task, "x"))
+            .unwrap();
         assert!(!t2.reaches_kind(&IntentId::new("orphan"), IntentKind::Vision));
     }
 }

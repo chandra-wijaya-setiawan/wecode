@@ -6,12 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# Deliberately dependency-free. This crate is pure domain logic, which is what
+# lets the admission gate be deterministic and lets the whole test suite run on
+# any target. Serialization belongs to the store crate, not here.
 [dependencies]
-serde = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }
 
 [lints]
 workspace = true

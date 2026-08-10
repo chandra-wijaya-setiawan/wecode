@@ -3,14 +3,11 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
-
 /// Identifier for an [`crate::Intent`].
 ///
 /// Human-readable on purpose: ids appear in prompts, audit records and the TUI,
 /// so `oauth-device-flow` beats a UUID for every one of those readers.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IntentId(String);
 
 impl IntentId {
@@ -76,8 +73,14 @@ mod tests {
 
     #[test]
     fn slugifies() {
-        assert_eq!(IntentId::new("OAuth Device Flow").as_str(), "oauth-device-flow");
-        assert_eq!(IntentId::new("cut p99 latency!").as_str(), "cut-p99-latency");
+        assert_eq!(
+            IntentId::new("OAuth Device Flow").as_str(),
+            "oauth-device-flow"
+        );
+        assert_eq!(
+            IntentId::new("cut p99 latency!").as_str(),
+            "cut-p99-latency"
+        );
     }
 
     #[test]
@@ -87,10 +90,8 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_through_json() {
-        let id = IntentId::new("ship-it");
-        let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(json, "\"ship-it\"");
-        assert_eq!(serde_json::from_str::<IntentId>(&json).unwrap(), id);
+    fn displays_as_its_slug() {
+        assert_eq!(IntentId::new("Ship It").to_string(), "ship-it");
+        assert_eq!("Ship It".parse::<IntentId>().unwrap().as_str(), "ship-it");
     }
 }

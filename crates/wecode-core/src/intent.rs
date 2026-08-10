@@ -1,15 +1,12 @@
 //! The intent ontology: one recursive node whose `kind` gates its grammar.
 
-use serde::{Deserialize, Serialize};
-
 use crate::id::IntentId;
 
 /// Where an intent sits between "why we exist" and "run this command".
 ///
 /// Borrowed from HTN planning: compound kinds cannot execute and must decompose;
 /// only [`IntentKind::Task`] is primitive.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum IntentKind {
     Vision,
     Goal,
@@ -65,8 +62,7 @@ impl IntentKind {
 }
 
 /// Time horizon. Ordered so a child's horizon may never exceed its parent's.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Horizon {
     Now,
     Week,
@@ -78,24 +74,21 @@ pub enum Horizon {
 
 /// Which sphere of life an intent belongs to. Orthogonal to the tree, so a
 /// personal goal can be a root without registering as organisational drift.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Sphere {
     Org,
     Unit(String),
     Personal,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Polarity {
     Positive,
     Negative,
 }
 
 /// Why an intent legitimately has no parent.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StandaloneReason {
     Maintenance,
     Urgent,
@@ -107,10 +100,12 @@ pub enum StandaloneReason {
 ///
 /// `Requires`/`Alternative` are KAOS AND/OR refinement; `Contributes` is GRL's
 /// contribution link with polarity.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Link {
-    Contributes { rationale: String, polarity: Polarity },
+    Contributes {
+        rationale: String,
+        polarity: Polarity,
+    },
     /// AND: the parent needs every such child.
     Requires,
     /// OR: any one such child satisfies the parent.
@@ -125,7 +120,10 @@ impl Link {
     /// Whether this link implies a parent must be present.
     #[must_use]
     pub fn needs_parent(&self) -> bool {
-        matches!(self, Self::Contributes { .. } | Self::Requires | Self::Alternative)
+        matches!(
+            self,
+            Self::Contributes { .. } | Self::Requires | Self::Alternative
+        )
     }
 
     #[must_use]
@@ -134,8 +132,7 @@ impl Link {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cmp {
     Lt,
     Lte,
@@ -146,39 +143,53 @@ pub enum Cmp {
 
 /// How we know an intent is progressing. Ordered by trustworthiness: a command
 /// either exits zero or it does not; a judgement is an opinion.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Measure {
-    Command { cmd: String, expect_status: i32 },
-    Metric { name: String, target: f64, cmp: Cmp },
-    Deliverable { path: String },
+    Command {
+        cmd: String,
+        expect_status: i32,
+    },
+    Metric {
+        name: String,
+        target: f64,
+        cmp: Cmp,
+    },
+    Deliverable {
+        path: String,
+    },
     /// Derived from children rather than measured here.
     Rollup,
     /// Human-judged. Legal only on a vision.
-    Proxy { note: String },
+    Proxy {
+        note: String,
+    },
 }
 
 impl Measure {
     /// Whether this measure can be evaluated without asking anyone.
     #[must_use]
     pub fn is_executable(&self) -> bool {
-        matches!(self, Self::Command { .. } | Self::Metric { .. } | Self::Deliverable { .. })
+        matches!(
+            self,
+            Self::Command { .. } | Self::Metric { .. } | Self::Deliverable { .. }
+        )
     }
 }
 
 /// Paths an intent may read and write. Write globs are the enforced guardrail.
-#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub struct Scope {
-    #[serde(default)]
     pub read: Vec<String>,
-    #[serde(default)]
     pub write: Vec<String>,
 }
 
 impl Scope {
     #[must_use]
     pub fn write(globs: &[&str]) -> Self {
-        Self { read: Vec::new(), write: globs.iter().map(|g| (*g).to_string()).collect() }
+        Self {
+            read: Vec::new(),
+            write: globs.iter().map(|g| (*g).to_string()).collect(),
+        }
     }
 
     #[must_use]
@@ -187,7 +198,7 @@ impl Scope {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub struct Budget {
     pub tokens: Option<u64>,
     pub wall_secs: Option<u64>,
@@ -200,8 +211,7 @@ impl Budget {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Status {
     #[default]
     Draft,
@@ -212,7 +222,7 @@ pub enum Status {
 }
 
 /// One node of the intent tree, at any level.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Intent {
     pub id: IntentId,
     pub kind: IntentKind,
@@ -224,13 +234,9 @@ pub struct Intent {
     pub horizon: Horizon,
     /// Relative priority among siblings.
     pub weight: f32,
-    #[serde(default)]
     pub measures: Vec<Measure>,
-    #[serde(default)]
     pub scope: Scope,
-    #[serde(default)]
     pub budget: Budget,
-    #[serde(default)]
     pub status: Status,
 }
 
@@ -332,7 +338,11 @@ mod tests {
     #[test]
     fn vision_admits_no_parent_kind() {
         assert!(IntentKind::Vision.valid_parents().is_empty());
-        assert!(IntentKind::Task.valid_parents().contains(&IntentKind::Project));
+        assert!(
+            IntentKind::Task
+                .valid_parents()
+                .contains(&IntentKind::Project)
+        );
         assert!(!IntentKind::Task.valid_parents().contains(&IntentKind::Goal));
     }
 
@@ -345,9 +355,20 @@ mod tests {
 
     #[test]
     fn proxy_and_rollup_are_not_executable() {
-        assert!(!Measure::Proxy { note: "vibes".into() }.is_executable());
+        assert!(
+            !Measure::Proxy {
+                note: "vibes".into()
+            }
+            .is_executable()
+        );
         assert!(!Measure::Rollup.is_executable());
-        assert!(Measure::Command { cmd: "cargo test".into(), expect_status: 0 }.is_executable());
+        assert!(
+            Measure::Command {
+                cmd: "cargo test".into(),
+                expect_status: 0
+            }
+            .is_executable()
+        );
     }
 
     #[test]
@@ -360,12 +381,16 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_through_json() {
+    fn builders_compose() {
         let i = Intent::new("t", IntentKind::Task, "write tests")
             .under("p", Link::Requires)
-            .measured(Measure::Command { cmd: "cargo test".into(), expect_status: 0 })
+            .measured(Measure::Command {
+                cmd: "cargo test".into(),
+                expect_status: 0,
+            })
             .scoped(Scope::write(&["tests/**"]));
-        let json = serde_json::to_string(&i).unwrap();
-        assert_eq!(serde_json::from_str::<Intent>(&json).unwrap(), i);
+        assert_eq!(i.parent.as_ref().map(IntentId::as_str), Some("p"));
+        assert!(i.has_executable_measure());
+        assert_eq!(i.scope.write, vec!["tests/**".to_string()]);
     }
 }

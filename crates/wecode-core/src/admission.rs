@@ -4,8 +4,6 @@
 //! model. That is the point — a gate that sometimes says yes for reasons nobody can
 //! reproduce is not a gate.
 
-use serde::{Deserialize, Serialize};
-
 use crate::id::IntentId;
 use crate::intent::{Intent, IntentKind, Link, Measure};
 use crate::tree::IntentTree;
@@ -13,17 +11,39 @@ use crate::tree::IntentTree;
 /// Words that name a direction without naming a target. Their presence means we
 /// cannot tell when the work is done, so we ask.
 const VAGUE_TERMS: &[&str] = &[
-    "faster", "slower", "better", "improve", "improved", "optimize", "optimise", "robust",
-    "clean", "cleaner", "cleanup", "nice", "nicer", "modern", "scalable", "simple", "simpler",
-    "good", "bad", "various", "stuff", "things", "somehow", "properly", "correctly", "etc",
+    "faster",
+    "slower",
+    "better",
+    "improve",
+    "improved",
+    "optimize",
+    "optimise",
+    "robust",
+    "clean",
+    "cleaner",
+    "cleanup",
+    "nice",
+    "nicer",
+    "modern",
+    "scalable",
+    "simple",
+    "simpler",
+    "good",
+    "bad",
+    "various",
+    "stuff",
+    "things",
+    "somehow",
+    "properly",
+    "correctly",
+    "etc",
 ];
 
 /// Separators that suggest more than one outcome in a single statement.
 const COMPOUND_MARKERS: &[&str] = &[" and ", " & ", ";", " then ", " plus ", " also "];
 
 /// A specific, reportable reason an intent is not assignable.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "defect")]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Defect {
     StatementEmpty,
     StatementCompound { marker: String },
@@ -54,11 +74,9 @@ impl Defect {
             Self::StatementVague { term } => format!(
                 "{term:?} names a direction, not a target. {term} compared to what, and by how much?"
             ),
-            Self::NoParentLink => {
-                "Which intent does this serve? If none, say why it stands alone \
+            Self::NoParentLink => "Which intent does this serve? If none, say why it stands alone \
                  (maintenance, urgent, exploration, personal)."
-                    .into()
-            }
+                .into(),
             Self::ParentMissing { parent } => {
                 format!("Parent `{parent}` does not exist. Create it, or re-link this intent.")
             }
@@ -100,7 +118,7 @@ impl Defect {
 }
 
 /// An explicit, attributed decision to skip a check.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Waiver {
     pub defect: Defect,
     pub by: String,
@@ -108,8 +126,7 @@ pub struct Waiver {
 }
 
 /// The outcome of the gate.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "state")]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Admission {
     Draft { defects: Vec<Defect> },
     Admitted { by: String, waivers: Vec<Waiver> },
@@ -146,7 +163,10 @@ impl Admission {
             .collect();
 
         if remaining.is_empty() {
-            Self::Admitted { by: by.into(), waivers }
+            Self::Admitted {
+                by: by.into(),
+                waivers,
+            }
         } else {
             Self::Draft { defects: remaining }
         }
@@ -174,14 +194,19 @@ fn check_statement(intent: &Intent, out: &mut Vec<Defect>) {
     }
     let lower = format!(" {} ", s.to_lowercase());
     if let Some(marker) = COMPOUND_MARKERS.iter().find(|m| lower.contains(*m)) {
-        out.push(Defect::StatementCompound { marker: (*marker).trim().to_string() });
+        out.push(Defect::StatementCompound {
+            marker: (*marker).trim().to_string(),
+        });
     }
     // A vision names a direction on purpose, so vagueness is expected there.
     if intent.kind != IntentKind::Vision {
-        if let Some(term) = VAGUE_TERMS.iter().find(|t| {
-            lower.contains(&format!(" {t} ")) || lower.contains(&format!(" {t}."))
-        }) {
-            out.push(Defect::StatementVague { term: (*term).to_string() });
+        if let Some(term) = VAGUE_TERMS
+            .iter()
+            .find(|t| lower.contains(&format!(" {t} ")) || lower.contains(&format!(" {t}.")))
+        {
+            out.push(Defect::StatementVague {
+                term: (*term).to_string(),
+            });
         }
     }
 }
@@ -190,15 +215,15 @@ fn check_link(intent: &Intent, tree: &IntentTree, out: &mut Vec<Defect>) {
     match (&intent.link, &intent.parent) {
         (Link::Unlinked, _) => out.push(Defect::NoParentLink),
         (link, None) if link.needs_parent() => out.push(Defect::NoParentLink),
-        (_, Some(parent)) => {
-            match tree.get(parent) {
-                None => out.push(Defect::ParentMissing { parent: parent.clone() }),
-                Some(p) if intent.horizon > p.horizon => {
-                    out.push(Defect::HorizonExceedsParent);
-                }
-                Some(_) => {}
+        (_, Some(parent)) => match tree.get(parent) {
+            None => out.push(Defect::ParentMissing {
+                parent: parent.clone(),
+            }),
+            Some(p) if intent.horizon > p.horizon => {
+                out.push(Defect::HorizonExceedsParent);
             }
-        }
+            Some(_) => {}
+        },
         _ => {}
     }
 }
@@ -211,16 +236,16 @@ fn check_measures(intent: &Intent, out: &mut Vec<Defect>) {
         out.push(Defect::MeasureMissing);
         return;
     }
-    if intent.measures.iter().any(|m| matches!(m, Measure::Proxy { .. })) {
+    if intent
+        .measures
+        .iter()
+        .any(|m| matches!(m, Measure::Proxy { .. }))
+    {
         out.push(Defect::ProxyNotAllowed);
     }
     // Rollup counts as satisfied for compound kinds: children carry the evidence.
-    let rollup_ok =
-        !intent.kind.is_primitive() && intent.measures.iter().any(|m| *m == Measure::Rollup);
-    if intent.kind.requires_executable_measure()
-        && !intent.has_executable_measure()
-        && !rollup_ok
-    {
+    let rollup_ok = !intent.kind.is_primitive() && intent.measures.contains(&Measure::Rollup);
+    if intent.kind.requires_executable_measure() && !intent.has_executable_measure() && !rollup_ok {
         out.push(Defect::MeasureNotExecutable);
     }
 }
@@ -245,7 +270,12 @@ fn check_scope(intent: &Intent, tree: &IntentTree, out: &mut Vec<Defect>) {
                 continue;
             }
             for glob in &intent.scope.write {
-                if sib.scope.write.iter().any(|other| globs_overlap(glob, other)) {
+                if sib
+                    .scope
+                    .write
+                    .iter()
+                    .any(|other| globs_overlap(glob, other))
+                {
                     out.push(Defect::ScopeOverlaps {
                         with: sib.id.clone(),
                         glob: glob.clone(),
@@ -299,16 +329,23 @@ mod tests {
     use crate::intent::{Budget, Horizon, Measure, Scope, StandaloneReason};
 
     fn cmd() -> Measure {
-        Measure::Command { cmd: "cargo test".into(), expect_status: 0 }
+        Measure::Command {
+            cmd: "cargo test".into(),
+            expect_status: 0,
+        }
     }
 
     fn budget() -> Budget {
-        Budget { tokens: Some(100_000), wall_secs: Some(1800) }
+        Budget {
+            tokens: Some(100_000),
+            wall_secs: Some(1800),
+        }
     }
 
     fn base_tree() -> IntentTree {
         let mut t = IntentTree::new();
-        t.insert(Intent::new("vis", IntentKind::Vision, "be excellent")).unwrap();
+        t.insert(Intent::new("vis", IntentKind::Vision, "be excellent"))
+            .unwrap();
         t.insert(
             Intent::new("goal", IntentKind::Goal, "cut p99 below 500ms")
                 .under("vis", Link::Requires)
@@ -324,12 +361,16 @@ mod tests {
 
     /// A fully-formed project: the control case for every negative test below.
     fn good_project() -> Intent {
-        Intent::new("proj", IntentKind::Project, "add response caching to the export endpoint")
-            .under("goal", Link::Requires)
-            .measured(cmd())
-            .scoped(Scope::write(&["crates/export/**"]))
-            .budgeted(budget())
-            .horizon(Horizon::Month)
+        Intent::new(
+            "proj",
+            IntentKind::Project,
+            "add response caching to the export endpoint",
+        )
+        .under("goal", Link::Requires)
+        .measured(cmd())
+        .scoped(Scope::write(&["crates/export/**"]))
+        .budgeted(budget())
+        .horizon(Horizon::Month)
     }
 
     #[test]
@@ -344,7 +385,11 @@ mod tests {
         let t = base_tree();
         let mut i = good_project();
         i.statement = "   ".into();
-        assert!(Admission::check(&i, &t).defects().contains(&Defect::StatementEmpty));
+        assert!(
+            Admission::check(&i, &t)
+                .defects()
+                .contains(&Defect::StatementEmpty)
+        );
     }
 
     #[test]
@@ -354,9 +399,10 @@ mod tests {
         i.statement = "make the export faster".into();
         let defects = Admission::check(&i, &t);
         assert!(
-            defects.defects().iter().any(
-                |d| matches!(d, Defect::StatementVague { term } if term == "faster")
-            ),
+            defects
+                .defects()
+                .iter()
+                .any(|d| matches!(d, Defect::StatementVague { term } if term == "faster")),
             "got {:?}",
             defects.defects()
         );
@@ -368,7 +414,10 @@ mod tests {
         let v = Intent::new("v", IntentKind::Vision, "build a simple, better product");
         let defects = Admission::check(&v, &t);
         assert!(
-            !defects.defects().iter().any(|d| matches!(d, Defect::StatementVague { .. })),
+            !defects
+                .defects()
+                .iter()
+                .any(|d| matches!(d, Defect::StatementVague { .. })),
             "got {:?}",
             defects.defects()
         );
@@ -396,7 +445,11 @@ mod tests {
         let mut i = good_project();
         i.parent = None;
         i.link = Link::Unlinked;
-        assert!(Admission::check(&i, &t).defects().contains(&Defect::NoParentLink));
+        assert!(
+            Admission::check(&i, &t)
+                .defects()
+                .contains(&Defect::NoParentLink)
+        );
 
         let ok = good_project().standalone(StandaloneReason::Maintenance);
         let a = Admission::decide(&ok, &t, "operator", vec![]);
@@ -408,14 +461,20 @@ mod tests {
         let t = base_tree();
         let mut i = good_project();
         i.measures.clear();
-        assert!(Admission::check(&i, &t).defects().contains(&Defect::MeasureMissing));
+        assert!(
+            Admission::check(&i, &t)
+                .defects()
+                .contains(&Defect::MeasureMissing)
+        );
     }
 
     #[test]
     fn judged_only_measures_are_not_executable() {
         let t = base_tree();
         let mut i = good_project();
-        i.measures = vec![Measure::Proxy { note: "looks right".into() }];
+        i.measures = vec![Measure::Proxy {
+            note: "looks right".into(),
+        }];
         let d = Admission::check(&i, &t);
         assert!(d.defects().contains(&Defect::ProxyNotAllowed));
         assert!(d.defects().contains(&Defect::MeasureNotExecutable));
@@ -427,7 +486,9 @@ mod tests {
         let mut project = good_project();
         project.measures = vec![Measure::Rollup];
         assert!(
-            !Admission::check(&project, &t).defects().contains(&Defect::MeasureNotExecutable)
+            !Admission::check(&project, &t)
+                .defects()
+                .contains(&Defect::MeasureNotExecutable)
         );
 
         let mut task = Intent::new("t", IntentKind::Task, "write the cache layer")
@@ -435,7 +496,11 @@ mod tests {
             .scoped(Scope::write(&["crates/export/cache.rs"]))
             .budgeted(budget());
         task.measures = vec![Measure::Rollup];
-        assert!(Admission::check(&task, &t).defects().contains(&Defect::MeasureNotExecutable));
+        assert!(
+            Admission::check(&task, &t)
+                .defects()
+                .contains(&Defect::MeasureNotExecutable)
+        );
     }
 
     #[test]
@@ -443,7 +508,11 @@ mod tests {
         let t = base_tree();
         let mut i = good_project();
         i.scope = Scope::default();
-        assert!(Admission::check(&i, &t).defects().contains(&Defect::ScopeMissing));
+        assert!(
+            Admission::check(&i, &t)
+                .defects()
+                .contains(&Defect::ScopeMissing)
+        );
 
         for broad in ["**", "*", ".", "**/*"] {
             let j = good_project().scoped(Scope::write(&[broad]));
@@ -482,7 +551,9 @@ mod tests {
             .budgeted(budget());
         let d = Admission::check(&sibling, &t);
         assert!(
-            d.defects().iter().any(|x| matches!(x, Defect::ScopeOverlaps { .. })),
+            d.defects()
+                .iter()
+                .any(|x| matches!(x, Defect::ScopeOverlaps { .. })),
             "got {:?}",
             d.defects()
         );
@@ -510,14 +581,22 @@ mod tests {
         let t = base_tree();
         let mut i = good_project();
         i.budget = Budget::default();
-        assert!(Admission::check(&i, &t).defects().contains(&Defect::BudgetMissing));
+        assert!(
+            Admission::check(&i, &t)
+                .defects()
+                .contains(&Defect::BudgetMissing)
+        );
     }
 
     #[test]
     fn horizon_may_not_exceed_the_parent() {
         let t = base_tree();
         let i = good_project().horizon(Horizon::Year); // parent goal is Quarter
-        assert!(Admission::check(&i, &t).defects().contains(&Defect::HorizonExceedsParent));
+        assert!(
+            Admission::check(&i, &t)
+                .defects()
+                .contains(&Defect::HorizonExceedsParent)
+        );
     }
 
     #[test]
@@ -525,7 +604,11 @@ mod tests {
         let mut t = base_tree();
         t.insert(good_project()).unwrap();
         let stored = t.get(&IntentId::new("proj")).unwrap().clone();
-        assert!(Admission::check(&stored, &t).defects().contains(&Defect::CompoundHasNoChildren));
+        assert!(
+            Admission::check(&stored, &t)
+                .defects()
+                .contains(&Defect::CompoundHasNoChildren)
+        );
     }
 
     #[test]
@@ -550,16 +633,25 @@ mod tests {
     fn every_defect_asks_a_question() {
         let all = [
             Defect::StatementEmpty,
-            Defect::StatementCompound { marker: "and".into() },
-            Defect::StatementVague { term: "faster".into() },
+            Defect::StatementCompound {
+                marker: "and".into(),
+            },
+            Defect::StatementVague {
+                term: "faster".into(),
+            },
             Defect::NoParentLink,
-            Defect::ParentMissing { parent: IntentId::new("x") },
+            Defect::ParentMissing {
+                parent: IntentId::new("x"),
+            },
             Defect::MeasureMissing,
             Defect::MeasureNotExecutable,
             Defect::ProxyNotAllowed,
             Defect::ScopeMissing,
             Defect::ScopeTooBroad { glob: "**".into() },
-            Defect::ScopeOverlaps { with: IntentId::new("y"), glob: "a/**".into() },
+            Defect::ScopeOverlaps {
+                with: IntentId::new("y"),
+                glob: "a/**".into(),
+            },
             Defect::BudgetMissing,
             Defect::HorizonExceedsParent,
             Defect::CompoundHasNoChildren,
