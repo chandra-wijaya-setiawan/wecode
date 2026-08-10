@@ -1,0 +1,4 @@
+/target
+**/*.rs.bk
+.wecode/
+.claude/settings.local.json

@@ -1,0 +1,662 @@
+# wecode — Architecture
+
+A Rust runtime for running coding agents as staff: you set direction and hold
+accountability, the system enforces what each agent may do and attenuates what
+reaches you.
+
+- **Theory, prior art and open questions:** [`theory.md`](./theory.md)
+- **Design history and rationale for changes:** `git log`
+
+---
+
+## 1. Model
+
+```mermaid
+flowchart TB
+    op(["Operator — sets direction, holds accountability"])
+
+    subgraph OV["Oversight (§5)"]
+        tui["Zoom L0→L4 · health · attention budget"]
+    end
+
+    subgraph MGMT["Management — deterministic"]
+        ctl["Control · allocate projects to units, budgets"]
+        crd["Coordination · scope conflicts, locks"]
+        aud["Audit · checks, key results"]
+    end
+
+    subgraph GOV["Governance (§4)"]
+        brk["Capability Broker · authorize every action"]
+    end
+
+    subgraph EXEC["Execution (§6)"]
+        p1["Post · claude-code"]
+        p2["Post · codex"]
+        p3["Post · aider"]
+    end
+
+    op -->|"projects, goals"| ctl
+    tui --> op
+    ctl --> crd --> brk
+    brk --> p1 & p2 & p3
+    p1 & p2 & p3 -->|"events"| aud
+    aud -->|"rollups"| tui
+    p1 -.->|"⚡ alarm — bypasses everything"| op
+```
+
+Three rules the whole design follows:
+
+1. **Authority is enforced, never prompted.** A role is a set of checked
+   capabilities or it is nothing.
+2. **Ground truth over self-report.** Status comes from diffs, exit codes and spend
+   — never from an agent's account of its own work.
+3. **The operator's attention is the binding constraint.** Concurrency derives from
+   it; the runtime throttles itself rather than flooding you.
+
+---
+
+## 2. Core types
+
+```rust
+/// One recursive type at every scale: org, group, or a single seat.
+pub struct Unit {
+    pub id: UnitId,
+    pub name: String,
+    pub kind: UnitKind,
+    pub parent: Option<UnitId>,
+    pub children: Vec<UnitId>,
+    pub charter: Charter,
+    pub roles: Vec<RoleId>,
+    pub grant: Grant,          // capabilities, delegated from parent
+}
+
+pub enum UnitKind {
+    Group,                     // a lens over children; nests arbitrarily
+    Post { agent: AgentId },   // a seat; the leaf where work happens
+}
+
+/// A unit's identity and hard limits.
+pub struct Charter {
+    pub purpose: String,
+    pub invariants: Vec<Invariant>,   // violation raises an alarm, never a retry
+    pub escalate_to: Option<UnitId>,  // None ⇒ the operator
+}
+
+pub enum Invariant {
+    NeverTouch(Vec<Glob>),
+    NeverRun(CommandPattern),
+    MaxSpend(Budget),
+    RequireApproval { action: ActionKind, by: RoleId },
+}
+```
+
+**Post vs. agent.** A `Post` is a seat with a role, a grant and a reporting line;
+an agent is whoever occupies it. Swap `claude` for `codex` in a seat without
+touching the org, and audit records stay meaningful across the swap.
+
+### Roles
+
+```rust
+/// WHAT a unit is for — drives routing.
+pub enum Function {
+    Engineering, Quality, Security, Research, Release, Review, Docs,
+}
+
+/// HOW MUCH authority it carries — drives enforcement.
+pub struct Role {
+    pub id: RoleId,
+    pub title: String,
+    pub function: Function,
+    pub grants: Vec<Capability>,
+    pub inherits: Vec<RoleId>,
+}
+```
+
+### Capabilities
+
+```rust
+pub enum Capability {
+    ReadPaths(Vec<Glob>),
+    WritePaths(Vec<Glob>),
+    RunCommand(CommandPattern),
+    Network(NetworkScope),
+    SpendTokens(u64),
+    SpendWall(Duration),
+    MergeTo(BranchPattern),
+    Approve(ActionKind),
+    Delegate(Box<Capability>),
+    Staff(UnitKind),
+}
+```
+
+Selection rule: if it cannot be checked *before* the action occurs, it is not a
+capability — it is advice, and belongs in the prompt.
+
+### Projects
+
+Units are supply; projects are demand. Allocation across them is arithmetic.
+
+```rust
+pub struct Project {
+    pub id: ProjectId,
+    pub objective: String,
+    pub key_results: Vec<KeyResult>,
+    pub budget: Budget,
+    pub priority: Priority,
+    pub grant: Grant,                  // ceiling for any assignment here
+    pub assignments: Vec<Assignment>,
+}
+
+pub struct Assignment {
+    pub project: ProjectId,
+    pub unit: UnitId,
+    pub effective: Grant,              // unit.grant ∩ project.grant
+    pub allocation: f32,               // share of unit capacity
+    pub workflow: Option<WorkflowRef>, // how this unit discharges it
+}
+
+/// Ordered by trustworthiness.
+pub enum KeyResult {
+    Command { cmd: String, expect_status: i32 },
+    Metric  { name: String, target: f64, cmp: Cmp },
+    Artifact{ path: Glob },
+    Judged  { criteria: Vec<String> },   // last resort
+}
+```
+
+---
+
+## 3. Management functions
+
+Five functions exist at every non-leaf level. All but the last are deterministic.
+
+| Function | Does | Model? |
+|---|---|---|
+| **Coordination** | prevents collisions between units — write-scope arbitration, shared locks and conventions | no |
+| **Control** | allocates projects to units; budgets, capacity, dispatch. Weighted shortest job first | no |
+| **Audit** | samples execution directly, bypassing Control: checks, key results, scope verification | no |
+| **Policy** | charter invariants, approval requirements, escalation terminus | no |
+| **Intelligence** | proposes projects, replans on exception | **yes** |
+
+The components that run most often are arithmetic. Model calls happen inside a
+post (doing the work) and in Intelligence (deciding what work exists).
+
+---
+
+## 4. Governance
+
+### The Broker
+
+```rust
+pub trait Broker: Send + Sync {
+    /// Called before every consequential action. No bypass path exists.
+    fn authorize(&self, sess: &SessionId, act: &Action) -> Decision;
+    fn record(&self, sess: &SessionId, act: &Action, d: &Decision, out: &Outcome);
+}
+
+pub enum Decision {
+    Allow,
+    Deny { reason: DenyReason, alarm: bool },
+    RequireApproval { by: RoleId, timeout: Duration },
+}
+
+/// A session activates a subset of roles — least privilege per task.
+pub struct Session {
+    pub id: SessionId,
+    pub post: UnitId,
+    pub occupant: AgentId,
+    pub project: ProjectId,
+    pub active_roles: Vec<RoleId>,
+    pub effective: Grant,      // ∩ of unit, role and project grants — never ∪
+    pub spent: SpendCounters,
+}
+```
+
+Delegation only ever narrows: a parent cannot grant what it does not hold.
+
+### Enforcement points
+
+| Capability | Enforced at | Strength |
+|---|---|---|
+| `WritePaths` | worktree confinement + post-hoc diff scope check | strong |
+| `SpendTokens` / `SpendWall` | counter pre-dispatch + mid-flight kill | strong |
+| `MergeTo` | wecode performs all merges; agents never do | strong |
+| `Approve` | transition blocked until a holder signs | strong |
+| `Staff` | only Control instantiates units, within its own grant | strong |
+| `RunCommand` | argv pattern match at spawn | medium — a shell inside an allowed command escapes it |
+| `ReadPaths` | worktree contents | medium |
+| `Network` | env allowlist; proxy when containerized | weak without a container |
+
+This bounds blast radius, not correctness, and it is not a boundary against a
+hostile agent. Containers close the weak rows.
+
+### Regiment or sanction
+
+Split by **reversibility**, not severity.
+
+```rust
+pub enum ControlMode {
+    Regimented,                        // violation impossible
+    Sanctioned { sanction: Sanction }, // violation possible, recorded, penalized
+}
+
+pub enum Sanction {
+    RejectDeliverable,
+    RevokeCapability(Box<Capability>),
+    RequireApprovalHenceforth(RoleId),
+    Unstaff,
+}
+```
+
+| Action | Mode |
+|---|---|
+| merge to protected branch, invariant-matching command, secret in a diff, spend over ceiling | **regimented** |
+| write outside scope, allocation overrun, missed key result, touching another unit's files | **sanctioned** |
+
+A post that repeatedly writes outside its scope indicates the *scope* is wrong.
+Sanctioning surfaces that pattern; regimenting it away discards the signal.
+
+---
+
+## 5. Oversight
+
+The interface is the product: if attention is the constraint, everything else is
+scaffolding for making it trustworthy.
+
+### Attention budget
+
+```rust
+pub struct Attention {
+    pub max_open_items: usize,          // default 5
+    pub max_interrupts_per_hour: u8,    // default 3
+    pub digest_interval: Duration,
+    pub auto_approve_below: RiskLevel,
+}
+```
+
+When demand exceeds budget the system throttles itself, in order:
+
+1. **Batch** — three agents wanting `Cargo.lock` is one question.
+2. **Auto-resolve** below `auto_approve_below`; report in the digest.
+3. **Throttle dispatch** — `effective_parallel = min(configured, cores-2, headroom())`.
+4. **Pause and summarize** if the queue stays saturated.
+
+### Zoom
+
+Every level renders the same five columns — **identity · health · progress ·
+spend · needs-you** — so navigation is uniform all the way down.
+
+```
+  ┌ L0 PORTFOLIO ─────────────────────────────── ⏎ descend · ␣ digest ─┐
+  │  ▸ oauth-flow     ●amber  ████▁▁ 62%   142k/300k   1 approval      │
+  │  ▸ latency-p99    ●green  ██▁▁▁▁ 30%    38k/200k   —               │
+  │  ▸ soc2-evidence  ●red    █▁▁▁▁▁  8%    91k/100k   ⚡ALARM budget    │
+  └────────────────────────────────────────────────────────────────────┘
+  ┌ L2 UNIT · backend ─────────────────────────── ⌫ up · ⏎ down ───────┐
+  │  ▸ impl-api   claude-code  working    +214/-31  71k   idle 0m      │
+  │  ▸ test-api   codex        ⚠ stuck    +12/-0    27k   idle 14m     │
+  └────────────────────────────────────────────────────────────────────┘
+  ┌ L3 POST · test-api ──────────────────────────────── d diff · c ────┐
+  │  step   write tests for device-code polling                        │
+  │  scope  tests/**                              ✓ within scope       │
+  │  ⚠ no diff growth 14m · `cargo test` 7× · same failure 3×          │
+  │  [a] adopt  [r] retry+context  [k] kill  [s] steer  [L4] raw       │
+  └────────────────────────────────────────────────────────────────────┘
+```
+
+L0 is the default and the only view you must read. L4 is the raw event stream —
+for debugging, not monitoring.
+
+### Health
+
+Computed, never asked.
+
+```rust
+pub enum Health { Green, Amber, Red }
+
+pub struct Vitals {
+    pub diff_growth: BytesPerMin,
+    pub verify: Option<CheckOutcome>,
+    pub idle: Duration,
+    pub burn: f32,          // spend ÷ progress
+    pub rejects: u8,
+    pub tool_repeats: u8,
+}
+```
+
+**Stuck** (⇒ Amber, queued): no diff growth for N minutes, identical verify failure
+≥3×, same tool ≥K times, or spend rising with flat progress.
+
+### Steering
+
+| Key | Action | Mechanism |
+|---|---|---|
+| `a` | adopt work so far | commit worktree, mark done |
+| `r` | retry with context | cancel + restart, prior failure and your note attached |
+| `n` | narrow scope | tighten the grant, then retry |
+| `s` | steer | write `.wecode/inbox/` — only if the adapter cooperates |
+| `k` | kill | cancel, discard worktree, free the slot |
+
+The UI states which are reliable for the current adapter rather than offering
+buttons that silently do nothing.
+
+### What reaches you
+
+| Priority | Surfaces as | Blocking |
+|---|---|---|
+| Alarm | immediate; dispatch frozen; needs ack | yes |
+| Approval blocking work | batched queue | batched |
+| Exception — retries exhausted, rejected 3× | queue | no |
+| Agent question | queue, with diff so far | no |
+| Progress | pull only | no |
+
+Silence on green. Progress is pulled, never pushed.
+
+---
+
+## 6. Execution substrate
+
+### Agent trait
+
+```rust
+#[async_trait]
+pub trait Agent: Send + Sync {
+    fn id(&self) -> &AgentId;
+    fn capabilities(&self) -> &AgentCaps;
+    async fn execute(&self, a: TaskAssignment, ctx: ExecCtx)
+        -> Result<TaskOutcome, AgentError>;
+}
+```
+
+Implementations: `CliAgent` (a coding CLI as a supervised subprocess) and
+`A2aAgent` (a remote agent occupying a post). Everything above this trait is
+protocol-agnostic.
+
+```rust
+pub struct TaskAssignment {
+    pub task_id: TaskId,
+    pub step: Step,
+    pub attempt: u8,
+    pub workspace: WorkspacePath,
+    pub context: Vec<ContextItem>,
+    pub prior_failure: Option<String>,
+}
+
+pub struct TaskOutcome {
+    pub task_id: TaskId,
+    pub status: TaskStatus,
+    pub summary: String,
+    pub changed_files: Vec<FileChange>,
+    pub commit: Option<CommitSha>,
+    pub usage: Usage,
+}
+
+/// A2A's eight states, so a protocol bridge stays a mapping.
+pub enum TaskStatus {
+    Submitted, Working, InputRequired, AuthRequired,
+    Completed, Failed, Canceled,
+    Rejected,   // WE declined the output — e.g. scope violation
+}
+```
+
+### Adapters
+
+Adapter definitions are data; stream parsers are code.
+
+```toml
+# adapters/claude-code.toml
+name     = "claude-code"
+command  = "claude"
+protocol = "claude-stream-json"
+args     = ["-p", "{{prompt}}", "--output-format", "stream-json", "--verbose"]
+cwd      = "{{workspace}}"
+env_allowlist = ["ANTHROPIC_API_KEY", "PATH", "HOME"]
+
+[capabilities]
+edits_files = true
+tags = ["general", "rust"]
+
+[limits]
+wall_secs = 1800
+idle_secs = 300
+max_output_bytes = 8_000_000
+
+[health]
+probe = ["claude", "--version"]
+```
+
+```rust
+pub trait EventParser: Send {
+    fn feed(&mut self, chunk: &[u8], out: &mut Vec<AgentEvent>);
+    fn finish(&mut self, exit: ExitStatus, out: &mut Vec<AgentEvent>);
+}
+```
+
+Shipped: `ClaudeStreamJson`, `GenericJsonl`, `PlainRegex`, `Passthrough`.
+
+### Events
+
+```rust
+pub enum AgentEvent {
+    Started { post: UnitId, task: TaskId, pid: Option<u32> },
+    Message(String),
+    ToolCall { name: String, brief: String },
+    ToolResult { name: String, ok: bool, brief: String },
+    FileChanged { path: PathBuf, kind: ChangeKind },
+    CommandRun { cmd: String, status: Option<i32> },
+    Usage(Usage),
+    NeedsInput { question: String },
+    Finished { status: TaskStatus, summary: String },
+    Failed { error: String, retryable: bool },
+    Raw { line: String },
+}
+```
+
+### Process supervision
+
+`cwd` pinned to the worktree, env reduced to the allowlist, stdout/stderr
+line-framed into the parser, wall and idle timeouts, output cap, and cancellation
+via SIGINT then SIGKILL **on the process group** — coding CLIs spawn children.
+
+### Result trust order
+
+1. `git diff` of the worktree — ground truth
+2. `.wecode/result.json` — status and summary, if valid
+3. exit code + parsed events — fallback, normalized by one model call
+
+The diff always wins. If `result.json` claims success and the diff is empty where
+one was required, the task failed.
+
+### Workspaces
+
+One git worktree per task under `.wecode/wt/<task-id>/`, branched from the run
+branch. **Agents never commit and never merge** — wecode does both after checks
+pass. On merge conflict, a resolve-conflict step is dispatched like any other.
+The operator's working tree is never touched; output is a branch to review.
+
+### Protocol boundaries
+
+- **MCP** — how an agent reaches its tools. Configured in the CLI, not here.
+- **A2A** — how wecode meets other agents: `A2aServer` northbound (wecode as one
+  agent inside a larger system), `A2aAgent` southbound (a remote agent in a post).
+- **Envelope + `result.json`** — how wecode drives a local CLI that speaks neither.
+
+Internal orchestration is not A2A: local workers speak argv-in / prose-out, so an
+HTTP layer per subprocess removes no adapter work. Types align with A2A vocabulary
+so a bridge stays a mapping.
+
+### Topology
+
+Posts never talk to each other. Communication follows reporting lines: directives
+down (amplified), reports up (attenuated), sideways only through Coordination.
+Budget and scope are enforceable only at a chokepoint, and a total-order event log
+is what makes resume possible.
+
+---
+
+## 7. Channels
+
+```rust
+pub enum Signal {
+    Directive { to: UnitId, intent: Intent, grant: Grant, budget: Budget },
+    Report    { from: UnitId, cycle: CycleId, rollup: Rollup },
+    Exception { from: UnitId, kind: ExceptionKind, evidence: Evidence },
+    Alarm     { from: UnitId, kind: AlarmKind, evidence: Evidence },
+}
+
+/// Bounded by type, so attenuation is not a convention.
+pub struct Rollup {
+    pub cycle: CycleId,
+    pub health: Health,
+    pub kr_progress: Vec<(KeyResultId, f32)>,
+    pub spend: SpendCounters,
+    pub deliverables: Vec<ArtifactRef>,   // pointers, not content
+    pub exceptions: Vec<ExceptionKind>,   // ≤ N, most severe first
+    pub note: BoundedString<512>,
+}
+```
+
+**Alarms bypass every level and reach the operator directly.** Triggers: an
+invariant-violating action attempted, a secret detected in a diff, spend over
+150% of allocation, the same step rejected ≥3× across different occupants, a write
+attempted outside the worktree, or adapter health failing fleet-wide.
+
+Handling is deterministic and immediate: halt the session, freeze dispatch for the
+project, require acknowledgement. No model call sits on this path.
+
+### Capacity
+
+```rust
+pub struct Capacity {
+    pub max_reports_per_cycle: usize,
+    pub max_open_exceptions: usize,
+    pub max_concurrent_projects: usize,
+    pub decision_budget: Budget,
+}
+```
+
+Sustained overload at a level triggers, in order: attenuate harder → split the
+unit and add a level → escalate. A level persistently *under* capacity is
+collapsed.
+
+---
+
+## 8. Configuration
+
+```toml
+# org.toml
+profile = "solo"                  # solo | team | enterprise
+
+[attention]
+max_open_items          = 5
+max_interrupts_per_hour = 3
+digest_interval         = "20m"
+auto_approve_below      = "low"
+
+[[units]]
+name  = "backend"
+posts = ["impl-api", "test-api"]
+
+[[posts]]
+name  = "impl-api"
+agent = "claude-code"
+roles = ["engineer"]
+
+[[posts]]
+name  = "test-api"
+agent = "codex"
+roles = ["tester"]
+
+[roles.engineer]
+write = ["crates/**", "src/**"]
+run   = ["cargo *", "npm test"]
+spend = { tokens = 200_000, wall = "30m" }
+
+[roles.tester]
+read  = ["**"]
+write = ["tests/**"]              # cannot weaken code to pass a test
+run   = ["cargo test*"]
+
+[invariants]
+never_touch = [".github/**", "infra/**", "**/*.pem"]
+never_run   = ["git push --force*", "npm publish", "terraform apply"]
+max_spend   = { tokens = 1_000_000, wall = "4h" }
+
+[defaults]
+isolation = "worktree"
+retries   = 1
+verify    = [{ shell = "cargo test --workspace", expect_status = 0 }]
+```
+
+`profile` gates features: `solo` omits RACI, Intelligence, separation of duties and
+self-restructuring; `team` adds RACI and role-based approvals; `enterprise` adds
+the rest.
+
+---
+
+## 9. Commands
+
+```
+wecode up                        # start the oversight TUI (default)
+wecode project add "<objective>" [--budget …] [--unit …]
+wecode project ls | show <id>
+wecode run <project>             # allocate and dispatch
+wecode run <project> --workflow feature
+wecode approve | deny <item>
+wecode ack <alarm>               # clear an alarm, resume dispatch
+wecode post ls | probe | staff <post> <agent>
+wecode audit <run-id>            # what happened, and under whose authority
+wecode resume <run-id>
+```
+
+---
+
+## 10. Layout
+
+```
+crates/
+  wecode-core          # types and traits
+  wecode-gov           # Broker, grants, sessions, audit
+  wecode-org           # units, posts, roles, charters, config
+  wecode-mgmt          # coordination, control, audit, policy
+  wecode-agent         # Agent impls, adapters, parsers, supervision
+  wecode-workspace     # worktrees, scoping, diffs, merges
+  wecode-store         # event log + SQLite index + resume
+  wecode-llm           # model providers
+  wecode-tui           # oversight interface
+  wecode-cli           # bin: wecode
+adapters/              # one TOML per coding CLI
+```
+
+State lives in `.wecode/`: `runs/<id>/events.jsonl` is authoritative,
+`index.sqlite` is a rebuildable index, `wt/` holds worktrees. Resume is a fold
+over the log.
+
+Dependencies: `tokio`, `tokio-util`, `serde`, `serde_json`, `thiserror`, `anyhow`,
+`clap`, `tracing`, `reqwest` (rustls), `rusqlite` (bundled), `minijinja`,
+`globset`, `schemars`, `async-trait`, `ratatui` + `crossterm`. `git` is invoked as
+a subprocess rather than linking libgit2.
+
+---
+
+## 11. Build order
+
+Enforcement before intelligence; a governed agent you can see beats a hierarchy
+you cannot.
+
+| # | Delivers |
+|---|---|
+| **1** | One post executes one task: adapter, supervision, worktree, event stream, JSONL log |
+| **2** | Broker with every §4 enforcement point, grants, sessions, audit log |
+| **3** | Oversight TUI: zoom L0–L4, computed health, stuck detection, attention budget, digest |
+| **4** | Retries with prior-failure context, scope rejection, sanctions, resume |
+| **5** | Projects and Control: ≥2 projects, deterministic allocation, budgets, capacity |
+| **6** | Coordination: cross-post scope arbitration, locks, shared conventions |
+| **7** | Alarms: the §7 triggers, freeze, acknowledge, resume |
+| **8** | Approvals, role-based sign-off, Audit sampling |
+| **9** | Depth >1: rollup attenuation, overload response |
+| **10** | Intelligence: proposes projects, replans |
+| **11** | A2A server and client; container isolation |
+
+Steps 1–4 are the usable product for one operator. Everything after is judged on
+whether daily use surfaces the problem it solves.
