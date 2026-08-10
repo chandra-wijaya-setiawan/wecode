@@ -1,5 +1,6 @@
 //! Persistence. The event log is authoritative; everything else is a fold over it.
 
+pub mod audit;
 pub mod codec;
 
 use std::fs;
@@ -7,7 +8,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use wecode_core::{Intent, IntentTree, TreeError};
+use wecode_gov::Record;
 
+pub use audit::{AuditLine, decode_record, encode_record};
 pub use codec::{
     CodecError, decode_intent, encode_intent, horizon_from_str, intent_kind_from_str,
     standalone_reason_from_str,
@@ -85,6 +88,43 @@ impl Store {
     /// Appends a pre-encoded audit line.
     pub fn append_audit(&self, line: &str) -> Result<(), StoreError> {
         self.append_line(&self.audit_path(), line)
+    }
+
+    /// The highest sequence number in the ledger, or 0 if it is empty.
+    pub fn last_seq(&self) -> Result<u64, StoreError> {
+        Ok(self.load_audit()?.iter().map(|l| l.seq).max().unwrap_or(0))
+    }
+
+    /// Appends every record a Broker accumulated, renumbering from the ledger's
+    /// tail.
+    ///
+    /// A Broker counts from 1 within its own lifetime, which is right for a Broker
+    /// and wrong for the ledger: sequence must be monotonic across every process
+    /// that ever appends, or ordering and causal chains are meaningless. The
+    /// ledger owns the numbering because the ledger is what persists.
+    pub fn append_records(&self, records: &[Record]) -> Result<(), StoreError> {
+        let mut seq = self.last_seq()?;
+        for r in records {
+            seq += 1;
+            let mut renumbered = r.clone();
+            renumbered.seq = seq;
+            self.append_audit(&encode_record(&renumbered))?;
+        }
+        Ok(())
+    }
+
+    /// Reads the ledger. Unparseable lines are skipped rather than fatal: the
+    /// ledger is evidence, and losing all of it because one line is malformed
+    /// would be the worse failure.
+    pub fn load_audit(&self) -> Result<Vec<AuditLine>, StoreError> {
+        let path = self.audit_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(fs::read_to_string(&path)?
+            .lines()
+            .filter_map(decode_record)
+            .collect())
     }
 
     fn append_line(&self, path: &Path, line: &str) -> Result<(), StoreError> {
@@ -249,6 +289,57 @@ mod tests {
             StoreError::Codec { line, .. } => assert_eq!(line, 2),
             other => panic!("expected codec error, got {other:?}"),
         }
+    }
+
+    fn record(seq: u64, path: &str) -> Record {
+        use wecode_gov::{Action, Decision, Effective, Grant, Session, Source};
+        let s = Session::new(
+            "s",
+            "impl",
+            "claude-code",
+            "p".into(),
+            Effective::of(vec![Grant::root()]),
+        );
+        Record {
+            seq,
+            session: s.id,
+            post: s.post,
+            occupant: s.occupant,
+            intent: s.intent,
+            action: Action::Write {
+                path: path.to_string(),
+            },
+            decision: Decision::Allow,
+            source: Source::Broker,
+        }
+    }
+
+    #[test]
+    fn audit_sequence_is_monotonic_across_processes() {
+        let s = Store::open(temp_root("seq")).unwrap();
+        assert_eq!(s.last_seq().unwrap(), 0);
+
+        // Two separate "processes", each numbering from 1 internally.
+        s.append_records(&[record(1, "a"), record(2, "b")]).unwrap();
+        s.append_records(&[record(1, "c")]).unwrap();
+
+        let seqs: Vec<u64> = s.load_audit().unwrap().iter().map(|l| l.seq).collect();
+        assert_eq!(
+            seqs,
+            vec![1, 2, 3],
+            "ledger must renumber, not trust the Broker"
+        );
+        assert_eq!(s.last_seq().unwrap(), 3);
+    }
+
+    #[test]
+    fn a_malformed_audit_line_is_skipped_not_fatal() {
+        let s = Store::open(temp_root("audit-junk")).unwrap();
+        s.append_records(&[record(1, "a")]).unwrap();
+        s.append_audit("this is not a record").unwrap();
+        s.append_records(&[record(1, "b")]).unwrap();
+        // Losing the whole ledger because one line is bad is the worse failure.
+        assert_eq!(s.load_audit().unwrap().len(), 2);
     }
 
     #[test]

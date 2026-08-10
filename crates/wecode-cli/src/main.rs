@@ -1,12 +1,14 @@
 //! `wecode` — the single control driver.
 
 mod args;
+mod org;
 mod render;
 
 use std::process::ExitCode;
 
 use args::Args;
 use wecode_core::{Admission, Budget, Cmp, Intent, IntentId, Link, Measure, Scope, Sphere};
+use wecode_gov::{Action, Broker, Session};
 use wecode_store::{Store, horizon_from_str, intent_kind_from_str, standalone_reason_from_str};
 
 const USAGE: &str = "\
@@ -30,6 +32,18 @@ USAGE
   wecode intent show <id>              lineage: what this serves
   wecode intent check <id>             admission verdict and questions
   wecode intent link <id> --parent <p> resolve drift
+
+  wecode org show                      posts, occupants and what each may do
+
+  wecode guard <post> <verb> <target>  authorise an action; records the decision
+        verbs: read write run merge spend
+        --intent <id>   which intent this is for
+        --tokens <n>    for `spend`
+
+  wecode audit                         the ledger, newest last
+        --denied   refused actions only
+        --alarms   invariant violations only
+        --path <glob>   who touched these paths, any agent
 
 ENVIRONMENT
   WECODE_HOME   state directory (default $XDG_STATE_HOME/wecode)
@@ -63,6 +77,9 @@ fn run(a: &Args) -> Result<String, Box<dyn std::error::Error>> {
         }
         ("intent", "check") => intent_check(a, &store),
         ("intent", "link") => intent_link(a, &store),
+        ("org", "show") => Ok(org_show()),
+        ("guard", _) => guard(a, &store),
+        ("audit", _) => audit(a, &store),
         ("", _) | ("help", _) | ("--help", _) => Ok(USAGE.to_string()),
         (cmd, sub) => Err(format!("unknown command `{cmd} {sub}`\n\n{USAGE}").into()),
     }
@@ -188,6 +205,111 @@ fn intent_check(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::E
         .ok_or_else(|| format!("no such intent: {id}"))?;
     let verdict = Admission::check(intent, &tree);
     Ok(render::admission(intent, &verdict))
+}
+
+fn org_show() -> String {
+    let mut out = String::from("post        occupant      role       writes\n");
+    for p in org::posts() {
+        let writes = if p.grant.write.is_empty() {
+            "— (read only)".to_string()
+        } else {
+            p.grant.write.join(", ")
+        };
+        out.push_str(&format!(
+            "{:<11} {:<13} {:<10} {}\n",
+            p.name, p.occupant, p.role, writes
+        ));
+    }
+    out.push_str("\ninvariants outrank every grant above:\n");
+    for inv in &org::charter().invariants {
+        out.push_str(&format!("  {inv:?}\n"));
+    }
+    out
+}
+
+/// Builds the action named on the command line.
+fn parse_action(a: &Args) -> Result<Action, String> {
+    let verb = a.cmd(2);
+    let target = a.cmd(3);
+    Ok(match verb {
+        "read" => Action::Read {
+            path: require(target, "path")?.to_string(),
+        },
+        "write" => Action::Write {
+            path: require(target, "path")?.to_string(),
+        },
+        "run" => Action::Run {
+            argv: require(target, "command")?
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+        },
+        "merge" => Action::Merge {
+            branch: require(target, "branch")?.to_string(),
+        },
+        "spend" => Action::Spend {
+            tokens: a.num("tokens").unwrap_or(0),
+            wall_secs: a.num("wall").unwrap_or(0),
+        },
+        other => {
+            return Err(format!(
+                "unknown verb `{other}` (read write run merge spend)"
+            ));
+        }
+    })
+}
+
+fn guard(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Error>> {
+    let post_name = require(a.cmd(1), "post")?;
+    let post = org::find(post_name).ok_or_else(|| {
+        format!(
+            "no such post `{post_name}` — try one of: {}",
+            org::posts()
+                .iter()
+                .map(|p| p.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let action = parse_action(a)?;
+    let intent = IntentId::new(a.get("intent").unwrap_or("unassigned"));
+
+    let mut broker = Broker::new(org::charter());
+    let session = Session::new(
+        format!("cli-{post_name}"),
+        post.name,
+        post.occupant,
+        intent,
+        org::effective(&post),
+    );
+    let decision = broker.authorize(&session, &action);
+
+    // Every decision is recorded, allowed or not.
+    store.append_records(broker.ledger())?;
+    Ok(render::decision(
+        &post.name,
+        &post.occupant,
+        &action,
+        &decision,
+    ))
+}
+
+fn audit(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Error>> {
+    let mut lines = store.load_audit()?;
+
+    if a.has("denied") {
+        lines.retain(wecode_store::AuditLine::is_denial);
+    }
+    if a.has("alarms") {
+        lines.retain(wecode_store::AuditLine::is_alarm);
+    }
+    if let Some(pattern) = a.get("path") {
+        lines.retain(|l| {
+            matches!(l.action.as_str(), "read" | "write")
+                && wecode_gov::glob::matches(pattern, &l.target)
+        });
+    }
+    Ok(render::audit(&lines))
 }
 
 fn intent_link(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Error>> {

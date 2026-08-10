@@ -3,6 +3,8 @@
 //! Pure string functions so the output is testable without a terminal.
 
 use wecode_core::{Admission, Intent, IntentId, IntentKind, IntentTree, Link, Measure, Status};
+use wecode_gov::{Action, ControlMode, Decision};
+use wecode_store::AuditLine;
 
 #[must_use]
 pub(crate) fn kind_tag(kind: IntentKind) -> &'static str {
@@ -144,10 +146,80 @@ pub(crate) fn admission(intent: &Intent, verdict: &Admission) -> String {
     out
 }
 
+/// One authorisation verdict, with the reason and what happens next.
+#[must_use]
+pub(crate) fn decision(post: &str, occupant: &str, action: &Action, d: &Decision) -> String {
+    let (verb, target) = match action {
+        Action::Read { path } => ("read", path.clone()),
+        Action::Write { path } => ("write", path.clone()),
+        Action::Run { argv } => ("run", argv.join(" ")),
+        Action::Merge { branch } => ("merge", branch.clone()),
+        Action::Spend { tokens, wall_secs } => ("spend", format!("{tokens} tokens, {wall_secs}s")),
+        other => ("act", format!("{other:?}")),
+    };
+
+    let mut out = format!("{post} ({occupant})  {verb} {target}\n\n");
+    match d {
+        Decision::Allow => out.push_str("  ✓ allowed\n"),
+        Decision::RequireApproval { by } => out.push_str(&format!(
+            "  ⏸ needs approval: {}\n     nothing happens until a holder signs.\n",
+            wecode_store::audit::approval_name(*by)
+        )),
+        Decision::Deny {
+            reason,
+            mode,
+            alarm,
+        } => {
+            out.push_str(&format!("  ✗ denied — {reason}\n"));
+            match mode {
+                ControlMode::Regimented => {
+                    out.push_str("     regimented: blocked before it happens.\n");
+                }
+                ControlMode::Sanctioned => out.push_str(
+                    "     sanctioned: recoverable, so the attempt is recorded as a signal.\n\
+                     \x20    repeated attempts mean the scope is wrong, not the agent.\n",
+                ),
+            }
+            if *alarm {
+                out.push_str(
+                    "\n  ⚡ ALARM — charter invariant. Dispatch freezes until acknowledged.\n",
+                );
+            }
+        }
+    }
+    out
+}
+
+/// The audit ledger.
+#[must_use]
+pub(crate) fn audit(lines: &[AuditLine]) -> String {
+    if lines.is_empty() {
+        return "no matching audit records\n".to_string();
+    }
+    let mut out = String::from("seq  post        occupant      verdict   action  target\n");
+    for l in lines {
+        let mark = match l.outcome.as_str() {
+            "allow" => "✓ allow",
+            "approval" => "⏸ approve",
+            "alarm" => "⚡ ALARM",
+            _ => "✗ deny",
+        };
+        out.push_str(&format!(
+            "{:<4} {:<11} {:<13} {:<9} {:<7} {}\n",
+            l.seq, l.post, l.occupant, mark, l.action, l.target
+        ));
+        if !l.detail.is_empty() && l.outcome != "allow" {
+            out.push_str(&format!("     └─ {}\n", l.detail));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wecode_core::{Budget, Scope};
+    use wecode_gov::{Broker, Charter, Effective, Grant, Invariant, Session};
 
     fn sample() -> IntentTree {
         let mut t = IntentTree::new();
@@ -243,6 +315,106 @@ mod tests {
         assert!(out.contains("  1  "), "{out}");
         // The vague term must appear in the question, not just be counted.
         assert!(out.contains("faster"), "{out}");
+    }
+
+    fn verdict_for(grant: Grant, action: &Action) -> (Decision, Vec<AuditLine>) {
+        let mut b = Broker::new(Charter::with(vec![
+            Invariant::NeverTouch(vec!["**/*.pem".into()]),
+            Invariant::ApprovalToMerge(vec!["main".into()]),
+        ]));
+        let s = Session::new(
+            "s",
+            "impl-api",
+            "claude-code",
+            IntentId::new("caching"),
+            Effective::of(vec![grant]),
+        );
+        let d = b.authorize(&s, action);
+        let lines = b
+            .ledger()
+            .iter()
+            .filter_map(|r| wecode_store::decode_record(&wecode_store::encode_record(r)))
+            .collect();
+        (d, lines)
+    }
+
+    fn engineer() -> Grant {
+        Grant::writer(&["crates/**"])
+            .with_run(&["cargo *"])
+            .with_spend(1000, 60)
+    }
+
+    #[test]
+    fn allowed_action_reads_plainly() {
+        let action = Action::Write {
+            path: "crates/export/a.rs".into(),
+        };
+        let (d, _) = verdict_for(engineer(), &action);
+        let out = decision("impl-api", "claude-code", &action, &d);
+        assert!(out.contains("allowed"), "{out}");
+        assert!(out.contains("crates/export/a.rs"), "{out}");
+    }
+
+    #[test]
+    fn sanctioned_denial_explains_it_is_a_signal() {
+        let action = Action::Write {
+            path: "secrets/other.txt".into(),
+        };
+        let (d, _) = verdict_for(engineer(), &action);
+        let out = decision("impl-api", "claude-code", &action, &d);
+        assert!(out.contains("denied"), "{out}");
+        assert!(out.contains("sanctioned"), "{out}");
+        assert!(out.contains("scope is wrong"), "{out}");
+    }
+
+    #[test]
+    fn an_invariant_violation_announces_the_freeze() {
+        let action = Action::Write {
+            path: "deploy/key.pem".into(),
+        };
+        let (d, _) = verdict_for(Grant::root(), &action);
+        let out = decision("impl-api", "claude-code", &action, &d);
+        assert!(out.contains("ALARM"), "{out}");
+        assert!(out.contains("freezes"), "{out}");
+    }
+
+    #[test]
+    fn approval_says_nothing_happens_yet() {
+        let action = Action::Merge {
+            branch: "main".into(),
+        };
+        let (d, _) = verdict_for(Grant::root(), &action);
+        let out = decision("review", "claude-code", &action, &d);
+        assert!(out.contains("needs approval"), "{out}");
+        assert!(out.contains("nothing happens"), "{out}");
+    }
+
+    #[test]
+    fn empty_audit_says_so() {
+        assert!(audit(&[]).contains("no matching"));
+    }
+
+    #[test]
+    fn audit_shows_verdict_and_reason() {
+        let action = Action::Write {
+            path: "deploy/key.pem".into(),
+        };
+        let (_, lines) = verdict_for(Grant::root(), &action);
+        let out = audit(&lines);
+        assert!(out.contains("ALARM"), "{out}");
+        assert!(out.contains("deploy/key.pem"), "{out}");
+        assert!(out.contains("└─"), "reason should be shown: {out}");
+    }
+
+    #[test]
+    fn audit_omits_a_reason_for_allowed_actions() {
+        let action = Action::Write {
+            path: "crates/a.rs".into(),
+        };
+        let (_, lines) = verdict_for(engineer(), &action);
+        let out = audit(&lines);
+        assert!(out.contains("allow"), "{out}");
+        assert!(!out.contains("└─"), "{out}");
     }
 
     #[test]
