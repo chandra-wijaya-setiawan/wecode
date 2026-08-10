@@ -599,14 +599,29 @@ The operator's working tree is never touched; output is a branch to review.
 
 ### Protocol boundaries
 
-- **MCP** — how an agent reaches its tools. Configured in the CLI, not here.
-- **A2A** — how wecode meets other agents: `A2aServer` northbound (wecode as one
-  agent inside a larger system), `A2aAgent` southbound (a remote agent in a post).
-- **Envelope + `result.json`** — how wecode drives a local CLI that speaks neither.
+**The `Agent` trait is the only protocol boundary.** Everything above it is
+in-process Rust; each implementation chooses its own wire below it. A2A carries
+exactly one hop.
 
-Internal orchestration is not A2A: local workers speak argv-in / prose-out, so an
-HTTP layer per subprocess removes no adapter work. Types align with A2A vocabulary
-so a bridge stays a mapping.
+| Hop | Mechanism |
+|---|---|
+| Control → Coordination → Broker → dispatch | Rust function calls, one process |
+| Dispatch → post | `TaskAssignment` rendered to a text envelope + argv |
+| Post → orchestrator | stdout → parser → `AgentEvent`; then `result.json`; then the diff |
+| Post → post | **none** — forbidden (see Topology) |
+| Orchestrator → operator | in-process events, TUI, digest |
+| **wecode ↔ remote agent** | **A2A** — `A2aAgent` southbound, `A2aServer` northbound |
+| Post → its own tools | MCP, configured in the CLI, not by us |
+| Post → wecode, opt-in | MCP introspection (§4, `Introspect`) |
+
+A "task" is not an actor and has no protocol: it is a dispatched attempt, handed to
+an `Agent` impl as a struct. `CliAgent` turns that into argv and parses stdout;
+`A2aAgent` turns it into a `SendMessage` call. Nothing internal gains anything from
+HTTP and JSON-RPC to reach a process on the same machine.
+
+What *is* A2A-shaped is the **data model, not the transport** — `TaskStatus` is
+A2A's eight states, outcomes map to `Artifact`, context items to `Message`/`Part` —
+so bridging at either edge stays a mapping rather than a redesign.
 
 ### Topology
 
