@@ -183,7 +183,74 @@ measures and scope where possible, model-proposed otherwise, and **sampled by Au
 rather than individually approved. Definition is owned at the top and spot-checked at
 the bottom.
 
-### 2.4 Organization
+### 2.4 Admission — the formulation gate
+
+Task formulation *is* the orchestration. Nothing dispatches until it is well formed,
+and the check is a **type and structure check, not a judgement call**.
+
+```rust
+pub enum Admission {
+    Draft { defects: Vec<Defect> },      // cannot be assigned
+    Admitted { at: CycleId, by: UnitId, waivers: Vec<Waiver> },
+}
+
+pub enum Defect {
+    StatementCompound,                       // more than one outcome
+    StatementVague { term: String },          // the only model-assisted check
+    NoParentLink,
+    MeasureMissing,
+    MeasureNotExecutable { idx: usize },      // Judged where Command/Metric required
+    AcceptanceNotCheckable { idx: usize },
+    ScopeMissing,
+    ScopeTooBroad { glob: String },
+    ScopeOverlaps { with: IntentId },
+    BudgetMissing,
+    HorizonExceedsParent,
+    NoCapableUnit { function: Function },
+}
+```
+
+**Every defect except `StatementVague` is decided by inspecting types and the tree** —
+`Measure::Judged` is not executable, `**` is not a scope, a missing parent is a
+missing field, sibling globs either intersect or they do not. Vagueness is the single
+place a model assists, and it only ever *raises* a question; it can never admit an
+intent.
+
+Each defect carries a fixed question. Admission is a dialogue with whoever created
+the intent — operator, Intelligence, or a decomposing post:
+
+```
+$ wecode "make the export faster"
+
+  ⚠ 3 defects — not assignable
+
+  1  measure missing
+     How do we know this is done? A command or a metric with a target.
+     > k6 run load/export.js, p95 under 5s
+
+  2  scope missing
+     Which paths may change?
+     > crates/export/**
+
+  3  statement vague: "faster"
+     Faster than what, by when? (horizon)
+     > this month
+
+  ✓ admitted — Project under Goal: cut p99 latency
+```
+
+Rules: a `Draft` cannot be assigned; admission is recorded with its author; a
+`Waiver` is explicit, attributed and surfaced by Audit, so skipping a check is
+visible rather than silent. Re-opening an admitted intent to change a measure follows
+§2.3 rule 2 — approval, and the attempt is invalidated.
+
+**Kept off the attention budget:** derivable fields are derived before asking (scope
+from the parent, measures inherited from a parent's `Command`, horizon from the
+parent), so questions are only ever about what genuinely cannot be inferred. A
+conversational or exploratory task admits with `Standalone { Exploration }` and a
+relaxed checklist — it still needs a scope and a budget, just not a metric.
+
+### 2.5 Organization
 
 ```rust
 /// One recursive type at every scale: org, group, or a single seat.
@@ -262,7 +329,7 @@ pub enum Capability {
 Selection rule: if it cannot be checked *before* the action occurs, it is not a
 capability — it is advice, and belongs in the prompt.
 
-### 2.5 Assignment — binding demand to supply
+### 2.6 Assignment — binding demand to supply
 
 ```rust
 pub struct Assignment {
@@ -392,6 +459,55 @@ defeat every control in this section.
 Management is not an agent talking to a system over a protocol — it is code with a
 function call. MCP and A2A exist only at the edges where something *outside* the
 process needs in.
+
+### Audit plane — one ledger across every harness
+
+Each coding CLI keeps its own logs in its own shape, and none of them know about the
+others. Every consequential fact lands instead in **one append-only ledger** with one
+record type, so a question can be asked once rather than per harness.
+
+```rust
+pub struct Record {
+    pub seq: u64,                      // monotonic; the ledger is append-only
+    pub at: Timestamp,
+    pub actor: Actor,                  // Operator | Post{post, occupant} | System(Function)
+    pub intent: Option<IntentId>,      // ─┐
+    pub task: Option<TaskId>,          //  │ correlation keys
+    pub session: Option<SessionId>,    // ─┘
+    pub caused_by: Option<u64>,        // causal parent — reconstructs the chain
+    pub action: Action,
+    pub authority: Option<Authority>,  // the grant and Decision that permitted it
+    pub outcome: Outcome,
+    pub cost: Cost,                    // tokens, wall, and money
+    pub source: Source,
+}
+
+/// Trust marking. Same principle as diff-over-self-report, applied to telemetry.
+pub enum Source {
+    Broker,                            // authoritative — we decided it
+    Supervisor,                        // authoritative — we observed it (exit code, diff, spend)
+    Harness { adapter: String },        // best-effort — the agent's own account. Untrusted
+}
+```
+
+`source` is the load-bearing field. A harness's self-reported tool log is useful for
+debugging and inadmissible as evidence; marking it at write time stops the two being
+confused later. Anything that gates a decision comes from `Broker` or `Supervisor`.
+
+Because `intent`, `task` and `caused_by` are on every record regardless of which agent
+produced it, cross-harness questions become ordinary queries:
+
+```
+wecode audit --path 'crates/auth/**' --since 7d     # who touched this, any agent
+wecode audit --intent <id> --tree                   # everything under a goal
+wecode audit --denied                               # refused actions and why
+wecode audit --cost --group-by intent               # spend by objective
+wecode audit --waivers                              # admission checks skipped
+```
+
+The ledger is `audit.jsonl` in the state dir, outside every worktree and unreachable
+by any agent. `Record` maps cleanly onto an OTel span (`caused_by` → parent span), so
+export is a projection rather than a second instrumentation path.
 
 #### Optional introspection over MCP
 
@@ -852,9 +968,9 @@ you cannot.
 
 | # | Delivers |
 |---|---|
-| **0** | The intent ontology: `Intent`, grammar enforcement, `wecode "…"` intake with confirm, `intent tree` |
+| **0** | Intent ontology + **admission gate** (§2.4): grammar enforcement, deterministic defect checks, the clarify dialogue, `intent tree` |
 | **1** | One post executes one task: adapter, supervision, worktree, event stream, JSONL log |
-| **2** | Broker with every §4 enforcement point, grants, sessions, audit log |
+| **2** | Broker with every §4 enforcement point, grants, sessions, and the audit plane (one ledger, `source` marking, `wecode audit` queries) |
 | **3** | Oversight TUI: zoom L0–L4, computed health, stuck detection, attention budget, digest, `Trajectory` |
 | **4** | Retries with prior-failure context, scope rejection, sanctions, resume |
 | **5** | Projects and Control: ≥2 projects, deterministic allocation, budgets, capacity |
