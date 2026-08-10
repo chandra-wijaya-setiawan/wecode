@@ -6,8 +6,9 @@ enforces what each agent may do, and attenuates what reaches you — so nothing
 drifts from the objective it was meant to serve.
 
 ```bash
-./wecode org show                  # your staff, and what each may do
-./wecode intent tree               # the hierarchy
+./wecode init ~/companies/acme     # a company: profile, roles, posts, state
+./wecode company show              # your staff, and what each may do
+./wecode board                     # the cockpit
 ./wecode audit --path 'crates/**'  # who touched this, any agent
 ```
 
@@ -31,9 +32,10 @@ drifts from the objective it was meant to serve.
 
 ## Status
 
-Working: the intent ontology, the admission gate, capability grants, the Broker,
-the audit ledger, and the CLI over all of it. 141 tests.
+Working: the intent ontology and admission gate, company workspaces and templates,
+capability grants, the Broker, the audit ledger, assignment with scope checking, and
+the board. 199 tests.
 
-Not yet built: agent execution — nothing spawns `claude` or `codex` yet. See
-[Status](docs/getting-started.md#status) for why, and
-[architecture.md §11](docs/architecture.md#11-build-order) for the build order.
+Not yet built: a real TUI, and agent execution — nothing spawns `claude` or `codex`
+yet. Both need a native build; see [Status](docs/getting-started.md#status) for why,
+and [architecture.md §11](docs/architecture.md#11-build-order) for the build order.

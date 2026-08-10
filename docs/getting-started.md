@@ -3,52 +3,99 @@
 Run `./wecode` from the repo root. The first invocation compiles (~10s); after that
 it is instant.
 
-State lives in `$WECODE_HOME` (default `~/.local/state/wecode`). Set it per project:
-
-```bash
-export WECODE_HOME=~/.local/state/wecode/myproject
-```
-
-> **Current limitation.** `guard` is a manual probe, not a live intercept, and
-> nothing spawns `claude` or `codex` yet — see [Status](#status). What works today
-> is the intent, governance and audit half.
+> **Current limits.** `guard` is a manual probe, not a live intercept; `board` is a
+> snapshot rather than a live dashboard; and nothing spawns `claude` or `codex` yet.
+> See [Status](#status). What works today is intent, governance, audit and the
+> board.
 
 ---
 
-## 1. See what you have
+## 1. Create a company
+
+A company is a **self-contained directory**: profile, roles, posts, agent templates
+and state, all in one place. It is deliberately *not* a code repository — the repos
+it works on are declared inside it by path.
 
 ```bash
-./wecode                # usage
-./wecode org show       # posts, occupants, and what each may do
+./wecode templates                              # see what's available
+./wecode init ~/companies/acme                  # default: software-company
+./wecode init ~/companies/solo --template solo  # smallest governed setup
 ```
 
-`org show` is the staff list, and worth reading first:
+```
+~/companies/acme/
+  company.toml            profile, attention budget, invariants, roles, posts
+  agents/claude-code.toml how to invoke each coding CLI
+  agents/codex.toml
+  templates/task-envelope.md
+  state/                  intents.log, audit.log — append-only (gitignored)
+  README.md
+```
 
-| post | occupant | writes |
-|---|---|---|
-| `impl-api` | claude-code | `crates/**`, `src/**` |
-| `test-api` | codex | `tests/**` only |
-| `review` | claude-code | nothing — read-only, holds the sole merge approval |
+Then point it at your code. Edit `company.toml`:
 
-A tester that cannot edit the implementation cannot make a failing test pass by
-weakening the code. That is enforced, not requested.
+```toml
+[[repos]]
+name = "app"
+path = "~/projects/your-repo"
+```
+
+Commands find the workspace by walking up from the working directory, like git and
+cargo. So `cd ~/companies/acme` and the `--org` flag becomes unnecessary:
+
+```bash
+cd ~/companies/acme
+wecode company show
+```
+
+Otherwise pass `--org <dir>` or set `WECODE_ORG`. Examples below use `--org` to be
+explicit.
+
+## 2. Read the org
+
+```bash
+./wecode --org ~/companies/acme company show
+```
+
+| post | role | occupant | writes |
+|---|---|---|---|
+| `chief` | chief | claude-code | — read only |
+| `impl` | engineer | claude-code | `src/**`, `crates/**`, `lib/**` |
+| `test` | tester | codex | `tests/**`, `spec/**` |
+| `review` | reviewer | claude-code | — read only |
+
+Two things in that table are load-bearing:
+
+- The **tester writes only tests**, so it cannot make a failing test pass by
+  weakening the implementation.
+- The **chief writes nothing and runs nothing.** It holds `define`, `staff` and
+  approvals — so it configures and assigns, but cannot do the work. Loading a
+  company whose chief has `write` or `run` is a validation error. An agent that can
+  both set the criteria and satisfy them is not governed.
 
 Below the table are the **charter invariants**, which outrank every grant.
 
-## 2. Capture intent, top down
+## 3. Capture intent, top down
 
 ```bash
-# The direction. A vision is a root and needs no measure.
-./wecode intent add vision ship-fast "lead the market on export speed"
+W="./wecode --org ~/companies/acme"
+
+# A vision is a root and needs no measure.
+$W intent add vision fast "lead the market on export speed"
 
 # A goal needs a measurable target.
-./wecode intent add goal p99 "cut export p99 below 500ms" \
-    --parent ship-fast --measure-metric p99_ms:lt:500
+$W intent add goal p99 "cut export p99 below 500ms" \
+    --parent fast --measure-metric p99_ms:lt:500
 
 # A project needs scope and budget too.
-./wecode intent add project caching "add response caching to the export endpoint" \
+$W intent add project caching "add response caching to the export endpoint" \
     --parent p99 --measure-cmd "k6 run load/export.js" \
     --write "crates/export/**" --tokens 200000 --wall 1800
+
+# A task hangs off a project, never off a goal.
+$W intent add task cache-tests "cover the cache layer with tests" \
+    --parent caching --measure-cmd "cargo test" \
+    --write "tests/**" --tokens 50000
 ```
 
 ### Feed it something vague
@@ -56,7 +103,7 @@ Below the table are the **charter invariants**, which outrank every grant.
 This is the part that earns its keep:
 
 ```bash
-./wecode intent add project speedup "make the export faster"
+$W intent add project speedup "make the export faster"
 ```
 
 ```
@@ -70,79 +117,95 @@ This is the part that earns its keep:
 ```
 
 Nothing is saved. Answer the questions, or pass `--force` to admit anyway — which
-records a waiver rather than hiding the gap.
-
-Every check except the vagueness one is decided by inspecting types and the tree,
-so the gate is reproducible.
+records a waiver rather than hiding the gap. Every check except the vagueness one is
+decided by inspecting types and the tree, so the gate is reproducible.
 
 ### Ad-hoc work
 
-Work that serves nothing is fine, but you have to say so:
+Work that serves nothing is fine, but you have to say so. `--standalone` is
+deliberate; an intent with no link at all is drift, and reported as such.
 
 ```bash
-./wecode intent add task bump-deps "update transitive dependencies" \
+$W intent add task bump-deps "update transitive dependencies" \
     --standalone maintenance --measure-cmd "cargo check" \
     --write "Cargo.toml" --tokens 5000
 ```
 
-`--standalone` is deliberate; an intent with no link at all is drift, and reported.
-
-## 3. Navigate
+## 4. The board
 
 ```bash
-./wecode intent tree                     # the whole hierarchy, indented
-./wecode intent show caching             # what does this serve?
-./wecode intent check caching            # re-run admission on a saved intent
-./wecode intent link <id> --parent <p>   # fix drift
+$W board            # portfolio
+$W board caching    # descend into one intent
 ```
 
-`intent show` answers the "am I still on trajectory" question by walking from the
-root down to the node:
-
 ```
-VIS lead the market on export speed
-  GOAL cut export p99 below 500ms
-    PROJ add response caching to the export endpoint
-      TASK cover the cache layer with tests
+┌ L0 · PORTFOLIO ─────────────────────── wecode board <id> to descend ─┐
+│ what                    health    progress    spend       needs you
+│ VIS fast                ●red    ▁▁▁▁▁▁   0%   400         1 alarm
+│   GOAL p99              ●red    ▁▁▁▁▁▁   0%   400         1 alarm
+└─ alarms freeze dispatch · silence on green
 ```
 
-## 4. Test the enforcement
+Same five columns at every level — **what · health · progress · spend · needs-you**
+— which works only because the intent tree is self-similar.
+
+**Health is computed, never reported.** Alarms and over-budget are red; defects,
+denials and stalled are amber; otherwise green. Spend and incidents roll *up* the
+tree, so an alarm on one task turns its project, goal and vision red. `stalled`
+means spend rising with zero progress — the failure mode that quietly wastes money.
+
+## 5. Assign work
+
+```bash
+$W assign caching --to impl
+```
+
+The useful check is deterministic: a post whose grant does not cover the intent's
+write scope cannot legally do the work, so assigning it would guarantee a rejection
+later.
+
+```
+$ $W assign cache-tests --to impl
+error: post `impl` (role engineer) may not write tests/** — it writes only: src/**, crates/**, lib/**
+
+$ $W assign cache-tests --to test
+  assigned cache-tests to test (tester, occupied by codex)
+```
+
+Goals are refused outright — a goal is reached by satisfying its children, never by
+being handed to a unit.
+
+## 6. Test the enforcement
 
 `guard` asks the Broker whether a post may do something, and records the answer.
 
 ```bash
-./wecode guard impl-api write crates/export/cache.rs   # ✓ allowed
-./wecode guard test-api write crates/export/cache.rs   # ✗ denied — sanctioned
-./wecode guard impl-api write deploy/prod.pem          # ⚡ ALARM
-./wecode guard impl-api run "git push --force"         # ⚡ ALARM
-./wecode guard review  merge main                      # ⏸ needs approval
-./wecode guard impl-api spend x --tokens 500000        # ⚡ ALARM (2.5× cap)
+$W guard impl write crates/export/cache.rs --intent caching   # ✓ allowed
+$W guard test write crates/export/cache.rs --intent caching   # ✗ denied — sanctioned
+$W guard impl write deploy/prod.pem --intent caching          # ⚡ ALARM
+$W guard impl run "git push --force" --intent caching         # ⚡ ALARM
+$W guard review merge main --intent caching                   # ⏸ needs approval
+$W guard impl spend x --tokens 500000 --intent caching        # ⚡ ALARM (2.5× cap)
 ```
 
 Two things to notice:
 
-- The tester denial is **sanctioned** — recoverable, so the attempt is recorded as
-  a signal that the *scope* may be wrong rather than the agent.
+- The tester denial is **sanctioned** — recoverable, so the attempt is recorded as a
+  signal that the *scope* may be wrong rather than the agent.
 - The `.pem` and force-push denials are **alarms**, and they fire even under a root
   grant, because charter invariants are checked *before* grants. A grant that
   permits an invariant violation is itself the bug.
 
-## 5. Read the ledger
+Always pass `--intent`: a record with no intent cannot be correlated, and will not
+appear on the board.
+
+## 7. Read the ledger
 
 ```bash
-./wecode audit                      # everything, every agent, one place
-./wecode audit --alarms             # invariant violations only
-./wecode audit --denied             # refusals
-./wecode audit --path 'crates/**'   # who touched these paths, any agent
-```
-
-```
-seq  post        occupant      verdict   action  target
-1    impl-api    claude-code   ✓ allow   write   crates/export/cache.rs
-2    test-api    codex         ✗ deny    write   crates/export/cache.rs
-     └─ sanctioned: write outside scope: crates/export/cache.rs
-3    impl-api    claude-code   ⚡ ALARM   write   deploy/prod.pem
-     └─ regimented: invariant violated: never_touch deploy/prod.pem
+$W audit                      # everything, every agent, one place
+$W audit --alarms             # invariant violations only
+$W audit --denied             # refusals
+$W audit --path 'crates/**'   # who touched these paths, any agent
 ```
 
 The `--path` query is the cross-harness question no individual coding CLI can
@@ -154,14 +217,18 @@ answer, because each one only knows its own session.
 
 | Command | Does |
 |---|---|
-| `intent add <kind> <id> "<statement>"` | capture intent; runs the admission gate |
-| `intent tree` | the whole hierarchy |
-| `intent show <id>` | lineage — what this serves |
-| `intent check <id>` | re-run admission on a saved intent |
+| `init <dir> [--template <name>]` | scaffold a company workspace |
+| `templates` | list templates |
+| `company show` | profile, posts, grants, invariants |
+| `intent add <kind> <id> "<stmt>"` | capture intent; runs the admission gate |
+| `intent tree` / `show <id>` / `check <id>` | hierarchy / lineage / re-check |
 | `intent link <id> --parent <p>` | resolve drift |
-| `org show` | posts, occupants, grants, invariants |
+| `board [<id>]` | cockpit: portfolio, or one intent |
+| `assign <intent> --to <post>` | check the post may do it, then activate |
 | `guard <post> <verb> <target>` | authorise an action and record it |
-| `audit` | the ledger |
+| `audit [--denied\|--alarms\|--path <glob>]` | the ledger |
+
+Global: `--org <dir>` (or `$WECODE_ORG`) to pick a company explicitly.
 
 ### `intent add` flags
 
@@ -185,7 +252,7 @@ answer, because each one only knows its own session.
 ## Development
 
 ```bash
-cargo test  --target wasm32-wasip1              # 141 tests
+cargo test  --target wasm32-wasip1              # 199 tests
 cargo clippy --target wasm32-wasip1 --all-targets
 cargo fmt --all
 ```
@@ -196,35 +263,45 @@ This machine has no C linker — no `cc`, no `crt1.o`, no `libc.so` — and `sud
 needs a password. Proc-macro crates are host dylibs, so `serde`, `thiserror` and
 `clap` are all unavailable, which blocked even `cargo check`.
 
-`wasm32-wasip1` links with Rust's bundled lld against a bundled libc and runs
-under Node's WASI, so the whole suite is buildable and testable. Two consequences,
-both isolated to one file each:
+`wasm32-wasip1` links with Rust's bundled lld against a bundled libc and runs under
+Node's WASI, so the whole suite builds and tests. Three consequences, each isolated
+to one file:
 
-- the record format is hand-rolled tab-delimited rather than JSONL (`codec.rs`)
-- arg parsing is hand-rolled rather than clap (`args.rs`)
+- record format is hand-rolled tab-delimited rather than JSONL (`store/codec.rs`)
+- config parsing is a hand-rolled TOML subset rather than `toml` (`org/toml.rs`)
+- arg parsing is hand-rolled rather than `clap` (`cli/args.rs`)
 
 Making `wecode-core` dependency-free turned out to be better design regardless: a
 pure domain crate, with serialization belonging to the store.
 
-To restore a native build:
+**Note:** panics abort rather than unwind on wasip1, so a failing test reports
+`RuntimeError: unreachable` with no message. Narrow it down by running one test at a
+time, or reason from the assertion.
+
+### Restoring a native build
 
 ```bash
 sudo apt-get install -y build-essential
 ```
 
-Then delete `.cargo/config.toml` and `scripts/wasi-run.mjs`, and simplify
-`./wecode` to `cargo run -q -p wecode-cli`. Nothing in the source depends on the
-workaround.
+Then delete `.cargo/config.toml` and `scripts/wasi-run.mjs`, and simplify `./wecode`
+to `cargo run -q -p wecode-cli`. Nothing in the source depends on the workaround.
 
 ## Status
 
-Built and tested: the intent ontology, the admission gate, capability grants, the
-Broker, the audit ledger, and the CLI over all of it.
+**Working:** the intent ontology and admission gate, company workspaces and
+templates, capability grants, the Broker, the audit ledger, assignment with scope
+checking, and the board.
 
-Not built: **agent execution.** `CliAgent`, process supervision and git worktrees
-need process spawning, which wasip1 does not have — so that layer cannot be
-compiled or tested here until the C linker exists. It is the piece that makes this
-actually drive `claude` and `codex`.
+**Not built:**
 
-See [architecture.md §11](./architecture.md#11-build-order) for the full build
-order.
+- **A real TUI.** Full-screen rendering works on wasip1, but raw keypress mode needs
+  `termios`, which WASI has no equivalent for — so `ratatui`/`crossterm` cannot be
+  used. `board` is a snapshot with the right layout; live refresh and `j`/`k`
+  navigation need a native build.
+- **Agent execution.** `CliAgent`, process supervision and git worktrees need
+  process spawning, which wasip1 does not have. This is the piece that makes wecode
+  actually drive `claude` and `codex`.
+
+Both are waiting on the same C linker. See
+[architecture.md §11](./architecture.md#11-build-order) for the full build order.
