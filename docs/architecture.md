@@ -223,6 +223,7 @@ pub enum Capability {
     Approve(ActionKind),
     Delegate(Box<Capability>),
     Staff(UnitKind),
+    Introspect(IntrospectScope),   // read own intent / ancestors / conventions
 }
 ```
 
@@ -337,6 +338,46 @@ pub enum Sanction {
 
 A post that repeatedly writes outside its scope indicates the *scope* is wrong.
 Sanctioning surfaces that pattern; regimenting it away discards the signal.
+
+### State access
+
+Who may reach the intent tree, grants and event log — and how.
+
+| Consumer | Access | Mechanism |
+|---|---|---|
+| Control, Coordination, Audit, Policy | read/write | **in-process Rust**; same binary, direct store calls. Not a protocol |
+| Oversight TUI | read | in-process, plus tailing `events.jsonl` |
+| Intake / Intelligence model calls | **none** | receive a rendered prompt, return structured output. Stateless |
+| Worker agents (posts) | **none by default** | task envelope only: intent statement, ancestor chain, acceptance, scope |
+| Worker agents, opt-in | narrow read | **MCP**, capability-gated (`Introspect`) — see below |
+| External systems and agents | task-level | **A2A** northbound, never the store |
+
+**The store is never reachable by an agent.** All writes go through the Broker; no
+agent receives a database handle or path. An agent that could write `Intent` or
+`Grant` rows could assign itself work and widen its own authority, which would
+defeat every control in this section.
+
+Management is not an agent talking to a system over a protocol — it is code with a
+function call. MCP and A2A exist only at the edges where something *outside* the
+process needs in.
+
+#### Optional introspection over MCP
+
+Some tasks legitimately need context the envelope omits: *what goal does this
+serve?*, *what did the previous attempt try?* For adapters that speak MCP, wecode
+can expose a minimal read-only server:
+
+```
+my_intent()        → statement, acceptance, scope, ancestor chain
+prior_attempts()   → summaries and failures for this step
+conventions()      → project conventions in scope
+report_progress()  → the only write; a note, not a status claim
+```
+
+Gated by an `Introspect` capability, because information access is authority: a
+post that can read the whole tree can reason about work it was not given. Default
+off. `report_progress` cannot set status — status stays computed from diffs and exit
+codes (rule 2), so an agent still cannot declare its own success.
 
 ---
 
@@ -551,7 +592,7 @@ one was required, the task failed.
 
 ### Workspaces
 
-One git worktree per task under `.wecode/wt/<task-id>/`, branched from the run
+One git worktree per task under the state dir (§10), branched from the run
 branch. **Agents never commit and never merge** — wecode does both after checks
 pass. On merge conflict, a resolve-conflict step is dispatched like any other.
 The operator's working tree is never touched; output is a branch to review.
@@ -732,9 +773,23 @@ crates/
 adapters/              # one TOML per coding CLI
 ```
 
-State lives in `.wecode/`: `runs/<id>/events.jsonl` is authoritative,
-`index.sqlite` is a rebuildable index, `wt/` holds worktrees. Resume is a fold
-over the log.
+### State location
+
+State lives **outside the repository**, because a post's cwd is its worktree and
+`..` must not reach authority data:
+
+```
+$XDG_STATE_HOME/wecode/<repo-id>/
+  runs/<id>/events.jsonl     # authoritative; resume is a fold over this
+  index.sqlite               # rebuildable index
+  audit.jsonl                # every Broker decision
+wt/<task-id>/                # worktrees, siblings of each other, outside the repo
+```
+
+A worktree still reaches the main repo through its `.git` pointer — that is fine, it
+may read code. What it must not reach is `index.sqlite`, `audit.jsonl` or any grant
+definition. Nothing under the repo root holds state; `.wecode/` in-repo is reserved
+for the task-local `result.json` and `inbox/`, both writable and both untrusted.
 
 Dependencies: `tokio`, `tokio-util`, `serde`, `serde_json`, `thiserror`, `anyhow`,
 `clap`, `tracing`, `reqwest` (rustls), `rusqlite` (bundled), `minijinja`,
