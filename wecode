@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Convenience wrapper for the wecode CLI.
+#
+# TEMPORARY: this box has no C linker, so the binary is built for wasm32-wasip1
+# and run under Node's WASI. Once `cc` exists, this becomes
+# `cargo run -q -p wecode-cli -- "$@"` and the wasm bits can go.
+set -euo pipefail
+
+export PATH="$HOME/.cargo/bin:$PATH"
+if ! command -v node >/dev/null 2>&1; then
+  for candidate in "$HOME"/.local/share/pi-node/*/bin; do
+    [ -d "$candidate" ] && export PATH="$candidate:$PATH" && break
+  done
+fi
+
+: "${WECODE_HOME:=$HOME/.local/state/wecode}"
+export WECODE_HOME
+
+cd "$(dirname "$0")"
+exec cargo run -q --target wasm32-wasip1 -p wecode-cli -- "$@"
