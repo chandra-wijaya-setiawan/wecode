@@ -16,6 +16,11 @@ const wasi = new WASI({
   env,
   preopens: { '/': '/' },
   returnOnExit: true,
+  // Inherit the real stdio explicitly. Without this, panic messages written to
+  // fd 2 are lost and a failing test reports only "RuntimeError: unreachable".
+  stdin: 0,
+  stdout: 1,
+  stderr: 2,
 });
 
 const module = await WebAssembly.compile(readFileSync(wasmPath));

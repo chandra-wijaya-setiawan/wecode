@@ -1,52 +1,49 @@
 //! `wecode` — the single control driver.
 
 mod args;
-mod org;
 mod render;
 
 use std::process::ExitCode;
 
 use args::Args;
-use wecode_core::{Admission, Budget, Cmp, Intent, IntentId, Link, Measure, Scope, Sphere};
-use wecode_gov::{Action, Broker, Session};
+use wecode_core::{Admission, Budget, Cmp, Intent, IntentId, Link, Measure, Scope, Sphere, Status};
+use wecode_gov::{Action, Broker, Session, glob};
+use wecode_org::{Company, Post, Workspace, workspace};
 use wecode_store::{Store, horizon_from_str, intent_kind_from_str, standalone_reason_from_str};
 
 const USAGE: &str = "\
 wecode — run coding agents as staff
 
-USAGE
+A company is a self-contained directory: profile, roles, posts, agent templates
+and state. It is not a code repository; the repos it works on are declared inside
+it by path.
+
+SETUP
+  wecode init <dir> [--template <name>]   scaffold a company workspace
+  wecode templates                        list available templates
+  wecode company show                     profile, posts, invariants
+
+  Commands find the workspace by walking up from the working directory, or via
+  --org <dir> / $WECODE_ORG.
+
+INTENT
   wecode intent add <kind> <id> \"<statement>\"   kind: vision|goal|project|task
-        --parent <id>            what this serves
+        --parent <id> | --standalone <maintenance|urgent|exploration|personal>
         --link <requires|alternative|contributes>
-        --standalone <maintenance|urgent|exploration|personal>
-        --measure-cmd \"<cmd>\"    executable acceptance (repeatable)
+        --measure-cmd \"<cmd>\"        executable acceptance (repeatable)
         --measure-metric <name>:<lt|lte|gt|gte|eq>:<target>
-        --write <glob>           writable paths (repeatable)
-        --read <glob>            readable paths (repeatable)
+        --write <glob>  --read <glob>   scope (repeatable)
         --tokens <n>  --wall <secs>
         --horizon <now|week|month|quarter|year|indefinite>
-        --personal               personal rather than org sphere
-        --force                  admit despite defects (recorded as a waiver)
+        --personal  --force
+  wecode intent tree | show <id> | check <id>
+  wecode intent link <id> --parent <p>
 
-  wecode intent tree                   the whole hierarchy
-  wecode intent show <id>              lineage: what this serves
-  wecode intent check <id>             admission verdict and questions
-  wecode intent link <id> --parent <p> resolve drift
-
-  wecode org show                      posts, occupants and what each may do
-
+WORK
+  wecode assign <intent> --to <post>   check the post may do it, then activate
   wecode guard <post> <verb> <target>  authorise an action; records the decision
-        verbs: read write run merge spend
-        --intent <id>   which intent this is for
-        --tokens <n>    for `spend`
-
-  wecode audit                         the ledger, newest last
-        --denied   refused actions only
-        --alarms   invariant violations only
-        --path <glob>   who touched these paths, any agent
-
-ENVIRONMENT
-  WECODE_HOME   state directory (default $XDG_STATE_HOME/wecode)
+        verbs: read write run merge spend        --tokens <n> for spend
+  wecode audit [--denied] [--alarms] [--path <glob>]
 ";
 
 fn main() -> ExitCode {
@@ -65,24 +62,42 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(a: &Args) -> Result<String, Box<dyn std::error::Error>> {
-    let store = Store::open(Store::default_root())?;
+type Res = Result<String, Box<dyn std::error::Error>>;
 
+fn run(a: &Args) -> Res {
     match (a.cmd(0), a.cmd(1)) {
-        ("intent", "add") => intent_add(a, &store),
-        ("intent", "tree") => Ok(render::tree(&store.load_tree()?)),
+        ("init", _) => init(a),
+        ("templates", _) => Ok(render::templates()),
+        ("company", "show") | ("org", "show") => {
+            let (_, company) = open(a)?;
+            Ok(render::company(&company))
+        }
+        ("intent", "add") => intent_add(a),
+        ("intent", "tree") => {
+            let (store, _) = open(a)?;
+            Ok(render::tree(&store.load_tree()?))
+        }
         ("intent", "show") => {
+            let (store, _) = open(a)?;
             let id = require(a.cmd(2), "intent id")?;
             Ok(render::lineage(&store.load_tree()?, &IntentId::new(id)))
         }
-        ("intent", "check") => intent_check(a, &store),
-        ("intent", "link") => intent_link(a, &store),
-        ("org", "show") => Ok(org_show()),
-        ("guard", _) => guard(a, &store),
-        ("audit", _) => audit(a, &store),
+        ("intent", "check") => intent_check(a),
+        ("intent", "link") => intent_link(a),
+        ("assign", _) => assign(a),
+        ("guard", _) => guard(a),
+        ("audit", _) => audit(a),
         ("", _) | ("help", _) | ("--help", _) => Ok(USAGE.to_string()),
         (cmd, sub) => Err(format!("unknown command `{cmd} {sub}`\n\n{USAGE}").into()),
     }
+}
+
+/// Resolves the workspace, then its state store and validated profile.
+fn open(a: &Args) -> Result<(Store, Company), Box<dyn std::error::Error>> {
+    let ws = workspace::resolve(a.get("org"))?;
+    let company = ws.load()?;
+    let store = Store::open(ws.state_dir())?;
+    Ok((store, company))
 }
 
 fn require<'a>(value: &'a str, what: &str) -> Result<&'a str, String> {
@@ -91,6 +106,28 @@ fn require<'a>(value: &'a str, what: &str) -> Result<&'a str, String> {
     } else {
         Ok(value)
     }
+}
+
+fn init(a: &Args) -> Res {
+    let dir = require(a.cmd(1), "target directory")?;
+    let template = a.get("template").unwrap_or("software-company");
+    let root = wecode_org::expand_home(dir);
+
+    let written = workspace::init(&root, template)?;
+    let company = Workspace::at(&root).load()?;
+
+    let mut out = format!("created {} from template `{template}`\n\n", root.display());
+    for p in &written {
+        out.push_str(&format!("  {}\n", p.display()));
+    }
+    out.push_str(&format!(
+        "\n{} — {} posts, {} roles\n\nnext:\n  cd {}\n  wecode company show\n  edit company.toml, then point [[repos]] at your code\n",
+        company.name,
+        company.posts.len(),
+        company.roles.len(),
+        root.display()
+    ));
+    Ok(out)
 }
 
 /// Builds an intent from flags. Nothing here decides admissibility.
@@ -173,7 +210,8 @@ fn parse_metric(spec: &str) -> Result<Measure, String> {
     })
 }
 
-fn intent_add(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Error>> {
+fn intent_add(a: &Args) -> Res {
+    let (store, _) = open(a)?;
     let intent = build_intent(a)?;
     let tree = store.load_tree()?;
 
@@ -181,8 +219,8 @@ fn intent_add(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Err
     let mut out = render::admission(&intent, &verdict);
 
     if verdict.is_admitted() || a.has("force") {
-        // Insert into a scratch tree first so a grammar violation is caught before
-        // anything is written. The log is append-only; a bad line stays forever.
+        // Probe a scratch tree first: the log is append-only, so a grammar
+        // violation must be caught before anything is written.
         let mut probe = tree;
         probe.insert(intent.clone())?;
         store.append_intent(&intent)?;
@@ -197,7 +235,8 @@ fn intent_add(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Err
     Ok(out)
 }
 
-fn intent_check(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Error>> {
+fn intent_check(a: &Args) -> Res {
+    let (store, _) = open(a)?;
     let id = IntentId::new(require(a.cmd(2), "intent id")?);
     let tree = store.load_tree()?;
     let intent = tree
@@ -207,27 +246,125 @@ fn intent_check(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::E
     Ok(render::admission(intent, &verdict))
 }
 
-fn org_show() -> String {
-    let mut out = String::from("post        occupant      role       writes\n");
-    for p in org::posts() {
-        let writes = if p.grant.write.is_empty() {
-            "— (read only)".to_string()
-        } else {
-            p.grant.write.join(", ")
-        };
-        out.push_str(&format!(
-            "{:<11} {:<13} {:<10} {}\n",
-            p.name, p.occupant, p.role, writes
-        ));
-    }
-    out.push_str("\ninvariants outrank every grant above:\n");
-    for inv in &org::charter().invariants {
-        out.push_str(&format!("  {inv:?}\n"));
-    }
-    out
+fn intent_link(a: &Args) -> Res {
+    let (store, _) = open(a)?;
+    let id = IntentId::new(require(a.cmd(2), "intent id")?);
+    let parent = IntentId::new(require(a.get("parent").unwrap_or(""), "--parent")?);
+
+    let mut tree = store.load_tree()?;
+    tree.reparent(&id, Some(parent.clone()))?;
+
+    let mut updated = tree
+        .get(&id)
+        .ok_or_else(|| format!("no such intent: {id}"))?
+        .clone();
+    updated.link = Link::Requires;
+    store.append_intent(&updated)?;
+
+    Ok(format!("  linked {id} under {parent}\n"))
 }
 
-/// Builds the action named on the command line.
+/// Assigns an admitted intent to a post — the chief's job.
+///
+/// The load-bearing check is the last one: a post whose grant does not cover the
+/// intent's write scope cannot legally do the work, so assigning it guarantees a
+/// scope rejection later. Catching that here is deterministic and cheap.
+fn assign(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    let id = IntentId::new(require(a.cmd(1), "intent id")?);
+    let post_name = require(a.get("to").unwrap_or(""), "--to <post>")?;
+    let post = find_post(&company, post_name)?;
+
+    let tree = store.load_tree()?;
+    let intent = tree
+        .get(&id)
+        .ok_or_else(|| format!("no such intent: {id}"))?;
+
+    if !intent.kind.is_assignable() {
+        return Err(format!(
+            "a {} is not assignable — it is reached by satisfying its children",
+            intent.kind.as_str()
+        )
+        .into());
+    }
+    let verdict = Admission::check(intent, &tree);
+    if !verdict.defects().is_empty() {
+        let mut out = render::admission(intent, &verdict);
+        out.push_str("\n  not assigned — a draft cannot be dispatched\n");
+        return Ok(out);
+    }
+
+    let grant = company
+        .grant_of(&post)
+        .ok_or_else(|| format!("post `{post_name}` has no role grant"))?;
+    let uncovered: Vec<&str> = intent
+        .scope
+        .write
+        .iter()
+        .filter(|w| !grant.write.iter().any(|g| glob::covers(g, w)))
+        .map(String::as_str)
+        .collect();
+
+    if !uncovered.is_empty() {
+        return Err(format!(
+            "post `{post_name}` (role {}) may not write {} — it writes only: {}\n\
+             \x20 assign a post whose scope covers the work, or widen the role",
+            post.role,
+            uncovered.join(", "),
+            if grant.write.is_empty() {
+                "nothing".to_string()
+            } else {
+                grant.write.join(", ")
+            }
+        )
+        .into());
+    }
+
+    let mut activated = intent.clone();
+    activated.status = Status::Active;
+    store.append_intent(&activated)?;
+    record(&store, &company, &post, &Action::Staff)?;
+
+    Ok(format!(
+        "  assigned {id} to {post_name} ({}, occupied by {})\n  status: active\n",
+        post.role, post.agent
+    ))
+}
+
+fn find_post(company: &Company, name: &str) -> Result<Post, String> {
+    company.post(name).cloned().ok_or_else(|| {
+        format!(
+            "no such post `{name}` — have: {}",
+            company
+                .posts
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
+}
+
+/// Runs one action past the Broker under a post's authority, and records it.
+fn record(
+    store: &Store,
+    company: &Company,
+    post: &Post,
+    action: &Action,
+) -> Result<wecode_gov::Decision, Box<dyn std::error::Error>> {
+    let mut broker = Broker::new(company.charter.clone());
+    let session = Session::new(
+        format!("cli-{}", post.name),
+        post.name.clone(),
+        post.agent.clone(),
+        IntentId::new("cli"),
+        company.effective(post),
+    );
+    let decision = broker.authorize(&session, action);
+    store.append_records(broker.ledger())?;
+    Ok(decision)
+}
+
 fn parse_action(a: &Args) -> Result<Action, String> {
     let verb = a.cmd(2);
     let target = a.cmd(3);
@@ -259,42 +396,21 @@ fn parse_action(a: &Args) -> Result<Action, String> {
     })
 }
 
-fn guard(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Error>> {
-    let post_name = require(a.cmd(1), "post")?;
-    let post = org::find(post_name).ok_or_else(|| {
-        format!(
-            "no such post `{post_name}` — try one of: {}",
-            org::posts()
-                .iter()
-                .map(|p| p.name)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    })?;
+fn guard(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    let post = find_post(&company, require(a.cmd(1), "post")?)?;
     let action = parse_action(a)?;
-    let intent = IntentId::new(a.get("intent").unwrap_or("unassigned"));
-
-    let mut broker = Broker::new(org::charter());
-    let session = Session::new(
-        format!("cli-{post_name}"),
-        post.name,
-        post.occupant,
-        intent,
-        org::effective(&post),
-    );
-    let decision = broker.authorize(&session, &action);
-
-    // Every decision is recorded, allowed or not.
-    store.append_records(broker.ledger())?;
+    let decision = record(&store, &company, &post, &action)?;
     Ok(render::decision(
-        post.name,
-        post.occupant,
+        &post.name,
+        &post.agent,
         &action,
         &decision,
     ))
 }
 
-fn audit(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Error>> {
+fn audit(a: &Args) -> Res {
+    let (store, _) = open(a)?;
     let mut lines = store.load_audit()?;
 
     if a.has("denied") {
@@ -305,26 +421,8 @@ fn audit(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Error>> 
     }
     if let Some(pattern) = a.get("path") {
         lines.retain(|l| {
-            matches!(l.action.as_str(), "read" | "write")
-                && wecode_gov::glob::matches(pattern, &l.target)
+            matches!(l.action.as_str(), "read" | "write") && glob::matches(pattern, &l.target)
         });
     }
     Ok(render::audit(&lines))
-}
-
-fn intent_link(a: &Args, store: &Store) -> Result<String, Box<dyn std::error::Error>> {
-    let id = IntentId::new(require(a.cmd(2), "intent id")?);
-    let parent = IntentId::new(require(a.get("parent").unwrap_or(""), "--parent")?);
-
-    let mut tree = store.load_tree()?;
-    tree.reparent(&id, Some(parent.clone()))?;
-
-    let mut updated = tree
-        .get(&id)
-        .ok_or_else(|| format!("no such intent: {id}"))?
-        .clone();
-    updated.link = Link::Requires;
-    store.append_intent(&updated)?;
-
-    Ok(format!("  linked {id} under {parent}\n"))
 }

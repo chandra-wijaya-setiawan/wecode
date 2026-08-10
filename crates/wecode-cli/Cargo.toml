@@ -17,6 +17,7 @@ path = "src/main.rs"
 wecode-core = { workspace = true }
 wecode-gov = { path = "../wecode-gov" }
 wecode-store = { path = "../wecode-store" }
+wecode-org = { path = "../wecode-org" }
 
 [lints]
 workspace = true

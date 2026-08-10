@@ -3,7 +3,8 @@
 //! Pure string functions so the output is testable without a terminal.
 
 use wecode_core::{Admission, Intent, IntentId, IntentKind, IntentTree, Link, Measure, Status};
-use wecode_gov::{Action, ControlMode, Decision};
+use wecode_gov::{Action, ControlMode, Decision, Invariant};
+use wecode_org::Company;
 use wecode_store::AuditLine;
 
 #[must_use]
@@ -144,6 +145,86 @@ pub(crate) fn admission(intent: &Intent, verdict: &Admission) -> String {
         out.push_str(&format!("  {}  {}\n", i + 1, d.question()));
     }
     out
+}
+
+/// Available org templates.
+#[must_use]
+pub(crate) fn templates() -> String {
+    let mut out = String::from("templates:\n");
+    for t in wecode_org::template::all() {
+        out.push_str(&format!("  {:<18} {}\n", t.name, t.summary));
+    }
+    out.push_str("\n  wecode init <dir> --template <name>\n");
+    out
+}
+
+/// The company profile: who exists, what they may do, what outranks them.
+#[must_use]
+pub(crate) fn company(c: &Company) -> String {
+    let mut out = format!("{}  ({} profile)\n", c.name, c.profile);
+    if !c.description.is_empty() {
+        for line in c.description.lines() {
+            out.push_str(&format!("  {line}\n"));
+        }
+    }
+
+    out.push_str("\nposts\n");
+    out.push_str(&format!(
+        "  {:<10} {:<11} {:<14} {}\n",
+        "post", "role", "occupant", "writes"
+    ));
+    for p in &c.posts {
+        let writes = match c.grant_of(p) {
+            Some(g) if g.write.is_empty() => "— (read only)".to_string(),
+            Some(g) => g.write.join(", "),
+            None => "?? unknown role".to_string(),
+        };
+        out.push_str(&format!(
+            "  {:<10} {:<11} {:<14} {}\n",
+            p.name, p.role, p.agent, writes
+        ));
+    }
+
+    if let Some(chief) = c.chief() {
+        out.push_str(&format!(
+            "\nchief of staff: {} — configures and assigns; cannot write or run\n",
+            chief.name
+        ));
+    } else {
+        out.push_str("\n⚠ no chief post: nothing can assign work\n");
+    }
+
+    if c.repos.is_empty() {
+        out.push_str("\n⚠ no [[repos]] declared — nothing to work on yet\n");
+    } else {
+        out.push_str("\nrepos\n");
+        for r in &c.repos {
+            out.push_str(&format!("  {:<10} {}\n", r.name, r.path));
+        }
+    }
+
+    out.push_str(&format!(
+        "\nattention: {} open items, {} interrupts/hour, digest every {}m\n",
+        c.attention.max_open_items,
+        c.attention.max_interrupts_per_hour,
+        c.attention.digest_interval_mins
+    ));
+
+    out.push_str("\ninvariants (outrank every grant above)\n");
+    for inv in &c.charter.invariants {
+        out.push_str(&format!("  {}\n", invariant_line(inv)));
+    }
+    out
+}
+
+fn invariant_line(inv: &Invariant) -> String {
+    match inv {
+        Invariant::NeverTouch(v) => format!("never touch    {}", v.join(", ")),
+        Invariant::NeverRun(v) => format!("never run      {}", v.join(", ")),
+        Invariant::ApprovalToMerge(v) => format!("approve merge  {}", v.join(", ")),
+        Invariant::MaxTokens(n) => format!("max tokens     {n}"),
+        Invariant::MaxWallSecs(n) => format!("max wall       {n}s"),
+    }
 }
 
 /// One authorisation verdict, with the reason and what happens next.
