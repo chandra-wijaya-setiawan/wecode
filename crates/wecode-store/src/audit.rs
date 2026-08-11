@@ -399,10 +399,18 @@ mod tests {
         let mut b = Broker::new(Charter::with(vec![Invariant::ApprovalToMerge(vec![
             "main".into(),
         ])]));
-        let sess = Session::new("s-1", "review", "claude-code", Effective::of(vec![Grant::root()]));
-        b.authorize(&sess, &Action::Merge {
-            branch: "main".into(),
-        });
+        let sess = Session::new(
+            "s-1",
+            "review",
+            "claude-code",
+            Effective::of(vec![Grant::root()]),
+        );
+        b.authorize(
+            &sess,
+            &Action::Merge {
+                branch: "main".into(),
+            },
+        );
         s.append_records(b.ledger()).unwrap();
 
         let r = &s.audit(&AuditQuery::default()).unwrap()[0];

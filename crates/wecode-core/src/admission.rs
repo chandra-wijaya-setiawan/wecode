@@ -12,9 +12,32 @@ use crate::task::Task;
 /// Words that name a direction without naming a target. Their presence means we
 /// cannot tell when the work is done, so we ask.
 const VAGUE_TERMS: &[&str] = &[
-    "faster", "slower", "better", "improve", "improved", "optimize", "optimise", "robust",
-    "clean", "cleaner", "cleanup", "nice", "nicer", "modern", "scalable", "simple", "simpler",
-    "good", "bad", "various", "stuff", "things", "somehow", "properly", "correctly", "etc",
+    "faster",
+    "slower",
+    "better",
+    "improve",
+    "improved",
+    "optimize",
+    "optimise",
+    "robust",
+    "clean",
+    "cleaner",
+    "cleanup",
+    "nice",
+    "nicer",
+    "modern",
+    "scalable",
+    "simple",
+    "simpler",
+    "good",
+    "bad",
+    "various",
+    "stuff",
+    "things",
+    "somehow",
+    "properly",
+    "correctly",
+    "etc",
 ];
 
 /// Separators that suggest more than one outcome in a single statement.
@@ -24,21 +47,35 @@ const COMPOUND_MARKERS: &[&str] = &[" and ", " & ", ";", " then ", " plus ", " a
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Defect {
     StatementEmpty,
-    StatementCompound { marker: String },
-    StatementVague { term: String },
+    StatementCompound {
+        marker: String,
+    },
+    StatementVague {
+        term: String,
+    },
     RepoMissing,
     /// The repo is not one the company registers.
-    RepoUnknown { repo: String, known: Vec<String> },
+    RepoUnknown {
+        repo: String,
+        known: Vec<String>,
+    },
     MeasureMissing,
     MeasureNotExecutable,
     ScopeMissing,
-    ScopeTooBroad { glob: String },
-    ScopeOverlaps { with: TaskId, glob: String },
+    ScopeTooBroad {
+        glob: String,
+    },
+    ScopeOverlaps {
+        with: TaskId,
+        glob: String,
+    },
     BudgetMissing,
     /// A project with no tasks cannot progress.
     ProjectHasNoTasks,
     /// A dependency that will never be satisfied.
-    DependencyMissing { on: TaskId },
+    DependencyMissing {
+        on: TaskId,
+    },
 }
 
 impl Defect {
@@ -214,11 +251,15 @@ pub fn check_task(t: &Task, plan: &Plan) -> Vec<Defect> {
         }
     }
 
-    // Overlap matters only between tasks that could run at once. A dependency in
-    // either direction sequences them, so sharing paths is then fine — which is
-    // half the reason dependencies exist.
+    // Overlap matters only between tasks that could run at once. Two things stop
+    // that: a dependency in either direction sequences them, and a parent/child
+    // relation means one contains the other rather than competing with it.
     for other in plan.tasks_of(&t.project) {
-        if other.id == t.id || other.status.is_closed() || sequenced(t, other) {
+        if other.id == t.id
+            || other.status.is_closed()
+            || sequenced(t, other)
+            || nested(plan, t, other)
+        {
             continue;
         }
         for glob in &t.scope.write {
@@ -236,6 +277,23 @@ pub fn check_task(t: &Task, plan: &Plan) -> Vec<Defect> {
 /// Whether either task waits on the other, in either direction.
 fn sequenced(a: &Task, b: &Task) -> bool {
     a.depends_on.contains(&b.id) || b.depends_on.contains(&a.id)
+}
+
+/// Whether one task is part of the other, at any depth.
+///
+/// A subtask almost always writes inside its parent's area — that is what makes it
+/// a subtask. Reporting that as a conflict would make the parent relation unusable
+/// for anything that touches files.
+fn nested(plan: &Plan, a: &Task, b: &Task) -> bool {
+    let ancestor_of = |x: &Task, y: &Task| {
+        // `x` is fresh and may not be in the plan yet, so walk from `y` upward and
+        // also check `x`'s own declared parent chain against `y`.
+        plan.ancestors(&y.id).iter().any(|p| p.id == x.id)
+    };
+    a.parent.as_ref() == Some(&b.id)
+        || b.parent.as_ref() == Some(&a.id)
+        || ancestor_of(a, b)
+        || ancestor_of(b, a)
 }
 
 fn check_statement(text: &str, out: &mut Vec<Defect>) {
@@ -306,8 +364,8 @@ mod tests {
     fn good_project() -> Project {
         Project::new(
             "caching",
-            "wecode",
             "add response caching to the export endpoint",
+            "wecode",
         )
         .measured(Measure::Metric {
             name: "p99_ms".into(),
@@ -426,9 +484,9 @@ mod tests {
     #[test]
     fn a_missing_dependency_is_reported() {
         let t = good_task().after("ghost");
-        assert!(check_task(&t, &seeded()).contains(&Defect::DependencyMissing {
-            on: "ghost".into()
-        }));
+        assert!(
+            check_task(&t, &seeded()).contains(&Defect::DependencyMissing { on: "ghost".into() })
+        );
     }
 
     #[test]
@@ -464,6 +522,43 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "a successor cannot collide with its predecessor"
+        );
+    }
+
+    #[test]
+    fn a_subtask_may_write_inside_its_parents_scope() {
+        // Otherwise the parent relation is unusable for anything touching files.
+        let mut plan = seeded();
+        plan.add_task(good_task()).unwrap();
+
+        let inner = Task::new("cache-keys", "caching", "design the cache key format")
+            .under("cache-layer")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/export/keys.rs"]))
+            .budgeted(budget());
+        assert!(
+            !check_task(&inner, &plan)
+                .iter()
+                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
+            "a subtask works inside its parent, it does not compete with it"
+        );
+    }
+
+    #[test]
+    fn unrelated_siblings_still_collide() {
+        // The control: nesting must not become a blanket exemption.
+        let mut plan = seeded();
+        plan.add_task(good_task()).unwrap();
+
+        let rival = Task::new("other", "caching", "rewrite the export writer")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/export/**"]))
+            .budgeted(budget());
+        assert!(
+            check_task(&rival, &plan)
+                .iter()
+                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
+            "two concurrent siblings on the same paths is a real conflict"
         );
     }
 

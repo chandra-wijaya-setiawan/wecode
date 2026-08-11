@@ -17,14 +17,30 @@ use wecode_gov::{ActionKind, Charter, Effective, Grant, Introspect, Invariant, N
 #[derive(Debug)]
 pub enum OrgError {
     Parse(toml::de::Error),
-    UnknownRole { post: String, role: String },
-    UnknownPost { user: String, post: String },
-    UnknownAgent { post: String, agent: String },
-    BadValue { at: String, value: String },
+    UnknownRole {
+        post: String,
+        role: String,
+    },
+    UnknownPost {
+        user: String,
+        post: String,
+    },
+    UnknownAgent {
+        post: String,
+        agent: String,
+    },
+    BadValue {
+        at: String,
+        value: String,
+    },
     /// A role wider than the operator's own grant.
-    Escalation { role: String },
+    Escalation {
+        role: String,
+    },
     /// The chief manages; it must not be able to do the work itself.
-    ChiefMayNotExecute { detail: &'static str },
+    ChiefMayNotExecute {
+        detail: &'static str,
+    },
 }
 
 impl fmt::Display for OrgError {
@@ -38,7 +54,10 @@ impl fmt::Display for OrgError {
                 write!(f, "user `{user}` names post `{post}`, which is not defined")
             }
             Self::UnknownAgent { post, agent } => {
-                write!(f, "post `{post}` names agent `{agent}`, which has no [agents.{agent}] block")
+                write!(
+                    f,
+                    "post `{post}` names agent `{agent}`, which has no [agents.{agent}] block"
+                )
             }
             Self::BadValue { at, value } => write!(f, "bad value at {at}: `{value}`"),
             Self::Escalation { role } => {
@@ -600,9 +619,8 @@ agent = "claude-code"
 
     #[test]
     fn invariants_are_collected() {
-        let text = format!(
-            "{MINIMAL}\n[invariants]\nnever_touch = [\"**/*.pem\"]\nmax_tokens = 500\n"
-        );
+        let text =
+            format!("{MINIMAL}\n[invariants]\nnever_touch = [\"**/*.pem\"]\nmax_tokens = 500\n");
         let c = Company::parse(&text).unwrap();
         assert!(
             c.charter
@@ -614,7 +632,8 @@ agent = "claude-code"
 
     #[test]
     fn repos_are_declared_by_path_and_listed_by_name() {
-        let text = format!("{MINIMAL}\n[[repos]]\nname = \"wecode\"\npath = \"~/projects/wecode\"\n");
+        let text =
+            format!("{MINIMAL}\n[[repos]]\nname = \"wecode\"\npath = \"~/projects/wecode\"\n");
         let c = Company::parse(&text).unwrap();
         assert_eq!(c.repo_names(), vec!["wecode".to_string()]);
         assert_eq!(c.repo("wecode").unwrap().path, "~/projects/wecode");

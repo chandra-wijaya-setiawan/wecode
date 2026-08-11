@@ -1,9 +1,9 @@
 //! End-to-end tests: run the real binary against a real workspace.
 //!
 //! These exist because the three worst bugs so far were all integration bugs that
-//! unit tests structurally could not catch — a hardcoded intent id, a per-process
-//! audit sequence, and a Vision being refused admission. Each needed the whole
-//! pipeline running.
+//! unit tests structurally could not catch — a hardcoded attribution, a
+//! per-process audit sequence, and a root-kind being refused admission. Each
+//! needed the whole pipeline running.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -110,34 +110,20 @@ impl Org {
         self.dir.join(rel)
     }
 
-    /// Builds the vision → goal → project → task chain used by several tests.
+    /// Builds the project and tasks used by several tests.
+    ///
+    /// `bench` depends on `cache-tests` so the dependency relation is exercised
+    /// end to end, not just in unit tests.
     fn seed(&self) {
-        self.run(&["intent", "add", "vision", "fast", "lead on export speed"])
-            .assert_ok("add vision");
         self.run(&[
-            "intent",
-            "add",
-            "goal",
-            "p99",
-            "cut export p99 below 500ms",
-            "--parent",
-            "fast",
-            "--measure-metric",
-            "p99_ms:lt:500",
-        ])
-        .assert_ok("add goal");
-        self.run(&[
-            "intent",
-            "add",
             "project",
+            "add",
             "caching",
             "add response caching to the export endpoint",
-            "--parent",
-            "p99",
+            "--repo",
+            "app",
             "--measure-cmd",
             "cargo test",
-            "--write",
-            "crates/export/**",
             "--tokens",
             "200000",
             "--wall",
@@ -145,14 +131,13 @@ impl Org {
         ])
         .assert_ok("add project");
         self.run(&[
-            "intent",
-            "add",
             "task",
+            "add",
             "cache-tests",
             "cover the cache layer with tests",
-            "--parent",
+            "--project",
             "caching",
-            "--measure-cmd",
+            "--accept-cmd",
             "cargo test",
             "--write",
             "tests/**",
@@ -160,8 +145,45 @@ impl Org {
             "50000",
         ])
         .assert_ok("add task");
+        self.run(&[
+            "task",
+            "add",
+            "bench",
+            "benchmark the cache under load",
+            "--project",
+            "caching",
+            "--after",
+            "cache-tests",
+            "--accept-cmd",
+            "cargo bench",
+            // Under tests/, so the tester's grant covers it. It overlaps
+            // cache-tests, which is legal precisely because it is sequenced after.
+            "--write",
+            "tests/bench/**",
+            "--tokens",
+            "20000",
+        ])
+        .assert_ok("add dependent task");
     }
 }
+
+/// A well-formed `project add`, for tests about sessions and authority rather
+/// than about the plan. Defined once so a change to admission does not need
+/// editing in a dozen places.
+const ADD_PROJECT: &[&str] = &[
+    "project",
+    "add",
+    "v",
+    "add response caching to the export endpoint",
+    "--repo",
+    "app",
+    "--measure-cmd",
+    "cargo test",
+    "--tokens",
+    "100",
+    "--wall",
+    "60",
+];
 
 /// Runs the binary with no workspace at all.
 fn bare(args: &[&str]) -> Run {
@@ -182,17 +204,16 @@ fn bare(args: &[&str]) -> Run {
 #[test]
 fn init_scaffolds_a_self_contained_workspace() {
     let org = Org::new("init", "software-company");
-    for f in [
-        "company.toml",
-        "agents/claude-code.toml",
-        "agents/codex.toml",
-        "templates/task-envelope.md",
-        "README.md",
-        ".gitignore",
-    ] {
+    for f in ["company.toml", "README.md", ".gitignore"] {
         assert!(org.path(f).is_file(), "missing {f}");
     }
-    assert!(org.path("state").is_dir(), "state dir not created");
+    // Agents and the task envelope are inlined in company.toml, so a workspace has
+    // no subdirectories to keep in sync.
+    assert!(!org.path("agents").exists(), "no agents/ directory");
+    assert!(!org.path("templates").exists(), "no templates/ directory");
+    // The database appears on first use, not at init.
+    org.run(&["tree"]).assert_ok("tree");
+    assert!(org.path("wecode.db").is_file(), "wecode.db not created");
 }
 
 #[test]
@@ -205,7 +226,7 @@ fn init_refuses_to_overwrite_an_existing_workspace() {
 
 #[test]
 fn a_missing_workspace_explains_how_to_make_one() {
-    let r = bare(&["intent", "tree"]);
+    let r = bare(&["tree"]);
     assert!(!r.ok());
     r.assert_contains("no company workspace found")
         .assert_contains("wecode init");
@@ -325,7 +346,7 @@ fn a_session_survives_between_processes() {
     let org = Org::unattended("sess-persist", "solo");
     org.run(&["login", "you"]).assert_ok("login");
 
-    org.run(&["intent", "add", "vision", "v", "lead on export speed"])
+    org.run(ADD_PROJECT)
         .assert_ok("no flags needed")
         .assert_contains("saved");
 
@@ -338,21 +359,21 @@ fn a_session_survives_between_processes() {
 fn without_a_session_a_state_changing_command_refuses() {
     // The regression that matters most: omitting a flag used to grant root.
     let org = Org::unattended("sess-none", "solo");
-    let r = org.run(&["intent", "add", "vision", "v", "lead on export speed"]);
+    let r = org.run(ADD_PROJECT);
     assert!(!r.ok(), "must refuse, not silently act as root");
     r.assert_contains("not logged in")
         .assert_contains("wecode login")
         .assert_contains("you");
 
     // And nothing was written.
-    org.run(&["intent", "tree"])
-        .assert_contains("no intents yet");
+    org.run(&["tree"]).assert_contains("no projects yet");
 }
 
 #[test]
 fn reading_needs_no_session() {
     let org = Org::unattended("sess-read", "solo");
-    org.run(&["intent", "tree"]).assert_ok("tree");
+    org.run(&["tree"]).assert_ok("tree");
+    org.run(&["ready"]).assert_ok("ready");
     org.run(&["company", "show"]).assert_ok("company show");
     org.run(&["board"]).assert_ok("board");
     org.run(&["who"]).assert_ok("who");
@@ -369,7 +390,7 @@ fn two_sessions_are_ambiguous_until_one_is_named() {
     org.run(&["login", "you", "--as", "review"])
         .assert_ok("login 2");
 
-    let r = org.run(&["intent", "add", "vision", "v", "lead on export speed"]);
+    let r = org.run(ADD_PROJECT);
     assert!(!r.ok(), "two seats, no way to guess which");
     r.assert_contains("several sessions");
 
@@ -378,17 +399,11 @@ fn two_sessions_are_ambiguous_until_one_is_named() {
         .split_whitespace()
         .find(|w| w.starts_with("s-"))
         .expect("login prints a session id");
-    org.run(&[
-        "intent",
-        "add",
-        "vision",
-        "v",
-        "lead on export speed",
-        "--session",
-        id,
-    ])
-    .assert_ok("named session")
-    .assert_contains("saved");
+    let mut named: Vec<&str> = ADD_PROJECT.to_vec();
+    named.extend(["--session", id]);
+    org.run(&named)
+        .assert_ok("named session")
+        .assert_contains("saved");
 }
 
 #[test]
@@ -396,15 +411,16 @@ fn an_idle_expired_session_is_not_used() {
     let org = Org::unattended("sess-expired", "solo");
     org.run(&["login", "you"]).assert_ok("login");
 
-    // Rewrite the session as opened long ago, and shorten the ttl. No sleeping.
-    let path = org.path("state/sessions.log");
-    let log = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(&path, log.replace(&format!("at={}", now()), "at=1000")).unwrap();
+    // The only sleep in the suite. Expiry is a function of the wall clock, and the
+    // alternatives are worse: a zero ttl is a config the org crate itself rejects
+    // as implausible, and reaching past the binary into the store would stop this
+    // being an end-to-end test of the thing that broke.
     let conf = org.path("company.toml");
     let text = std::fs::read_to_string(&conf).unwrap();
-    std::fs::write(&conf, text.replace("ttl = \"8h\"", "ttl = \"60s\"")).unwrap();
+    std::fs::write(&conf, text.replace("ttl = \"8h\"", "ttl = \"1s\"")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2100));
 
-    let r = org.run(&["intent", "add", "vision", "v", "lead on export speed"]);
+    let r = org.run(ADD_PROJECT);
     assert!(!r.ok(), "an idle session must not authorise");
     r.assert_contains("not logged in");
 }
@@ -430,7 +446,8 @@ fn whoami_lists_only_the_commands_this_seat_may_call() {
     org.run(&["whoami"])
         .assert_ok("whoami")
         .assert_contains("assign")
-        .assert_contains("intent add");
+        .assert_contains("project add")
+        .assert_contains("task add");
 
     // An engineer seat holds neither define nor staff.
     let eng = Org::unattended("sess-whoami-eng", "software-company");
@@ -439,7 +456,7 @@ fn whoami_lists_only_the_commands_this_seat_may_call() {
     let out = eng.run(&["whoami"]).assert_ok("whoami").all();
     assert!(!out.contains("assign"), "engineer cannot staff:\n{out}");
     assert!(
-        !out.contains("intent add"),
+        !out.contains("project add") && !out.contains("task add"),
         "engineer cannot define:\n{out}"
     );
 }
@@ -447,128 +464,104 @@ fn whoami_lists_only_the_commands_this_seat_may_call() {
 #[test]
 fn the_ledger_names_both_the_human_and_the_agent() {
     let org = Org::new("sess-ledger", "software-company");
-    org.run(&["intent", "add", "vision", "v", "lead on export speed"])
-        .assert_ok("add");
+    org.run(ADD_PROJECT).assert_ok("add");
 
-    let log = std::fs::read_to_string(org.path("state/audit.log")).unwrap();
-    assert!(log.contains("human=you"), "{log}");
-    assert!(
-        log.contains("agent=claude-code") || log.contains("occupant=claude-code"),
-        "{log}"
-    );
-    assert!(
-        log.contains("session=s-"),
-        "the real session id, not cli-<post>:\n{log}"
-    );
+    // The seat is a human *and* an agent, and the ledger records both. `who`
+    // renders the pair the store holds.
+    org.run(&["who"])
+        .assert_ok("who")
+        .assert_contains("you via claude-code")
+        .assert_contains("s-");
+    org.run(&["audit"])
+        .assert_ok("audit")
+        .assert_contains("chief")
+        .assert_contains("claude-code");
 }
 
 #[test]
 fn as_operator_is_the_only_way_to_reach_root() {
     let org = Org::unattended("sess-operator", "solo");
     // No session, but an explicit override still works — deliberately typed.
-    org.run(&[
-        "intent",
-        "add",
-        "vision",
-        "v",
-        "lead on export speed",
-        "--as",
-        "operator",
-    ])
-    .assert_ok("explicit operator")
-    .assert_contains("saved");
+    let mut as_root: Vec<&str> = ADD_PROJECT.to_vec();
+    as_root.extend(["--as", "operator"]);
+    org.run(&as_root)
+        .assert_ok("explicit operator")
+        .assert_contains("saved");
 
-    let log = std::fs::read_to_string(org.path("state/audit.log")).unwrap();
-    assert!(
-        log.contains("post=operator"),
-        "recorded as operator:\n{log}"
-    );
+    org.run(&["audit"])
+        .assert_ok("audit")
+        .assert_contains("operator");
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
-
-// --------------------------------------------------------------- intent --------
+// ----------------------------------------------------------------- plan --------
 
 #[test]
 fn a_vague_project_is_refused_with_specific_questions() {
     let org = Org::new("vague", "solo");
     let r = org.run(&[
-        "intent",
-        "add",
         "project",
+        "add",
         "speedup",
         "make the export faster",
+        "--repo",
+        "app",
     ]);
     r.assert_ok("command itself succeeds")
-        .assert_contains("not assignable")
+        .assert_contains("not admitted")
         .assert_contains("faster")
         .assert_contains("not saved");
 
     // Nothing was written.
-    org.run(&["intent", "tree"])
-        .assert_contains("no intents yet");
+    org.run(&["tree"]).assert_contains("no projects yet");
 }
 
 #[test]
-fn force_admits_a_defective_intent_and_says_so() {
+fn force_admits_a_defective_project_and_says_so() {
     let org = Org::new("force", "solo");
     org.run(&[
-        "intent",
-        "add",
         "project",
+        "add",
         "speedup",
         "make the export faster",
+        "--repo",
+        "app",
         "--force",
     ])
     .assert_ok("forced add")
     .assert_contains("forced")
     .assert_contains("saved");
-    org.run(&["intent", "tree"]).assert_contains("speedup");
+    org.run(&["tree"]).assert_contains("speedup");
 }
 
 #[test]
-fn a_bare_vision_is_admitted() {
-    // Regression: a Vision has no legal parent, so being unlinked is correct.
-    let org = Org::new("vision", "solo");
-    org.run(&["intent", "add", "vision", "fast", "lead on export speed"])
-        .assert_ok("add vision")
-        .assert_contains("admitted")
-        .assert_contains("saved");
-    org.run(&["intent", "tree"]).assert_lacks("UNLINKED");
-}
-
-#[test]
-fn the_grammar_rejects_a_task_under_a_goal() {
-    let org = Org::new("grammar", "solo");
-    org.run(&["intent", "add", "vision", "v", "be excellent"])
-        .assert_ok("vision");
-    org.run(&[
-        "intent",
-        "add",
-        "goal",
-        "g",
-        "reach 99.9% uptime",
-        "--parent",
-        "v",
-        "--measure-metric",
-        "uptime:gte:99.9",
-    ])
-    .assert_ok("goal");
-
+fn a_project_must_name_a_repo_the_company_knows() {
+    let org = Org::new("repo-unknown", "solo");
     let r = org.run(&[
-        "intent",
+        "project",
         "add",
+        "x",
+        "add response caching to the export endpoint",
+        "--repo",
+        "nonexistent",
+        "--measure-cmd",
+        "cargo test",
+        "--tokens",
+        "100",
+    ]);
+    r.assert_contains("not admitted").assert_contains("app");
+}
+
+#[test]
+fn a_task_needs_a_project_that_exists() {
+    let org = Org::new("task-orphan", "solo");
+    let r = org.run(&[
         "task",
+        "add",
         "t",
         "do the thing",
-        "--parent",
-        "g",
-        "--measure-cmd",
+        "--project",
+        "ghost",
+        "--accept-cmd",
         "cargo test",
         "--write",
         "src/**",
@@ -576,24 +569,201 @@ fn the_grammar_rejects_a_task_under_a_goal() {
         "10",
     ]);
     assert!(!r.ok(), "should be refused");
-    r.assert_contains("may not be parented");
+    r.assert_contains("no such project");
 }
 
 #[test]
-fn the_tree_and_lineage_survive_a_restart() {
+fn a_spike_is_the_only_kind_admitted_without_a_write_scope() {
+    let org = Org::new("spike", "solo");
+    org.seed();
+
+    // A feature that writes nothing is a defect...
+    org.run(&[
+        "task",
+        "add",
+        "f",
+        "implement the eviction policy",
+        "--project",
+        "caching",
+        "--accept-cmd",
+        "cargo test",
+        "--tokens",
+        "10",
+    ])
+    .assert_contains("not admitted");
+
+    // ...but a spike produces no code, so it needs no write scope.
+    org.run(&[
+        "task",
+        "add",
+        "s",
+        "investigate the eviction strategies",
+        "--project",
+        "caching",
+        "--kind",
+        "spike",
+        "--accept-cmd",
+        "cargo test",
+        "--tokens",
+        "10",
+    ])
+    .assert_ok("spike")
+    .assert_contains("admitted")
+    .assert_contains("saved");
+}
+
+#[test]
+fn the_plan_survives_a_restart() {
     let org = Org::new("persist", "solo");
     org.seed();
 
     // A separate process reads what earlier processes wrote.
-    org.run(&["intent", "tree"])
+    org.run(&["tree"])
         .assert_ok("tree")
-        .assert_contains("VIS")
-        .assert_contains("cache-tests");
+        .assert_contains("caching")
+        .assert_contains("cache-tests")
+        .assert_contains("after cache-tests");
 
-    org.run(&["intent", "show", "cache-tests"])
+    org.run(&["show", "cache-tests"])
         .assert_ok("show")
-        .assert_contains("lead on export speed")
-        .assert_contains("cover the cache layer");
+        .assert_contains("cover the cache layer")
+        .assert_contains("caching");
+}
+
+#[test]
+fn show_resolves_either_level_and_says_so_when_neither_matches() {
+    let org = Org::new("show", "solo");
+    org.seed();
+    org.run(&["show", "caching"])
+        .assert_ok("show project")
+        .assert_contains("objective");
+    org.run(&["show", "cache-tests"])
+        .assert_ok("show task")
+        .assert_contains("acceptance");
+    let r = org.run(&["show", "nope"]);
+    assert!(!r.ok());
+    r.assert_contains("no project or task");
+}
+
+#[test]
+fn the_two_relations_are_reported_separately() {
+    // The modelling error this design exists to avoid: a subtask is part of its
+    // parent, a dependency comes after its predecessor, and they are not the same.
+    let org = Org::new("relations", "solo");
+    org.seed();
+    org.run(&[
+        "task",
+        "add",
+        "keys",
+        "design the cache key format",
+        "--project",
+        "caching",
+        "--parent",
+        "cache-tests",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "tests/keys/**",
+        "--tokens",
+        "10",
+    ])
+    .assert_ok("subtask");
+
+    org.run(&["show", "cache-tests"])
+        .assert_contains("subtasks")
+        .assert_contains("not blocked by it");
+
+    org.run(&["show", "bench"])
+        .assert_contains("depends on")
+        .assert_contains("must come after");
+}
+
+#[test]
+fn a_dependency_is_a_sibling_in_the_tree_not_a_child() {
+    let org = Org::new("tree-shape", "solo");
+    org.seed();
+    let out = org.run(&["tree"]).assert_ok("tree").stdout.clone();
+    let indent = |needle: &str| {
+        let line = out
+            .lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no line for {needle} in:\n{out}"));
+        line.len() - line.trim_start().len()
+    };
+    assert_eq!(
+        indent("cache-tests"),
+        indent("benchmark the cache"),
+        "a predecessor is not a parent:\n{out}"
+    );
+}
+
+#[test]
+fn ready_reports_only_what_a_dispatcher_could_pick_up() {
+    let org = Org::new("ready", "software-company");
+    org.seed();
+
+    // Fresh tasks are drafts: nothing is dispatchable until it is assigned.
+    org.run(&["ready"]).assert_contains("nothing ready");
+
+    org.run(&["assign", "cache-tests", "--to", "test"])
+        .assert_ok("assign");
+    org.run(&["assign", "bench", "--to", "test"])
+        .assert_ok("assign dependent");
+
+    org.run(&["ready"])
+        .assert_ok("ready")
+        .assert_contains("cache-tests")
+        .assert_lacks("benchmark the cache");
+}
+
+#[test]
+fn finishing_a_predecessor_releases_its_dependent() {
+    let org = Org::new("release", "software-company");
+    org.seed();
+    org.run(&["assign", "cache-tests", "--to", "test"])
+        .assert_ok("assign");
+    org.run(&["assign", "bench", "--to", "test"])
+        .assert_ok("assign");
+    org.run(&["ready"]).assert_lacks("benchmark the cache");
+
+    org.run(&["status", "cache-tests", "done"])
+        .assert_ok("status")
+        .assert_contains("done");
+
+    org.run(&["ready"])
+        .assert_ok("ready")
+        .assert_contains("benchmark the cache");
+}
+
+#[test]
+fn status_rejects_a_name_that_is_not_a_status() {
+    let org = Org::new("status-bad", "solo");
+    org.seed();
+    let r = org.run(&["status", "cache-tests", "finished"]);
+    assert!(!r.ok());
+    r.assert_contains("unknown status")
+        .assert_contains("waiting");
+}
+
+#[test]
+fn a_duplicate_task_id_is_refused() {
+    let org = Org::new("dupe", "solo");
+    org.seed();
+    let r = org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "cover the cache layer twice",
+        "--project",
+        "caching",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "other/**",
+        "--tokens",
+        "10",
+    ]);
+    assert!(!r.ok(), "a duplicate id must be refused");
 }
 
 #[test]
@@ -601,14 +771,13 @@ fn sibling_scope_overlap_is_reported() {
     let org = Org::new("overlap", "solo");
     org.seed();
     let r = org.run(&[
-        "intent",
-        "add",
         "task",
+        "add",
         "more-tests",
         "extend the cache tests",
-        "--parent",
+        "--project",
         "caching",
-        "--measure-cmd",
+        "--accept-cmd",
         "cargo test",
         "--write",
         "tests/**",
@@ -616,6 +785,32 @@ fn sibling_scope_overlap_is_reported() {
         "1000",
     ]);
     r.assert_contains("overlaps").assert_contains("cache-tests");
+}
+
+#[test]
+fn sequenced_tasks_may_share_a_scope() {
+    // Two tasks that cannot run at once are not competing for the same files, so
+    // the overlap check must exempt them.
+    let org = Org::new("overlap-seq", "solo");
+    org.seed();
+    org.run(&[
+        "task",
+        "add",
+        "more-tests",
+        "extend the cache tests",
+        "--project",
+        "caching",
+        "--after",
+        "cache-tests",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "tests/**",
+        "--tokens",
+        "1000",
+    ])
+    .assert_ok("sequenced overlap")
+    .assert_contains("admitted");
 }
 
 // --------------------------------------------------------------- assign --------
@@ -639,19 +834,39 @@ fn assign_refuses_a_post_whose_scope_cannot_cover_the_work() {
 }
 
 #[test]
-fn a_goal_is_not_assignable() {
-    let org = Org::new("assign-goal", "software-company");
+fn assigning_a_dependent_task_says_what_it_waits_on() {
+    let org = Org::new("assign-waits", "software-company");
     org.seed();
-    let r = org.run(&["assign", "p99", "--to", "impl"]);
-    assert!(!r.ok());
-    r.assert_contains("not assignable");
+    org.run(&["assign", "bench", "--to", "test"])
+        .assert_ok("assign")
+        .assert_contains("waiting")
+        .assert_contains("cache-tests");
+}
+
+#[test]
+fn a_defective_task_cannot_be_dispatched() {
+    let org = Org::new("assign-draft", "software-company");
+    org.seed();
+    org.run(&[
+        "task",
+        "add",
+        "vague",
+        "make it faster",
+        "--project",
+        "caching",
+        "--force",
+    ])
+    .assert_ok("forced");
+    org.run(&["assign", "vague", "--to", "test"])
+        .assert_contains("not assigned")
+        .assert_contains("cannot be dispatched");
 }
 
 #[test]
 fn assign_names_the_available_posts_when_given_a_bad_one() {
     let org = Org::new("assign-post", "software-company");
     org.seed();
-    let r = org.run(&["assign", "caching", "--to", "nobody"]);
+    let r = org.run(&["assign", "cache-tests", "--to", "nobody"]);
     assert!(!r.ok());
     r.assert_contains("no such post").assert_contains("chief");
 }
@@ -667,8 +882,8 @@ fn an_in_scope_write_is_allowed() {
         "impl",
         "write",
         "crates/export/cache.rs",
-        "--intent",
-        "caching",
+        "--task",
+        "cache-tests",
     ])
     .assert_ok("guard")
     .assert_contains("allowed");
@@ -683,8 +898,8 @@ fn the_tester_cannot_edit_the_implementation() {
         "test",
         "write",
         "crates/export/cache.rs",
-        "--intent",
-        "caching",
+        "--task",
+        "cache-tests",
     ])
     .assert_ok("guard")
     .assert_contains("denied")
@@ -702,8 +917,8 @@ fn an_invariant_violation_alarms_even_for_a_permitted_post() {
         "impl",
         "write",
         "src/keys/prod.pem",
-        "--intent",
-        "caching",
+        "--task",
+        "cache-tests",
     ])
     .assert_contains("ALARM")
     .assert_contains("never_touch");
@@ -713,8 +928,8 @@ fn an_invariant_violation_alarms_even_for_a_permitted_post() {
         "impl",
         "run",
         "git push --force",
-        "--intent",
-        "caching",
+        "--task",
+        "cache-tests",
     ])
     .assert_contains("ALARM")
     .assert_contains("never_run");
@@ -724,7 +939,7 @@ fn an_invariant_violation_alarms_even_for_a_permitted_post() {
 fn merging_a_protected_branch_needs_approval() {
     let org = Org::new("guard-merge", "software-company");
     org.seed();
-    org.run(&["guard", "review", "merge", "main", "--intent", "caching"])
+    org.run(&["guard", "review", "merge", "main", "--task", "cache-tests"])
         .assert_contains("needs approval");
 }
 
@@ -733,7 +948,14 @@ fn overspending_is_refused() {
     let org = Org::new("guard-spend", "software-company");
     org.seed();
     org.run(&[
-        "guard", "impl", "spend", "x", "--tokens", "500000", "--intent", "caching",
+        "guard",
+        "impl",
+        "spend",
+        "x",
+        "--tokens",
+        "500000",
+        "--task",
+        "cache-tests",
     ])
     .assert_contains("budget");
 }
@@ -750,7 +972,7 @@ fn the_audit_sequence_is_monotonic_across_processes() {
         "crates/export/b.rs",
         "crates/export/c.rs",
     ] {
-        org.run(&["guard", "impl", "write", path, "--intent", "caching"]);
+        org.run(&["guard", "impl", "write", path, "--task", "cache-tests"]);
     }
     let out = org.run(&["audit"]).assert_ok("audit").stdout.clone();
     let seqs: Vec<u64> = out
@@ -773,18 +995,25 @@ fn audit_filters_select_alarms_denials_and_paths() {
         "impl",
         "write",
         "crates/export/ok.rs",
-        "--intent",
-        "caching",
+        "--task",
+        "cache-tests",
     ]);
     org.run(&[
         "guard",
         "test",
         "write",
         "crates/export/no.rs",
-        "--intent",
-        "caching",
+        "--task",
+        "cache-tests",
     ]);
-    org.run(&["guard", "impl", "write", "src/x.pem", "--intent", "caching"]);
+    org.run(&[
+        "guard",
+        "impl",
+        "write",
+        "src/x.pem",
+        "--task",
+        "cache-tests",
+    ]);
 
     org.run(&["audit", "--alarms"])
         .assert_contains("x.pem")
@@ -801,11 +1030,18 @@ fn audit_filters_select_alarms_denials_and_paths() {
 }
 
 #[test]
-fn guard_records_are_attributed_to_their_intent() {
-    // Regression: the intent was hardcoded, so every record was uncorrelated.
+fn guard_records_are_attributed_to_their_task() {
+    // Regression: the attribution was hardcoded, so every record was uncorrelated.
     let org = Org::new("audit-attrib", "software-company");
     org.seed();
-    org.run(&["guard", "impl", "write", "src/x.pem", "--intent", "caching"]);
+    org.run(&[
+        "guard",
+        "impl",
+        "write",
+        "src/x.pem",
+        "--task",
+        "cache-tests",
+    ]);
 
     // Assert on the needs-you cell and the incident row, NOT on the word "alarm":
     // the footer hints mention "--alarms", so a looser assertion passes even when
@@ -823,8 +1059,8 @@ fn guard_records_are_attributed_to_their_intent() {
 
 #[test]
 fn an_unattributed_record_does_not_reach_the_board() {
-    // The other half of attribution: a record with no --intent must not be
-    // silently credited to some intent.
+    // The other half of attribution: a record naming nothing must not be silently
+    // credited to some task.
     let org = Org::new("audit-unattrib", "software-company");
     org.seed();
     org.run(&["guard", "impl", "write", "src/x.pem"]);
@@ -851,11 +1087,11 @@ fn the_board_shows_five_columns_at_every_level() {
 }
 
 #[test]
-fn the_board_reports_an_unknown_intent_plainly() {
+fn the_board_reports_an_unknown_id_plainly() {
     let org = Org::new("board-missing", "solo");
     org.seed();
     org.run(&["board", "nope"])
-        .assert_contains("no such intent");
+        .assert_contains("no project or task");
 }
 
 #[test]
@@ -874,7 +1110,7 @@ fn help_lists_the_command_groups() {
     let r = bare(&[]);
     r.assert_ok("help")
         .assert_contains("SETUP")
-        .assert_contains("INTENT")
+        .assert_contains("PLAN")
         .assert_contains("COCKPIT")
         .assert_contains("WORK");
 }

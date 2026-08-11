@@ -21,7 +21,10 @@ pub use session::SessionInfo;
 pub enum StoreError {
     Db(rusqlite::Error),
     /// A row the schema allows but the domain does not, e.g. an unknown task kind.
-    Corrupt { what: &'static str, value: String },
+    Corrupt {
+        what: &'static str,
+        value: String,
+    },
 }
 
 impl fmt::Display for StoreError {

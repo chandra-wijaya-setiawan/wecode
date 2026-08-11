@@ -3,7 +3,6 @@
 
 use std::fmt;
 
-
 use crate::glob;
 use crate::grant::{ActionKind, Effective, Introspect, WorkKind};
 
@@ -868,7 +867,12 @@ mod tests {
     #[test]
     fn ledger_answers_cross_harness_path_questions() {
         let mut b = Broker::new(Charter::default());
-        let a = Session::new("s1", "impl", "claude-code", Effective::of(vec![Grant::root()]));
+        let a = Session::new(
+            "s1",
+            "impl",
+            "claude-code",
+            Effective::of(vec![Grant::root()]),
+        );
         let c = Session::new("s2", "test", "codex", Effective::of(vec![Grant::root()]));
         b.authorize(
             &a,

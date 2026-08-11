@@ -4,11 +4,22 @@
 /// exits zero or it does not; a judgement is an opinion.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Measure {
-    Command { cmd: String, expect_status: i32 },
-    Metric { name: String, target: f64, cmp: Cmp },
-    Deliverable { path: String },
+    Command {
+        cmd: String,
+        expect_status: i32,
+    },
+    Metric {
+        name: String,
+        target: f64,
+        cmp: Cmp,
+    },
+    Deliverable {
+        path: String,
+    },
     /// Human-judged. Legal on a project's objective, never on a task.
-    Judged { note: String },
+    Judged {
+        note: String,
+    },
 }
 
 impl Measure {
@@ -215,6 +226,24 @@ impl TaskStatus {
         matches!(self, Self::NeedsApproval | Self::NeedsInput | Self::Failed)
     }
 
+    /// Every status, in lifecycle order. Exists so an error message can list them
+    /// without a second hand-maintained copy drifting out of sync.
+    #[must_use]
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Draft,
+            Self::Waiting,
+            Self::Ready,
+            Self::Running,
+            Self::Verifying,
+            Self::NeedsApproval,
+            Self::NeedsInput,
+            Self::Failed,
+            Self::Done,
+            Self::Dropped,
+        ]
+    }
+
     #[must_use]
     pub fn mark(self) -> char {
         match self {
@@ -238,7 +267,12 @@ mod tests {
 
     #[test]
     fn only_judged_measures_need_a_person() {
-        assert!(!Measure::Judged { note: "looks right".into() }.is_executable());
+        assert!(
+            !Measure::Judged {
+                note: "looks right".into()
+            }
+            .is_executable()
+        );
         assert!(
             Measure::Command {
                 cmd: "cargo test".into(),

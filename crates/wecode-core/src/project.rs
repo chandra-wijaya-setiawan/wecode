@@ -23,10 +23,13 @@ pub struct Project {
 }
 
 impl Project {
+    /// Argument order follows the field order — `objective` then `repo`. It used
+    /// to be the other way round, which reads as a plausible call either way and
+    /// so silently swapped the two on a mistake.
     pub fn new(
         id: impl Into<ProjectId>,
-        repo: impl Into<String>,
         objective: impl Into<String>,
+        repo: impl Into<String>,
     ) -> Self {
         Self {
             id: id.into(),
@@ -63,7 +66,7 @@ mod tests {
 
     #[test]
     fn a_project_starts_as_a_draft_with_nothing_assumed() {
-        let p = Project::new("caching", "wecode", "add response caching");
+        let p = Project::new("caching", "add response caching", "wecode");
         assert_eq!(p.status, ProjectStatus::Draft);
         assert!(p.measures.is_empty());
         assert!(!p.budget.is_set());
@@ -72,7 +75,7 @@ mod tests {
 
     #[test]
     fn builders_compose() {
-        let p = Project::new("caching", "wecode", "add response caching")
+        let p = Project::new("caching", "add response caching", "wecode")
             .measured(Measure::Metric {
                 name: "p99_ms".into(),
                 target: 500.0,
@@ -89,7 +92,7 @@ mod tests {
 
     #[test]
     fn a_judged_objective_is_not_executable() {
-        let p = Project::new("x", "r", "be excellent").measured(Measure::Judged {
+        let p = Project::new("x", "be excellent", "r").measured(Measure::Judged {
             note: "operator decides".into(),
         });
         assert!(!p.has_executable_measure());

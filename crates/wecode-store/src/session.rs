@@ -312,6 +312,11 @@ mod tests {
             u32::from_str_radix(&a.id[2..], 16).unwrap(),
             u32::from_str_radix(&b.id[2..], 16).unwrap(),
         );
-        assert!(na.abs_diff(nb) > 1, "ids {} and {} are adjacent", a.id, b.id);
+        assert!(
+            na.abs_diff(nb) > 1,
+            "ids {} and {} are adjacent",
+            a.id,
+            b.id
+        );
     }
 }

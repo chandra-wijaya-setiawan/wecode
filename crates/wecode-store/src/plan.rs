@@ -68,12 +68,19 @@ impl Store {
         type ProjectRow = (String, String, String, String, Option<i64>, Option<i64>);
         let rows: Vec<ProjectRow> = stmt
             .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
             })?
             .collect::<rusqlite::Result<_>>()?;
 
         for (id, repo, objective, status, tokens, wall) in rows {
-            let mut p = Project::new(ProjectId::new(&id), repo, objective);
+            let mut p = Project::new(ProjectId::new(&id), objective, repo);
             p.status = ProjectStatus::parse(&status).ok_or_else(|| StoreError::Corrupt {
                 what: "project status",
                 value: status.clone(),
@@ -196,27 +203,29 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?;
 
         rows.into_iter()
-            .map(|(kind, cmd, status, name, target, cmp, path, note)| match kind.as_str() {
-                "command" => Ok(Measure::Command {
-                    cmd: cmd.unwrap_or_default(),
-                    expect_status: status.unwrap_or(0) as i32,
-                }),
-                "metric" => Ok(Measure::Metric {
-                    name: name.unwrap_or_default(),
-                    target: target.unwrap_or(0.0),
-                    cmp: cmp.as_deref().and_then(cmp_parse).unwrap_or(Cmp::Eq),
-                }),
-                "deliverable" => Ok(Measure::Deliverable {
-                    path: path.unwrap_or_default(),
-                }),
-                "judged" => Ok(Measure::Judged {
-                    note: note.unwrap_or_default(),
-                }),
-                other => Err(StoreError::Corrupt {
-                    what: "measure kind",
-                    value: other.to_string(),
-                }),
-            })
+            .map(
+                |(kind, cmd, status, name, target, cmp, path, note)| match kind.as_str() {
+                    "command" => Ok(Measure::Command {
+                        cmd: cmd.unwrap_or_default(),
+                        expect_status: status.unwrap_or(0) as i32,
+                    }),
+                    "metric" => Ok(Measure::Metric {
+                        name: name.unwrap_or_default(),
+                        target: target.unwrap_or(0.0),
+                        cmp: cmp.as_deref().and_then(cmp_parse).unwrap_or(Cmp::Eq),
+                    }),
+                    "deliverable" => Ok(Measure::Deliverable {
+                        path: path.unwrap_or_default(),
+                    }),
+                    "judged" => Ok(Measure::Judged {
+                        note: note.unwrap_or_default(),
+                    }),
+                    other => Err(StoreError::Corrupt {
+                        what: "measure kind",
+                        value: other.to_string(),
+                    }),
+                },
+            )
             .collect()
     }
 
@@ -290,7 +299,10 @@ impl Store {
         )?;
         self.replace_measures(&MeasureTable::Task, t.id.as_str(), &t.acceptance)?;
 
-        c.execute("DELETE FROM task_scopes WHERE task_id = ?1", [t.id.as_str()])?;
+        c.execute(
+            "DELETE FROM task_scopes WHERE task_id = ?1",
+            [t.id.as_str()],
+        )?;
         for (access, globs) in [("read", &t.scope.read), ("write", &t.scope.write)] {
             for glob in globs {
                 c.execute(
@@ -423,11 +435,9 @@ impl Store {
     pub fn project_exists(&self, id: &ProjectId) -> Result<bool, StoreError> {
         let found: Option<i64> = self
             .conn()
-            .query_row(
-                "SELECT 1 FROM projects WHERE id = ?1",
-                [id.as_str()],
-                |r| r.get(0),
-            )
+            .query_row("SELECT 1 FROM projects WHERE id = ?1", [id.as_str()], |r| {
+                r.get(0)
+            })
             .optional()?;
         Ok(found.is_some())
     }
@@ -450,7 +460,7 @@ mod tests {
     }
 
     fn project() -> Project {
-        Project::new("caching", "wecode", "add response caching")
+        Project::new("caching", "add response caching", "wecode")
             .measured(Measure::Metric {
                 name: "p99_ms".into(),
                 target: 500.0,
@@ -499,7 +509,7 @@ mod tests {
     #[test]
     fn every_measure_variant_survives_the_round_trip() {
         let s = store();
-        let p = Project::new("p", "wecode", "objective")
+        let p = Project::new("p", "objective", "wecode")
             .measured(Measure::Command {
                 cmd: "cargo test".into(),
                 expect_status: 1,
@@ -522,7 +532,7 @@ mod tests {
     #[test]
     fn measure_order_is_preserved() {
         let s = store();
-        let p = Project::new("p", "wecode", "objective")
+        let p = Project::new("p", "objective", "wecode")
             .measured(Measure::Deliverable { path: "a".into() })
             .measured(Measure::Deliverable { path: "b".into() })
             .measured(Measure::Deliverable { path: "c".into() });
@@ -541,7 +551,11 @@ mod tests {
 
         let plan = s.load_plan().unwrap();
         assert_eq!(
-            plan.task(&"struct".into()).unwrap().parent.as_ref().map(TaskId::as_str),
+            plan.task(&"struct".into())
+                .unwrap()
+                .parent
+                .as_ref()
+                .map(TaskId::as_str),
             Some("layer")
         );
         assert_eq!(
@@ -564,7 +578,8 @@ mod tests {
         assert!(plan.is_ready(&"first".into()));
         assert!(!plan.is_ready(&"second".into()));
 
-        s.set_task_status(&"first".into(), TaskStatus::Done).unwrap();
+        s.set_task_status(&"first".into(), TaskStatus::Done)
+            .unwrap();
         assert!(s.load_plan().unwrap().is_ready(&"second".into()));
     }
 

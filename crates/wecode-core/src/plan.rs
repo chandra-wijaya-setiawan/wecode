@@ -21,7 +21,10 @@ pub enum PlanError {
     NoSuchProject(ProjectId),
     NoSuchTask(TaskId),
     /// A subtask whose parent is in a different project.
-    ParentInAnotherProject { task: TaskId, parent: TaskId },
+    ParentInAnotherProject {
+        task: TaskId,
+        parent: TaskId,
+    },
     /// `parent` chain loops.
     ParentCycle(TaskId),
     /// `depends_on` graph loops.
@@ -57,6 +60,12 @@ pub enum Blocker {
     /// A predecessor that is not finished.
     Waiting(TaskId),
     /// A predecessor that does not exist.
+    ///
+    /// Unreachable through this API — `add_task` and `update_task` both refuse an
+    /// unknown prerequisite, and the store has a foreign key. It survives because
+    /// `foreign_keys` is per-connection and defaults *off*, so anyone opening
+    /// wecode.db with the sqlite3 CLI can delete a task and leave a dangling row.
+    /// Reporting that beats silently treating the dependency as satisfied.
     Missing(TaskId),
 }
 
@@ -266,11 +275,16 @@ impl Plan {
         self.blockers(id).is_empty()
     }
 
-    /// Open tasks whose predecessors are all done — what could start now.
+    /// Tasks a dispatcher could pick up now: schedulable, and every predecessor
+    /// done.
+    ///
+    /// `is_schedulable`, not `!is_closed`. A running task is not closed, and
+    /// listing it here is how the same work gets dispatched twice; a draft one has
+    /// not been admitted yet.
     pub fn ready_tasks(&self) -> impl Iterator<Item = &Task> {
         self.tasks
             .values()
-            .filter(|t| !t.status.is_closed() && self.is_ready(&t.id))
+            .filter(|t| t.status.is_schedulable() && self.is_ready(&t.id))
     }
 
     /// Fraction of a project's tasks that are done, counting leaves only so a
@@ -316,7 +330,7 @@ mod tests {
 
     fn plan() -> Plan {
         let mut p = Plan::new();
-        p.add_project(Project::new("caching", "wecode", "add response caching"))
+        p.add_project(Project::new("caching", "add response caching", "wecode"))
             .unwrap();
         p
     }
@@ -341,7 +355,8 @@ mod tests {
             PlanError::DuplicateTask("t1".into())
         );
         assert!(matches!(
-            p.add_project(Project::new("caching", "r", "x")).unwrap_err(),
+            p.add_project(Project::new("caching", "x", "r"))
+                .unwrap_err(),
             PlanError::DuplicateProject(_)
         ));
     }
@@ -349,7 +364,7 @@ mod tests {
     #[test]
     fn a_subtask_must_share_its_parents_project() {
         let mut p = plan();
-        p.add_project(Project::new("other", "wecode", "something else"))
+        p.add_project(Project::new("other", "something else", "wecode"))
             .unwrap();
         p.add_task(task("parent")).unwrap();
 
@@ -468,16 +483,40 @@ mod tests {
     }
 
     #[test]
-    fn ready_tasks_excludes_closed_and_blocked() {
+    fn ready_tasks_lists_only_what_a_dispatcher_may_pick_up() {
         let mut p = plan();
-        p.add_task(task("a")).unwrap();
-        p.add_task(task("b").after("a")).unwrap();
-        let mut c = task("c");
-        c.status = TaskStatus::Done;
-        p.add_task(c).unwrap();
+        let mut at = |id: &str, status: TaskStatus| {
+            let mut t = task(id);
+            t.status = status;
+            p.add_task(t).unwrap();
+        };
+        at("waiting", TaskStatus::Waiting);
+        at("draft", TaskStatus::Draft);
+        at("running", TaskStatus::Running);
+        at("done", TaskStatus::Done);
+        at("failed", TaskStatus::Failed);
 
         let ready: Vec<&str> = p.ready_tasks().map(|t| t.id.as_str()).collect();
-        assert_eq!(ready, vec!["a"], "b waits, c is finished");
+        assert_eq!(
+            ready,
+            vec!["waiting"],
+            "a draft is not admitted, a running task is already out, \
+             and done/failed are not up for grabs"
+        );
+    }
+
+    #[test]
+    fn a_schedulable_task_still_waits_for_its_predecessor() {
+        let mut p = plan();
+        let mut a = task("a");
+        a.status = TaskStatus::Waiting;
+        p.add_task(a).unwrap();
+        let mut b = task("b").after("a");
+        b.status = TaskStatus::Waiting;
+        p.add_task(b).unwrap();
+
+        let ready: Vec<&str> = p.ready_tasks().map(|t| t.id.as_str()).collect();
+        assert_eq!(ready, vec!["a"], "b's predecessor is not done");
     }
 
     #[test]
@@ -514,7 +553,7 @@ mod tests {
     #[test]
     fn tasks_of_and_roots_of_partition_by_project() {
         let mut p = plan();
-        p.add_project(Project::new("other", "wecode", "x")).unwrap();
+        p.add_project(Project::new("other", "x", "wecode")).unwrap();
         p.add_task(task("a")).unwrap();
         p.add_task(task("b").under("a")).unwrap();
         p.add_task(Task::new("z", "other", "x")).unwrap();

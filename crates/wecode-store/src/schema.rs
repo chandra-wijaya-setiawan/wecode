@@ -242,7 +242,8 @@ mod tests {
         )
         .unwrap();
 
-        c.execute("DELETE FROM projects WHERE id = 'p'", []).unwrap();
+        c.execute("DELETE FROM projects WHERE id = 'p'", [])
+            .unwrap();
 
         for table in [
             "tasks",

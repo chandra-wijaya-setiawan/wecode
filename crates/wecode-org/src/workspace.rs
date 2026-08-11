@@ -112,7 +112,6 @@ impl Workspace {
         let text = fs::read_to_string(self.company_path())?;
         Ok(Company::parse(&text)?)
     }
-
 }
 
 /// Walks up from `start` looking for the marker file.
@@ -382,5 +381,4 @@ mod tests {
         assert!(msg.contains("--org"), "{msg}");
         assert!(msg.contains("wecode init"), "{msg}");
     }
-
 }

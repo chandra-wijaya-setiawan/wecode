@@ -3,7 +3,6 @@
 
 use std::collections::BTreeSet;
 
-
 use crate::glob;
 
 /// The two levels of work authority can be granted over.
@@ -38,6 +37,41 @@ pub enum ActionKind {
     Admission,
     BudgetIncrease,
     MeasureAmendment,
+}
+
+impl ActionKind {
+    /// The name an operator types and the ledger stores. Lived in the old codec,
+    /// which meant the CLI could name an approval the store did not recognise; it
+    /// belongs next to the variants it names.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Admission => "admission",
+            Self::BudgetIncrease => "budget-increase",
+            Self::MeasureAmendment => "measure-amendment",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "merge" => Self::Merge,
+            "admission" => Self::Admission,
+            "budget" | "budget-increase" => Self::BudgetIncrease,
+            "measure" | "measure-amendment" => Self::MeasureAmendment,
+            _ => return None,
+        })
+    }
+
+    #[must_use]
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Merge,
+            Self::Admission,
+            Self::BudgetIncrease,
+            Self::MeasureAmendment,
+        ]
+    }
 }
 
 /// How far a post may see beyond its own envelope.

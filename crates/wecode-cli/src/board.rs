@@ -1,15 +1,14 @@
 //! The cockpit: a full-screen board with the same five columns at every level.
 //!
-//! Rendering only — no raw-mode input, because wasip1 has no termios. Navigation
-//! is `wecode board [id]` rather than arrow keys; when a native build exists this
-//! module keeps its shape and gains a key loop.
-//!
 //! Health is **computed**, never reported by an agent: it comes from status,
 //! admission defects, the audit ledger and declared budgets.
+//!
+//! Two levels of work means two levels of board — the portfolio lists projects
+//! with their root tasks, and a focus view descends into either.
 
 use std::collections::BTreeMap;
 
-use wecode_core::{Admission, Intent, IntentId, IntentKind, IntentTree, Status};
+use wecode_core::{Plan, Project, ProjectId, ProjectStatus, Task, TaskId, TaskStatus, admission};
 use wecode_store::AuditLine;
 
 use crate::render::kind_tag;
@@ -38,7 +37,7 @@ impl Health {
     }
 }
 
-/// Everything the board knows about one intent, all of it derived.
+/// Everything the board knows about one project or task, all of it derived.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Vitals {
     pub(crate) health: Health,
@@ -51,116 +50,202 @@ pub(crate) struct Vitals {
     pub(crate) needs: Vec<String>,
 }
 
-/// Spend and incident counts per intent, folded from the ledger once.
-pub(crate) fn ledger_index(audit: &[AuditLine]) -> BTreeMap<String, (u64, usize, usize)> {
-    let mut out: BTreeMap<String, (u64, usize, usize)> = BTreeMap::new();
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct Counts {
+    spent: u64,
+    alarms: usize,
+    denials: usize,
+}
+
+impl Counts {
+    fn add(&mut self, other: Self) {
+        self.spent += other.spent;
+        self.alarms += other.alarms;
+        self.denials += other.denials;
+    }
+}
+
+/// Spend and incidents folded from the ledger once, split by what they are
+/// attributed to.
+///
+/// The two maps are separate because a record naming a task also names its
+/// project: counting it in both would double every number.
+#[derive(Default)]
+pub(crate) struct Ledger {
+    by_task: BTreeMap<String, Counts>,
+    by_project: BTreeMap<String, Counts>,
+}
+
+pub(crate) fn ledger_index(audit: &[AuditLine]) -> Ledger {
+    let mut out = Ledger::default();
     for l in audit {
-        let e = out.entry(l.intent.clone()).or_default();
+        let mut c = Counts::default();
         if l.action == "spend" {
             // target is "<tokens>t/<secs>s"
             if let Some(t) = l.target.split('t').next()
                 && let Ok(n) = t.parse::<u64>()
             {
-                e.0 += n;
+                c.spent = n;
             }
         }
         if l.is_alarm() {
-            e.1 += 1;
+            c.alarms = 1;
         } else if l.is_denial() {
-            e.2 += 1;
+            c.denials = 1;
+        }
+        // A task-level record belongs to the task; the project sees it by rollup.
+        if l.task.is_empty() {
+            if !l.project.is_empty() {
+                out.by_project.entry(l.project.clone()).or_default().add(c);
+            }
+        } else {
+            out.by_task.entry(l.task.clone()).or_default().add(c);
         }
     }
     out
 }
 
-/// Fraction of leaf descendants that are done. A leaf counts as itself.
-fn progress(tree: &IntentTree, id: &IntentId) -> f32 {
-    let leaves = leaf_statuses(tree, id);
-    if leaves.is_empty() {
-        return 0.0;
-    }
-    let done = leaves.iter().filter(|s| **s == Status::Done).count();
-    done as f32 / leaves.len() as f32
-}
-
-fn leaf_statuses(tree: &IntentTree, id: &IntentId) -> Vec<Status> {
-    let Some(node) = tree.get(id) else {
-        return Vec::new();
-    };
-    let kids: Vec<&Intent> = tree.children(id).collect();
-    if kids.is_empty() {
-        return vec![node.status];
-    }
-    kids.iter()
-        .flat_map(|k| leaf_statuses(tree, &k.id))
-        .collect()
-}
-
-/// Rolled-up spend and incidents for an intent and everything beneath it.
-fn subtree_totals(
-    tree: &IntentTree,
-    id: &IntentId,
-    idx: &BTreeMap<String, (u64, usize, usize)>,
-) -> (u64, usize, usize) {
-    let own = idx.get(id.as_str()).copied().unwrap_or_default();
-    let mut total = own;
-    for kid in tree.children(id) {
-        let k = subtree_totals(tree, &kid.id, idx);
-        total.0 += k.0;
-        total.1 += k.1;
-        total.2 += k.2;
+/// Rolled-up counts for a task and its subtasks.
+fn task_totals(plan: &Plan, id: &TaskId, l: &Ledger) -> Counts {
+    let mut total = l.by_task.get(id.as_str()).copied().unwrap_or_default();
+    for kid in plan.subtasks(id) {
+        total.add(task_totals(plan, &kid.id, l));
     }
     total
 }
 
-pub(crate) fn vitals(
-    tree: &IntentTree,
-    intent: &Intent,
-    idx: &BTreeMap<String, (u64, usize, usize)>,
-) -> Vitals {
-    let (spent, alarms, denials) = subtree_totals(tree, &intent.id, idx);
-    let defects = Admission::check(intent, tree).defects().len();
-    let budget = intent.budget.tokens;
-    let prog = progress(tree, &intent.id);
+/// A project's own records plus every task in it.
+fn project_totals(plan: &Plan, id: &ProjectId, l: &Ledger) -> Counts {
+    let mut total = l.by_project.get(id.as_str()).copied().unwrap_or_default();
+    // Every task, not just roots: a subtask's spend is the project's spend too, and
+    // walking roots recursively would reach the same set by a longer road.
+    for t in plan.tasks_of(id) {
+        total.add(l.by_task.get(t.id.as_str()).copied().unwrap_or_default());
+    }
+    total
+}
 
-    let over_budget = budget.is_some_and(|b| spent > b);
-    let stalled = spent > 0 && prog == 0.0 && intent.status == Status::Active;
+pub(crate) fn project_vitals(
+    plan: &Plan,
+    p: &Project,
+    l: &Ledger,
+    known_repos: &[String],
+) -> Vitals {
+    let c = project_totals(plan, &p.id, l);
+    let defects = admission::check_project(p, plan, known_repos).len();
+    let prog = plan.progress(&p.id);
+    let over = p.budget.tokens.is_some_and(|b| c.spent > b);
+    let stalled = c.spent > 0 && prog == 0.0 && p.status == ProjectStatus::Active;
 
     let mut needs = Vec::new();
+    push_common(&mut needs, c.alarms, defects, over, stalled);
+    let waiting = plan
+        .tasks_of(&p.id)
+        .filter(|t| t.status.needs_a_human())
+        .count();
+    if waiting > 0 {
+        needs.push(format!("{waiting} to answer"));
+    }
+    if plan.tasks_of(&p.id).next().is_none() {
+        needs.push("no tasks".to_string());
+    }
+
+    Vitals {
+        health: health_of(c.alarms, over, defects, stalled, c.denials, waiting),
+        progress: prog,
+        spent: c.spent,
+        budget: p.budget.tokens,
+        alarms: c.alarms,
+        denials: c.denials,
+        defects,
+        needs,
+    }
+}
+
+pub(crate) fn task_vitals(plan: &Plan, t: &Task, l: &Ledger) -> Vitals {
+    let c = task_totals(plan, &t.id, l);
+    let defects = admission::check_task(t, plan).len();
+    let prog = task_progress(plan, t);
+    let over = t.budget.tokens.is_some_and(|b| c.spent > b);
+    let stalled = c.spent > 0 && prog == 0.0 && t.status == TaskStatus::Running;
+
+    let mut needs = Vec::new();
+    push_common(&mut needs, c.alarms, defects, over, stalled);
+    let awaiting = usize::from(t.status.needs_a_human());
+    if t.status.needs_a_human() {
+        needs.push(t.status.as_str().to_string());
+    }
+    if t.status == TaskStatus::Draft && defects == 0 && t.assignee.is_none() {
+        needs.push("unassigned".to_string());
+    }
+    for b in plan.blockers(&t.id) {
+        if let wecode_core::Blocker::Missing(m) = b {
+            needs.push(format!("{m} missing"));
+        }
+    }
+
+    Vitals {
+        health: health_of(c.alarms, over, defects, stalled, c.denials, awaiting),
+        progress: prog,
+        spent: c.spent,
+        budget: t.budget.tokens,
+        alarms: c.alarms,
+        denials: c.denials,
+        defects,
+        needs,
+    }
+}
+
+fn push_common(needs: &mut Vec<String>, alarms: usize, defects: usize, over: bool, stalled: bool) {
     if alarms > 0 {
         needs.push(format!("{alarms} alarm"));
     }
     if defects > 0 {
         needs.push(format!("{defects} defect"));
     }
-    if over_budget {
+    if over {
         needs.push("over budget".to_string());
     }
     if stalled {
         needs.push("stalled".to_string());
     }
-    if intent.kind.is_assignable() && intent.status == Status::Draft && defects == 0 {
-        needs.push("unassigned".to_string());
-    }
+}
 
-    let health = if alarms > 0 || over_budget {
+/// One rule, used for both levels. Red is reserved for the irreversible and the
+/// already-breached; a question waiting on a person is amber, not red.
+fn health_of(
+    alarms: usize,
+    over: bool,
+    defects: usize,
+    stalled: bool,
+    denials: usize,
+    awaiting: usize,
+) -> Health {
+    if alarms > 0 || over {
         Health::Red
-    } else if defects > 0 || stalled || denials > 0 {
+    } else if defects > 0 || stalled || denials > 0 || awaiting > 0 {
         Health::Amber
     } else {
         Health::Green
-    };
-
-    Vitals {
-        health,
-        progress: prog,
-        spent,
-        budget,
-        alarms,
-        denials,
-        defects,
-        needs,
     }
+}
+
+/// A task's own progress: done leaves beneath it, or itself if it is a leaf.
+fn task_progress(plan: &Plan, t: &Task) -> f32 {
+    let leaves = leaf_statuses(plan, t);
+    if leaves.is_empty() {
+        return 0.0;
+    }
+    let done = leaves.iter().filter(|s| **s == TaskStatus::Done).count();
+    done as f32 / leaves.len() as f32
+}
+
+fn leaf_statuses(plan: &Plan, t: &Task) -> Vec<TaskStatus> {
+    let kids: Vec<&Task> = plan.subtasks(&t.id).collect();
+    if kids.is_empty() {
+        return vec![t.status];
+    }
+    kids.iter().flat_map(|k| leaf_statuses(plan, k)).collect()
 }
 
 fn bar(fraction: f32) -> String {
@@ -231,29 +316,27 @@ fn footer(hint: &str) -> String {
     format!("{DIM}└─ {hint}{RESET}\n")
 }
 
-/// The portfolio view: one line per root, then its goals.
-pub(crate) fn portfolio(tree: &IntentTree, audit: &[AuditLine]) -> String {
-    if tree.is_empty() {
-        return "no intents yet — wecode intent add vision <id> \"<statement>\"\n".to_string();
+/// The portfolio view: one line per project, then its root tasks.
+pub(crate) fn portfolio(plan: &Plan, audit: &[AuditLine], known_repos: &[String]) -> String {
+    if plan.is_empty() {
+        return "no projects yet — wecode project add <id> --repo <name> \"<objective>\"\n"
+            .to_string();
     }
-    let idx = ledger_index(audit);
+    let l = ledger_index(audit);
     let mut out = title_bar("L0", "PORTFOLIO", "wecode board <id> to descend");
     out.push_str(&header_row());
 
-    let mut roots: Vec<&Intent> = tree.roots().collect();
-    roots.sort_by_key(|r| r.id.clone());
-
-    for r in roots {
+    for p in plan.projects() {
         out.push_str(&row(
-            &format!("{} {}", kind_tag(r.kind), r.id),
-            &vitals(tree, r, &idx),
+            &format!("{}", p.id),
+            &project_vitals(plan, p, &l, known_repos),
         ));
-        let mut kids: Vec<&Intent> = tree.children(&r.id).collect();
-        kids.sort_by_key(|k| k.id.clone());
-        for k in kids {
+        let mut roots: Vec<&Task> = plan.roots_of(&p.id).collect();
+        roots.sort_by(|a, b| a.id.cmp(&b.id));
+        for t in roots {
             out.push_str(&row(
-                &format!("  {} {}", kind_tag(k.kind), k.id),
-                &vitals(tree, k, &idx),
+                &format!("  {} {}", kind_tag(t.kind), t.id),
+                &task_vitals(plan, t, &l),
             ));
         }
     }
@@ -261,132 +344,167 @@ pub(crate) fn portfolio(tree: &IntentTree, audit: &[AuditLine]) -> String {
     out
 }
 
-/// A focused view: the intent, its children, and its incidents.
-pub(crate) fn focus(tree: &IntentTree, audit: &[AuditLine], id: &IntentId) -> String {
-    let Some(node) = tree.get(id) else {
-        return format!("no such intent: {id}\n");
-    };
-    let idx = ledger_index(audit);
-    let v = vitals(tree, node, &idx);
+/// A focused view on either level: the subject, what is beneath it, its incidents.
+pub(crate) fn focus(plan: &Plan, audit: &[AuditLine], id: &str, known_repos: &[String]) -> String {
+    let l = ledger_index(audit);
 
-    let level = match node.kind {
-        IntentKind::Vision | IntentKind::Goal => "L1",
-        IntentKind::Project => "L2",
-        IntentKind::Task => "L3",
-    };
-    let mut out = title_bar(level, &id.to_string(), "wecode board to go up");
-    out.push_str(&format!("{DIM}│ {}{RESET}\n", node.statement));
-    out.push_str(&header_row());
-    out.push_str(&row(&format!("{} {}", kind_tag(node.kind), id), &v));
-
-    let mut kids: Vec<&Intent> = tree.children(id).collect();
-    kids.sort_by_key(|k| k.id.clone());
-    for k in kids {
-        out.push_str(&row(
-            &format!("  {} {}", kind_tag(k.kind), k.id),
-            &vitals(tree, k, &idx),
-        ));
-    }
-
-    let incidents: Vec<&AuditLine> = audit
-        .iter()
-        .filter(|l| l.intent == id.as_str() && l.is_denial())
-        .collect();
-    if !incidents.is_empty() {
-        out.push_str(&format!("{DIM}│{RESET}\n"));
-        out.push_str(&format!("{DIM}│ incidents{RESET}\n"));
-        for l in incidents.iter().take(5) {
-            let mark = if l.is_alarm() {
-                format!("{RED}⚡{RESET}")
-            } else {
-                format!("{AMBER}✗{RESET}")
-            };
-            // The target is the point of an incident line: what was touched.
-            out.push_str(&format!(
-                "│  {mark} {:<10} {:<6} {:<24} {DIM}{}{RESET}\n",
-                l.post,
-                l.action,
-                truncate(&l.target, 24),
-                l.detail
+    if let Some(p) = plan.project(&ProjectId::new(id)) {
+        let v = project_vitals(plan, p, &l, known_repos);
+        let mut out = title_bar("L1", id, "wecode board to go up");
+        out.push_str(&format!("{DIM}│ {}  [{}]{RESET}\n", p.objective, p.repo));
+        out.push_str(&header_row());
+        out.push_str(&row(&format!("{}", p.id), &v));
+        let mut roots: Vec<&Task> = plan.roots_of(&p.id).collect();
+        roots.sort_by(|a, b| a.id.cmp(&b.id));
+        for t in roots {
+            out.push_str(&row(
+                &format!("  {} {}", kind_tag(t.kind), t.id),
+                &task_vitals(plan, t, &l),
             ));
         }
+        // Every incident in the project, including its tasks'. The project row
+        // rolls their alarms up, so hiding the rows leaves a count with nothing to
+        // explain it — and no way to find what tripped.
+        out.push_str(&incidents(audit, |x| x.project == id));
+        out.push_str(&footer(hint_for(&v)));
+        return out;
     }
 
-    let hint = if v.needs.is_empty() {
+    if let Some(t) = plan.task(&TaskId::new(id)) {
+        let v = task_vitals(plan, t, &l);
+        let mut out = title_bar("L2", id, "wecode board to go up");
+        out.push_str(&format!("{DIM}│ {}{RESET}\n", t.title));
+        out.push_str(&header_row());
+        out.push_str(&row(&format!("{} {}", kind_tag(t.kind), t.id), &v));
+        let mut kids: Vec<&Task> = plan.subtasks(&t.id).collect();
+        kids.sort_by(|a, b| a.id.cmp(&b.id));
+        for k in kids {
+            out.push_str(&row(
+                &format!("  {} {}", kind_tag(k.kind), k.id),
+                &task_vitals(plan, k, &l),
+            ));
+        }
+        out.push_str(&incidents(audit, |x| x.task == id));
+        out.push_str(&footer(hint_for(&v)));
+        return out;
+    }
+
+    format!("no project or task: {id}\n")
+}
+
+fn hint_for(v: &Vitals) -> &'static str {
+    if v.needs.is_empty() {
         "nothing needs you here"
     } else {
-        "wecode intent check <id> · wecode audit --alarms"
-    };
-    out.push_str(&footer(hint));
+        "wecode check <id> · wecode audit --alarms"
+    }
+}
+
+fn incidents(audit: &[AuditLine], mine: impl Fn(&AuditLine) -> bool) -> String {
+    let found: Vec<&AuditLine> = audit.iter().filter(|l| mine(l) && l.is_denial()).collect();
+    if found.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("{DIM}│{RESET}\n{DIM}│ incidents{RESET}\n");
+    for l in found.iter().take(5) {
+        let mark = if l.is_alarm() {
+            format!("{RED}⚡{RESET}")
+        } else {
+            format!("{AMBER}✗{RESET}")
+        };
+        // The target is the point of an incident line: what was touched.
+        out.push_str(&format!(
+            "│  {mark} {:<10} {:<6} {:<24} {DIM}{}{RESET}\n",
+            l.post,
+            l.action,
+            truncate(&l.target, 24),
+            l.detail
+        ));
+    }
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wecode_core::{Budget, Link, Measure, Scope};
+    use wecode_core::{Budget, Measure, Scope};
 
-    fn tree() -> IntentTree {
-        let mut t = IntentTree::new();
-        t.insert(Intent::new("vis", IntentKind::Vision, "be fast"))
-            .unwrap();
-        t.insert(
-            Intent::new("goal", IntentKind::Goal, "cut p99 below 500ms")
-                .under("vis", Link::Requires)
-                .measured(Measure::Rollup),
-        )
-        .unwrap();
-        t.insert(
-            Intent::new("proj", IntentKind::Project, "add caching")
-                .under("goal", Link::Requires)
+    fn repos() -> Vec<String> {
+        vec!["wecode".to_string()]
+    }
+
+    /// A project with one well-formed task, so a defect in a test is one the test
+    /// introduced rather than background noise.
+    fn plan() -> Plan {
+        let mut p = Plan::new();
+        p.add_project(
+            Project::new("caching", "cut export p99 below 500ms", "wecode")
                 .measured(Measure::Command {
-                    cmd: "cargo test".into(),
+                    cmd: "cargo bench".into(),
                     expect_status: 0,
                 })
-                .scoped(Scope::write(&["crates/**"]))
                 .budgeted(Budget {
                     tokens: Some(1000),
                     wall_secs: Some(60),
                 }),
         )
         .unwrap();
-        t
+        p.add_task(good_task("t1", "write the cache layer", "crates/cache/**"))
+            .unwrap();
+        p
     }
 
-    fn line(intent: &str, action: &str, target: &str, outcome: &str) -> AuditLine {
+    fn good_task(id: &str, title: &str, glob: &str) -> Task {
+        Task::new(id, "caching", title)
+            .accepting(Measure::Command {
+                cmd: "cargo test".into(),
+                expect_status: 0,
+            })
+            .scoped(Scope::write(&[glob]))
+            .budgeted(Budget {
+                tokens: Some(500),
+                wall_secs: Some(30),
+            })
+    }
+
+    fn line(project: &str, task: &str, action: &str, target: &str, outcome: &str) -> AuditLine {
         AuditLine {
             seq: 1,
+            at: 0,
             session: "s-test".into(),
             post: "impl".into(),
             human: "chandra".into(),
-            occupant: "claude-code".into(),
-            intent: intent.into(),
+            agent: "claude-code".into(),
+            project: project.into(),
+            task: task.into(),
             source: "broker".into(),
             action: action.into(),
             target: target.into(),
             outcome: outcome.into(),
+            mode: "regimented".into(),
             detail: "d".into(),
         }
     }
 
     #[test]
-    fn empty_tree_suggests_a_next_step() {
-        assert!(portfolio(&IntentTree::new(), &[]).contains("intent add vision"));
+    fn empty_plan_suggests_a_next_step() {
+        assert!(portfolio(&Plan::new(), &[], &repos()).contains("project add"));
     }
 
     #[test]
-    fn portfolio_lists_roots_and_their_children() {
-        let out = portfolio(&tree(), &[]);
-        assert!(out.contains("VIS vis"), "{out}");
-        assert!(out.contains("GOAL goal"), "{out}");
+    fn portfolio_lists_projects_and_their_root_tasks() {
+        let out = portfolio(&plan(), &[], &repos());
+        assert!(out.contains("caching"), "{out}");
+        assert!(out.contains("feat t1"), "{out}");
         assert!(out.contains("L0 · PORTFOLIO"), "{out}");
     }
 
     #[test]
     fn every_level_shows_the_same_five_columns() {
         for out in [
-            portfolio(&tree(), &[]),
-            focus(&tree(), &[], &IntentId::new("goal")),
+            portfolio(&plan(), &[], &repos()),
+            focus(&plan(), &[], "caching", &repos()),
+            focus(&plan(), &[], "t1", &repos()),
         ] {
             for col in ["what", "health", "progress", "spend", "needs you"] {
                 assert!(out.contains(col), "missing `{col}` in:\n{out}");
@@ -395,50 +513,102 @@ mod tests {
     }
 
     #[test]
-    fn an_alarm_turns_the_subtree_red_and_rolls_upward() {
-        let audit = vec![line("proj", "write", "x.pem", "alarm")];
-        let t = tree();
-        let idx = ledger_index(&audit);
-        // The project itself, and the goal above it, both go red.
-        for id in ["proj", "goal", "vis"] {
-            let node = t.get(&IntentId::new(id)).unwrap();
-            assert_eq!(
-                vitals(&t, node, &idx).health,
-                Health::Red,
-                "{id} should be red"
-            );
-        }
+    fn an_alarm_on_a_task_turns_its_project_red_too() {
+        let audit = vec![line("caching", "t1", "write", "x.pem", "alarm")];
+        let p = plan();
+        let l = ledger_index(&audit);
+        assert_eq!(
+            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l).health,
+            Health::Red
+        );
+        assert_eq!(
+            project_vitals(
+                &p,
+                p.project(&ProjectId::new("caching")).unwrap(),
+                &l,
+                &repos()
+            )
+            .health,
+            Health::Red,
+            "an alarm must roll up"
+        );
     }
 
     #[test]
     fn a_denial_is_amber_not_red() {
-        let audit = vec![line("proj", "write", "other.rs", "deny")];
-        let t = tree();
-        let idx = ledger_index(&audit);
-        let node = t.get(&IntentId::new("proj")).unwrap();
-        assert_eq!(vitals(&t, node, &idx).health, Health::Amber);
+        let audit = vec![line("caching", "t1", "write", "other.rs", "deny")];
+        let p = plan();
+        let l = ledger_index(&audit);
+        assert_eq!(
+            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l).health,
+            Health::Amber
+        );
     }
 
     #[test]
-    fn spend_rolls_up_from_children() {
-        let audit = vec![line("proj", "spend", "400t/10s", "allow")];
-        let t = tree();
-        let idx = ledger_index(&audit);
-        let goal = t.get(&IntentId::new("goal")).unwrap();
+    fn task_spend_rolls_up_to_the_project_exactly_once() {
+        // The double-count trap: the record names both a project and a task.
+        let audit = vec![line("caching", "t1", "spend", "400t/10s", "allow")];
+        let p = plan();
+        let l = ledger_index(&audit);
+        let v = project_vitals(
+            &p,
+            p.project(&ProjectId::new("caching")).unwrap(),
+            &l,
+            &repos(),
+        );
+        assert_eq!(v.spent, 400, "counted once, not twice");
+    }
+
+    #[test]
+    fn project_level_spend_is_counted_without_a_task() {
+        let audit = vec![line("caching", "", "spend", "150t/1s", "allow")];
+        let p = plan();
+        let l = ledger_index(&audit);
+        let v = project_vitals(
+            &p,
+            p.project(&ProjectId::new("caching")).unwrap(),
+            &l,
+            &repos(),
+        );
+        assert_eq!(v.spent, 150);
+        // ...and it does not leak onto the task.
         assert_eq!(
-            vitals(&t, goal, &idx).spent,
-            400,
-            "goal sees its child's spend"
+            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l).spent,
+            0
+        );
+    }
+
+    #[test]
+    fn a_subtasks_spend_reaches_its_parent_task_and_the_project() {
+        let mut p = plan();
+        p.add_task(good_task("t1a", "the inner half", "crates/cache/inner/**").under("t1"))
+            .unwrap();
+        let audit = vec![line("caching", "t1a", "spend", "700t/2s", "allow")];
+        let l = ledger_index(&audit);
+        assert_eq!(
+            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l).spent,
+            700,
+            "a parent task sees its subtask's spend"
+        );
+        assert_eq!(
+            project_vitals(
+                &p,
+                p.project(&ProjectId::new("caching")).unwrap(),
+                &l,
+                &repos()
+            )
+            .spent,
+            700
         );
     }
 
     #[test]
     fn exceeding_budget_is_red() {
-        let audit = vec![line("proj", "spend", "5000t/0s", "allow")];
-        let t = tree();
-        let idx = ledger_index(&audit);
-        let node = t.get(&IntentId::new("proj")).unwrap();
-        let v = vitals(&t, node, &idx);
+        let audit = vec![line("caching", "t1", "spend", "5000t/0s", "allow")];
+        let p = plan();
+        let l = ledger_index(&audit);
+        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l);
         assert_eq!(v.health, Health::Red);
         assert!(
             v.needs.iter().any(|n| n.contains("over budget")),
@@ -449,60 +619,40 @@ mod tests {
 
     #[test]
     fn progress_is_the_done_fraction_of_leaves() {
-        let mut t = tree();
-        t.insert(
-            Intent::new("t1", IntentKind::Task, "one")
-                .under("proj", Link::Requires)
-                .measured(Measure::Command {
-                    cmd: "c".into(),
-                    expect_status: 0,
-                })
-                .scoped(Scope::write(&["a/**"]))
-                .budgeted(Budget {
-                    tokens: Some(1),
-                    wall_secs: None,
-                }),
-        )
-        .unwrap();
-        let proj = IntentId::new("proj");
-        assert_eq!(progress(&t, &proj), 0.0, "one leaf, not done");
+        let mut p = plan();
+        assert_eq!(p.progress(&ProjectId::new("caching")), 0.0);
 
-        // Set the status before inserting: the tree is append-style, and rebuilding
-        // it by iterating in id order would insert a child before its parent.
-        let mut t2 = tree();
-        let mut task = Intent::new("t1", IntentKind::Task, "one").under("proj", Link::Requires);
-        task.status = Status::Done;
-        t2.insert(task).unwrap();
-        assert_eq!(progress(&t2, &proj), 1.0, "the only leaf is done");
+        let mut t = p.task(&TaskId::new("t1")).unwrap().clone();
+        t.status = TaskStatus::Done;
+        p.update_task(t).unwrap();
+        assert_eq!(p.progress(&ProjectId::new("caching")), 1.0);
 
-        let mut second = Intent::new("t2", IntentKind::Task, "two").under("proj", Link::Requires);
-        second.status = Status::Active;
-        t2.insert(second).unwrap();
-        assert_eq!(progress(&t2, &proj), 0.5, "one of two leaves done");
+        p.add_task(good_task("t2", "the second half", "crates/other/**"))
+            .unwrap();
+        assert_eq!(p.progress(&ProjectId::new("caching")), 0.5);
+    }
+
+    #[test]
+    fn a_parent_tasks_progress_comes_from_its_subtasks_not_itself() {
+        let mut p = plan();
+        p.add_task(good_task("t1a", "first inner", "crates/cache/a/**").under("t1"))
+            .unwrap();
+        p.add_task(good_task("t1b", "second inner", "crates/cache/b/**").under("t1"))
+            .unwrap();
+        let mut a = p.task(&TaskId::new("t1a")).unwrap().clone();
+        a.status = TaskStatus::Done;
+        p.update_task(a).unwrap();
+
+        let l = ledger_index(&[]);
+        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l);
+        assert_eq!(v.progress, 0.5, "one of two subtasks done");
     }
 
     #[test]
     fn a_draft_with_no_defects_reads_as_unassigned() {
-        // Must be a leaf: a compound intent with no children carries a defect of
-        // its own, which would mask the unassigned signal.
-        let mut t = tree();
-        t.insert(
-            Intent::new("t1", IntentKind::Task, "write the cache layer")
-                .under("proj", Link::Requires)
-                .measured(Measure::Command {
-                    cmd: "cargo test".into(),
-                    expect_status: 0,
-                })
-                .scoped(Scope::write(&["crates/cache.rs"]))
-                .budgeted(Budget {
-                    tokens: Some(100),
-                    wall_secs: Some(10),
-                }),
-        )
-        .unwrap();
-
-        let idx = BTreeMap::new();
-        let v = vitals(&t, t.get(&IntentId::new("t1")).unwrap(), &idx);
+        let p = plan();
+        let l = ledger_index(&[]);
+        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l);
         assert_eq!(v.defects, 0, "control case must be defect-free");
         assert!(v.needs.iter().any(|n| n == "unassigned"), "{:?}", v.needs);
         assert_eq!(
@@ -513,38 +663,97 @@ mod tests {
     }
 
     #[test]
-    fn a_compound_intent_with_no_children_is_amber() {
-        // The project in `tree()` has no children, which the admission gate reports.
-        let t = tree();
-        let idx = BTreeMap::new();
-        let v = vitals(&t, t.get(&IntentId::new("proj")).unwrap(), &idx);
-        assert!(v.defects > 0);
+    fn a_project_with_no_tasks_says_so_and_is_amber() {
+        let mut p = Plan::new();
+        p.add_project(
+            Project::new("bare", "some real objective here", "wecode")
+                .measured(Measure::Command {
+                    cmd: "cargo test".into(),
+                    expect_status: 0,
+                })
+                .budgeted(Budget {
+                    tokens: Some(10),
+                    wall_secs: Some(1),
+                }),
+        )
+        .unwrap();
+        let v = project_vitals(
+            &p,
+            p.project(&ProjectId::new("bare")).unwrap(),
+            &ledger_index(&[]),
+            &repos(),
+        );
+        assert!(v.needs.iter().any(|n| n == "no tasks"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
     }
 
     #[test]
-    fn focus_on_a_missing_intent_says_so() {
-        assert!(focus(&tree(), &[], &IntentId::new("nope")).contains("no such intent"));
+    fn a_task_awaiting_a_person_is_amber_and_names_the_reason() {
+        let mut p = plan();
+        let mut t = p.task(&TaskId::new("t1")).unwrap().clone();
+        t.status = TaskStatus::NeedsApproval;
+        p.update_task(t).unwrap();
+        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &ledger_index(&[]));
+        assert!(
+            v.needs.iter().any(|n| n == "needs-approval"),
+            "{:?}",
+            v.needs
+        );
+        assert_eq!(v.health, Health::Amber);
     }
 
     #[test]
-    fn focus_shows_incidents_for_that_intent_only() {
+    fn a_waiting_prerequisite_is_not_itself_a_fault() {
+        // Depending on unfinished work is normal; only a defect or an incident
+        // should colour a row.
+        let mut p = plan();
+        p.add_task(good_task("t2", "the second half", "crates/other/**").after("t1"))
+            .unwrap();
+        let v = task_vitals(&p, p.task(&TaskId::new("t2")).unwrap(), &ledger_index(&[]));
+        assert_eq!(v.defects, 0, "{:?}", v.needs);
+        assert_eq!(v.health, Health::Green);
+    }
+
+    #[test]
+    fn focus_on_a_missing_id_says_so() {
+        assert!(focus(&plan(), &[], "nope", &repos()).contains("no project or task"));
+    }
+
+    #[test]
+    fn a_project_explains_the_alarms_it_rolls_up() {
+        // The count and the evidence must appear together, or the number is a
+        // dead end.
+        let p = plan();
+        let audit = vec![line("caching", "t1", "write", "x.pem", "alarm")];
+        let out = focus(&p, &audit, "caching", &repos());
+        assert!(out.contains("1 alarm"), "{out}");
+        assert!(
+            out.contains("x.pem"),
+            "the evidence, not just the count:\n{out}"
+        );
+    }
+
+    #[test]
+    fn focus_shows_incidents_for_that_subject_only() {
+        let mut p = plan();
+        p.add_task(good_task("t2", "the second half", "crates/other/**"))
+            .unwrap();
         let audit = vec![
-            line("proj", "write", "x.pem", "alarm"),
-            line("goal", "write", "other", "deny"),
+            line("caching", "t1", "write", "x.pem", "alarm"),
+            line("caching", "t2", "write", "elsewhere.rs", "deny"),
         ];
-        let out = focus(&tree(), &audit, &IntentId::new("proj"));
+        let out = focus(&p, &audit, "t1", &repos());
         assert!(out.contains("incidents"), "{out}");
         assert!(out.contains("x.pem"), "{out}");
         assert!(
-            !out.contains("other"),
-            "should not show another intent's: {out}"
+            !out.contains("elsewhere.rs"),
+            "should not show another task's: {out}"
         );
     }
 
     #[test]
     fn long_labels_are_truncated_not_wrapped() {
-        let s = truncate("a-very-long-intent-identifier-that-overflows", 26);
+        let s = truncate("a-very-long-task-identifier-that-overflows", 26);
         assert_eq!(s.chars().count(), 26);
         assert!(s.ends_with('…'));
     }

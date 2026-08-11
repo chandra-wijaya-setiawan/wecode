@@ -89,7 +89,10 @@ mod tests {
 
     #[test]
     fn slugifies() {
-        assert_eq!(ProjectId::new("OAuth Device Flow").as_str(), "oauth-device-flow");
+        assert_eq!(
+            ProjectId::new("OAuth Device Flow").as_str(),
+            "oauth-device-flow"
+        );
         assert_eq!(TaskId::new("cut p99 latency!").as_str(), "cut-p99-latency");
     }
 
