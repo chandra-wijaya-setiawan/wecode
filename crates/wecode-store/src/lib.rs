@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-pub use audit::AuditLine;
+pub use audit::{AuditLine, AuditQuery};
 pub use session::SessionInfo;
 
 #[derive(Debug)]
