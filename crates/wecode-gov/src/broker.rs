@@ -172,11 +172,17 @@ pub struct Spend {
 }
 
 /// One post working on one intent, with a subset of its roles activated.
+///
+/// A seat is crewed by an agent, and often by a human alongside it. `occupant` is
+/// the agent that acted; `human` is the person crewing the same seat. Both are
+/// recorded flatly, with no implied direction between them — the human is not the
+/// agent's owner, and the agent is not merely the human's tool.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Session {
     pub id: String,
     pub post: String,
     pub occupant: String,
+    pub human: Option<String>,
     pub intent: IntentId,
     pub effective: Effective,
     pub spent: Spend,
@@ -195,10 +201,18 @@ impl Session {
             id: id.into(),
             post: post.into(),
             occupant: occupant.into(),
+            human: None,
             intent,
             effective,
             spent: Spend::default(),
         }
+    }
+
+    /// Names the human crewing this seat alongside the agent.
+    #[must_use]
+    pub fn crewed_with(mut self, human: Option<String>) -> Self {
+        self.human = human;
+        self
     }
 }
 
@@ -221,6 +235,7 @@ pub struct Record {
     pub session: String,
     pub post: String,
     pub occupant: String,
+    pub human: Option<String>,
     pub intent: IntentId,
     pub action: Action,
     pub decision: Decision,
@@ -259,6 +274,7 @@ impl Broker {
             session: session.id.clone(),
             post: session.post.clone(),
             occupant: session.occupant.clone(),
+            human: session.human.clone(),
             intent: session.intent.clone(),
             action: action.clone(),
             decision: decision.clone(),
@@ -447,6 +463,7 @@ impl Broker {
             session: session.id.clone(),
             post: session.post.clone(),
             occupant: session.occupant.clone(),
+            human: session.human.clone(),
             intent: session.intent.clone(),
             action,
             decision: Decision::Allow,

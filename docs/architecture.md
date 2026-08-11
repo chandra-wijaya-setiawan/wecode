@@ -64,6 +64,53 @@ Three rules the whole design follows:
 
 ---
 
+## 1.1 Vocabulary
+
+Three planes. **No word appears in more than one**, which has not always been true
+here and is the reason this section exists.
+
+**Demand — what we want. Static.**
+
+| | Is |
+|---|---|
+| **Intent** | one node: `Vision` → `Goal` → `Project` → `Task` |
+| **Task** | *only* the executable leaf kind of an intent. Never an execution. |
+
+**Supply — who may act. Static.**
+
+| | Is |
+|---|---|
+| **User** | a person |
+| **Agent** | a coding CLI (`claude-code`, `codex`) |
+| **Post** | a seat in the org chart, holding a role |
+| **Role** | authority — a `Grant` |
+| **Assignment** | the durable binding of an intent to a post |
+
+**Execution — what is happening now. Live.**
+
+| | Is | Bounded by |
+|---|---|---|
+| **Session** | a connection with authority: one post, one agent, optionally a user | idle timeout |
+| **Attempt** | one execution of one `Task` intent, by one session | wall and token budget |
+
+```
+User ──┐
+       ├─ Session ──1:N──> Attempt ──N:1──> Intent (kind = Task)
+Agent ─┘     │                 │
+           (post)          (worktree, process,
+        → Role → Grant     outcome, spend)
+```
+
+A session may run many attempts; an attempt belongs to exactly one session. For a
+spawned CLI these are 1:1 — the process *is* the attempt — but nothing special-cases
+that, because a long-lived agent connected over a protocol does many attempts on one
+session.
+
+**A session has no kinds.** Autonomous simply means it has no user. That also keeps
+the two limits apart: sessions expire on *idle*, attempts on *budget*.
+
+---
+
 ## 2. Intent and organization
 
 Two orthogonal hierarchies. **Intent** is demand — what we are trying to achieve.
@@ -342,6 +389,61 @@ pub struct Assignment {
 }
 ```
 
+### 2.7 Users and sessions
+
+A **user** is a person, holding a seat:
+
+```toml
+[[users]]
+name = "chandra"
+post = "chief"
+
+[[posts]]
+name  = "chief"
+role  = "chief"
+agent = "claude-code"     # a post with no user is an agent-only seat
+
+[session]
+ttl = "8h"                # idle timeout
+```
+
+A **session** is one connection with authority. `login` opens one; every command
+refreshes it; idling past the TTL expires it.
+
+```rust
+pub struct SessionInfo {
+    pub id: SessionId,
+    pub post: String,
+    pub agent: String,
+    /// None ⇒ autonomous. The only thing distinguishing an agent session.
+    pub user: Option<String>,
+    pub opened: u64,
+    pub last_seen: u64,
+}
+```
+
+Resolution order for who is acting, applied to every state-changing command:
+
+1. `--session <id>`
+2. `$WECODE_SESSION`
+3. exactly one active session — the solo case, zero friction
+4. `--as <post>` — a deliberate override
+5. **refuse**, listing active sessions and available users
+
+Step 5 matters more than the rest: **nothing reaches the root grant by omission.**
+`--as operator` remains available but must be typed.
+
+**Autonomous agents never create or present a session.** A dispatched worker is
+confined to a worktree and cannot reach the workspace (§10), and needs no access
+anyway (§4) — the supervisor opens the session, holds the id, and records on the
+worker's behalf from exit codes, diffs and spend. Were workers to present a session
+id, one could pass another seat's and inherit its authority; presenting nothing
+removes that class of escalation entirely.
+
+There is **no credential** anywhere in this design. `login` selects a seat; it does
+not authenticate. Anyone with filesystem access to the workspace can log in as
+anyone, which is fine for a solo operator and must not be mistaken for security.
+
 Allocation across assignments is arithmetic (§3, Control). Only `Project` and
 `Task` intents are assignable — a Goal is reached by satisfying its children, never
 by being handed to a unit.
@@ -472,7 +574,7 @@ pub struct Record {
     pub at: Timestamp,
     pub actor: Actor,                  // Operator | Post{post, occupant} | System(Function)
     pub intent: Option<IntentId>,      // ─┐
-    pub task: Option<TaskId>,          //  │ correlation keys
+    pub task: Option<AttemptId>,          //  │ correlation keys
     pub session: Option<SessionId>,    // ─┘
     pub caused_by: Option<u64>,        // causal parent — reconstructs the chain
     pub action: Action,
@@ -634,8 +736,8 @@ Silence on green. Progress is pulled, never pushed.
 pub trait Agent: Send + Sync {
     fn id(&self) -> &AgentId;
     fn capabilities(&self) -> &AgentCaps;
-    async fn execute(&self, a: TaskAssignment, ctx: ExecCtx)
-        -> Result<TaskOutcome, AgentError>;
+    async fn execute(&self, a: AttemptSpec, ctx: ExecCtx)
+        -> Result<AttemptOutcome, AgentError>;
 }
 ```
 
@@ -644,18 +746,19 @@ Implementations: `CliAgent` (a coding CLI as a supervised subprocess) and
 protocol-agnostic.
 
 ```rust
-pub struct TaskAssignment {
-    pub task_id: TaskId,
-    pub step: Step,
-    pub attempt: u8,
+pub struct AttemptSpec {
+    pub attempt_id: AttemptId,
+    pub session: SessionId,     // the connection running it (§2.7)
+    pub intent: IntentId,       // must be kind == Task
+    pub number: u8,             // 1, 2, 3 on retry
     pub workspace: WorkspacePath,
     pub context: Vec<ContextItem>,
     pub prior_failure: Option<String>,
 }
 
-pub struct TaskOutcome {
-    pub task_id: TaskId,
-    pub status: TaskStatus,
+pub struct AttemptOutcome {
+    pub attempt_id: AttemptId,
+    pub status: AttemptStatus,
     pub summary: String,
     pub changed_files: Vec<FileChange>,
     pub commit: Option<CommitSha>,
@@ -663,7 +766,7 @@ pub struct TaskOutcome {
 }
 
 /// A2A's eight states, so a protocol bridge stays a mapping.
-pub enum TaskStatus {
+pub enum AttemptStatus {
     Submitted, Working, InputRequired, AuthRequired,
     Completed, Failed, Canceled,
     Rejected,   // WE declined the output — e.g. scope violation
@@ -709,7 +812,7 @@ Shipped: `ClaudeStreamJson`, `GenericJsonl`, `PlainRegex`, `Passthrough`.
 
 ```rust
 pub enum AgentEvent {
-    Started { post: UnitId, task: TaskId, pid: Option<u32> },
+    Started { post: UnitId, task: AttemptId, pid: Option<u32> },
     Message(String),
     ToolCall { name: String, brief: String },
     ToolResult { name: String, ok: bool, brief: String },
@@ -717,7 +820,7 @@ pub enum AgentEvent {
     CommandRun { cmd: String, status: Option<i32> },
     Usage(Usage),
     NeedsInput { question: String },
-    Finished { status: TaskStatus, summary: String },
+    Finished { status: AttemptStatus, summary: String },
     Failed { error: String, retryable: bool },
     Raw { line: String },
 }
@@ -754,7 +857,7 @@ exactly one hop.
 | Hop | Mechanism |
 |---|---|
 | Control → Coordination → Broker → dispatch | Rust function calls, one process |
-| Dispatch → post | `TaskAssignment` rendered to a text envelope + argv |
+| Dispatch → post | `AttemptSpec` rendered to a text envelope + argv |
 | Post → orchestrator | stdout → parser → `AgentEvent`; then `result.json`; then the diff |
 | Post → post | **none** — forbidden (see Topology) |
 | Orchestrator → operator | in-process events, TUI, digest |
@@ -767,7 +870,7 @@ an `Agent` impl as a struct. `CliAgent` turns that into argv and parses stdout;
 `A2aAgent` turns it into a `SendMessage` call. Nothing internal gains anything from
 HTTP and JSON-RPC to reach a process on the same machine.
 
-What *is* A2A-shaped is the **data model, not the transport** — `TaskStatus` is
+What *is* A2A-shaped is the **data model, not the transport** — `AttemptStatus` is
 A2A's eight states, outcomes map to `Artifact`, context items to `Message`/`Part` —
 so bridging at either edge stays a mapping rather than a redesign.
 

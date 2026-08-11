@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use args::Args;
 use wecode_core::{Admission, Budget, Cmp, Intent, IntentId, Link, Measure, Scope, Sphere, Status};
-use wecode_gov::{Action, Broker, Session, glob};
+use wecode_gov::{Action, ActionKind, Broker, Effective, Grant, Session, glob};
 use wecode_org::{Company, Post, Workspace, workspace};
 use wecode_store::{Store, horizon_from_str, intent_kind_from_str, standalone_reason_from_str};
 
@@ -38,6 +38,7 @@ INTENT
         --tokens <n>  --wall <secs>
         --horizon <now|week|month|quarter|year|indefinite>
         --personal  --force
+        --as <post>   act as an agent post; omitted means the operator
   wecode intent tree | show <id> | check <id>
   wecode intent link <id> --parent <p>
 
@@ -47,6 +48,7 @@ COCKPIT
 
 WORK
   wecode assign <intent> --to <post>   check the post may do it, then activate
+  wecode approve <merge|admission|budget|measure> [<what>] --as <post>
   wecode guard <post> <verb> <target>  authorise an action; records the decision
         verbs: read write run merge spend        --tokens <n> for spend
   wecode audit [--denied] [--alarms] [--path <glob>]
@@ -93,6 +95,7 @@ fn run(a: &Args) -> Res {
         ("board", _) => board(a),
         ("up", _) | ("cockpit", _) => cockpit(a),
         ("assign", _) => assign(a),
+        ("approve", _) => approve(a),
         ("guard", _) => guard(a),
         ("audit", _) => audit(a),
         ("", _) | ("help", _) | ("--help", _) => Ok(USAGE.to_string()),
@@ -219,8 +222,23 @@ fn parse_metric(spec: &str) -> Result<Measure, String> {
 }
 
 fn intent_add(a: &Args) -> Res {
-    let (store, _) = open(a)?;
+    let (store, company) = open(a)?;
     let intent = build_intent(a)?;
+
+    // A post may never define the criteria it will be judged by. Enforced here
+    // because this is the only path that creates one.
+    let who = actor(a, &company)?;
+    require_allowed(
+        &store,
+        &company,
+        &who,
+        &intent.id,
+        &Action::Define {
+            kind: intent.kind,
+        },
+        format!("defining a {}", intent.kind.as_str()).as_str(),
+    )?;
+
     let tree = store.load_tree()?;
 
     let verdict = Admission::decide(&intent, &tree, "operator", Vec::new());
@@ -328,14 +346,25 @@ fn assign(a: &Args) -> Res {
         .into());
     }
 
+    // Assigning is the chief's job, so the chief's authority is what gets checked
+    // — not the assignee's. Staffing requires the `staff` capability.
+    let who = managing_actor(a, &company)?;
+    require_allowed(
+        &store,
+        &company,
+        &who,
+        &id,
+        &Action::Staff,
+        "assigning work",
+    )?;
+
     let mut activated = intent.clone();
     activated.status = Status::Active;
     store.append_intent(&activated)?;
-    record(&store, &company, &post, &id, &Action::Staff)?;
 
     Ok(format!(
-        "  assigned {id} to {post_name} ({}, occupied by {})\n  status: active\n",
-        post.role, post.agent
+        "  {} assigned {id} to {post_name} ({}, occupied by {})\n  status: active\n",
+        who.post, post.role, post.agent
     ))
 }
 
@@ -353,25 +382,110 @@ fn find_post(company: &Company, name: &str) -> Result<Post, String> {
     })
 }
 
-/// Runs one action past the Broker under a post's authority, and records it.
+/// Whoever an action is performed by.
+///
+/// The operator holds the root grant and is the ultimate authority — they may
+/// always define. Any *agent* acting instead must name its post, and is then held
+/// to that post's grant. That asymmetry is the point: an agent cannot quietly
+/// inherit the operator's authority by omitting a flag.
+struct Actor {
+    post: String,
+    agent: String,
+    effective: Effective,
+}
+
+impl Actor {
+    fn operator() -> Self {
+        Self {
+            post: "operator".into(),
+            agent: "human".into(),
+            effective: Effective::of(vec![Grant::root()]),
+        }
+    }
+
+    fn of(company: &Company, post: &Post) -> Self {
+        Self {
+            post: post.name.clone(),
+            agent: post.agent.clone(),
+            effective: company.effective(post),
+        }
+    }
+}
+
+/// Resolves `--as <post>`, defaulting to the operator.
+fn actor(a: &Args, company: &Company) -> Result<Actor, String> {
+    match a.get("as") {
+        None => Ok(Actor::operator()),
+        Some("operator") => Ok(Actor::operator()),
+        Some(name) => Ok(Actor::of(company, &find_post(company, name)?)),
+    }
+}
+
+/// Resolves `--as <post>`, defaulting to the chief of staff when one exists.
+///
+/// Management actions default to the chief rather than the operator so that the
+/// governed path is the easy one.
+fn managing_actor(a: &Args, company: &Company) -> Result<Actor, String> {
+    if a.get("as").is_some() {
+        return actor(a, company);
+    }
+    Ok(company
+        .chief()
+        .map_or_else(Actor::operator, |c| Actor::of(company, c)))
+}
+
+/// Runs one action past the Broker under an actor's authority, and records it.
 fn record(
     store: &Store,
     company: &Company,
-    post: &Post,
+    actor: &Actor,
     intent: &IntentId,
     action: &Action,
 ) -> Result<wecode_gov::Decision, Box<dyn std::error::Error>> {
     let mut broker = Broker::new(company.charter.clone());
     let session = Session::new(
-        format!("cli-{}", post.name),
-        post.name.clone(),
-        post.agent.clone(),
+        format!("cli-{}", actor.post),
+        actor.post.clone(),
+        actor.agent.clone(),
         intent.clone(),
-        company.effective(post),
+        actor.effective.clone(),
     );
     let decision = broker.authorize(&session, action);
     store.append_records(broker.ledger())?;
     Ok(decision)
+}
+
+/// Records an action and fails unless it was allowed.
+///
+/// `record` alone returns the verdict; earlier code discarded it, which meant a
+/// denial was logged and then ignored. Nothing that changes state may do that.
+fn require_allowed(
+    store: &Store,
+    company: &Company,
+    actor: &Actor,
+    intent: &IntentId,
+    action: &Action,
+    what: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match record(store, company, actor, intent, action)? {
+        wecode_gov::Decision::Allow => Ok(()),
+        wecode_gov::Decision::RequireApproval { by } => Err(format!(
+            "{what} needs approval: {}\n  a holder must sign: wecode approve {} --as <post>",
+            wecode_store::audit::approval_name(by),
+            wecode_store::audit::approval_name(by)
+        )
+        .into()),
+        wecode_gov::Decision::Deny { reason, alarm, .. } => Err(format!(
+            "{what} refused for `{}`: {reason}{}",
+            actor.post,
+            if alarm {
+                "\n  ⚡ charter invariant — recorded as an alarm"
+            } else {
+                ""
+            }
+        )
+        .into()),
+    }
 }
 
 fn parse_action(a: &Args) -> Result<Action, String> {
@@ -411,7 +525,8 @@ fn guard(a: &Args) -> Res {
     let action = parse_action(a)?;
     // Attribution matters: an audit record with no intent cannot be correlated.
     let intent = IntentId::new(a.get("intent").unwrap_or("unattributed"));
-    let decision = record(&store, &company, &post, &intent, &action)?;
+    let who = Actor::of(&company, &post);
+    let decision = record(&store, &company, &who, &intent, &action)?;
     Ok(render::decision(
         &post.name,
         &post.agent,
@@ -439,6 +554,40 @@ fn board(a: &Args) -> Res {
         "" => Ok(board::portfolio(&tree, &audit)),
         id => Ok(board::focus(&tree, &audit, &IntentId::new(id))),
     }
+}
+
+/// A holder signs off on something the Broker gated.
+fn approve(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    let kind = match require(a.cmd(1), "what to approve")? {
+        "merge" => ActionKind::Merge,
+        "admission" => ActionKind::Admission,
+        "budget" | "budget-increase" => ActionKind::BudgetIncrease,
+        "measure" | "measure-amendment" => ActionKind::MeasureAmendment,
+        other => {
+            return Err(format!(
+                "unknown approval `{other}` (merge, admission, budget, measure)"
+            )
+            .into());
+        }
+    };
+    let who = actor(a, &company)?;
+    let intent = IntentId::new(a.get("intent").unwrap_or("unattributed"));
+
+    require_allowed(
+        &store,
+        &company,
+        &who,
+        &intent,
+        &Action::Approve { kind },
+        "approving",
+    )?;
+    Ok(format!(
+        "  {} approved {}{}\n",
+        who.post,
+        wecode_store::audit::approval_name(kind),
+        a.cmd(2).is_empty().then(String::new).unwrap_or_else(|| format!(": {}", a.cmd(2)))
+    ))
 }
 
 fn audit(a: &Args) -> Res {
