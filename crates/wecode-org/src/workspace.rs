@@ -16,6 +16,8 @@ pub const MARKER: &str = "company.toml";
 #[derive(Debug)]
 pub enum WorkspaceError {
     NotFound,
+    /// A named or given org that does not exist.
+    NoSuchOrg(String),
     Io(io::Error),
     Org(OrgError),
     AlreadyInitialised(PathBuf),
@@ -31,9 +33,18 @@ impl fmt::Display for WorkspaceError {
             Self::NotFound => write!(
                 f,
                 "no company workspace found\n\
-                 \x20 pass --org <dir>, run `wecode use <dir>` to set a default,\n\
-                 \x20 or `wecode init <dir>` to make one"
+                 \x20 pass --org <name>, run `wecode use <name>` to set a default,\n\
+                 \x20 or `wecode init <name>` to make one"
             ),
+            Self::NoSuchOrg(name) => {
+                let known = list().into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+                write!(f, "no org `{name}`")?;
+                if known.is_empty() {
+                    write!(f, " — none exist yet; `wecode init <name>` makes one")
+                } else {
+                    write!(f, " — have: {}", known.join(", "))
+                }
+            }
             Self::Io(e) => write!(f, "io: {e}"),
             Self::Org(e) => write!(f, "{e}"),
             Self::AlreadyInitialised(p) => {
@@ -147,6 +158,49 @@ pub fn find(start: &Path) -> Option<Workspace> {
     None
 }
 
+/// Where named workspaces live: `$WECODE_CONFIG/workspaces`, else
+/// `~/.wecode/workspaces`.
+#[must_use]
+pub fn workspaces_root() -> PathBuf {
+    match std::env::var("WECODE_CONFIG") {
+        Ok(dir) => expand_home(&dir).join("workspaces"),
+        Err(_) => expand_home("~/.wecode/workspaces"),
+    }
+}
+
+/// Interprets a workspace reference as either a path or a bare name.
+///
+/// Anything containing a separator, or starting with `~` or `.`, is a path.
+/// Everything else is a name looked up under [`workspaces_root`], so `--org cws`
+/// finds `~/.wecode/workspaces/cws` without the operator typing it.
+#[must_use]
+pub fn locate(reference: &str) -> PathBuf {
+    let r = reference.trim();
+    if r.contains(std::path::MAIN_SEPARATOR) || r.starts_with('~') || r.starts_with('.') {
+        expand_home(r)
+    } else {
+        workspaces_root().join(r)
+    }
+}
+
+/// Names of the workspaces under [`workspaces_root`], in order.
+#[must_use]
+pub fn list() -> Vec<(String, Workspace)> {
+    let Ok(entries) = fs::read_dir(workspaces_root()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Workspace)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let ws = Workspace::at(e.path());
+            let name = e.file_name().to_str()?.to_string();
+            ws.exists().then_some((name, ws))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 /// Where the chosen default workspace is remembered.
 ///
 /// `$WECODE_CONFIG` overrides the location. That exists so tests cannot clobber a
@@ -184,19 +238,19 @@ pub fn set_default(ws: &Workspace) -> Result<(), WorkspaceError> {
 /// should mean that company, whatever was last chosen globally.
 pub fn resolve(explicit: Option<&str>) -> Result<Workspace, WorkspaceError> {
     if let Some(p) = explicit {
-        let ws = Workspace::at(expand_home(p));
+        let ws = Workspace::at(locate(p));
         return if ws.exists() {
             Ok(ws)
         } else {
-            Err(WorkspaceError::NotFound)
+            Err(WorkspaceError::NoSuchOrg(p.to_string()))
         };
     }
     if let Ok(p) = std::env::var("WECODE_ORG") {
-        let ws = Workspace::at(expand_home(&p));
+        let ws = Workspace::at(locate(&p));
         return if ws.exists() {
             Ok(ws)
         } else {
-            Err(WorkspaceError::NotFound)
+            Err(WorkspaceError::NoSuchOrg(p))
         };
     }
     let cwd = std::env::current_dir()?;
@@ -331,8 +385,17 @@ mod tests {
     fn resolve_rejects_an_explicit_path_that_is_not_a_workspace() {
         assert!(matches!(
             resolve(Some("/definitely/not/here")).unwrap_err(),
-            WorkspaceError::NotFound
+            WorkspaceError::NoSuchOrg(_)
         ));
+    }
+
+    #[test]
+    fn a_bare_name_is_looked_up_but_a_path_is_taken_as_given() {
+        // The distinction that makes `--org cws` work without a full path.
+        assert_eq!(locate("/abs/path"), PathBuf::from("/abs/path"));
+        assert!(locate("./rel").ends_with("rel"));
+        assert_eq!(locate("cws"), workspaces_root().join("cws"));
+        assert_eq!(locate("  cws  "), workspaces_root().join("cws"));
     }
 
     #[test]

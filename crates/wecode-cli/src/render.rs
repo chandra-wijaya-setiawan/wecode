@@ -160,6 +160,34 @@ pub(crate) fn templates() -> String {
     out
 }
 
+/// Named orgs, and which is the default.
+#[must_use]
+pub(crate) fn orgs() -> String {
+    let found = wecode_org::workspace::list();
+    if found.is_empty() {
+        return format!(
+            "no orgs yet in {}\n  wecode init <name>\n",
+            wecode_org::workspace::workspaces_root().display()
+        );
+    }
+    let default = wecode_org::workspace::default_workspace();
+    let mut out = String::new();
+    for (name, ws) in found {
+        let mark = if default.as_ref().is_some_and(|d| d.root() == ws.root()) {
+            "*"
+        } else {
+            " "
+        };
+        let title = ws.load().map_or_else(
+            |e| format!("⚠ {e}"),
+            |c| format!("{} ({} posts)", c.name, c.posts.len()),
+        );
+        out.push_str(&format!("{mark} {name:<14} {title}\n"));
+    }
+    out.push_str("\n* = default. wecode use <name> to change.\n");
+    out
+}
+
 /// The company profile: who exists, what they may do, what outranks them.
 #[must_use]
 pub(crate) fn company(c: &Company) -> String {

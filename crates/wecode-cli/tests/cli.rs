@@ -252,6 +252,63 @@ fn a_remembered_default_is_used_outside_any_workspace() {
 }
 
 #[test]
+fn a_bare_name_resolves_under_the_workspaces_root() {
+    // `--org cws` should find ~/.wecode/workspaces/cws without typing the path.
+    let cfg = std::env::temp_dir().join("wecode-e2e-named-cfg");
+    let _ = std::fs::remove_dir_all(&cfg);
+
+    let run = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_wecode"));
+        cmd.args(args);
+        cmd.env_remove("WECODE_ORG");
+        cmd.env("WECODE_CONFIG", &cfg);
+        cmd.current_dir(Path::new("/"));
+        decode(cmd.output().expect("runs"))
+    };
+
+    run(&["init", "acme", "--template", "solo"]).assert_ok("init by name");
+    assert!(
+        cfg.join("workspaces/acme/company.toml").is_file(),
+        "a bare name should land under the workspaces root"
+    );
+
+    run(&["--org", "acme", "company", "show"])
+        .assert_ok("show by name")
+        .assert_contains("My Project");
+
+    run(&["orgs"]).assert_ok("orgs").assert_contains("acme");
+}
+
+#[test]
+fn an_unknown_org_name_lists_the_ones_that_exist() {
+    let cfg = std::env::temp_dir().join("wecode-e2e-unknown-cfg");
+    let _ = std::fs::remove_dir_all(&cfg);
+
+    let run = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_wecode"));
+        cmd.args(args);
+        cmd.env_remove("WECODE_ORG");
+        cmd.env("WECODE_CONFIG", &cfg);
+        cmd.current_dir(Path::new("/"));
+        decode(cmd.output().expect("runs"))
+    };
+
+    run(&["init", "real", "--template", "solo"]).assert_ok("init");
+    let r = run(&["--org", "ghost", "company", "show"]);
+    assert!(!r.ok());
+    r.assert_contains("no org `ghost`").assert_contains("real");
+}
+
+#[test]
+fn a_path_is_still_taken_as_a_path() {
+    // Anything with a separator must bypass the name lookup entirely.
+    let org = Org::unattended("named-path", "solo");
+    org.run(&["--org", org.dir.to_str().unwrap(), "company", "show"])
+        .assert_ok("full path")
+        .assert_contains("My Project");
+}
+
+#[test]
 fn use_refuses_a_directory_that_is_not_a_workspace() {
     let org = Org::unattended("default-bad", "solo");
     let r = org.run(&["use", "/tmp"]);
@@ -389,7 +446,7 @@ fn whoami_lists_only_the_commands_this_seat_may_call() {
 
 #[test]
 fn the_ledger_names_both_the_human_and_the_agent() {
-    let org = Org::new("sess-who", "software-company");
+    let org = Org::new("sess-ledger", "software-company");
     org.run(&["intent", "add", "vision", "v", "lead on export speed"])
         .assert_ok("add");
 

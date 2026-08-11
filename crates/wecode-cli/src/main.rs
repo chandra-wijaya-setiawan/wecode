@@ -21,19 +21,21 @@ and state. It is not a code repository; the repos it works on are declared insid
 it by path.
 
 SESSION
-  wecode use <dir>                     remember a default org (skips --org)
+  wecode orgs                          named orgs under ~/.wecode/workspaces
+  wecode use <name|dir>                remember a default org (skips --org)
   wecode login <user> [--as <post>] [--agent <n>]   open a session
   wecode whoami                        this seat, and the commands it may call
   wecode who                           everything connected right now
   wecode logout [--session <id>] [--all]
 
 SETUP
-  wecode init <dir> [--template <name>]   scaffold a company workspace
+  wecode init <name|dir> [--template <t>] scaffold a company workspace
+        a bare name lands in ~/.wecode/workspaces/<name>
   wecode templates                        list available templates
   wecode company show                     profile, posts, invariants
 
   Commands find the workspace by walking up from the working directory, or via
-  --org <dir> / $WECODE_ORG.
+  --org <name|dir> / $WECODE_ORG / the default set by `wecode use`.
 
 INTENT
   wecode intent add <kind> <id> \"<statement>\"   kind: vision|goal|project|task
@@ -103,6 +105,7 @@ fn run(a: &Args) -> Res {
         ("up", _) | ("cockpit", _) => cockpit(a),
         ("assign", _) => assign(a),
         ("use", _) => use_org(a),
+        ("orgs", _) => Ok(render::orgs()),
         ("login", _) => login(a),
         ("logout", _) => logout(a),
         ("who", _) => who(a),
@@ -132,9 +135,10 @@ fn require<'a>(value: &'a str, what: &str) -> Result<&'a str, String> {
 }
 
 fn init(a: &Args) -> Res {
-    let dir = require(a.cmd(1), "target directory")?;
+    let dir = require(a.cmd(1), "org name or directory")?;
     let template = a.get("template").unwrap_or("software-company");
-    let root = wecode_org::expand_home(dir);
+    // A bare name lands in ~/.wecode/workspaces; a path is taken as given.
+    let root = workspace::locate(dir);
 
     let written = workspace::init(&root, template)?;
     let company = Workspace::at(&root).load()?;
@@ -638,7 +642,7 @@ fn board(a: &Args) -> Res {
 /// Remembers a workspace as the default, so later commands need no --org.
 fn use_org(a: &Args) -> Res {
     let dir = require(a.cmd(1), "workspace directory")?;
-    let ws = Workspace::at(wecode_org::expand_home(dir));
+    let ws = Workspace::at(workspace::locate(dir));
     if !ws.exists() {
         return Err(format!("{} is not a company workspace", ws.root().display()).into());
     }
