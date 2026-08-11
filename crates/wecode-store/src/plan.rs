@@ -65,7 +65,8 @@ impl Store {
             "SELECT id, repo, objective, status, budget_tokens, budget_wall
              FROM projects ORDER BY id",
         )?;
-        let rows: Vec<(String, String, String, String, Option<i64>, Option<i64>)> = stmt
+        type ProjectRow = (String, String, String, String, Option<i64>, Option<i64>);
+        let rows: Vec<ProjectRow> = stmt
             .query_map([], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
             })?

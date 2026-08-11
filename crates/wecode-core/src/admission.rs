@@ -157,7 +157,7 @@ pub fn check_project(p: &Project, plan: &Plan, known_repos: &[String]) -> Vec<De
 
     if p.repo.trim().is_empty() {
         out.push(Defect::RepoMissing);
-    } else if !known_repos.is_empty() && !known_repos.iter().any(|r| *r == p.repo) {
+    } else if !known_repos.is_empty() && !known_repos.contains(&p.repo) {
         out.push(Defect::RepoUnknown {
             repo: p.repo.clone(),
             known: known_repos.to_vec(),

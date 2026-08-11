@@ -95,21 +95,11 @@ impl Workspace {
         self.root.join(MARKER)
     }
 
-    /// Append-only logs. Inside the workspace, which is safe precisely because a
-    /// workspace is not a code repo and no post ever runs here.
+    /// The database. Inside the workspace, which is safe precisely because a
+    /// workspace is not a code repo and no worker ever runs here.
     #[must_use]
-    pub fn state_dir(&self) -> PathBuf {
-        self.root.join("state")
-    }
-
-    #[must_use]
-    pub fn agents_dir(&self) -> PathBuf {
-        self.root.join("agents")
-    }
-
-    #[must_use]
-    pub fn templates_dir(&self) -> PathBuf {
-        self.root.join("templates")
+    pub fn db_path(&self) -> PathBuf {
+        self.root.join("wecode.db")
     }
 
     #[must_use]
@@ -123,25 +113,6 @@ impl Workspace {
         Ok(Company::parse(&text)?)
     }
 
-    /// Agent template names present on disk.
-    pub fn agents(&self) -> Vec<String> {
-        let Ok(entries) = fs::read_dir(self.agents_dir()) else {
-            return Vec::new();
-        };
-        let mut names: Vec<String> = entries
-            .filter_map(Result::ok)
-            .filter_map(|e| {
-                let p = e.path();
-                if p.extension().and_then(|s| s.to_str()) == Some("toml") {
-                    p.file_stem()?.to_str().map(str::to_string)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        names.sort();
-        names
-    }
 }
 
 /// Walks up from `start` looking for the marker file.
@@ -290,8 +261,6 @@ pub fn init(root: impl Into<PathBuf>, template_name: &str) -> Result<Vec<PathBuf
         fs::write(&path, contents)?;
         written.push(path);
     }
-    fs::create_dir_all(ws.state_dir())?;
-
     // Fail loudly here rather than at first use if a template ever regresses.
     ws.load()?;
     Ok(written)
@@ -316,7 +285,7 @@ mod tests {
 
         let ws = Workspace::at(&root);
         assert!(ws.exists());
-        assert!(ws.state_dir().is_dir());
+        assert!(!ws.db_path().exists(), "the db is created on first open");
 
         let c = ws.load().unwrap();
         assert_eq!(c.name, "Example Software Co");
@@ -325,13 +294,22 @@ mod tests {
     }
 
     #[test]
-    fn init_writes_agent_templates_for_every_post() {
-        let root = temp("agents");
+    fn a_workspace_is_two_files_plus_a_readme() {
+        let root = temp("shape");
         init(&root, "software-company").unwrap();
         let ws = Workspace::at(&root);
-        let agents = ws.agents();
-        assert!(agents.contains(&"claude-code".to_string()), "{agents:?}");
-        assert!(agents.contains(&"codex".to_string()), "{agents:?}");
+
+        assert!(ws.company_path().is_file(), "company.toml");
+        // The database is created on first open, not by init.
+        assert!(!ws.db_path().exists());
+
+        // Agents and prompt templates are inlined, so there are no subdirectories.
+        let c = ws.load().unwrap();
+        assert!(c.agents.contains_key("claude-code"));
+        assert!(c.agents.contains_key("codex"));
+        assert!(!c.templates.task_envelope.is_empty());
+        assert!(!root.join("agents").exists(), "no agents/ directory");
+        assert!(!root.join("templates").exists(), "no templates/ directory");
     }
 
     #[test]
@@ -405,10 +383,4 @@ mod tests {
         assert!(msg.contains("wecode init"), "{msg}");
     }
 
-    #[test]
-    fn agents_is_empty_when_the_directory_is_missing() {
-        let root = temp("noagents");
-        fs::create_dir_all(&root).unwrap();
-        assert!(Workspace::at(&root).agents().is_empty());
-    }
 }

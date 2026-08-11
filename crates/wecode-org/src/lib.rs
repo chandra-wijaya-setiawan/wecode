@@ -7,9 +7,8 @@
 
 pub mod company;
 pub mod template;
-pub mod toml;
 pub mod workspace;
 
-pub use company::{Attention, Company, OrgError, Post, Repo};
+pub use company::{AgentTemplate, Attention, Company, OrgError, Post, Repo, Templates, User};
 pub use template::Template;
 pub use workspace::{Workspace, WorkspaceError, expand_home, init, resolve};
