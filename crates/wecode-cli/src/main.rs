@@ -20,6 +20,12 @@ A company is a self-contained directory: profile, roles, posts, agent templates
 and state. It is not a code repository; the repos it works on are declared inside
 it by path.
 
+SESSION
+  wecode login <user> [--as <post>] [--agent <n>]   open a session
+  wecode whoami                        this seat, and the commands it may call
+  wecode who                           everything connected right now
+  wecode logout [--session <id>] [--all]
+
 SETUP
   wecode init <dir> [--template <name>]   scaffold a company workspace
   wecode templates                        list available templates
@@ -95,6 +101,10 @@ fn run(a: &Args) -> Res {
         ("board", _) => board(a),
         ("up", _) | ("cockpit", _) => cockpit(a),
         ("assign", _) => assign(a),
+        ("login", _) => login(a),
+        ("logout", _) => logout(a),
+        ("who", _) => who(a),
+        ("whoami", _) => whoami(a),
         ("approve", _) => approve(a),
         ("guard", _) => guard(a),
         ("audit", _) => audit(a),
@@ -227,15 +237,13 @@ fn intent_add(a: &Args) -> Res {
 
     // A post may never define the criteria it will be judged by. Enforced here
     // because this is the only path that creates one.
-    let who = actor(a, &company)?;
+    let who = actor(a, &store, &company)?;
     require_allowed(
         &store,
         &company,
         &who,
         &intent.id,
-        &Action::Define {
-            kind: intent.kind,
-        },
+        &Action::Define { kind: intent.kind },
         format!("defining a {}", intent.kind.as_str()).as_str(),
     )?;
 
@@ -348,7 +356,7 @@ fn assign(a: &Args) -> Res {
 
     // Assigning is the chief's job, so the chief's authority is what gets checked
     // — not the assignee's. Staffing requires the `staff` capability.
-    let who = managing_actor(a, &company)?;
+    let who = actor(a, &store, &company)?;
     require_allowed(
         &store,
         &company,
@@ -364,7 +372,9 @@ fn assign(a: &Args) -> Res {
 
     Ok(format!(
         "  {} assigned {id} to {post_name} ({}, occupied by {})\n  status: active\n",
-        who.post, post.role, post.agent
+        who.describe(),
+        post.role,
+        post.agent
     ))
 }
 
@@ -388,50 +398,115 @@ fn find_post(company: &Company, name: &str) -> Result<Post, String> {
 /// always define. Any *agent* acting instead must name its post, and is then held
 /// to that post's grant. That asymmetry is the point: an agent cannot quietly
 /// inherit the operator's authority by omitting a flag.
+/// Whoever an action is performed by: a seat, the agent typing for it, and the
+/// human crewing it when there is one.
 struct Actor {
     post: String,
     agent: String,
+    human: Option<String>,
+    session: String,
     effective: Effective,
 }
 
 impl Actor {
+    /// The root grant. Reachable only by typing `--as operator` — never by
+    /// omitting a flag, which is how authority used to leak.
     fn operator() -> Self {
         Self {
             post: "operator".into(),
-            agent: "human".into(),
+            agent: "cli".into(),
+            human: None,
+            session: "operator".into(),
             effective: Effective::of(vec![Grant::root()]),
         }
     }
 
-    fn of(company: &Company, post: &Post) -> Self {
+    fn of(company: &Company, post: &Post, session: &str, human: Option<String>) -> Self {
         Self {
             post: post.name.clone(),
-            agent: post.agent.clone(),
+            agent: std::env::var("WECODE_AGENT").unwrap_or_else(|_| post.agent.clone()),
+            human,
+            session: session.to_string(),
             effective: company.effective(post),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match &self.human {
+            Some(h) => format!("{} ({h} via {})", self.post, self.agent),
+            None => format!("{} ({})", self.post, self.agent),
         }
     }
 }
 
-/// Resolves `--as <post>`, defaulting to the operator.
-fn actor(a: &Args, company: &Company) -> Result<Actor, String> {
-    match a.get("as") {
-        None => Ok(Actor::operator()),
-        Some("operator") => Ok(Actor::operator()),
-        Some(name) => Ok(Actor::of(company, &find_post(company, name)?)),
+/// Resolves who is acting, in one order, for every state-changing command:
+///
+/// 1. `--session <id>`
+/// 2. `$WECODE_SESSION`
+/// 3. exactly one active session — the solo case
+/// 4. `--as <post>` — a deliberate override
+/// 5. refuse
+///
+/// Step 5 is the point. Nothing reaches the root grant by omission.
+fn actor(a: &Args, store: &Store, company: &Company) -> Result<Actor, Box<dyn std::error::Error>> {
+    if let Some(name) = a.get("as") {
+        if name == "operator" {
+            return Ok(Actor::operator());
+        }
+        let post = find_post(company, name)?;
+        let human = company.users_of(&post.name).first().map(|u| u.name.clone());
+        return Ok(Actor::of(company, &post, "adhoc", human));
     }
+
+    let live = store.sessions(company.session_ttl)?;
+    let wanted = a
+        .get("session")
+        .map(str::to_string)
+        .or_else(|| std::env::var("WECODE_SESSION").ok());
+
+    let chosen = match wanted {
+        Some(id) => live.iter().find(|s| s.id == id).cloned().ok_or_else(|| {
+            format!("session `{id}` is not active — `wecode who` lists live ones")
+        })?,
+        None => match live.len() {
+            1 => live[0].clone(),
+            0 => {
+                return Err(no_session_error(company).into());
+            }
+            _ => {
+                let mut msg =
+                    String::from("several sessions are active — name one with --session:\n");
+                for s in &live {
+                    msg.push_str(&format!("  {}  {}  {}\n", s.id, s.post, s.who()));
+                }
+                return Err(msg.into());
+            }
+        },
+    };
+
+    store.touch(&chosen.id)?;
+    let post = find_post(company, &chosen.post)?;
+    Ok(Actor::of(company, &post, &chosen.id, chosen.user.clone()))
 }
 
-/// Resolves `--as <post>`, defaulting to the chief of staff when one exists.
-///
-/// Management actions default to the chief rather than the operator so that the
-/// governed path is the easy one.
-fn managing_actor(a: &Args, company: &Company) -> Result<Actor, String> {
-    if a.get("as").is_some() {
-        return actor(a, company);
+fn no_session_error(company: &Company) -> String {
+    let mut msg = String::from("not logged in — `wecode login <user>`\n");
+    if company.users.is_empty() {
+        msg.push_str("  no users declared; add a [[users]] block to company.toml\n");
+    } else {
+        msg.push_str("  users: ");
+        msg.push_str(
+            &company
+                .users
+                .iter()
+                .map(|u| format!("{} ({})", u.name, u.post))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        msg.push('\n');
     }
-    Ok(company
-        .chief()
-        .map_or_else(Actor::operator, |c| Actor::of(company, c)))
+    msg.push_str("  or act explicitly with --as <post>");
+    msg
 }
 
 /// Runs one action past the Broker under an actor's authority, and records it.
@@ -444,12 +519,13 @@ fn record(
 ) -> Result<wecode_gov::Decision, Box<dyn std::error::Error>> {
     let mut broker = Broker::new(company.charter.clone());
     let session = Session::new(
-        format!("cli-{}", actor.post),
+        actor.session.clone(),
         actor.post.clone(),
         actor.agent.clone(),
         intent.clone(),
         actor.effective.clone(),
-    );
+    )
+    .crewed_with(actor.human.clone());
     let decision = broker.authorize(&session, action);
     store.append_records(broker.ledger())?;
     Ok(decision)
@@ -525,7 +601,8 @@ fn guard(a: &Args) -> Res {
     let action = parse_action(a)?;
     // Attribution matters: an audit record with no intent cannot be correlated.
     let intent = IntentId::new(a.get("intent").unwrap_or("unattributed"));
-    let who = Actor::of(&company, &post);
+    let human = company.users_of(&post.name).first().map(|u| u.name.clone());
+    let who = Actor::of(&company, &post, "guard", human);
     let decision = record(&store, &company, &who, &intent, &action)?;
     Ok(render::decision(
         &post.name,
@@ -556,6 +633,83 @@ fn board(a: &Args) -> Res {
     }
 }
 
+fn login(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    let name = require(a.cmd(1), "user name")?;
+
+    let user = company
+        .user(name)
+        .ok_or_else(|| no_session_error(&company))?
+        .clone();
+    let post_name = a.get("as").unwrap_or(&user.post).to_string();
+    let post = find_post(&company, &post_name)?;
+    let agent = a
+        .get("agent")
+        .map(str::to_string)
+        .unwrap_or_else(|| post.agent.clone());
+
+    let s = store.login(&post.name, &agent, Some(user.name.clone()))?;
+    let grant = company.grant_of(&post);
+
+    let mut out = format!("  session {}  ({})\n\n", s.id, s.who());
+    out.push_str(&render::whoami(&company, &s, &post, grant));
+    Ok(out)
+}
+
+fn logout(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    let live = store.sessions(company.session_ttl)?;
+
+    // Task episodes end with their task, not with a human leaving.
+    let mut closed = Vec::new();
+    if a.has("all") {
+        for s in live.iter().filter(|s| !s.is_autonomous()) {
+            store.logout(&s.id)?;
+            closed.push(s.id.clone());
+        }
+    } else if let Some(id) = a.get("session") {
+        store.logout(id)?;
+        closed.push(id.to_string());
+    } else {
+        match live.iter().filter(|s| !s.is_autonomous()).count() {
+            1 => {
+                let s = live
+                    .iter()
+                    .find(|s| !s.is_autonomous())
+                    .expect("counted one");
+                store.logout(&s.id)?;
+                closed.push(s.id.clone());
+            }
+            0 => return Ok("  no interactive session to close\n".into()),
+            _ => return Err("several sessions — name one with --session, or --all".into()),
+        }
+    }
+    Ok(format!("  closed {}\n", closed.join(", ")))
+}
+
+fn who(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    Ok(render::who(
+        &store.sessions_all()?,
+        company.session_ttl,
+        wecode_store::now_secs(),
+    ))
+}
+
+fn whoami(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    let live = store.sessions(company.session_ttl)?;
+    let Some(s) = live.first() else {
+        return Ok(format!("{}\n", no_session_error(&company)));
+    };
+    let s = a
+        .get("session")
+        .and_then(|id| live.iter().find(|x| x.id == id))
+        .unwrap_or(s);
+    let post = find_post(&company, &s.post)?;
+    Ok(render::whoami(&company, s, &post, company.grant_of(&post)))
+}
+
 /// A holder signs off on something the Broker gated.
 fn approve(a: &Args) -> Res {
     let (store, company) = open(a)?;
@@ -565,13 +719,12 @@ fn approve(a: &Args) -> Res {
         "budget" | "budget-increase" => ActionKind::BudgetIncrease,
         "measure" | "measure-amendment" => ActionKind::MeasureAmendment,
         other => {
-            return Err(format!(
-                "unknown approval `{other}` (merge, admission, budget, measure)"
-            )
-            .into());
+            return Err(
+                format!("unknown approval `{other}` (merge, admission, budget, measure)").into(),
+            );
         }
     };
-    let who = actor(a, &company)?;
+    let who = actor(a, &store, &company)?;
     let intent = IntentId::new(a.get("intent").unwrap_or("unattributed"));
 
     require_allowed(
@@ -584,9 +737,12 @@ fn approve(a: &Args) -> Res {
     )?;
     Ok(format!(
         "  {} approved {}{}\n",
-        who.post,
+        who.describe(),
         wecode_store::audit::approval_name(kind),
-        a.cmd(2).is_empty().then(String::new).unwrap_or_else(|| format!(": {}", a.cmd(2)))
+        a.cmd(2)
+            .is_empty()
+            .then(String::new)
+            .unwrap_or_else(|| format!(": {}", a.cmd(2)))
     ))
 }
 

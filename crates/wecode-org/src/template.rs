@@ -89,7 +89,7 @@ path = "~/projects/your-repo"
 # an agent that can both set the criteria and satisfy them is not governed.
 [roles.chief]
 read = ["**"]
-define = ["goal", "project", "task"]
+define = ["vision", "goal", "project", "task"]
 approve = ["admission", "budget-increase"]
 introspect = "tree"
 staff = true
@@ -118,6 +118,18 @@ approve = ["merge"]
 introspect = "own"
 tokens = 30000
 wall_secs = 300
+
+
+# ---------------------------------------------------------------- users --------
+# A person holding a seat. Authority lives on the post's role, so naming a user
+# adds accountability, not power. A post with no user is an agent-only seat.
+
+[[users]]
+name = "you"              # rename to yourself
+post = "chief"
+
+[session]
+ttl = "8h"                # idle timeout for an interactive session
 
 # ---------------------------------------------------------------- posts --------
 # A post is a seat; `agent` is whoever currently occupies it. Re-staff without
@@ -166,7 +178,7 @@ path = "~/projects/your-repo"
 
 [roles.chief]
 read = ["**"]
-define = ["goal", "project", "task"]
+define = ["vision", "goal", "project", "task"]
 approve = ["admission"]
 introspect = "tree"
 staff = true
@@ -178,6 +190,13 @@ write = ["src/**", "crates/**"]
 run = ["cargo *"]
 tokens = 200000
 wall_secs = 1800
+
+[[users]]
+name = "you"
+post = "chief"
+
+[session]
+ttl = "8h"
 
 [[posts]]
 name = "chief"
@@ -312,6 +331,48 @@ mod tests {
                 Company::parse(toml).unwrap_or_else(|e| panic!("{} does not parse: {e}", t.name));
             assert!(!c.name.is_empty());
             assert!(c.chief().is_some(), "{} has no chief post", t.name);
+        }
+    }
+
+    #[test]
+    fn every_template_declares_a_user_on_a_real_post() {
+        for t in all() {
+            let toml = t
+                .files
+                .iter()
+                .find(|(p, _)| *p == "company.toml")
+                .unwrap()
+                .1;
+            let c = Company::parse(toml).unwrap();
+            assert!(!c.users.is_empty(), "{} declares no users", t.name);
+            for u in &c.users {
+                assert!(
+                    c.post(&u.post).is_some(),
+                    "{}: user `{}` names post `{}`, which does not exist",
+                    t.name,
+                    u.name,
+                    u.post
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_template_sets_a_session_ttl() {
+        for t in all() {
+            let toml = t
+                .files
+                .iter()
+                .find(|(p, _)| *p == "company.toml")
+                .unwrap()
+                .1;
+            let c = Company::parse(toml).unwrap();
+            assert!(
+                c.session_ttl.as_secs() > 0 && c.session_ttl.as_secs() <= 86_400,
+                "{} has an implausible session ttl: {:?}",
+                t.name,
+                c.session_ttl
+            );
         }
     }
 

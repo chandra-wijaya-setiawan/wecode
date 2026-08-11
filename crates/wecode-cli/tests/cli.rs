@@ -73,6 +73,15 @@ impl Org {
     /// Creates a fresh workspace. Each test gets its own: they run in parallel,
     /// and the store is append-only shared state.
     fn new(name: &str, template: &str) -> Self {
+        let org = Self::unattended(name, template);
+        // Most tests act as somebody. The few that check the refusal path use
+        // `unattended` instead.
+        org.run(&["login", "you"]).assert_ok("login");
+        org
+    }
+
+    /// A workspace with nobody logged in.
+    fn unattended(name: &str, template: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("wecode-e2e-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         let org = Self { dir };
@@ -214,6 +223,182 @@ fn a_broken_company_file_names_the_problem() {
     let r = org.run(&["company", "show"]);
     assert!(!r.ok());
     r.assert_contains("name");
+}
+
+// -------------------------------------------------------------- session --------
+
+#[test]
+fn a_session_survives_between_processes() {
+    // The mechanism the whole agent workflow rests on: log in once, then every
+    // later invocation is a separate process that finds the seat by itself.
+    let org = Org::unattended("sess-persist", "solo");
+    org.run(&["login", "you"]).assert_ok("login");
+
+    org.run(&["intent", "add", "vision", "v", "lead on export speed"])
+        .assert_ok("no flags needed")
+        .assert_contains("saved");
+
+    org.run(&["audit"])
+        .assert_contains("chief")
+        .assert_contains("claude-code");
+}
+
+#[test]
+fn without_a_session_a_state_changing_command_refuses() {
+    // The regression that matters most: omitting a flag used to grant root.
+    let org = Org::unattended("sess-none", "solo");
+    let r = org.run(&["intent", "add", "vision", "v", "lead on export speed"]);
+    assert!(!r.ok(), "must refuse, not silently act as root");
+    r.assert_contains("not logged in")
+        .assert_contains("wecode login")
+        .assert_contains("you");
+
+    // And nothing was written.
+    org.run(&["intent", "tree"])
+        .assert_contains("no intents yet");
+}
+
+#[test]
+fn reading_needs_no_session() {
+    let org = Org::unattended("sess-read", "solo");
+    org.run(&["intent", "tree"]).assert_ok("tree");
+    org.run(&["company", "show"]).assert_ok("company show");
+    org.run(&["board"]).assert_ok("board");
+    org.run(&["who"]).assert_ok("who");
+}
+
+#[test]
+fn two_sessions_are_ambiguous_until_one_is_named() {
+    let org = Org::unattended("sess-two", "software-company");
+    let first = org
+        .run(&["login", "you"])
+        .assert_ok("login 1")
+        .stdout
+        .clone();
+    org.run(&["login", "you", "--as", "review"])
+        .assert_ok("login 2");
+
+    let r = org.run(&["intent", "add", "vision", "v", "lead on export speed"]);
+    assert!(!r.ok(), "two seats, no way to guess which");
+    r.assert_contains("several sessions");
+
+    // Naming one resolves it.
+    let id = first
+        .split_whitespace()
+        .find(|w| w.starts_with("s-"))
+        .expect("login prints a session id");
+    org.run(&[
+        "intent",
+        "add",
+        "vision",
+        "v",
+        "lead on export speed",
+        "--session",
+        id,
+    ])
+    .assert_ok("named session")
+    .assert_contains("saved");
+}
+
+#[test]
+fn an_idle_expired_session_is_not_used() {
+    let org = Org::unattended("sess-expired", "solo");
+    org.run(&["login", "you"]).assert_ok("login");
+
+    // Rewrite the session as opened long ago, and shorten the ttl. No sleeping.
+    let path = org.path("state/sessions.log");
+    let log = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, log.replace(&format!("at={}", now()), "at=1000")).unwrap();
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(&conf, text.replace("ttl = \"8h\"", "ttl = \"60s\"")).unwrap();
+
+    let r = org.run(&["intent", "add", "vision", "v", "lead on export speed"]);
+    assert!(!r.ok(), "an idle session must not authorise");
+    r.assert_contains("not logged in");
+}
+
+#[test]
+fn who_reports_the_connected_and_logout_clears_them() {
+    let org = Org::unattended("sess-who", "software-company");
+    org.run(&["who"]).assert_contains("nobody connected");
+
+    org.run(&["login", "you"]).assert_ok("login");
+    org.run(&["who"])
+        .assert_ok("who")
+        .assert_contains("chief")
+        .assert_contains("you via claude-code");
+
+    org.run(&["logout", "--all"]).assert_ok("logout");
+    org.run(&["who"]).assert_contains("nobody connected");
+}
+
+#[test]
+fn whoami_lists_only_the_commands_this_seat_may_call() {
+    let org = Org::new("sess-whoami", "software-company");
+    org.run(&["whoami"])
+        .assert_ok("whoami")
+        .assert_contains("assign")
+        .assert_contains("intent add");
+
+    // An engineer seat holds neither define nor staff.
+    let eng = Org::unattended("sess-whoami-eng", "software-company");
+    eng.run(&["login", "you", "--as", "impl"])
+        .assert_ok("login");
+    let out = eng.run(&["whoami"]).assert_ok("whoami").all();
+    assert!(!out.contains("assign"), "engineer cannot staff:\n{out}");
+    assert!(
+        !out.contains("intent add"),
+        "engineer cannot define:\n{out}"
+    );
+}
+
+#[test]
+fn the_ledger_names_both_the_human_and_the_agent() {
+    let org = Org::new("sess-crew", "software-company");
+    org.run(&["intent", "add", "vision", "v", "lead on export speed"])
+        .assert_ok("add");
+
+    let log = std::fs::read_to_string(org.path("state/audit.log")).unwrap();
+    assert!(log.contains("human=you"), "{log}");
+    assert!(
+        log.contains("agent=claude-code") || log.contains("occupant=claude-code"),
+        "{log}"
+    );
+    assert!(
+        log.contains("session=s-"),
+        "the real session id, not cli-<post>:\n{log}"
+    );
+}
+
+#[test]
+fn as_operator_is_the_only_way_to_reach_root() {
+    let org = Org::unattended("sess-operator", "solo");
+    // No session, but an explicit override still works — deliberately typed.
+    org.run(&[
+        "intent",
+        "add",
+        "vision",
+        "v",
+        "lead on export speed",
+        "--as",
+        "operator",
+    ])
+    .assert_ok("explicit operator")
+    .assert_contains("saved");
+
+    let log = std::fs::read_to_string(org.path("state/audit.log")).unwrap();
+    assert!(
+        log.contains("post=operator"),
+        "recorded as operator:\n{log}"
+    );
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 // --------------------------------------------------------------- intent --------
@@ -481,7 +666,11 @@ fn the_audit_sequence_is_monotonic_across_processes() {
         .lines()
         .filter_map(|l| l.split_whitespace().next()?.parse().ok())
         .collect();
-    assert_eq!(seqs, vec![1, 2, 3], "one ledger, one sequence:\n{out}");
+    // Contiguous from 1, not a fixed count: seeding also records `define`
+    // actions now, so pinning the length would just be brittle.
+    let expected: Vec<u64> = (1..=seqs.len() as u64).collect();
+    assert_eq!(seqs, expected, "one ledger, one sequence:\n{out}");
+    assert!(seqs.len() > 3, "the three writes must be in there:\n{out}");
 }
 
 #[test]

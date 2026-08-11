@@ -2,10 +2,12 @@
 //!
 //! Pure string functions so the output is testable without a terminal.
 
+use std::time::Duration;
 use wecode_core::{Admission, Intent, IntentId, IntentKind, IntentTree, Link, Measure, Status};
-use wecode_gov::{Action, ControlMode, Decision, Invariant};
-use wecode_org::Company;
-use wecode_store::AuditLine;
+
+use wecode_gov::{Action, ControlMode, Decision, Grant, Invariant};
+use wecode_org::{Company, Post};
+use wecode_store::{AuditLine, SessionInfo};
 
 #[must_use]
 pub(crate) fn kind_tag(kind: IntentKind) -> &'static str {
@@ -225,6 +227,114 @@ fn invariant_line(inv: &Invariant) -> String {
         Invariant::MaxTokens(n) => format!("max tokens     {n}"),
         Invariant::MaxWallSecs(n) => format!("max wall       {n}s"),
     }
+}
+
+/// The commands a grant unlocks.
+///
+/// **This is the discovery mechanism.** An agent logs in, asks `whoami`, and learns
+/// its surface instead of guessing or hardcoding role names. Kept as one function
+/// because an MCP server would expose exactly this list as its tool set — the
+/// derivation should exist once.
+#[must_use]
+pub(crate) fn available_commands(grant: &Grant) -> Vec<(&'static str, String)> {
+    let mut out = vec![
+        ("intent tree", "the hierarchy".to_string()),
+        ("intent show <id>", "what an intent serves".to_string()),
+        ("board [<id>]", "the cockpit".to_string()),
+        ("audit", "the ledger".to_string()),
+    ];
+    if !grant.define.is_empty() {
+        let kinds: Vec<&str> = grant.define.iter().map(|k| k.as_str()).collect();
+        out.push(("intent add", format!("may define: {}", kinds.join(", "))));
+    }
+    if grant.staff {
+        out.push(("assign <intent> --to <post>", "dispatch work".to_string()));
+    }
+    if !grant.approve.is_empty() {
+        let kinds: Vec<String> = grant
+            .approve
+            .iter()
+            .map(|k| wecode_store::audit::approval_name(*k).to_string())
+            .collect();
+        out.push(("approve <what>", format!("may sign: {}", kinds.join(", "))));
+    }
+    out
+}
+
+/// The current seat, and what it may do.
+#[must_use]
+pub(crate) fn whoami(
+    company: &Company,
+    s: &SessionInfo,
+    post: &Post,
+    grant: Option<&Grant>,
+) -> String {
+    let mut out = format!(
+        "{}  ·  {}\n  seat     {} ({})\n  crew     {}\n",
+        company.name,
+        s.id,
+        post.name,
+        post.role,
+        s.who()
+    );
+
+    let Some(g) = grant else {
+        out.push_str("\n  ⚠ role has no grant — this seat can do nothing\n");
+        return out;
+    };
+
+    if !g.write.is_empty() {
+        out.push_str(&format!("  writes   {}\n", g.write.join(", ")));
+    }
+    if let Some(t) = g.tokens {
+        out.push_str(&format!("  budget   {t} tokens\n"));
+    }
+
+    out.push_str("\ncommands\n");
+    for (cmd, note) in available_commands(g) {
+        out.push_str(&format!("  {cmd:<28} {note}\n"));
+    }
+    out
+}
+
+fn ago(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+/// Everything connected right now.
+#[must_use]
+pub(crate) fn who(sessions: &[SessionInfo], ttl: Duration, now: u64) -> String {
+    if sessions.is_empty() {
+        return "nobody connected — wecode login <user>\n".to_string();
+    }
+    let mut out = format!(
+        "{:<11} {:<10} {:<24} {:<7} {:<7} {}\n",
+        "session", "post", "crew", "age", "idle", "state"
+    );
+    for s in sessions {
+        let expired = s.is_expired(ttl, now);
+        out.push_str(&format!(
+            "{:<11} {:<10} {:<24} {:<7} {:<7} {}\n",
+            s.id,
+            s.post,
+            s.who(),
+            ago(s.age_secs(now)),
+            ago(s.idle_secs(now)),
+            if expired {
+                "expired"
+            } else if s.is_autonomous() {
+                "working"
+            } else {
+                "live"
+            }
+        ));
+    }
+    out
 }
 
 /// One authorisation verdict, with the reason and what happens next.

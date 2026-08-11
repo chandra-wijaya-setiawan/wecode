@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::time::Duration;
 
 use wecode_core::IntentKind;
 use wecode_gov::{ActionKind, Charter, Effective, Grant, Introspect, Invariant, Network};
@@ -15,6 +16,10 @@ pub enum OrgError {
     UnknownRole {
         post: String,
         role: String,
+    },
+    UnknownPost {
+        user: String,
+        post: String,
     },
     BadValue {
         at: String,
@@ -37,6 +42,9 @@ impl fmt::Display for OrgError {
             Self::Missing(what) => write!(f, "company.toml is missing {what}"),
             Self::UnknownRole { post, role } => {
                 write!(f, "post `{post}` names role `{role}`, which is not defined")
+            }
+            Self::UnknownPost { user, post } => {
+                write!(f, "user `{user}` names post `{post}`, which is not defined")
             }
             Self::BadValue { at, value } => write!(f, "bad value at {at}: `{value}`"),
             Self::Escalation { role } => {
@@ -67,6 +75,14 @@ pub struct Post {
     pub role: String,
     /// Which agent template currently occupies the seat.
     pub agent: String,
+}
+
+/// A person, holding a seat. Distinct from the agent that types for that seat:
+/// authority lives on the post's role, so a user adds accountability, not power.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct User {
+    pub name: String,
+    pub post: String,
 }
 
 /// The operator's attention budget — the binding constraint on concurrency.
@@ -105,6 +121,9 @@ pub struct Company {
     pub repos: Vec<Repo>,
     pub roles: BTreeMap<String, Grant>,
     pub posts: Vec<Post>,
+    pub users: Vec<User>,
+    /// Idle timeout for interactive sessions.
+    pub session_ttl: Duration,
 }
 
 impl Company {
@@ -112,6 +131,17 @@ impl Company {
     #[must_use]
     pub fn chief(&self) -> Option<&Post> {
         self.posts.iter().find(|p| p.role == "chief")
+    }
+
+    #[must_use]
+    pub fn user(&self, name: &str) -> Option<&User> {
+        self.users.iter().find(|u| u.name == name)
+    }
+
+    /// The people crewing a seat. Empty means the seat is agent-only.
+    #[must_use]
+    pub fn users_of(&self, post: &str) -> Vec<&User> {
+        self.users.iter().filter(|u| u.post == post).collect()
     }
 
     #[must_use]
@@ -161,6 +191,12 @@ impl Company {
             repos: parse_repos(&doc),
             roles: parse_roles(&doc)?,
             posts: parse_posts(&doc)?,
+            users: parse_users(&doc)?,
+            session_ttl: doc
+                .table_get("session", "ttl")
+                .and_then(Value::as_str)
+                .and_then(parse_duration)
+                .unwrap_or(Duration::from_secs(8 * 3600)),
         };
         company.validate()?;
         Ok(company)
@@ -179,6 +215,14 @@ impl Company {
                 return Err(OrgError::UnknownRole {
                     post: post.name.clone(),
                     role: post.role.clone(),
+                });
+            }
+        }
+        for user in &self.users {
+            if self.post(&user.post).is_none() {
+                return Err(OrgError::UnknownPost {
+                    user: user.name.clone(),
+                    post: user.post.clone(),
                 });
             }
         }
@@ -354,6 +398,42 @@ fn parse_posts(doc: &toml::Doc) -> Result<Vec<Post>, OrgError> {
         });
     }
     Ok(out)
+}
+
+fn parse_users(doc: &toml::Doc) -> Result<Vec<User>, OrgError> {
+    let mut out = Vec::new();
+    for t in doc.array("users") {
+        let name = t
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or(OrgError::Missing("[[users]] name"))?
+            .to_string();
+        out.push(User {
+            post: t
+                .get("post")
+                .and_then(Value::as_str)
+                .ok_or(OrgError::Missing("[[users]] post"))?
+                .to_string(),
+            name,
+        });
+    }
+    Ok(out)
+}
+
+/// Parses `30m`, `8h`, `7d`, or a bare number of seconds.
+pub fn parse_duration(s: &str) -> Option<Duration> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last()? {
+        's' => (&s[..s.len() - 1], 1),
+        'm' => (&s[..s.len() - 1], 60),
+        'h' => (&s[..s.len() - 1], 3600),
+        'd' => (&s[..s.len() - 1], 86_400),
+        _ => (s, 1),
+    };
+    num.trim()
+        .parse::<u64>()
+        .ok()
+        .map(|n| Duration::from_secs(n * mult))
 }
 
 fn action_kind(s: &str) -> Option<ActionKind> {

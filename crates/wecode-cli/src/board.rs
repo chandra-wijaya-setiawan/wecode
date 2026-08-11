@@ -356,7 +356,9 @@ mod tests {
     fn line(intent: &str, action: &str, target: &str, outcome: &str) -> AuditLine {
         AuditLine {
             seq: 1,
+            session: "s-test".into(),
             post: "impl".into(),
+            human: "chandra".into(),
             occupant: "claude-code".into(),
             intent: intent.into(),
             source: "broker".into(),

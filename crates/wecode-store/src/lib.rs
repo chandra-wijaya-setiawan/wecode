@@ -2,10 +2,12 @@
 
 pub mod audit;
 pub mod codec;
+pub mod session;
 
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use wecode_core::{Intent, IntentTree, TreeError};
 use wecode_gov::Record;
@@ -15,6 +17,7 @@ pub use codec::{
     CodecError, decode_intent, encode_intent, horizon_from_str, intent_kind_from_str,
     standalone_reason_from_str,
 };
+pub use session::{SessionInfo, now_secs};
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -78,6 +81,64 @@ impl Store {
     #[must_use]
     pub fn audit_path(&self) -> PathBuf {
         self.root.join("audit.log")
+    }
+
+    #[must_use]
+    pub fn sessions_path(&self) -> PathBuf {
+        self.root.join("sessions.log")
+    }
+
+    fn sessions_log(&self) -> Result<String, StoreError> {
+        let p = self.sessions_path();
+        if p.exists() {
+            Ok(fs::read_to_string(p)?)
+        } else {
+            Ok(String::new())
+        }
+    }
+
+    /// Opens a session and returns it. The seed keeps ids apart when two opens
+    /// land in the same second.
+    pub fn login(
+        &self,
+        post: &str,
+        agent: &str,
+        user: Option<String>,
+    ) -> Result<SessionInfo, StoreError> {
+        let seed = self.sessions_log()?.len() as u64;
+        let s = session::open(post, agent, user, seed);
+        self.append_line(&self.sessions_path(), &session::encode_open(&s))?;
+        Ok(s)
+    }
+
+    pub fn logout(&self, id: &str) -> Result<(), StoreError> {
+        self.append_line(
+            &self.sessions_path(),
+            &session::encode_close(id, now_secs()),
+        )
+    }
+
+    /// Refreshes a session, but only when it is stale enough to be worth a line.
+    pub fn touch(&self, id: &str) -> Result<(), StoreError> {
+        let now = now_secs();
+        let stale = session::fold(&self.sessions_log()?)
+            .into_iter()
+            .find(|s| s.id == id)
+            .is_some_and(|s| s.idle_secs(now) >= session::TOUCH_INTERVAL);
+        if stale {
+            self.append_line(&self.sessions_path(), &session::encode_touch(id, now))?;
+        }
+        Ok(())
+    }
+
+    /// Sessions open and not idle-expired.
+    pub fn sessions(&self, ttl: Duration) -> Result<Vec<SessionInfo>, StoreError> {
+        Ok(session::active(&self.sessions_log()?, ttl, now_secs()))
+    }
+
+    /// Every open session, expired included — for reporting staleness.
+    pub fn sessions_all(&self) -> Result<Vec<SessionInfo>, StoreError> {
+        Ok(session::fold(&self.sessions_log()?))
     }
 
     /// Appends one intent. The log is the record; the tree is a fold over it.
@@ -305,6 +366,7 @@ mod tests {
             session: s.id,
             post: s.post,
             occupant: s.occupant,
+            human: None,
             intent: s.intent,
             action: Action::Write {
                 path: path.to_string(),

@@ -63,6 +63,7 @@ pub fn encode_record(r: &Record) -> String {
         format!("session={}", r.session),
         format!("post={}", r.post),
         format!("occupant={}", r.occupant),
+        format!("human={}", r.human.clone().unwrap_or_default()),
         format!("intent={}", r.intent),
         format!("source={}", source_str(r.source)),
         format!("action={verb}"),
@@ -80,8 +81,14 @@ pub fn encode_record(r: &Record) -> String {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct AuditLine {
     pub seq: u64,
+    /// The session this action belonged to. Written since the first version and
+    /// silently dropped on decode until now, so the ledger could not be joined to
+    /// sessions at all.
+    pub session: String,
     pub post: String,
     pub occupant: String,
+    /// The person crewing the seat; empty for an autonomous agent.
+    pub human: String,
     pub intent: String,
     pub source: String,
     pub action: String,
@@ -111,8 +118,10 @@ pub fn decode_record(line: &str) -> Option<AuditLine> {
     }
     Some(AuditLine {
         seq: f.opt("seq")?.parse().ok()?,
+        session: f.opt("session").unwrap_or_default().to_string(),
         post: f.opt("post").unwrap_or_default().to_string(),
         occupant: f.opt("occupant").unwrap_or_default().to_string(),
+        human: f.opt("human").unwrap_or_default().to_string(),
         intent: f.opt("intent").unwrap_or_default().to_string(),
         source: f.opt("source").unwrap_or_default().to_string(),
         action: f.opt("action").unwrap_or_default().to_string(),
@@ -260,5 +269,48 @@ mod tests {
     #[test]
     fn a_foreign_line_is_not_an_audit_record() {
         assert!(decode_record("intent\tid=x").is_none());
+    }
+
+    #[test]
+    fn the_session_id_survives_the_round_trip() {
+        // Regression: `session=` was written by encode and dropped by decode, so
+        // the ledger could not be joined to sessions. Every test passed anyway.
+        let lines = ledger_of(&[Action::Write {
+            path: "crates/export/a.rs".into(),
+        }]);
+        assert!(lines[0].contains("session=s1"), "{}", lines[0]);
+        assert_eq!(decode_record(&lines[0]).unwrap().session, "s1");
+    }
+
+    #[test]
+    fn the_human_crewing_the_seat_is_recorded() {
+        let mut b = Broker::new(Charter::default());
+        let s = Session::new(
+            "s1",
+            "chief",
+            "claude-code",
+            IntentId::new("caching"),
+            Effective::of(vec![Grant::root()]),
+        )
+        .crewed_with(Some("chandra".into()));
+        b.authorize(
+            &s,
+            &Action::Write {
+                path: "a.rs".into(),
+            },
+        );
+
+        let line = encode_record(&b.ledger()[0]);
+        let d = decode_record(&line).unwrap();
+        assert_eq!(d.human, "chandra");
+        assert_eq!(d.occupant, "claude-code", "both are recorded, flatly");
+    }
+
+    #[test]
+    fn an_autonomous_seat_records_an_empty_human() {
+        let lines = ledger_of(&[Action::Write {
+            path: "a.rs".into(),
+        }]);
+        assert_eq!(decode_record(&lines[0]).unwrap().human, "");
     }
 }
