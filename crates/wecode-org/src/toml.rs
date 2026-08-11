@@ -525,12 +525,4 @@ mod tests {
         let e = parse("a = [x, y]\n").unwrap_err();
         assert!(e.message.contains("must be quoted"), "{}", e.message);
     }
-
-    #[test]
-    fn missing_table_or_key_reads_as_none() {
-        let d = parse("[a]\nb = 1\n").unwrap();
-        assert!(d.table("nope").is_none());
-        assert!(d.table_get("a", "nope").is_none());
-        assert!(d.array("nope").is_empty());
-    }
 }

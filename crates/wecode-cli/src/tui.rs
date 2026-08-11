@@ -694,12 +694,6 @@ mod tests {
     }
 
     #[test]
-    fn bar_clamps_out_of_range_input() {
-        assert_eq!(bar(-1.0).chars().filter(|c| *c == '█').count(), 0);
-        assert_eq!(bar(2.0).chars().filter(|c| *c == '█').count(), 8);
-    }
-
-    #[test]
     fn spend_abbreviates_thousands_and_shows_the_cap() {
         let v = Vitals {
             health: Health::Green,

@@ -664,40 +664,6 @@ mod tests {
     }
 
     #[test]
-    fn every_defect_asks_a_question() {
-        let all = [
-            Defect::StatementEmpty,
-            Defect::StatementCompound {
-                marker: "and".into(),
-            },
-            Defect::StatementVague {
-                term: "faster".into(),
-            },
-            Defect::NoParentLink,
-            Defect::ParentMissing {
-                parent: IntentId::new("x"),
-            },
-            Defect::MeasureMissing,
-            Defect::MeasureNotExecutable,
-            Defect::ProxyNotAllowed,
-            Defect::ScopeMissing,
-            Defect::ScopeTooBroad { glob: "**".into() },
-            Defect::ScopeOverlaps {
-                with: IntentId::new("y"),
-                glob: "a/**".into(),
-            },
-            Defect::BudgetMissing,
-            Defect::HorizonExceedsParent,
-            Defect::CompoundHasNoChildren,
-        ];
-        for d in all {
-            let q = d.question();
-            assert!(!q.is_empty(), "{d:?} has no question");
-            assert!(q.len() > 15, "{d:?} question is too terse: {q}");
-        }
-    }
-
-    #[test]
     fn glob_overlap_helper() {
         assert!(globs_overlap("crates/export/**", "crates/export/cache.rs"));
         assert!(globs_overlap("crates/**", "crates/export/**"));

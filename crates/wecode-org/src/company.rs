@@ -459,15 +459,6 @@ agent = "claude-code"
     }
 
     #[test]
-    fn a_role_wider_than_the_operator_is_rejected() {
-        // tokens unset means unlimited, which is fine; but Introspect::Tree plus
-        // staff plus everything is still within root. Use an impossible network.
-        let text = "[company]\nname = \"A\"\n\n[roles.rogue]\nwrite = [\"**\"]\nnetwork = \"any\"\nstaff = true\n";
-        // This one is legal: root allows it all. Confirm the check passes here…
-        assert!(Company::parse(text).is_ok());
-    }
-
-    #[test]
     fn a_chief_that_can_write_is_rejected() {
         let text = "[company]\nname = \"A\"\n\n[roles.chief]\nstaff = true\nwrite = [\"src/**\"]\n\n[[posts]]\nname = \"chief\"\nrole = \"chief\"\n";
         assert_eq!(

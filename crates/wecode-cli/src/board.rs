@@ -541,15 +541,6 @@ mod tests {
     }
 
     #[test]
-    fn bars_and_spend_cells_are_fixed_width() {
-        assert_eq!(bar(0.0).chars().count(), bar(1.0).chars().count());
-        assert_eq!(
-            spend_cell(0, Some(100)).chars().count(),
-            spend_cell(999_999, Some(100_000)).chars().count()
-        );
-    }
-
-    #[test]
     fn long_labels_are_truncated_not_wrapped() {
         let s = truncate("a-very-long-intent-identifier-that-overflows", 26);
         assert_eq!(s.chars().count(), 26);

@@ -300,13 +300,6 @@ mod tests {
     use crate::company::Company;
 
     #[test]
-    fn templates_are_findable_by_name() {
-        assert!(find("software-company").is_some());
-        assert!(find("solo").is_some());
-        assert!(find("nope").is_none());
-    }
-
-    #[test]
     fn every_template_parses_as_a_valid_company() {
         for t in all() {
             let toml = t

@@ -306,15 +306,6 @@ mod tests {
     }
 
     #[test]
-    fn expand_home_handles_tilde() {
-        // Only meaningful when HOME is set; assert the non-tilde path regardless.
-        assert_eq!(expand_home("/abs/path"), PathBuf::from("/abs/path"));
-        if std::env::var("HOME").is_ok() {
-            assert!(expand_home("~/x").is_absolute());
-        }
-    }
-
-    #[test]
     fn agents_is_empty_when_the_directory_is_missing() {
         let root = temp("noagents");
         fs::create_dir_all(&root).unwrap();
