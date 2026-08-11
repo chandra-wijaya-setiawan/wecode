@@ -251,9 +251,16 @@ pub fn check_task(t: &Task, plan: &Plan) -> Vec<Defect> {
         }
     }
 
-    // Overlap matters only between tasks that could run at once. Two things stop
-    // that: a dependency in either direction sequences them, and a parent/child
-    // relation means one contains the other rather than competing with it.
+    // Overlap matters only between tasks that could run at once. A finished task is
+    // not one of them: its scope is history, and letting a newly added task make an
+    // old one retroactively defective reports the fault against the wrong task.
+    if t.status.is_closed() {
+        return out;
+    }
+
+    // Two further things stop concurrency: a dependency in either direction
+    // sequences them, and a parent/child relation means one contains the other
+    // rather than competing with it.
     for other in plan.tasks_of(&t.project) {
         if other.id == t.id
             || other.status.is_closed()
@@ -559,6 +566,28 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "two concurrent siblings on the same paths is a real conflict"
+        );
+    }
+
+    #[test]
+    fn a_finished_task_is_not_made_defective_by_a_later_one() {
+        // The board computes defects for every row, so this surfaced as a done task
+        // showing "1 defect" the moment an overlapping task was added.
+        let mut plan = seeded();
+        let mut done = good_task();
+        done.status = TaskStatus::Done;
+        plan.add_task(done.clone()).unwrap();
+
+        let newcomer = Task::new("later", "caching", "revisit the export writer")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/export/**"]))
+            .budgeted(budget());
+        plan.add_task(newcomer).unwrap();
+
+        assert!(
+            check_task(&done, &plan).is_empty(),
+            "a finished task cannot conflict: {:?}",
+            check_task(&done, &plan)
         );
     }
 

@@ -17,7 +17,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{DefaultTerminal, Frame};
-use wecode_core::{Plan, ProjectId, Task, TaskId};
+use wecode_core::{Plan, Project, ProjectId, ProjectStatus, Task, TaskId, TaskStatus};
 use wecode_org::Company;
 use wecode_store::{AuditLine, AuditQuery, Store};
 
@@ -54,9 +54,19 @@ impl Subject {
 /// One visible line: a subject at a depth, with its derived vitals.
 struct RowItem {
     subject: Subject,
-    depth: usize,
+    /// Already carries its own indentation and tree glyph, so a separate depth
+    /// field would be a second source of truth for the same thing.
     label: String,
+    /// The declared state, as a mark and a word. Distinct from `vitals.health`,
+    /// which is computed — a task can be perfectly healthy and not started.
+    status: String,
     vitals: Vitals,
+}
+
+impl RowItem {
+    fn is_project(&self) -> bool {
+        matches!(self.subject, Subject::Project(_))
+    }
 }
 
 struct App {
@@ -123,30 +133,35 @@ impl App {
         match self.focus.clone() {
             None => {
                 for p in self.plan.projects() {
-                    rows.push(project_row(&self.plan, p, &l, &self.known_repos, 0));
-                    for t in sorted(self.plan.roots_of(&p.id)) {
-                        rows.push(task_row(&self.plan, t, &l, 1));
+                    rows.push(project_row(&self.plan, p, &l, &self.known_repos));
+                    let roots = sorted(self.plan.roots_of(&p.id));
+                    for (i, t) in roots.iter().enumerate() {
+                        rows.push(task_row(&self.plan, t, &l, 1, last(i, roots.len())));
                     }
                 }
             }
             Some(Subject::Project(id)) => {
                 if let Some(p) = self.plan.project(&id) {
-                    rows.push(project_row(&self.plan, p, &l, &self.known_repos, 0));
-                    for t in sorted(self.plan.roots_of(&id)) {
-                        rows.push(task_row(&self.plan, t, &l, 1));
-                        for k in sorted(self.plan.subtasks(&t.id)) {
-                            rows.push(task_row(&self.plan, k, &l, 2));
+                    rows.push(project_row(&self.plan, p, &l, &self.known_repos));
+                    let roots = sorted(self.plan.roots_of(&id));
+                    for (i, t) in roots.iter().enumerate() {
+                        rows.push(task_row(&self.plan, t, &l, 1, last(i, roots.len())));
+                        let kids = sorted(self.plan.subtasks(&t.id));
+                        for (j, k) in kids.iter().enumerate() {
+                            rows.push(task_row(&self.plan, k, &l, 2, last(j, kids.len())));
                         }
                     }
                 }
             }
             Some(Subject::Task(id)) => {
                 if let Some(t) = self.plan.task(&id) {
-                    rows.push(task_row(&self.plan, t, &l, 0));
-                    for k in sorted(self.plan.subtasks(&id)) {
-                        rows.push(task_row(&self.plan, k, &l, 1));
-                        for g in sorted(self.plan.subtasks(&k.id)) {
-                            rows.push(task_row(&self.plan, g, &l, 2));
+                    rows.push(task_row(&self.plan, t, &l, 0, true));
+                    let kids = sorted(self.plan.subtasks(&id));
+                    for (i, k) in kids.iter().enumerate() {
+                        rows.push(task_row(&self.plan, k, &l, 1, last(i, kids.len())));
+                        let grand = sorted(self.plan.subtasks(&k.id));
+                        for (j, g) in grand.iter().enumerate() {
+                            rows.push(task_row(&self.plan, g, &l, 2, last(j, grand.len())));
                         }
                     }
                 }
@@ -238,27 +253,79 @@ fn sorted<'a>(it: impl Iterator<Item = &'a Task>) -> Vec<&'a Task> {
     v
 }
 
-fn project_row(
-    plan: &Plan,
-    p: &wecode_core::Project,
-    l: &Ledger,
-    known_repos: &[String],
-    depth: usize,
-) -> RowItem {
+fn last(i: usize, n: usize) -> bool {
+    i + 1 == n
+}
+
+/// A project row: the word `project`, its id, and the repo it owns. The repo is on
+/// the row rather than only in the detail pane because without it nothing on screen
+/// connects a project to the code it works on.
+fn project_row(plan: &Plan, p: &Project, l: &Ledger, known_repos: &[String]) -> RowItem {
     RowItem {
         subject: Subject::Project(p.id.clone()),
-        depth,
-        label: format!("▪ {}", p.id),
+        label: format!("PROJECT {}  [{}]", p.id, p.repo),
+        status: format!("{} {}", project_mark(p.status), p.status.as_str()),
         vitals: board::project_vitals(plan, p, l, known_repos),
     }
 }
 
-fn task_row(plan: &Plan, t: &Task, l: &Ledger, depth: usize) -> RowItem {
+fn task_row(plan: &Plan, t: &Task, l: &Ledger, depth: usize, is_last: bool) -> RowItem {
+    let connector = if depth == 0 {
+        String::new()
+    } else {
+        format!(
+            "{}{} ",
+            "   ".repeat(depth - 1),
+            if is_last { "└─" } else { "├─" }
+        )
+    };
     RowItem {
         subject: Subject::Task(t.id.clone()),
-        depth,
-        label: format!("{} {}", crate::render::kind_tag(t.kind), t.id),
+        label: format!("{connector}{} {}", crate::render::kind_tag(t.kind), t.id),
+        status: format!("{} {}", t.status.mark(), status_word(t.status)),
         vitals: board::task_vitals(plan, t, l),
+    }
+}
+
+fn project_mark(s: ProjectStatus) -> char {
+    match s {
+        ProjectStatus::Draft => '·',
+        ProjectStatus::Active => '>',
+        ProjectStatus::Done => '✓',
+        ProjectStatus::Dropped => '-',
+    }
+}
+
+/// Short enough for a column. `needs-approval` and `needs-input` are the reason
+/// this exists rather than using `as_str` directly.
+fn status_word(s: TaskStatus) -> &'static str {
+    match s {
+        TaskStatus::NeedsApproval => "approval",
+        TaskStatus::NeedsInput => "input",
+        other => other.as_str(),
+    }
+}
+
+/// Colour follows meaning, not decoration: green is finished, yellow is waiting on
+/// a person, cyan is in flight.
+fn status_style(row: &RowItem) -> Style {
+    let base = Style::new();
+    match &row.subject {
+        Subject::Project(_) => base.fg(Color::Cyan),
+        Subject::Task(_) => {
+            if row.status.contains("done") {
+                base.fg(Color::Green)
+            } else if row.status.contains("approval")
+                || row.status.contains("input")
+                || row.status.contains("failed")
+            {
+                base.fg(Color::Yellow)
+            } else if row.status.contains("running") || row.status.contains("verifying") {
+                base.fg(Color::Cyan)
+            } else {
+                base.fg(Color::DarkGray)
+            }
+        }
     }
 }
 
@@ -333,14 +400,20 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn table(f: &mut Frame, area: Rect, app: &mut App) {
-    let header = Row::new(vec!["what", "health", "progress", "spend", "needs you"])
-        .style(Style::new().fg(Color::DarkGray));
+    let header = Row::new(vec![
+        "what",
+        "status",
+        "health",
+        "progress",
+        "spend",
+        "needs you",
+    ])
+    .style(Style::new().fg(Color::DarkGray));
 
     let rows: Vec<Row> = app
         .rows
         .iter()
         .map(|r| {
-            let indent = "  ".repeat(r.depth);
             let needs = if r.vitals.needs.is_empty() {
                 Span::styled("—", Style::new().fg(Color::DarkGray))
             } else {
@@ -351,8 +424,21 @@ fn table(f: &mut Frame, area: Rect, app: &mut App) {
                 };
                 Span::styled(r.vitals.needs.join(", "), style)
             };
+            // A project names itself in bold cyan; a task is plain and connected by
+            // a tree glyph, so the two levels are distinguishable without reading.
+            // The title is deliberately not here — at this width it truncated to
+            // noise, and the detail pane already carries it in full.
+            let what = if r.is_project() {
+                Line::from(Span::styled(
+                    r.label.clone(),
+                    Style::new().add_modifier(Modifier::BOLD).fg(Color::Cyan),
+                ))
+            } else {
+                Line::from(Span::raw(r.label.clone()))
+            };
             Row::new(vec![
-                Line::from(format!("{indent}{}", r.label)),
+                what,
+                Line::from(Span::styled(r.status.clone(), status_style(r))),
                 Line::from(health_span(r.vitals.health)),
                 Line::from(bar(r.vitals.progress)),
                 Line::from(spend_text(&r.vitals)),
@@ -362,11 +448,12 @@ fn table(f: &mut Frame, area: Rect, app: &mut App) {
         .collect();
 
     let widths = [
-        Constraint::Min(28),
+        Constraint::Min(30),
+        Constraint::Length(11),
         Constraint::Length(9),
-        Constraint::Length(14),
-        Constraint::Length(14),
-        Constraint::Min(20),
+        Constraint::Length(13),
+        Constraint::Length(12),
+        Constraint::Min(14),
     ];
 
     let block = Block::default()
@@ -521,7 +608,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
 
 fn help(f: &mut Frame, area: Rect) {
     let w = 54u16.min(area.width.saturating_sub(4));
-    let h = 15u16.min(area.height.saturating_sub(2));
+    let h = 18u16.min(area.height.saturating_sub(2));
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -537,7 +624,9 @@ fn help(f: &mut Frame, area: Rect) {
         Line::from("r            reload now".to_string()),
         Line::from("q            quit".to_string()),
         Line::from(""),
-        Line::from("health is computed, never reported:".fg(Color::DarkGray)),
+        Line::from("status is declared; health is computed:".fg(Color::DarkGray)),
+        Line::from("  · draft  ⋯ waiting  ○ ready  > running".fg(Color::DarkGray)),
+        Line::from("  ? verifying  ! approval  ✓ done  x failed".fg(Color::DarkGray)),
         Line::from("red = alarm or over budget".fg(Color::DarkGray)),
         Line::from("amber = defects, denials, stalled, waiting on you".fg(Color::DarkGray)),
     ];
@@ -596,7 +685,7 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use wecode_core::{Budget, Measure, Project, Scope, TaskStatus};
+    use wecode_core::{Budget, Measure, Scope};
 
     /// Renders one frame into an in-memory backend and returns it as text.
     fn render(app: &mut App, w: u16, h: u16) -> String {
@@ -671,20 +760,77 @@ mod tests {
     }
 
     #[test]
-    fn the_portfolio_frame_shows_all_five_columns() {
-        let out = render(&mut app("portfolio"), 110, 24);
-        for col in ["what", "health", "progress", "spend", "needs you"] {
+    fn the_portfolio_frame_shows_every_column() {
+        let out = render(&mut app("portfolio"), 118, 24);
+        for col in ["what", "status", "health", "progress", "spend", "needs you"] {
             assert!(out.contains(col), "missing `{col}` in:\n{out}");
         }
         assert!(out.contains("L0 PORTFOLIO"), "{out}");
-        assert!(out.contains("caching"), "{out}");
         assert!(out.contains("feat layer"), "{out}");
+    }
+
+    #[test]
+    fn a_project_row_names_its_level_and_its_repo() {
+        // Without these, nothing on screen says which row is the project or what
+        // code it works on — the two things that actually confused a reader.
+        let out = render(&mut app("level"), 118, 24);
+        assert!(out.contains("PROJECT caching"), "{out}");
+        assert!(
+            out.contains("[main]"),
+            "the repo belongs on the row:\n{out}"
+        );
+    }
+
+    #[test]
+    fn tasks_hang_off_the_project_with_tree_glyphs() {
+        let mut a = app("glyphs");
+        a.focus = Some(Subject::Project(ProjectId::new("caching")));
+        a.rebuild();
+        let out = render(&mut a, 118, 24);
+        assert!(
+            out.contains("└─ feat layer"),
+            "the only root task is last:\n{out}"
+        );
+        assert!(
+            out.contains("└─ feat keys"),
+            "the subtask nests deeper:\n{out}"
+        );
+    }
+
+    #[test]
+    fn declared_status_is_shown_next_to_computed_health() {
+        // The gap this closes: a draft, a waiting and a ready task were all rendered
+        // as green/0%, indistinguishable.
+        let mut a = app("status");
+        let out = render(&mut a, 118, 24);
+        assert!(out.contains("· draft"), "a fresh task is a draft:\n{out}");
+
+        a.store
+            .set_task_status(&TaskId::new("layer"), TaskStatus::Done)
+            .unwrap();
+        a.reload();
+        let out = render(&mut a, 118, 24);
+        assert!(out.contains("✓ done"), "{out}");
+    }
+
+    #[test]
+    fn the_long_statuses_are_shortened_to_fit_the_column() {
+        assert_eq!(status_word(TaskStatus::NeedsApproval), "approval");
+        assert_eq!(status_word(TaskStatus::NeedsInput), "input");
+        // Everything else keeps the name the CLI accepts.
+        assert_eq!(status_word(TaskStatus::Waiting), "waiting");
+        for s in TaskStatus::all() {
+            assert!(
+                status_word(*s).len() <= 9,
+                "{s:?} is too wide for the column"
+            );
+        }
     }
 
     #[test]
     fn the_portfolio_shows_projects_and_root_tasks_but_not_subtasks() {
         // Depth is bounded on purpose: the portfolio is a scan, not a full tree.
-        let out = render(&mut app("depth"), 110, 24);
+        let out = render(&mut app("depth"), 118, 24);
         assert!(out.contains("feat layer"), "{out}");
         assert!(
             !out.contains("feat keys"),

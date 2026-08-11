@@ -282,25 +282,52 @@ fn title_bar(level: &str, subject: &str, hint: &str) -> String {
 
 fn header_row() -> String {
     format!(
-        "{DIM}│ {:<26} {:<12} {:<11} {:<12} {}{RESET}\n",
-        "what", "health", "progress", "spend", "needs you"
+        "{DIM}│ {:<26} {:<11} {:<12} {:<11} {:<12} {}{RESET}\n",
+        "what", "status", "health", "progress", "spend", "needs you"
     )
 }
 
-fn row(label: &str, v: &Vitals) -> String {
+/// The declared state alongside the computed one. Both, always: a task can be
+/// entirely healthy and not started, and a board that shows only health cannot say
+/// which.
+fn row(label: &str, status: &str, v: &Vitals) -> String {
     let needs = if v.needs.is_empty() {
         format!("{DIM}—{RESET}")
     } else {
         v.needs.join(", ")
     };
     format!(
-        "│ {:<26} {:<12} {:<11} {:<12} {}\n",
+        "│ {:<26} {:<11} {:<12} {:<11} {:<12} {}\n",
         truncate(label, 26),
+        status,
         v.health.dot(),
         bar(v.progress),
         spend_cell(v.spent, v.budget),
         needs
     )
+}
+
+fn project_status(p: &Project) -> String {
+    format!("{} {}", project_mark(p.status), p.status.as_str())
+}
+
+fn project_mark(s: ProjectStatus) -> char {
+    match s {
+        ProjectStatus::Draft => '·',
+        ProjectStatus::Active => '>',
+        ProjectStatus::Done => '✓',
+        ProjectStatus::Dropped => '-',
+    }
+}
+
+/// Short enough for a column; `needs-approval` and `needs-input` are why.
+fn task_status(t: &Task) -> String {
+    let word = match t.status {
+        TaskStatus::NeedsApproval => "approval",
+        TaskStatus::NeedsInput => "input",
+        other => other.as_str(),
+    };
+    format!("{} {word}", t.status.mark())
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -328,7 +355,8 @@ pub(crate) fn portfolio(plan: &Plan, audit: &[AuditLine], known_repos: &[String]
 
     for p in plan.projects() {
         out.push_str(&row(
-            &format!("{}", p.id),
+            &format!("PROJECT {} [{}]", p.id, p.repo),
+            &project_status(p),
             &project_vitals(plan, p, &l, known_repos),
         ));
         let mut roots: Vec<&Task> = plan.roots_of(&p.id).collect();
@@ -336,6 +364,7 @@ pub(crate) fn portfolio(plan: &Plan, audit: &[AuditLine], known_repos: &[String]
         for t in roots {
             out.push_str(&row(
                 &format!("  {} {}", kind_tag(t.kind), t.id),
+                &task_status(t),
                 &task_vitals(plan, t, &l),
             ));
         }
@@ -353,12 +382,17 @@ pub(crate) fn focus(plan: &Plan, audit: &[AuditLine], id: &str, known_repos: &[S
         let mut out = title_bar("L1", id, "wecode board to go up");
         out.push_str(&format!("{DIM}│ {}  [{}]{RESET}\n", p.objective, p.repo));
         out.push_str(&header_row());
-        out.push_str(&row(&format!("{}", p.id), &v));
+        out.push_str(&row(
+            &format!("PROJECT {} [{}]", p.id, p.repo),
+            &project_status(p),
+            &v,
+        ));
         let mut roots: Vec<&Task> = plan.roots_of(&p.id).collect();
         roots.sort_by(|a, b| a.id.cmp(&b.id));
         for t in roots {
             out.push_str(&row(
                 &format!("  {} {}", kind_tag(t.kind), t.id),
+                &task_status(t),
                 &task_vitals(plan, t, &l),
             ));
         }
@@ -375,12 +409,17 @@ pub(crate) fn focus(plan: &Plan, audit: &[AuditLine], id: &str, known_repos: &[S
         let mut out = title_bar("L2", id, "wecode board to go up");
         out.push_str(&format!("{DIM}│ {}{RESET}\n", t.title));
         out.push_str(&header_row());
-        out.push_str(&row(&format!("{} {}", kind_tag(t.kind), t.id), &v));
+        out.push_str(&row(
+            &format!("{} {}", kind_tag(t.kind), t.id),
+            &task_status(t),
+            &v,
+        ));
         let mut kids: Vec<&Task> = plan.subtasks(&t.id).collect();
         kids.sort_by(|a, b| a.id.cmp(&b.id));
         for k in kids {
             out.push_str(&row(
                 &format!("  {} {}", kind_tag(k.kind), k.id),
+                &task_status(k),
                 &task_vitals(plan, k, &l),
             ));
         }
