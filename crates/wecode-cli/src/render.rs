@@ -645,6 +645,107 @@ pub(crate) fn envelope(
     format!("{}\nWorking directory: {}\n", filled.trim(), cwd.display())
 }
 
+/// What verification observed, and what it concluded.
+#[must_use]
+pub(crate) fn verdict(
+    task: &Task,
+    dir: &std::path::Path,
+    v: &crate::verify::Verdict,
+    next: TaskStatus,
+) -> String {
+    let mut out = format!(
+        "{} {}  {}\n  in       {}\n",
+        kind_tag(task.kind),
+        task.id,
+        task.title,
+        dir.display()
+    );
+
+    out.push_str(&format!(
+        "\ndiff — {} file{}\n",
+        v.changed.len(),
+        if v.changed.len() == 1 { "" } else { "s" }
+    ));
+    if v.changed.is_empty() {
+        // Not neutral: a task that declared a write scope and changed nothing did
+        // not do its work, whatever its acceptance says.
+        out.push_str("  nothing changed\n");
+    }
+    for path in &v.changed {
+        let bad = v.violations.contains(path);
+        out.push_str(&format!(
+            "  {} {}{}\n",
+            if bad { "✗" } else { "✓" },
+            path,
+            if bad { "   outside scope" } else { "" }
+        ));
+    }
+
+    if !v.checks.is_empty() {
+        out.push_str("\nacceptance\n");
+        for c in &v.checks {
+            out.push_str(&format!(
+                "  {} {:<44} {}\n",
+                if c.passed() { "✓" } else { "✗" },
+                truncate_cmd(&c.cmd, 44),
+                c.describe()
+            ));
+        }
+    }
+    for u in &v.unjudgeable {
+        out.push_str(&format!("  ? {u}   no command can settle this\n"));
+    }
+
+    out.push('\n');
+    if v.passed() {
+        out.push_str("  ✓ passed\n");
+        if next == TaskStatus::NeedsApproval {
+            out.push_str("    the branch is not merged — wecode does not merge yet\n");
+        }
+    } else {
+        if !v.violations.is_empty() {
+            out.push_str(&format!(
+                "  ✗ {} write{} outside scope — recorded against this task\n",
+                v.violations.len(),
+                if v.violations.len() == 1 { "" } else { "s" }
+            ));
+        }
+        let missing = v.unrunnable();
+        let failed = v
+            .checks
+            .iter()
+            .filter(|c| !c.passed() && !c.missing())
+            .count();
+        if failed > 0 {
+            out.push_str(&format!("  ✗ {failed} acceptance check(s) failed\n"));
+        }
+        if !missing.is_empty() {
+            // Not a verdict about the work — say so, or a missing toolchain reads as
+            // a broken change.
+            out.push_str(&format!(
+                "  ⚠ {} check(s) could not run — the command was not found.\n\
+                 \x20   wecode runs acceptance through `sh -c` with its own environment;\n\
+                 \x20   this is a PATH problem, not a verdict on the work.\n",
+                missing.len()
+            ));
+        }
+        if v.checks.is_empty() && v.violations.is_empty() {
+            out.push_str("  ✗ nothing to judge by\n");
+        }
+    }
+    out.push_str(&format!("  {}\n", next.as_str()));
+    out
+}
+
+fn truncate_cmd(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
+}
+
 /// Available org templates.
 #[must_use]
 pub(crate) fn templates() -> String {

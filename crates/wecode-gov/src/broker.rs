@@ -466,7 +466,13 @@ impl Broker {
     }
 
     /// Records something we observed rather than decided.
-    pub fn observe(&mut self, session: &Session, action: Action, source: Source) {
+    pub fn observe(
+        &mut self,
+        session: &Session,
+        action: Action,
+        decision: Decision,
+        source: Source,
+    ) {
         self.seq += 1;
         self.ledger.push(Record {
             seq: self.seq,
@@ -477,7 +483,7 @@ impl Broker {
             project: session.project.clone(),
             task: session.task.clone(),
             action,
-            decision: Decision::Allow,
+            decision,
             source,
         });
     }
@@ -851,6 +857,7 @@ mod tests {
             Action::Write {
                 path: "crates/export/a.rs".into(),
             },
+            Decision::Allow,
             Source::Supervisor,
         );
         b.observe(
@@ -858,10 +865,36 @@ mod tests {
             Action::Run {
                 argv: vec!["cargo".into()],
             },
+            Decision::Allow,
             Source::Harness,
         );
         let sources: Vec<_> = b.ledger().iter().map(|r| r.source).collect();
         assert_eq!(sources, vec![Source::Supervisor, Source::Harness]);
+    }
+
+    #[test]
+    fn an_observed_violation_is_a_denial_the_supervisor_saw() {
+        // A write outside scope found in the diff is not a decision we made — it
+        // already happened. It still has to reach the ledger as a denial, or the
+        // post-hoc check has nowhere to report.
+        let mut b = Broker::new(Charter::default());
+        let s = confined();
+        b.observe(
+            &s,
+            Action::Write {
+                path: "somewhere/else.rs".into(),
+            },
+            Decision::Deny {
+                reason: DenyReason::OutsideWriteScope {
+                    path: "somewhere/else.rs".into(),
+                },
+                mode: ControlMode::Sanctioned,
+                alarm: false,
+            },
+            Source::Supervisor,
+        );
+        assert_eq!(b.denials().count(), 1);
+        assert_eq!(b.ledger()[0].source, Source::Supervisor);
     }
 
     #[test]

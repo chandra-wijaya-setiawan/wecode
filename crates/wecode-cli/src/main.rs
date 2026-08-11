@@ -5,6 +5,7 @@ mod board;
 mod git;
 mod render;
 mod tui;
+mod verify;
 mod work;
 
 use std::process::ExitCode;
@@ -80,6 +81,7 @@ COCKPIT
 WORK
   wecode assign <task> --to <post>     check the post may do it, then make it ready
   wecode start <task>                  worktree + envelope; marks it running
+  wecode verify <task>                 judge it: diff against scope, then acceptance
   wecode worktree [remove <task>]      list them, or remove one (--force if dirty)
   wecode approve <merge|admission|budget|measure> [<what>] --as <post>
   wecode guard <post> <verb> <target>  authorise an action; records the decision
@@ -132,6 +134,7 @@ fn run(a: &Args) -> Res {
         ("playbook", _) => playbook_show(a),
         ("brief", _) => brief(a),
         ("start", _) => start(a),
+        ("verify", _) => verify_task(a),
         ("worktree", "remove") | ("worktree", "rm") => worktree_remove(a),
         ("worktree", _) => worktree_list(a),
         ("archive", _) => set_archived(a, true),
@@ -987,6 +990,104 @@ fn start(a: &Args) -> Res {
         &cwd,
     ));
     Ok(out)
+}
+
+/// Judges a finished task from its diff and its acceptance commands.
+///
+/// Nothing here asks the agent how it went. The diff is ground truth, the exit codes
+/// are ours, and both reach the ledger as `Source::Supervisor` — observed, not
+/// self-reported, and therefore admissible.
+fn verify_task(a: &Args) -> Res {
+    let (ws, store, company) = open_full(a)?;
+    let id = TaskId::new(require(a.cmd(1), "task id")?);
+    let plan = store.load_plan()?;
+    let task = plan
+        .task(&id)
+        .ok_or_else(|| format!("no such task: {id}"))?
+        .clone();
+    let project = plan
+        .project(&task.project)
+        .ok_or_else(|| format!("no such project: {}", task.project))?;
+
+    // Judge wherever the work happened: the task's worktree when it has one, the
+    // repository itself when the playbook said it needed none.
+    let owner = work::owner(&plan, &id).expect("task is in the plan");
+    let wt = work::worktree_for(&work::org_name(ws.root()), &owner.id);
+    let dir = if wt.is_dir() {
+        wt
+    } else {
+        repo_path(&company, project)?
+    };
+    if !git::is_repo(&dir) {
+        return Err(format!("{} is not a git repository", dir.display()).into());
+    }
+
+    let mut v = verify::run_acceptance(&dir, &task.acceptance);
+    v.changed = git::changed_files(&dir)?;
+    v.violations = verify::violations(&v.changed, &task.scope);
+
+    // Record before deciding, so a crash between the two loses the transition rather
+    // than the evidence.
+    let who = actor(a, &store, &company)?;
+    let mut broker = Broker::new(company.charter.clone());
+    let session = Session::new(
+        who.session.clone(),
+        task.assignee.clone().unwrap_or_else(|| who.post.clone()),
+        who.agent.clone(),
+        who.effective.clone(),
+    )
+    .on(Some(task.project.to_string()), Some(id.to_string()))
+    .with_human(who.human.clone());
+
+    for path in &v.violations {
+        broker.observe(
+            &session,
+            Action::Write { path: path.clone() },
+            wecode_gov::Decision::Deny {
+                reason: wecode_gov::DenyReason::OutsideWriteScope { path: path.clone() },
+                mode: wecode_gov::ControlMode::Sanctioned,
+                alarm: false,
+            },
+            wecode_gov::Source::Supervisor,
+        );
+    }
+    for c in &v.checks {
+        broker.observe(
+            &session,
+            Action::Run {
+                argv: vec![c.cmd.clone()],
+            },
+            if c.passed() {
+                wecode_gov::Decision::Allow
+            } else {
+                wecode_gov::Decision::Deny {
+                    reason: wecode_gov::DenyReason::CommandNotPermitted {
+                        argv: format!("{} — {}", c.cmd, c.describe()),
+                    },
+                    mode: wecode_gov::ControlMode::Sanctioned,
+                    alarm: false,
+                }
+            },
+            wecode_gov::Source::Supervisor,
+        );
+    }
+    store.append_records(broker.ledger())?;
+
+    let next = if v.passed() {
+        // Passing acceptance is not the same as landed. A task with a worktree has a
+        // branch nobody has merged, and merging is a signature wecode does not yet
+        // collect — so it waits for a person rather than claiming to be done.
+        if dir.starts_with(work::run_root()) {
+            TaskStatus::NeedsApproval
+        } else {
+            TaskStatus::Done
+        }
+    } else {
+        TaskStatus::Failed
+    };
+    store.set_task_status(&id, next)?;
+
+    Ok(render::verdict(&task, &dir, &v, next))
 }
 
 fn worktree_list(a: &Args) -> Res {
