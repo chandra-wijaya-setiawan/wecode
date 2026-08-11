@@ -3,6 +3,7 @@
 mod args;
 mod board;
 mod render;
+mod tui;
 
 use std::process::ExitCode;
 
@@ -41,7 +42,8 @@ INTENT
   wecode intent link <id> --parent <p>
 
 COCKPIT
-  wecode board [<id>]                  portfolio, or descend into one intent
+  wecode up                            live dashboard: j/k move, enter descend, q quit
+  wecode board [<id>]                  the same view as a one-shot snapshot
 
 WORK
   wecode assign <intent> --to <post>   check the post may do it, then activate
@@ -89,6 +91,7 @@ fn run(a: &Args) -> Res {
         ("intent", "check") => intent_check(a),
         ("intent", "link") => intent_link(a),
         ("board", _) => board(a),
+        ("up", _) | ("cockpit", _) => cockpit(a),
         ("assign", _) => assign(a),
         ("guard", _) => guard(a),
         ("audit", _) => audit(a),
@@ -417,7 +420,17 @@ fn guard(a: &Args) -> Res {
     ))
 }
 
-/// The cockpit. No argument shows the portfolio; an id descends.
+/// The live cockpit: full-screen, navigable, reloads as state changes.
+fn cockpit(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    if !tui::is_tty() {
+        return Err("wecode up needs a terminal — try `wecode board` for a snapshot".into());
+    }
+    tui::run(store, company)?;
+    Ok(String::new())
+}
+
+/// A snapshot of the same view, for pipes and logs.
 fn board(a: &Args) -> Res {
     let (store, _) = open(a)?;
     let tree = store.load_tree()?;

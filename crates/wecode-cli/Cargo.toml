@@ -18,6 +18,8 @@ wecode-core = { workspace = true }
 wecode-gov = { path = "../wecode-gov" }
 wecode-store = { path = "../wecode-store" }
 wecode-org = { path = "../wecode-org" }
+ratatui = "0.29.0"
+crossterm = "0.29.0"
 
 [lints]
 workspace = true
