@@ -31,7 +31,8 @@ impl fmt::Display for WorkspaceError {
             Self::NotFound => write!(
                 f,
                 "no company workspace found\n\
-                 \x20 pass --org <dir>, set WECODE_ORG, or run `wecode init <dir>`"
+                 \x20 pass --org <dir>, run `wecode use <dir>` to set a default,\n\
+                 \x20 or `wecode init <dir>` to make one"
             ),
             Self::Io(e) => write!(f, "io: {e}"),
             Self::Org(e) => write!(f, "{e}"),
@@ -146,7 +147,41 @@ pub fn find(start: &Path) -> Option<Workspace> {
     None
 }
 
-/// Resolves a workspace: explicit path, then `WECODE_ORG`, then an upward walk.
+/// Where the chosen default workspace is remembered.
+///
+/// `$WECODE_CONFIG` overrides the location. That exists so tests cannot clobber a
+/// real default — which they did, once, before this was configurable.
+#[must_use]
+pub fn default_marker() -> PathBuf {
+    match std::env::var("WECODE_CONFIG") {
+        Ok(dir) => expand_home(&dir).join("current"),
+        Err(_) => expand_home("~/.wecode/current"),
+    }
+}
+
+/// Reads the remembered default, if it still exists.
+#[must_use]
+pub fn default_workspace() -> Option<Workspace> {
+    let path = fs::read_to_string(default_marker()).ok()?;
+    let ws = Workspace::at(expand_home(path.trim()));
+    ws.exists().then_some(ws)
+}
+
+/// Remembers a workspace as the default for commands run outside one.
+pub fn set_default(ws: &Workspace) -> Result<(), WorkspaceError> {
+    let marker = default_marker();
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(marker, format!("{}\n", ws.root().display()))?;
+    Ok(())
+}
+
+/// Resolves a workspace: explicit path, then `WECODE_ORG`, then an upward walk,
+/// then the remembered default.
+///
+/// The upward walk beats the default deliberately — standing inside a company
+/// should mean that company, whatever was last chosen globally.
 pub fn resolve(explicit: Option<&str>) -> Result<Workspace, WorkspaceError> {
     if let Some(p) = explicit {
         let ws = Workspace::at(expand_home(p));
@@ -165,7 +200,9 @@ pub fn resolve(explicit: Option<&str>) -> Result<Workspace, WorkspaceError> {
         };
     }
     let cwd = std::env::current_dir()?;
-    find(&cwd).ok_or(WorkspaceError::NotFound)
+    find(&cwd)
+        .or_else(default_workspace)
+        .ok_or(WorkspaceError::NotFound)
 }
 
 /// Expands a leading `~/`.

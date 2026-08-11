@@ -21,6 +21,7 @@ and state. It is not a code repository; the repos it works on are declared insid
 it by path.
 
 SESSION
+  wecode use <dir>                     remember a default org (skips --org)
   wecode login <user> [--as <post>] [--agent <n>]   open a session
   wecode whoami                        this seat, and the commands it may call
   wecode who                           everything connected right now
@@ -101,6 +102,7 @@ fn run(a: &Args) -> Res {
         ("board", _) => board(a),
         ("up", _) | ("cockpit", _) => cockpit(a),
         ("assign", _) => assign(a),
+        ("use", _) => use_org(a),
         ("login", _) => login(a),
         ("logout", _) => logout(a),
         ("who", _) => who(a),
@@ -631,6 +633,22 @@ fn board(a: &Args) -> Res {
         "" => Ok(board::portfolio(&tree, &audit)),
         id => Ok(board::focus(&tree, &audit, &IntentId::new(id))),
     }
+}
+
+/// Remembers a workspace as the default, so later commands need no --org.
+fn use_org(a: &Args) -> Res {
+    let dir = require(a.cmd(1), "workspace directory")?;
+    let ws = Workspace::at(wecode_org::expand_home(dir));
+    if !ws.exists() {
+        return Err(format!("{} is not a company workspace", ws.root().display()).into());
+    }
+    let company = ws.load()?;
+    workspace::set_default(&ws)?;
+    Ok(format!(
+        "  default org is now {} ({})\n",
+        company.name,
+        ws.root().display()
+    ))
 }
 
 fn login(a: &Args) -> Res {

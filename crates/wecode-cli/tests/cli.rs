@@ -98,8 +98,11 @@ impl Org {
             cmd.arg("--org").arg(&self.dir);
         }
         cmd.args(args);
-        // Never inherit a real workspace from the developer's environment.
+        // Never inherit — or clobber — anything from the developer's environment.
+        // WECODE_CONFIG in particular: `use` writes a default there, and without
+        // isolation a test run overwrites the real one.
         cmd.env_remove("WECODE_ORG");
+        cmd.env("WECODE_CONFIG", self.dir.join("config"));
         decode(cmd.output().expect("binary runs"))
     }
 
@@ -165,6 +168,7 @@ fn bare(args: &[&str]) -> Run {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_wecode"));
     cmd.args(args);
     cmd.env_remove("WECODE_ORG");
+    cmd.env("WECODE_CONFIG", std::env::temp_dir().join("wecode-e2e-noconfig"));
     // A directory guaranteed to contain no company.toml, and no parent that does.
     cmd.current_dir(Path::new("/"));
     decode(cmd.output().expect("binary runs"))
@@ -223,6 +227,33 @@ fn a_broken_company_file_names_the_problem() {
     let r = org.run(&["company", "show"]);
     assert!(!r.ok());
     r.assert_contains("name");
+}
+
+#[test]
+fn a_remembered_default_is_used_outside_any_workspace() {
+    let org = Org::unattended("default-org", "solo");
+
+    // `use` records it; a later command run from `/` finds it with no flags.
+    org.run(&["use", org.dir.to_str().unwrap()])
+        .assert_ok("use")
+        .assert_contains("default org is now");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wecode"));
+    cmd.arg("company").arg("show");
+    cmd.env_remove("WECODE_ORG");
+    cmd.env("WECODE_CONFIG", org.dir.join("config"));
+    cmd.current_dir(Path::new("/"));
+    decode(cmd.output().expect("runs"))
+        .assert_ok("company show via default")
+        .assert_contains("My Project");
+}
+
+#[test]
+fn use_refuses_a_directory_that_is_not_a_workspace() {
+    let org = Org::unattended("default-bad", "solo");
+    let r = org.run(&["use", "/tmp"]);
+    assert!(!r.ok());
+    r.assert_contains("not a company workspace");
 }
 
 // -------------------------------------------------------------- session --------
