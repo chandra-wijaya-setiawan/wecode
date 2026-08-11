@@ -1,117 +1,72 @@
 #!/usr/bin/env bash
-# wecode planning its own next steps, in wecode.
+# Seeds the cws workspace with wecode's own migration plan.
 #
-# Run once the project/task CLI exists. It doubles as a smoke test of the whole
-# command surface: if this script runs clean, admission, the plan grammar, the
-# dependency graph and scope-overlap checking all work end to end.
+# This is the self-hosting check. Every command below is one an operator types, so
+# if the plan cannot be expressed here it cannot be expressed at all — and twice
+# already it could not: the admission gate refused two of these objectives for
+# naming more than one outcome, which is the gate doing its job on its own author.
 #
-#   ./scripts/seed-cws.sh
-#
-# The dependency graph below is real, not illustrative:
-#
-#   store-sqlite ──┐
-#                  ├──> cli-commands ──┬──> cli-board ──> docs-refresh
-#   org-toml ──────┘                   ├──> integration-tests
-#                                      └──> seed-cws
-#
-# store-sqlite and org-toml touch different crates, so they may run in parallel —
-# and the scope-overlap check should permit exactly that. cli-commands and
-# cli-board both write crates/wecode-cli/**, which would normally collide; the
-# dependency between them is what makes it legal.
+# Idempotent only in the sense that re-running it on a seeded workspace will report
+# duplicate ids and change nothing.
 set -euo pipefail
 
-W="${WECODE:-./wecode}"
-ORG="${ORG:-cws}"
-run() { echo "+ $*" >&2; "$W" --org "$ORG" "$@"; }
+W="${WECODE:-./target/release/wecode} --org ${ORG:-cws}"
 
-# ---------------------------------------------------------------- project ------
+$W project add migration "replace the intent tree with a two-level plan" \
+  --repo wecode \
+  --measure-cmd "cargo test --workspace" \
+  --measure-cmd "cargo clippy --all-targets -- -D warnings" \
+  --tokens 800000 --wall 28800
 
-run project add migration \
-    --repo wecode \
-    "finish the two-level migration so the cws workspace works again" \
-    --measure-cmd "cargo test --workspace" \
-    --measure-cmd "cargo clippy --all-targets" \
-    --tokens 600000 --wall 21600
+# The two independent tasks first. Everything else waits on one of them, which is
+# why the dependency graph is worth having rather than a checklist.
+$W task add store-sqlite --project migration \
+  "move the store from append-only logs to SQLite" \
+  --accept-cmd "cargo test -p wecode-store" \
+  --write "crates/wecode-store/**" --tokens 120000 --wall 5400
 
-# ------------------------------------------------------------------- tasks -----
-# Two independent crates first. Disjoint scopes, so they may run at once.
+$W task add org-toml --project migration \
+  "parse company.toml with serde" \
+  --accept-cmd "cargo test -p wecode-org" \
+  --write "crates/wecode-org/**" --tokens 90000 --wall 3600
 
-run task add store-sqlite --project migration \
-    "port the store to SQLite using the table names in docs/ERD.md" \
-    --kind chore \
-    --accept-cmd "cargo test -p wecode-store" \
-    --write "crates/wecode-store/**" \
-    --tokens 150000 --wall 5400 \
-    --to impl
+# The join: the workspace does not build until this lands.
+$W task add cli-commands --project migration \
+  "rewrite the CLI onto the two-level plan" \
+  --after store-sqlite --after org-toml \
+  --accept-cmd "cargo test -p wecode-cli" \
+  --write "crates/wecode-cli/src/**" --tokens 200000 --wall 7200
 
-run task add org-toml --project migration \
-    "replace the hand-rolled TOML subset with serde and the toml crate" \
-    --kind chore \
-    --accept-cmd "cargo test -p wecode-org" \
-    --write "crates/wecode-org/**" \
-    --tokens 120000 --wall 5400 \
-    --to impl
+$W task add cli-board --project migration \
+  "render the board from computed plan health" \
+  --after cli-commands \
+  --accept-cmd "cargo test -p wecode-cli --bin wecode" \
+  --write "crates/wecode-cli/src/board.rs" \
+  --write "crates/wecode-cli/src/tui.rs" --tokens 90000 --wall 3600
 
-# The CLI cannot compile until both of those land.
+$W task add integration-tests --project migration \
+  "cover the new command surface end to end" \
+  --after cli-commands \
+  --accept-cmd "cargo test -p wecode-cli --test cli" \
+  --write "crates/wecode-cli/tests/**" --tokens 80000 --wall 3600
 
-run task add cli-commands --project migration \
-    "add project add, task add, tree, show and check commands" \
-    --kind feature \
-    --after store-sqlite --after org-toml \
-    --accept-cmd "cargo build --workspace" \
-    --write "crates/wecode-cli/src/main.rs" \
-    --write "crates/wecode-cli/src/render.rs" \
-    --tokens 150000 --wall 5400 \
-    --to impl
+$W task add seed-cws --project migration \
+  "recreate the cws workspace in the new format" \
+  --after cli-commands \
+  --accept-cmd "./target/release/wecode --org cws tree" \
+  --write "scripts/**" --tokens 40000 --wall 1800
 
-# Shares crates/wecode-cli with cli-commands, which is legal only because it
-# waits on it. Without the dependency this would be refused as a scope overlap.
+$W task add docs-refresh --project migration \
+  "correct architecture.md to the shipped design" \
+  --after cli-board --after seed-cws \
+  --accept-cmd "test -f docs/architecture.md" \
+  --write "docs/**" --write "README.md" --tokens 70000 --wall 3600
 
-run task add cli-board --project migration \
-    "port the board and the cockpit onto Plan" \
-    --kind feature \
-    --after cli-commands \
-    --accept-cmd "cargo test -p wecode-cli" \
-    --write "crates/wecode-cli/src/board.rs" \
-    --write "crates/wecode-cli/src/tui.rs" \
-    --tokens 120000 --wall 5400 \
-    --to impl
+# Assigning is what admits work to the queue: a fresh task is a draft, and
+# `wecode ready` deliberately shows nothing until a post owns it.
+for t in store-sqlite org-toml cli-commands cli-board integration-tests seed-cws docs-refresh; do
+  $W assign "$t" --to impl
+done
 
-# Tests live in their own directory, so this runs alongside cli-board.
-
-run task add integration-tests --project migration \
-    "rewrite the end-to-end suite for the project and task commands" \
-    --kind chore \
-    --after cli-commands \
-    --accept-cmd "cargo test --test cli" \
-    --write "crates/wecode-cli/tests/**" \
-    --tokens 100000 --wall 3600 \
-    --to test
-
-run task add seed-cws --project migration \
-    "recreate the cws company profile and run this seed script" \
-    --kind chore \
-    --after cli-commands \
-    --accept-cmd "test -f scripts/seed-cws.sh" \
-    --write "scripts/**" \
-    --tokens 30000 --wall 1800 \
-    --to impl
-
-# Docs last: three sections are now wrong — the four-level tree, tokio, and the
-# event bus. Fixing them before the code settles would mean doing it twice.
-
-run task add docs-refresh --project migration \
-    "correct architecture.md for two levels, threads over async, and no event bus" \
-    --kind docs \
-    --after cli-board \
-    --accept-cmd "test -f docs/ERD.md" \
-    --write "docs/**" \
-    --tokens 80000 --wall 3600 \
-    --to impl
-
-# ------------------------------------------------------------------ review -----
-
-echo >&2
-run tree
-echo >&2
-run ready
+$W tree
+$W ready
