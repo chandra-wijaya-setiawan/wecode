@@ -20,6 +20,12 @@ pub struct Project {
     pub measures: Vec<Measure>,
     pub budget: Budget,
     pub status: ProjectStatus,
+    /// Whether the operator has filed this away. Orthogonal to `status`: a project
+    /// can be `done` and still on the board, or `active` and hidden while parked.
+    ///
+    /// Display only. Archiving must never change what work is dispatchable — hiding
+    /// a project to tidy the board is not a decision to stop it.
+    pub archived: bool,
 }
 
 impl Project {
@@ -38,6 +44,7 @@ impl Project {
             measures: Vec::new(),
             budget: Budget::default(),
             status: ProjectStatus::Draft,
+            archived: false,
         }
     }
 
@@ -51,6 +58,13 @@ impl Project {
     pub fn budgeted(mut self, b: Budget) -> Self {
         self.budget = b;
         self
+    }
+
+    /// Whether the cockpit should show this. A method rather than reading the field,
+    /// so the rule has one home if it ever grows past the flag.
+    #[must_use]
+    pub fn is_visible(&self) -> bool {
+        !self.archived
     }
 
     #[must_use]

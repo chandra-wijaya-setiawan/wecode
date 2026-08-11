@@ -5,8 +5,7 @@
 use std::time::Duration;
 
 use wecode_core::{
-    Admission, Blocker, Defect, Plan, Project, ProjectId, ProjectStatus, Task, TaskId, TaskKind,
-    TaskStatus,
+    Admission, Blocker, Defect, Plan, Project, ProjectId, Task, TaskId, TaskKind, TaskStatus,
 };
 use wecode_gov::{Action, ControlMode, Decision, Grant, Invariant, WorkKind};
 use wecode_org::Playbook;
@@ -32,14 +31,29 @@ pub(crate) fn kind_tag(kind: TaskKind) -> &'static str {
 pub(crate) const LEGEND: &str = "  · draft   ⋯ waiting   ○ ready   > running   ? verifying/input   ! approval   ✓ done   x failed   - dropped\n";
 
 /// The whole plan: projects, each with its task tree.
+///
+/// `show_all` includes archived projects. Hiding is never silent — when anything is
+/// omitted the footer says how much and how to see it.
 #[must_use]
-pub(crate) fn tree(p: &Plan) -> String {
+pub(crate) fn tree(p: &Plan, show_all: bool) -> String {
     if p.is_empty() {
         return "no projects yet — try: wecode project add <id> --repo <name> \"<objective>\"\n"
             .to_string();
     }
+    let projects: Vec<&Project> = if show_all {
+        p.all_projects().collect()
+    } else {
+        p.projects().collect()
+    };
+    if projects.is_empty() {
+        return format!(
+            "every project is archived ({}) — wecode tree --all\n",
+            p.archived_count()
+        );
+    }
+
     let mut out = String::new();
-    for proj in p.projects() {
+    for proj in projects {
         out.push_str(&project_line(p, proj));
         let mut roots: Vec<&Task> = p.roots_of(&proj.id).collect();
         roots.sort_by(|a, b| a.id.cmp(&b.id));
@@ -49,29 +63,36 @@ pub(crate) fn tree(p: &Plan) -> String {
     }
     out.push('\n');
     out.push_str(LEGEND);
+    out.push_str(&archived_note(p, show_all));
     out
+}
+
+/// One line naming what is not on screen. A view that quietly shows less than
+/// everything is worse than one that shows too much.
+fn archived_note(p: &Plan, show_all: bool) -> String {
+    let n = p.archived_count();
+    if n == 0 {
+        String::new()
+    } else if show_all {
+        format!("  {n} archived, shown\n")
+    } else {
+        format!("  {n} archived, hidden — --all to include\n")
+    }
 }
 
 fn project_line(plan: &Plan, p: &Project) -> String {
     let done = plan.progress(&p.id);
+    // The marker goes at the end: a leading column would indent every project line
+    // by one and erase the distinction from its indented tasks.
     format!(
-        "{} {:<20} {:<28} [{}] {:.0}%\n",
-        project_mark(p.status),
+        "{} {:<20} {:<28} [{}] {:.0}%{}\n",
+        p.status.mark(),
         p.id.to_string(),
         p.objective,
         p.repo,
-        done * 100.0
+        done * 100.0,
+        if p.archived { "  archived" } else { "" }
     )
-}
-
-#[must_use]
-pub(crate) fn project_mark(s: ProjectStatus) -> char {
-    match s {
-        ProjectStatus::Draft => '·',
-        ProjectStatus::Active => '>',
-        ProjectStatus::Done => '✓',
-        ProjectStatus::Dropped => '-',
-    }
 }
 
 fn render_task(plan: &Plan, t: &Task, depth: usize, out: &mut String) {
@@ -141,7 +162,7 @@ pub(crate) fn project_detail(plan: &Plan, id: &ProjectId) -> String {
     };
     let mut out = format!(
         "{}  {}\n  objective  {}\n  repo       {}\n  status     {}\n",
-        project_mark(p.status),
+        p.status.mark(),
         p.id,
         p.objective,
         p.repo,
@@ -967,14 +988,28 @@ mod tests {
 
     #[test]
     fn empty_plan_suggests_a_next_step() {
-        let out = tree(&Plan::new());
+        let out = tree(&Plan::new(), false);
         assert!(out.contains("no projects yet"), "{out}");
         assert!(out.contains("project add"), "{out}");
     }
 
     #[test]
+    fn a_project_line_never_starts_with_a_space_so_tasks_read_as_nested() {
+        // Regression: an archived marker in a leading column indented every project
+        // by one and made it indistinguishable from its own tasks.
+        let mut p = plan();
+        let mut arch = p.project(&ProjectId::new("export")).unwrap().clone();
+        arch.archived = true;
+        p.update_project(arch).unwrap();
+        let out = tree(&p, true);
+        let line = out.lines().find(|l| l.contains("export")).unwrap();
+        assert!(!line.starts_with(' '), "{line:?}");
+        assert!(line.contains("archived"), "{line:?}");
+    }
+
+    #[test]
     fn tree_nests_tasks_under_their_project() {
-        let out = tree(&plan());
+        let out = tree(&plan(), false);
         let proj = out.lines().find(|l| l.contains("export")).unwrap();
         let task = out.lines().find(|l| l.contains("cache")).unwrap();
         assert!(!proj.starts_with(' '), "{proj:?}");
@@ -985,7 +1020,7 @@ mod tests {
     fn tree_shows_a_dependency_but_not_as_nesting() {
         // The whole point of the two-relation model: `bench` comes after `cache`
         // without being *part of* it, so it must not be indented under it.
-        let out = tree(&plan());
+        let out = tree(&plan(), false);
         let bench = out.lines().find(|l| l.contains("bench")).unwrap();
         assert!(bench.contains("after cache"), "{bench:?}");
         assert_eq!(
@@ -1000,7 +1035,7 @@ mod tests {
         let mut p = plan();
         p.add_task(Task::new("cache-keys", "export", "design the cache keys").under("cache"))
             .unwrap();
-        let out = tree(&p);
+        let out = tree(&p, false);
         let sub = out.lines().find(|l| l.contains("cache-keys")).unwrap();
         assert_eq!(sub.len() - sub.trim_start().len(), 4, "{sub:?}");
         assert!(!sub.contains("after"), "{sub:?}");
@@ -1008,7 +1043,7 @@ mod tests {
 
     #[test]
     fn the_legend_is_always_present_because_ten_marks_is_too_many_to_recall() {
-        assert!(tree(&plan()).contains("⋯ waiting"));
+        assert!(tree(&plan(), false).contains("⋯ waiting"));
     }
 
     #[test]

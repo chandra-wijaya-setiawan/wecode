@@ -17,6 +17,8 @@ language = "rust"
 worktree  = true
 assign_to = "impl"
 accept    = ["cargo test --workspace", "cargo clippy --all-targets -- -D warnings"]
+tokens    = 120000
+wall_secs = 5400
 guidance  = """
 One main task per behaviour that changes. Subtasks only when the work spans crates —
 each must be independently reviewable.
@@ -42,6 +44,8 @@ task and the gate will refuse it.
 worktree  = true
 assign_to = "impl"
 accept    = ["cargo test --workspace"]
+tokens    = 60000
+wall_secs = 2700
 guidance  = """
 Reproduce first.
 
@@ -83,6 +87,8 @@ which is why it is the right shape for "find out why".
 worktree  = true
 assign_to = "impl"
 accept    = ["cargo test --workspace", "cargo clippy --all-targets -- -D warnings"]
+tokens    = 90000
+wall_secs = 3600
 guidance  = """
 Behaviour must not change, so the acceptance is the existing suite passing unchanged.
 
@@ -97,6 +103,8 @@ Renaming a public item is a refactor; changing what it returns is not.
 worktree  = true
 assign_to = "impl"
 accept    = ["cargo test --workspace"]
+tokens    = 40000
+wall_secs = 1800
 guidance  = """
 Dependency bumps, config, tooling, gitignore. No behaviour change intended, but
 unlike a refactor no claim is made about it either.
@@ -109,6 +117,8 @@ hides both.
 worktree  = false
 assign_to = "impl"
 accept    = ["test -f docs/theory.md"]
+tokens    = 30000
+wall_secs = 1800
 guidance  = """
 Answers a question; changes no code. Needs no write scope, which is the one
 admission exemption any kind gets.
@@ -124,6 +134,8 @@ Time-box it. A spike that turns into an implementation should have been a featur
 worktree  = false
 assign_to = "impl"
 accept    = ["test -f docs/architecture.md"]
+tokens    = 30000
+wall_secs = 1800
 guidance  = """
 Single task. No subtasks, no worktree — prose does not conflict the way code does,
 so edit in place.

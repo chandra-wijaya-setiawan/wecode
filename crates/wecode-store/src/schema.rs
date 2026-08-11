@@ -12,7 +12,9 @@
 use rusqlite::Connection;
 
 /// Bumped whenever the schema changes. Stored in `user_version`.
-pub const VERSION: i64 = 1;
+///
+/// 2 adds `projects.archived`.
+pub const VERSION: i64 = 2;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -21,7 +23,10 @@ CREATE TABLE projects (
     objective     TEXT NOT NULL,
     status        TEXT NOT NULL,
     budget_tokens INTEGER,
-    budget_wall   INTEGER
+    budget_wall   INTEGER,
+    -- Filed away by the operator. STRICT tables have no BOOLEAN, hence INTEGER.
+    -- Display only: archiving never changes what is dispatchable.
+    archived      INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 CREATE TABLE tasks (
@@ -132,23 +137,39 @@ enum Step {
     UpToDate,
     /// Empty file: install the schema.
     Install,
+    /// Behind, with a known upgrade from this version.
+    Upgrade(i64),
     /// Behind, with no path from here.
     Unsupported,
 }
 
-fn step_for(current: i64, target: i64) -> Step {
+/// `have` is the set of versions an upgrade step exists *from*.
+///
+/// Taking it as a parameter is what keeps `Unsupported` reachable and therefore
+/// tested. Deciding it from a constant instead made the arm dead the moment the first
+/// upgrade landed — the same shape of hole this function was extracted to close.
+fn step_for(current: i64, target: i64, have: &[i64]) -> Step {
     if current >= target {
         Step::UpToDate
     } else if current == 0 {
         Step::Install
+    } else if (current..target).all(|v| have.contains(&v)) {
+        Step::Upgrade(current)
     } else {
-        // Reachable the moment `VERSION` is bumped without adding a migration. The
-        // original code matched neither branch here, returned `Ok`, and left a live
-        // database un-migrated while reporting success — the caller then queried
-        // columns the file does not have.
+        // A gap in the chain. Refusing beats running the steps that do exist and
+        // leaving the file half-migrated while reporting success.
         Step::Unsupported
     }
 }
+
+/// Every upgrade, in order. Each entry brings a file *from* that version to the next.
+///
+/// A list rather than a match so `migrate` applies them in sequence: a version-1 file
+/// meeting a future version 4 runs 1→2, 2→3, 3→4 rather than needing a direct step.
+const UPGRADES: &[(i64, &str)] = &[(
+    1,
+    "ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+)];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
 ///
@@ -158,13 +179,23 @@ fn step_for(current: i64, target: i64) -> Step {
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    match step_for(version, VERSION) {
+    let have: Vec<i64> = UPGRADES.iter().map(|(v, _)| *v).collect();
+    match step_for(version, VERSION, &have) {
         Step::UpToDate => Ok(()),
         Step::Install => {
             // WAL is a persistent property of the file, so it is set once here.
             // In-memory databases do not support it, hence the ignored result.
             let _ = conn.pragma_update(None, "journal_mode", "WAL");
             conn.execute_batch(SCHEMA)?;
+            conn.pragma_update(None, "user_version", VERSION)?;
+            Ok(())
+        }
+        Step::Upgrade(from) => {
+            for (version, sql) in UPGRADES {
+                if *version >= from {
+                    conn.execute_batch(sql)?;
+                }
+            }
             conn.pragma_update(None, "user_version", VERSION)?;
             Ok(())
         }
@@ -189,21 +220,68 @@ mod tests {
     }
 
     #[test]
-    fn a_version_behind_with_no_migration_is_refused() {
-        // The hole this closes, tested at a target this build has not reached yet:
-        // version 1 against target 2 used to satisfy neither branch, so `migrate`
-        // returned Ok and left a live database un-migrated.
-        assert_eq!(step_for(1, 2), Step::Unsupported);
-        assert_eq!(step_for(3, 9), Step::Unsupported);
+    fn a_gap_in_the_upgrade_chain_is_refused() {
+        // Running the steps that exist and stopping halfway would report success on a
+        // file that is now neither version.
+        assert_eq!(step_for(1, 3, &[1]), Step::Unsupported);
+        assert_eq!(step_for(1, 4, &[1, 3]), Step::Unsupported);
+        assert_eq!(step_for(2, 5, &[]), Step::Unsupported);
+    }
+
+    #[test]
+    fn a_complete_chain_upgrades_from_where_the_file_is() {
+        assert_eq!(step_for(1, 2, &[1]), Step::Upgrade(1));
+        assert_eq!(step_for(1, 3, &[1, 2]), Step::Upgrade(1));
+        assert_eq!(step_for(2, 3, &[1, 2]), Step::Upgrade(2));
     }
 
     #[test]
     fn an_empty_file_is_installed_and_a_current_one_left_alone() {
-        assert_eq!(step_for(0, 1), Step::Install);
-        assert_eq!(step_for(0, 7), Step::Install);
-        assert_eq!(step_for(1, 1), Step::UpToDate);
+        assert_eq!(step_for(0, 1, &[]), Step::Install);
+        assert_eq!(step_for(0, 7, &[1, 2]), Step::Install);
+        assert_eq!(step_for(1, 1, &[]), Step::UpToDate);
         // A file written by a newer build: leave it, do not downgrade it.
-        assert_eq!(step_for(2, 1), Step::UpToDate);
+        assert_eq!(step_for(2, 1, &[]), Step::UpToDate);
+    }
+
+    #[test]
+    fn this_build_can_upgrade_every_version_it_claims_to() {
+        // Guards the real constant: bumping VERSION without adding an UPGRADES entry
+        // would make every existing wecode.db unopenable.
+        let have: Vec<i64> = UPGRADES.iter().map(|(v, _)| *v).collect();
+        assert_eq!(step_for(1, VERSION, &have), Step::Upgrade(1));
+    }
+
+    #[test]
+    fn a_version_one_file_gains_the_column_and_keeps_its_rows() {
+        // The migration that matters, run for real rather than reasoned about.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE projects (
+                 id TEXT PRIMARY KEY, repo TEXT NOT NULL, objective TEXT NOT NULL,
+                 status TEXT NOT NULL, budget_tokens INTEGER, budget_wall INTEGER
+             ) STRICT;
+             INSERT INTO projects (id, repo, objective, status)
+             VALUES ('old', 'wecode', 'an objective', 'active');",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 1i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let v: i64 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, VERSION);
+        let (obj, archived): (String, i64) = c
+            .query_row(
+                "SELECT objective, archived FROM projects WHERE id = 'old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(obj, "an objective", "the row survived");
+        assert_eq!(archived, 0, "existing projects default to visible");
     }
 
     #[test]

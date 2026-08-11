@@ -62,10 +62,18 @@ impl Store {
         let mut plan = Plan::new();
 
         let mut stmt = self.conn().prepare(
-            "SELECT id, repo, objective, status, budget_tokens, budget_wall
+            "SELECT id, repo, objective, status, budget_tokens, budget_wall, archived
              FROM projects ORDER BY id",
         )?;
-        type ProjectRow = (String, String, String, String, Option<i64>, Option<i64>);
+        type ProjectRow = (
+            String,
+            String,
+            String,
+            String,
+            Option<i64>,
+            Option<i64>,
+            i64,
+        );
         let rows: Vec<ProjectRow> = stmt
             .query_map([], |r| {
                 Ok((
@@ -75,11 +83,12 @@ impl Store {
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5)?,
+                    r.get(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
 
-        for (id, repo, objective, status, tokens, wall) in rows {
+        for (id, repo, objective, status, tokens, wall, archived) in rows {
             let mut p = Project::new(ProjectId::new(&id), objective, repo);
             p.status = ProjectStatus::parse(&status).ok_or_else(|| StoreError::Corrupt {
                 what: "project status",
@@ -89,6 +98,7 @@ impl Store {
                 tokens: tokens.map(|n| n as u64),
                 wall_secs: wall.map(|n| n as u64),
             };
+            p.archived = archived != 0;
             p.measures = self.measures(&MeasureTable::Project, &id)?;
             plan.add_project(p).map_err(structural)?;
         }
@@ -257,11 +267,12 @@ impl Store {
     pub fn save_project(&self, p: &Project) -> Result<(), StoreError> {
         let c = self.conn();
         c.execute(
-            "INSERT INTO projects (id, repo, objective, status, budget_tokens, budget_wall)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO projects
+                (id, repo, objective, status, budget_tokens, budget_wall, archived)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                 repo = ?2, objective = ?3, status = ?4,
-                budget_tokens = ?5, budget_wall = ?6",
+                budget_tokens = ?5, budget_wall = ?6, archived = ?7",
             params![
                 p.id.as_str(),
                 p.repo,
@@ -269,6 +280,7 @@ impl Store {
                 p.status.as_str(),
                 p.budget.tokens.map(|n| n as i64),
                 p.budget.wall_secs.map(|n| n as i64),
+                i64::from(p.archived),
             ],
         )?;
         self.replace_measures(&MeasureTable::Project, p.id.as_str(), &p.measures)?;
@@ -419,6 +431,16 @@ impl Store {
         Ok(())
     }
 
+    /// Files a project away, or brings it back. Separate from status on purpose:
+    /// this changes what the operator sees, never what is dispatchable.
+    pub fn set_project_archived(&self, id: &ProjectId, archived: bool) -> Result<(), StoreError> {
+        self.conn().execute(
+            "UPDATE projects SET archived = ?2 WHERE id = ?1",
+            params![id.as_str(), i64::from(archived)],
+        )?;
+        Ok(())
+    }
+
     pub fn set_project_status(
         &self,
         id: &ProjectId,
@@ -493,6 +515,49 @@ mod tests {
 
         let loaded = s.load_plan().unwrap();
         assert_eq!(loaded.project(&"caching".into()), Some(&p));
+    }
+
+    #[test]
+    fn archived_survives_a_round_trip_and_is_independent_of_status() {
+        // The two properties must not be inferred from each other: a done project can
+        // stay on the board, and an active one can be filed away.
+        let s = store();
+        let mut p = project();
+        p.archived = true;
+        p.status = ProjectStatus::Active;
+        s.save_project(&p).unwrap();
+
+        let loaded = s.load_plan().unwrap();
+        let got = loaded.project(&"caching".into()).unwrap();
+        assert!(got.archived);
+        assert_eq!(got.status, ProjectStatus::Active);
+        assert!(!got.is_visible());
+    }
+
+    #[test]
+    fn archiving_is_reversible_without_touching_status() {
+        let s = store();
+        let mut p = project();
+        p.status = ProjectStatus::Done;
+        s.save_project(&p).unwrap();
+
+        s.set_project_archived(&"caching".into(), true).unwrap();
+        let after = s.load_plan().unwrap();
+        let got = after.project(&"caching".into()).unwrap();
+        assert!(got.archived);
+        assert_eq!(got.status, ProjectStatus::Done, "status untouched");
+
+        s.set_project_archived(&"caching".into(), false).unwrap();
+        let back = s.load_plan().unwrap();
+        assert!(!back.project(&"caching".into()).unwrap().archived);
+    }
+
+    #[test]
+    fn a_new_project_is_visible() {
+        let s = store();
+        s.save_project(&project()).unwrap();
+        let loaded = s.load_plan().unwrap();
+        assert!(loaded.project(&"caching".into()).unwrap().is_visible());
     }
 
     #[test]

@@ -96,8 +96,26 @@ impl Plan {
         self.tasks.get(id)
     }
 
+    /// Projects the cockpit shows — archived ones omitted.
+    ///
+    /// The *narrow* set keeps the existing name on purpose: every display path was
+    /// already calling this, so all of them filter by default and none can forget.
+    /// Reaching an archived project takes a deliberate `all_projects`.
     pub fn projects(&self) -> impl Iterator<Item = &Project> {
+        self.projects.values().filter(|p| p.is_visible())
+    }
+
+    /// Every project, archived included. For anything that must not lose track of a
+    /// project merely because it is hidden — resolving an id, listing worktrees.
+    pub fn all_projects(&self) -> impl Iterator<Item = &Project> {
         self.projects.values()
+    }
+
+    /// Whether any project is hidden, so a view can say so rather than silently
+    /// showing less than everything.
+    #[must_use]
+    pub fn archived_count(&self) -> usize {
+        self.projects.values().filter(|p| p.archived).count()
     }
 
     pub fn tasks(&self) -> impl Iterator<Item = &Task> {
@@ -275,16 +293,22 @@ impl Plan {
         self.blockers(id).is_empty()
     }
 
-    /// Tasks a dispatcher could pick up now: schedulable, and every predecessor
-    /// done.
+    /// Tasks a dispatcher could pick up now: in a live project, schedulable, and
+    /// every predecessor done.
     ///
-    /// `is_schedulable`, not `!is_closed`. A running task is not closed, and
-    /// listing it here is how the same work gets dispatched twice; a draft one has
-    /// not been admitted yet.
+    /// `is_schedulable`, not `!is_closed`. A running task is not closed, and listing
+    /// it here is how the same work gets dispatched twice; a draft one has not been
+    /// admitted yet.
+    ///
+    /// Archived projects are skipped. Archiving parks a project rather than merely
+    /// hiding it — the scheduler scans live projects only, so this query has to agree
+    /// with it or the board would advertise work nothing will ever pick up.
     pub fn ready_tasks(&self) -> impl Iterator<Item = &Task> {
-        self.tasks
-            .values()
-            .filter(|t| t.status.is_schedulable() && self.is_ready(&t.id))
+        self.tasks.values().filter(|t| {
+            t.status.is_schedulable()
+                && self.projects.get(&t.project).is_some_and(|p| !p.archived)
+                && self.is_ready(&t.id)
+        })
     }
 
     /// Fraction of a project's tasks that are done, counting leaves only so a
@@ -548,6 +572,57 @@ mod tests {
             .map(|t| t.id.as_str())
             .collect();
         assert_eq!(names, vec!["mid", "top"]);
+    }
+
+    #[test]
+    fn archiving_hides_a_project_from_the_default_view_only() {
+        let mut p = plan();
+        p.add_project(Project::new("other", "something else", "wecode"))
+            .unwrap();
+        let mut hidden = p.project(&"other".into()).unwrap().clone();
+        hidden.archived = true;
+        p.update_project(hidden).unwrap();
+
+        let shown: Vec<&str> = p.projects().map(|x| x.id.as_str()).collect();
+        assert_eq!(shown, vec!["caching"], "archived is omitted");
+
+        let all: Vec<&str> = p.all_projects().map(|x| x.id.as_str()).collect();
+        assert_eq!(all, vec!["caching", "other"], "but still present");
+
+        assert_eq!(p.archived_count(), 1);
+        // Direct lookup must still work, or an archived project becomes unreachable.
+        assert!(p.project(&"other".into()).is_some());
+    }
+
+    #[test]
+    fn archiving_a_project_parks_its_work() {
+        // Archiving is not merely hiding: the scheduler scans live projects only, so
+        // an archived project's tasks must stop being offered. `ready` and the
+        // scheduler have to answer the same question.
+        let mut p = plan();
+        let mut t = task("a");
+        t.status = TaskStatus::Waiting;
+        p.add_task(t).unwrap();
+        assert!(
+            !p.ready_tasks().next().is_none(),
+            "control: something ready"
+        );
+
+        let mut parked = p.project(&"caching".into()).unwrap().clone();
+        parked.archived = true;
+        p.update_project(parked).unwrap();
+
+        assert_eq!(
+            p.ready_tasks().count(),
+            0,
+            "parked work is not dispatchable"
+        );
+
+        // ...and unarchiving brings it back, so this is reversible.
+        let mut live = p.project(&"caching".into()).unwrap().clone();
+        live.archived = false;
+        p.update_project(live).unwrap();
+        assert_eq!(p.ready_tasks().count(), 1);
     }
 
     #[test]

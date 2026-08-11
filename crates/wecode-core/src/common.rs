@@ -133,6 +133,28 @@ impl ProjectStatus {
     pub fn is_closed(self) -> bool {
         matches!(self, Self::Done | Self::Dropped)
     }
+
+    /// Every status, in lifecycle order. Exists so an error message can list them
+    /// without a second hand-maintained copy drifting out of sync.
+    #[must_use]
+    pub fn all() -> &'static [Self] {
+        &[Self::Draft, Self::Active, Self::Done, Self::Dropped]
+    }
+
+    /// The glyph the board and the tree show.
+    ///
+    /// Lives here rather than in the renderers: the same four-arm match was
+    /// hand-copied into render.rs, board.rs and tui.rs, so a new variant would have
+    /// had to be remembered three times.
+    #[must_use]
+    pub fn mark(self) -> char {
+        match self {
+            Self::Draft => '·',
+            Self::Active => '>',
+            Self::Done => '✓',
+            Self::Dropped => '-',
+        }
+    }
 }
 
 /// A task's life, shaped so the scheduler can drive it with one query.
@@ -264,6 +286,19 @@ impl TaskStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_project_status_round_trips_and_has_a_distinct_mark() {
+        let mut marks = Vec::new();
+        for s in ProjectStatus::all() {
+            assert_eq!(ProjectStatus::parse(s.as_str()), Some(*s));
+            marks.push(s.mark());
+        }
+        assert_eq!(marks.len(), 4);
+        marks.sort_unstable();
+        marks.dedup();
+        assert_eq!(marks.len(), 4, "two statuses share a glyph");
+    }
 
     #[test]
     fn only_judged_measures_need_a_person() {

@@ -17,7 +17,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{DefaultTerminal, Frame};
-use wecode_core::{Plan, Project, ProjectId, ProjectStatus, Task, TaskId, TaskStatus};
+use wecode_core::{Plan, Project, ProjectId, Task, TaskId, TaskStatus};
 use wecode_org::Company;
 use wecode_store::{AuditLine, AuditQuery, Store};
 
@@ -81,6 +81,9 @@ struct App {
     table: TableState,
     pane: Pane,
     last_reload: Instant,
+    /// Whether archived projects are on screen. Off by default — archiving is a
+    /// request to stop seeing something.
+    show_archived: bool,
     status: String,
     quit: bool,
 }
@@ -98,7 +101,8 @@ impl App {
             table: TableState::default().with_selected(Some(0)),
             pane: Pane::Board,
             last_reload: Instant::now(),
-            status: "j/k move · enter descend · esc up · ? help · q quit".into(),
+            show_archived: false,
+            status: "j/k move · enter descend · esc up · a archived · ? help · q quit".into(),
             quit: false,
         };
         app.rebuild();
@@ -132,7 +136,12 @@ impl App {
 
         match self.focus.clone() {
             None => {
-                for p in self.plan.projects() {
+                let projects: Vec<&Project> = if self.show_archived {
+                    self.plan.all_projects().collect()
+                } else {
+                    self.plan.projects().collect()
+                };
+                for p in projects {
                     rows.push(project_row(&self.plan, p, &l, &self.known_repos));
                     let roots = sorted(self.plan.roots_of(&p.id));
                     for (i, t) in roots.iter().enumerate() {
@@ -236,6 +245,16 @@ impl App {
             KeyCode::Char('G') => self.table.select(Some(self.rows.len().saturating_sub(1))),
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.descend(),
             KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left => self.ascend(),
+            KeyCode::Char('a') => {
+                self.show_archived = !self.show_archived;
+                let n = self.plan.archived_count();
+                self.status = if self.show_archived {
+                    format!("showing {n} archived")
+                } else {
+                    format!("{n} archived hidden")
+                };
+                self.rebuild();
+            }
             KeyCode::Char('r') => {
                 self.reload();
                 self.status = "reloaded".into();
@@ -263,8 +282,13 @@ fn last(i: usize, n: usize) -> bool {
 fn project_row(plan: &Plan, p: &Project, l: &Ledger, known_repos: &[String]) -> RowItem {
     RowItem {
         subject: Subject::Project(p.id.clone()),
-        label: format!("PROJECT {}  [{}]", p.id, p.repo),
-        status: format!("{} {}", project_mark(p.status), p.status.as_str()),
+        label: format!(
+            "PROJECT {}  [{}]{}",
+            p.id,
+            p.repo,
+            if p.archived { "  archived" } else { "" }
+        ),
+        status: format!("{} {}", p.status.mark(), p.status.as_str()),
         vitals: board::project_vitals(plan, p, l, known_repos),
     }
 }
@@ -284,15 +308,6 @@ fn task_row(plan: &Plan, t: &Task, l: &Ledger, depth: usize, is_last: bool) -> R
         label: format!("{connector}{} {}", crate::render::kind_tag(t.kind), t.id),
         status: format!("{} {}", t.status.mark(), status_word(t.status)),
         vitals: board::task_vitals(plan, t, l),
-    }
-}
-
-fn project_mark(s: ProjectStatus) -> char {
-    match s {
-        ProjectStatus::Draft => '·',
-        ProjectStatus::Active => '>',
-        ProjectStatus::Done => '✓',
-        ProjectStatus::Dropped => '-',
     }
 }
 
@@ -621,6 +636,7 @@ fn help(f: &mut Frame, area: Rect) {
         Line::from("enter / l    descend into selection".to_string()),
         Line::from("esc / h      up one level".to_string()),
         Line::from("g / G        first / last".to_string()),
+        Line::from("a            show or hide archived projects".to_string()),
         Line::from("r            reload now".to_string()),
         Line::from("q            quit".to_string()),
         Line::from(""),

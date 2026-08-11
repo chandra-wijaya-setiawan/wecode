@@ -308,16 +308,7 @@ fn row(label: &str, status: &str, v: &Vitals) -> String {
 }
 
 fn project_status(p: &Project) -> String {
-    format!("{} {}", project_mark(p.status), p.status.as_str())
-}
-
-fn project_mark(s: ProjectStatus) -> char {
-    match s {
-        ProjectStatus::Draft => '·',
-        ProjectStatus::Active => '>',
-        ProjectStatus::Done => '✓',
-        ProjectStatus::Dropped => '-',
-    }
+    format!("{} {}", p.status.mark(), p.status.as_str())
 }
 
 /// Short enough for a column; `needs-approval` and `needs-input` are why.
@@ -344,7 +335,12 @@ fn footer(hint: &str) -> String {
 }
 
 /// The portfolio view: one line per project, then its root tasks.
-pub(crate) fn portfolio(plan: &Plan, audit: &[AuditLine], known_repos: &[String]) -> String {
+pub(crate) fn portfolio(
+    plan: &Plan,
+    audit: &[AuditLine],
+    known_repos: &[String],
+    show_all: bool,
+) -> String {
     if plan.is_empty() {
         return "no projects yet — wecode project add <id> --repo <name> \"<objective>\"\n"
             .to_string();
@@ -353,7 +349,12 @@ pub(crate) fn portfolio(plan: &Plan, audit: &[AuditLine], known_repos: &[String]
     let mut out = title_bar("L0", "PORTFOLIO", "wecode board <id> to descend");
     out.push_str(&header_row());
 
-    for p in plan.projects() {
+    let projects: Vec<&Project> = if show_all {
+        plan.all_projects().collect()
+    } else {
+        plan.projects().collect()
+    };
+    for p in projects {
         out.push_str(&row(
             &format!("PROJECT {} [{}]", p.id, p.repo),
             &project_status(p),
@@ -369,7 +370,12 @@ pub(crate) fn portfolio(plan: &Plan, audit: &[AuditLine], known_repos: &[String]
             ));
         }
     }
-    out.push_str(&footer("alarms freeze dispatch · silence on green"));
+    let hidden = plan.archived_count();
+    out.push_str(&footer(&if hidden > 0 && !show_all {
+        format!("alarms freeze dispatch · {hidden} archived, --all to include")
+    } else {
+        "alarms freeze dispatch · silence on green".to_string()
+    }));
     out
 }
 
@@ -527,12 +533,12 @@ mod tests {
 
     #[test]
     fn empty_plan_suggests_a_next_step() {
-        assert!(portfolio(&Plan::new(), &[], &repos()).contains("project add"));
+        assert!(portfolio(&Plan::new(), &[], &repos(), false).contains("project add"));
     }
 
     #[test]
     fn portfolio_lists_projects_and_their_root_tasks() {
-        let out = portfolio(&plan(), &[], &repos());
+        let out = portfolio(&plan(), &[], &repos(), false);
         assert!(out.contains("caching"), "{out}");
         assert!(out.contains("feat t1"), "{out}");
         assert!(out.contains("L0 · PORTFOLIO"), "{out}");
@@ -541,7 +547,7 @@ mod tests {
     #[test]
     fn every_level_shows_the_same_five_columns() {
         for out in [
-            portfolio(&plan(), &[], &repos()),
+            portfolio(&plan(), &[], &repos(), false),
             focus(&plan(), &[], "caching", &repos()),
             focus(&plan(), &[], "t1", &repos()),
         ] {

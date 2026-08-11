@@ -13,8 +13,8 @@ use std::path::PathBuf;
 
 use args::Args;
 use wecode_core::{
-    Admission, Budget, Cmp, Measure, Plan, Project, ProjectId, Scope, Task, TaskId, TaskKind,
-    TaskStatus, admission,
+    Admission, Budget, Cmp, Measure, Plan, Project, ProjectId, ProjectStatus, Scope, Task, TaskId,
+    TaskKind, TaskStatus, admission,
 };
 use wecode_gov::{Action, ActionKind, Broker, Effective, Grant, Session, WorkKind, glob};
 use wecode_org::{Company, Playbook, Post, Workspace, playbook, workspace};
@@ -65,15 +65,17 @@ PLAN
   wecode playbook [<kind>]             this project's guidance for that kind
         --project <p>   init            `init` writes a starter into the repo
   wecode brief                         who you are and how to work — read this first
-  wecode tree                          projects and their task trees
+  wecode tree [--all]                  projects and their task trees
   wecode ready                         what is schedulable right now
   wecode show <id>                     one project or task in full
   wecode check <id>                    the admission verdict
-  wecode status <task> <status>        move a task by hand
+  wecode status <project|task> <status>   set a status by hand
+  wecode archive <project> | unarchive <project>
+        hide a project from the cockpit, or bring it back (--force if work is live)
 
 COCKPIT
   wecode up                            live dashboard: j/k move, enter descend, q quit
-  wecode board [<id>]                  the same view as a one-shot snapshot
+  wecode board [<id>] [--all]          the same view as a one-shot snapshot
 
 WORK
   wecode assign <task> --to <post>     check the post may do it, then make it ready
@@ -115,12 +117,12 @@ fn run(a: &Args) -> Res {
         ("project", "add") => project_add(a),
         ("project", "list") | ("projects", _) => {
             let (store, _) = open(a)?;
-            Ok(render::tree(&store.load_plan()?))
+            Ok(render::tree(&store.load_plan()?, a.has("all")))
         }
         ("task", "add") => task_add(a),
         ("tree", _) => {
             let (store, _) = open(a)?;
-            Ok(render::tree(&store.load_plan()?))
+            Ok(render::tree(&store.load_plan()?, a.has("all")))
         }
         ("ready", _) => {
             let (store, _) = open(a)?;
@@ -132,6 +134,8 @@ fn run(a: &Args) -> Res {
         ("start", _) => start(a),
         ("worktree", "remove") | ("worktree", "rm") => worktree_remove(a),
         ("worktree", _) => worktree_list(a),
+        ("archive", _) => set_archived(a, true),
+        ("unarchive", _) => set_archived(a, false),
         ("show", _) => show(a),
         ("check", _) => check(a),
         ("status", _) => set_status(a),
@@ -528,12 +532,63 @@ fn check(a: &Args) -> Res {
     Err(format!("no project or task `{id}`").into())
 }
 
-/// Moves a task by hand. The scheduler will own most transitions; this exists so a
-/// human can correct it, and so the seed can mark history.
+/// Moves a project or a task by hand. The scheduler will own most task transitions;
+/// this exists so a human can correct it, and so the seed can mark history.
+///
+/// Resolves either level, the way `show` and `check` do. A project's status is a
+/// judgement, not a rollup: `done` with two tasks unfinished is a legitimate thing to
+/// say, so nothing here consults progress.
 fn set_status(a: &Args) -> Res {
     let (store, company) = open(a)?;
-    let id = TaskId::new(require(a.cmd(1), "task id")?);
+    let id = require(a.cmd(1), "project or task id")?;
     let want = require(a.cmd(2), "status")?;
+    let plan = store.load_plan()?;
+
+    if let Some(p) = plan.project(&ProjectId::new(id)) {
+        let status = ProjectStatus::parse(want).ok_or_else(|| {
+            format!(
+                "unknown project status `{want}` — have: {}",
+                ProjectStatus::all()
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        // Changing the project record is defining, the same capability that created
+        // it — not staffing, which is about who acts next.
+        let who = actor(a, &store, &company)?;
+        require_allowed(
+            &store,
+            &company,
+            &who,
+            (Some(id.to_string()), None),
+            &Action::Define {
+                kind: WorkKind::Project,
+            },
+            "setting a project's status",
+        )?;
+        let was = p.status;
+        store.set_project_status(&ProjectId::new(id), status)?;
+        let mut out = format!("  {id}  {} → {}\n", was.as_str(), status.as_str());
+        if status.is_closed() {
+            let open = plan
+                .tasks_of(&ProjectId::new(id))
+                .filter(|t| !t.status.is_closed())
+                .count();
+            if open > 0 {
+                // Said plainly rather than refused: closing with work outstanding is a
+                // judgement the operator is entitled to make.
+                out.push_str(&format!(
+                    "  {open} task{} still open — they remain dispatchable\n",
+                    if open == 1 { "" } else { "s" }
+                ));
+            }
+        }
+        return Ok(out);
+    }
+
+    let id = TaskId::new(id);
     let status = TaskStatus::parse(want).ok_or_else(|| {
         format!(
             "unknown status `{want}` — have: {}",
@@ -545,10 +600,9 @@ fn set_status(a: &Args) -> Res {
         )
     })?;
 
-    let plan = store.load_plan()?;
     let t = plan
         .task(&id)
-        .ok_or_else(|| format!("no such task: {id}"))?;
+        .ok_or_else(|| format!("no project or task `{id}` — `wecode tree` lists both"))?;
 
     // Moving work is staffing, not defining: it changes who is expected to act.
     let who = actor(a, &store, &company)?;
@@ -564,6 +618,65 @@ fn set_status(a: &Args) -> Res {
     let was = t.status;
     store.set_task_status(&id, status)?;
     Ok(format!("  {id}  {} → {}\n", was.as_str(), status.as_str()))
+}
+
+/// Files a project away, or brings it back.
+///
+/// Deliberately not a status. Archiving says "stop showing me this", which is a
+/// different claim from "this work is finished" — a done project can stay on the
+/// board, and a parked active one can be hidden. Display only: nothing here changes
+/// what is dispatchable.
+fn set_archived(a: &Args, archived: bool) -> Res {
+    let (store, company) = open(a)?;
+    let verb = if archived { "archive" } else { "unarchive" };
+    let id = ProjectId::new(require(a.cmd(1), "project id")?);
+    let plan = store.load_plan()?;
+    let p = plan.project(&id).ok_or_else(|| {
+        format!("no such project: {id} — archiving applies to projects, not tasks")
+    })?;
+
+    if p.archived == archived {
+        return Ok(format!(
+            "  {id} is already {}\n",
+            if archived { "archived" } else { "visible" }
+        ));
+    }
+
+    // Hiding work that is mid-flight or waiting on a person is how it gets forgotten.
+    // Finished and draft tasks are fine to file away.
+    if archived {
+        let live: Vec<&Task> = plan
+            .tasks_of(&id)
+            .filter(|t| t.status == TaskStatus::Running || t.status.needs_a_human())
+            .collect();
+        if !live.is_empty() && !a.has("force") {
+            let mut msg = format!("{id} has work that would be hidden mid-flight:\n");
+            for t in live.iter().take(10) {
+                msg.push_str(&format!("    {} {}  {}\n", t.status.mark(), t.id, t.title));
+            }
+            msg.push_str("  finish or drop them, or pass --force");
+            return Err(msg.into());
+        }
+    }
+
+    let who = actor(a, &store, &company)?;
+    require_allowed(
+        &store,
+        &company,
+        &who,
+        (Some(id.to_string()), None),
+        &Action::Define {
+            kind: WorkKind::Project,
+        },
+        &format!("{verb} a project"),
+    )?;
+    store.set_project_archived(&id, archived)?;
+
+    Ok(if archived {
+        format!("  archived {id} — `wecode tree --all` still shows it\n")
+    } else {
+        format!("  {id} is visible again\n")
+    })
 }
 
 /// Assigns an admitted task to a post — the chief's job.
@@ -882,7 +995,9 @@ fn worktree_list(a: &Args) -> Res {
     let org = work::org_name(ws.root());
 
     let mut rows = Vec::new();
-    for p in plan.projects() {
+    // `all_projects`: archiving must not make a checkout unreachable. A worktree you
+    // cannot see is one you cannot clean up.
+    for p in plan.all_projects() {
         let repo = repo_path(&company, p)?;
         if !git::is_repo(&repo) {
             continue;
@@ -1214,7 +1329,7 @@ fn board(a: &Args) -> Res {
     let plan = store.load_plan()?;
     let audit = store.audit(&AuditQuery::default())?;
     match a.cmd(1) {
-        "" => Ok(board::portfolio(&plan, &audit, &known_repos)),
+        "" => Ok(board::portfolio(&plan, &audit, &known_repos, a.has("all"))),
         id => Ok(board::focus(&plan, &audit, id, &known_repos)),
     }
 }
