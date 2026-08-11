@@ -282,7 +282,7 @@ fn literal_prefix(glob: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{Budget, Cmp, Scope, Status};
+    use crate::common::{Budget, Cmp, Measure, Scope, TaskStatus};
     use crate::task::TaskKind;
 
     fn repos() -> Vec<String> {
@@ -471,7 +471,7 @@ mod tests {
     fn a_closed_task_does_not_block_a_new_scope() {
         let mut plan = seeded();
         let mut done = good_task();
-        done.status = Status::Done;
+        done.status = TaskStatus::Done;
         plan.add_task(done).unwrap();
 
         let fresh = Task::new("cache-metrics", "caching", "record the cache hit rate")

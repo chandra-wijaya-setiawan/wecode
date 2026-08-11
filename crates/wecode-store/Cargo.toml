@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 wecode-core = { workspace = true }
 wecode-gov = { path = "../wecode-gov" }
+rusqlite = { workspace = true }
 
 [lints]
 workspace = true

@@ -310,6 +310,7 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::TaskStatus;
     use crate::project::Project;
     use crate::task::Task;
 
@@ -459,7 +460,7 @@ mod tests {
         );
 
         let mut first = p.task(&"first".into()).unwrap().clone();
-        first.status = Status::Done;
+        first.status = TaskStatus::Done;
         p.update_task(first).unwrap();
 
         assert!(p.is_ready(&"second".into()));
@@ -472,7 +473,7 @@ mod tests {
         p.add_task(task("a")).unwrap();
         p.add_task(task("b").after("a")).unwrap();
         let mut c = task("c");
-        c.status = Status::Done;
+        c.status = TaskStatus::Done;
         p.add_task(c).unwrap();
 
         let ready: Vec<&str> = p.ready_tasks().map(|t| t.id.as_str()).collect();
@@ -485,7 +486,7 @@ mod tests {
         p.add_task(task("parent")).unwrap();
         let mut a = task("a");
         a.parent = Some("parent".into());
-        a.status = Status::Done;
+        a.status = TaskStatus::Done;
         p.add_task(a).unwrap();
         let mut b = task("b");
         b.parent = Some("parent".into());

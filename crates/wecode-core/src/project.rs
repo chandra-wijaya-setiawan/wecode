@@ -5,7 +5,7 @@
 //! and `Goal` are now attributes — the company has a vision, a project has an
 //! objective — because neither was ever executable and both cost a level of tree.
 
-use crate::common::{Budget, Measure, Status};
+use crate::common::{Budget, Measure, ProjectStatus};
 use crate::id::ProjectId;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -19,7 +19,7 @@ pub struct Project {
     /// How we know the project succeeded.
     pub measures: Vec<Measure>,
     pub budget: Budget,
-    pub status: Status,
+    pub status: ProjectStatus,
 }
 
 impl Project {
@@ -34,7 +34,7 @@ impl Project {
             repo: repo.into(),
             measures: Vec::new(),
             budget: Budget::default(),
-            status: Status::Draft,
+            status: ProjectStatus::Draft,
         }
     }
 
@@ -64,7 +64,7 @@ mod tests {
     #[test]
     fn a_project_starts_as_a_draft_with_nothing_assumed() {
         let p = Project::new("caching", "wecode", "add response caching");
-        assert_eq!(p.status, Status::Draft);
+        assert_eq!(p.status, ProjectStatus::Draft);
         assert!(p.measures.is_empty());
         assert!(!p.budget.is_set());
         assert!(!p.has_executable_measure());

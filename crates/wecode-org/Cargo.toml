@@ -9,6 +9,8 @@ license.workspace = true
 [dependencies]
 wecode-core = { workspace = true }
 wecode-gov = { path = "../wecode-gov" }
+serde = { workspace = true }
+toml = { workspace = true }
 
 [lints]
 workspace = true

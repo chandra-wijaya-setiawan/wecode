@@ -9,7 +9,7 @@
 //! A subtask is not blocked by its parent, and a predecessor is not a parent. Both
 //! need cycle checks, separately.
 
-use crate::common::{Budget, Measure, Scope, Status};
+use crate::common::{Budget, Measure, Scope, TaskStatus};
 use crate::id::{ProjectId, TaskId};
 
 /// What kind of work this is. Affects reporting and routing, never authority.
@@ -82,7 +82,7 @@ pub struct Task {
     pub budget: Budget,
     /// The post doing it, once assigned.
     pub assignee: Option<String>,
-    pub status: Status,
+    pub status: TaskStatus,
 }
 
 impl Task {
@@ -102,7 +102,7 @@ impl Task {
             scope: Scope::default(),
             budget: Budget::default(),
             assignee: None,
-            status: Status::Draft,
+            status: TaskStatus::Draft,
         }
     }
 
@@ -210,7 +210,7 @@ mod tests {
     fn a_new_task_assumes_nothing() {
         let t = Task::new("t", "p", "x");
         assert_eq!(t.kind, TaskKind::Feature);
-        assert_eq!(t.status, Status::Draft);
+        assert_eq!(t.status, TaskStatus::Draft);
         assert!(t.parent.is_none());
         assert!(t.depends_on.is_empty());
         assert!(t.assignee.is_none());

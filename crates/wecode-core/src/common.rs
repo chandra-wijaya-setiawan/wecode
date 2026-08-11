@@ -86,49 +86,147 @@ impl Budget {
     }
 }
 
+/// A project's life. A project never runs — its tasks do — so it has no
+/// `Running` or `Verifying`.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub enum Status {
+pub enum ProjectStatus {
     #[default]
     Draft,
-    Ready,
     Active,
-    Blocked,
     Done,
     Dropped,
 }
 
-impl Status {
+impl ProjectStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Active => "active",
+            Self::Done => "done",
+            Self::Dropped => "dropped",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "draft" => Self::Draft,
+            "active" => Self::Active,
+            "done" => Self::Done,
+            "dropped" => Self::Dropped,
+            _ => return None,
+        })
+    }
+
+    #[must_use]
+    pub fn is_closed(self) -> bool {
+        matches!(self, Self::Done | Self::Dropped)
+    }
+}
+
+/// A task's life, shaped so the scheduler can drive it with one query.
+///
+/// `Waiting` and `Ready` differ only by whether prerequisites are finished, and the
+/// scheduler is the single writer that promotes one to the other on each tick. That
+/// makes the stored value a cache with exactly one author: a missed scan delays a
+/// promotion, it cannot lose one.
+///
+/// There is deliberately no `Blocked`. Waiting on a task, waiting on a signature and
+/// waiting on an answer are three different situations, resolved by three different
+/// people.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum TaskStatus {
+    /// Has defects; not workable.
+    #[default]
+    Draft,
+    /// Admitted, but some prerequisite is unfinished.
+    Waiting,
+    /// Admitted and unblocked — the scheduler's queue.
+    Ready,
+    /// An execution is in flight.
+    Running,
+    /// The agent finished; acceptance and scope checks are running.
+    Verifying,
+    /// A capability holder must sign — a merge, a budget increase.
+    NeedsApproval,
+    /// A human must answer the agent.
+    NeedsInput,
+    /// Attempted, retries exhausted. A person decides what happens next.
+    Failed,
+    Done,
+    Dropped,
+}
+
+impl TaskStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Waiting => "waiting",
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Verifying => "verifying",
+            Self::NeedsApproval => "needs-approval",
+            Self::NeedsInput => "needs-input",
+            Self::Failed => "failed",
+            Self::Done => "done",
+            Self::Dropped => "dropped",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "draft" => Self::Draft,
+            "waiting" => Self::Waiting,
+            "ready" => Self::Ready,
+            "running" => Self::Running,
+            "verifying" => Self::Verifying,
+            "needs-approval" => Self::NeedsApproval,
+            "needs-input" => Self::NeedsInput,
+            "failed" => Self::Failed,
+            "done" => Self::Done,
+            "dropped" => Self::Dropped,
+            _ => return None,
+        })
+    }
+
     #[must_use]
     pub fn is_done(self) -> bool {
         matches!(self, Self::Done)
     }
 
-    /// Whether work is finished with, either way.
+    /// Finished with, either way. Closed tasks are ignored by the scheduler and by
+    /// scope-conflict checks.
     #[must_use]
     pub fn is_closed(self) -> bool {
         matches!(self, Self::Done | Self::Dropped)
     }
 
+    /// Whether the scheduler may consider promoting or dispatching this.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Draft => "draft",
-            Self::Ready => "ready",
-            Self::Active => "active",
-            Self::Blocked => "blocked",
-            Self::Done => "done",
-            Self::Dropped => "dropped",
-        }
+    pub fn is_schedulable(self) -> bool {
+        matches!(self, Self::Waiting | Self::Ready)
+    }
+
+    /// Whether a person has to act before anything else can happen. Drives the
+    /// board's "needs you" column.
+    #[must_use]
+    pub fn needs_a_human(self) -> bool {
+        matches!(self, Self::NeedsApproval | Self::NeedsInput | Self::Failed)
     }
 
     #[must_use]
     pub fn mark(self) -> char {
         match self {
             Self::Draft => '·',
+            Self::Waiting => '⋯',
             Self::Ready => '○',
-            Self::Active => '>',
-            Self::Blocked => '!',
-            Self::Done => 'x',
+            Self::Running => '>',
+            Self::Verifying => '?',
+            Self::NeedsApproval => '!',
+            Self::NeedsInput => '!',
+            Self::Failed => 'x',
+            Self::Done => '✓',
             Self::Dropped => '-',
         }
     }
@@ -170,9 +268,65 @@ mod tests {
 
     #[test]
     fn closed_covers_dropped_as_well_as_done() {
-        assert!(Status::Done.is_done());
-        assert!(!Status::Dropped.is_done());
-        assert!(Status::Dropped.is_closed());
-        assert!(!Status::Active.is_closed());
+        assert!(TaskStatus::Done.is_done());
+        assert!(!TaskStatus::Dropped.is_done());
+        assert!(TaskStatus::Dropped.is_closed());
+        assert!(!TaskStatus::Running.is_closed());
+    }
+
+    #[test]
+    fn every_status_round_trips_through_its_name() {
+        for s in [
+            TaskStatus::Draft,
+            TaskStatus::Waiting,
+            TaskStatus::Ready,
+            TaskStatus::Running,
+            TaskStatus::Verifying,
+            TaskStatus::NeedsApproval,
+            TaskStatus::NeedsInput,
+            TaskStatus::Failed,
+            TaskStatus::Done,
+            TaskStatus::Dropped,
+        ] {
+            assert_eq!(TaskStatus::parse(s.as_str()), Some(s), "{s:?}");
+        }
+        for s in [
+            ProjectStatus::Draft,
+            ProjectStatus::Active,
+            ProjectStatus::Done,
+            ProjectStatus::Dropped,
+        ] {
+            assert_eq!(ProjectStatus::parse(s.as_str()), Some(s), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn only_waiting_and_ready_are_schedulable() {
+        assert!(TaskStatus::Waiting.is_schedulable());
+        assert!(TaskStatus::Ready.is_schedulable());
+        for s in [
+            TaskStatus::Draft,
+            TaskStatus::Running,
+            TaskStatus::Verifying,
+            TaskStatus::Done,
+        ] {
+            assert!(!s.is_schedulable(), "{s:?} must not be picked up");
+        }
+    }
+
+    #[test]
+    fn the_three_states_that_need_a_person_are_distinguished() {
+        // No single "blocked": waiting on a signature, on an answer, and on a
+        // decision after failure are different situations.
+        for s in [
+            TaskStatus::NeedsApproval,
+            TaskStatus::NeedsInput,
+            TaskStatus::Failed,
+        ] {
+            assert!(s.needs_a_human(), "{s:?}");
+        }
+        for s in [TaskStatus::Waiting, TaskStatus::Ready, TaskStatus::Running] {
+            assert!(!s.needs_a_human(), "{s:?} resolves without a person");
+        }
     }
 }
