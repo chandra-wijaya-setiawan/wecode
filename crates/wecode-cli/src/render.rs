@@ -645,6 +645,44 @@ pub(crate) fn envelope(
     format!("{}\nWorking directory: {}\n", filled.trim(), cwd.display())
 }
 
+/// What running the agent did. Facts only — the verdict comes from `verify`.
+#[must_use]
+pub(crate) fn ran(
+    task: &Task,
+    post: &Post,
+    cwd: &std::path::Path,
+    o: &crate::spawn::Outcome,
+) -> String {
+    let mut out = format!(
+        "{} {}  {}\n  post     {} ({})\n  in       {}\n  took     {:.0}s\n  {}\n",
+        kind_tag(task.kind),
+        task.id,
+        task.title,
+        post.name,
+        post.agent,
+        cwd.display(),
+        o.took.as_secs_f64(),
+        if o.ended.ok() {
+            format!("✓ {}", o.ended.describe())
+        } else {
+            format!("✗ {}", o.ended.describe())
+        }
+    );
+    if o.truncated {
+        out.push_str("  output was capped\n");
+    }
+    // The tail, not the whole log: enough to see how it ended without burying the
+    // verdict that follows.
+    let tail: Vec<&str> = o.output.lines().rev().take(12).collect();
+    if !tail.is_empty() {
+        out.push_str("\nlast output\n");
+        for line in tail.into_iter().rev() {
+            out.push_str(&format!("  {}\n", truncate_cmd(line, 100)));
+        }
+    }
+    out
+}
+
 /// What verification observed, and what it concluded.
 #[must_use]
 pub(crate) fn verdict(

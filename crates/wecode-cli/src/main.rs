@@ -4,6 +4,7 @@ mod args;
 mod board;
 mod git;
 mod render;
+mod spawn;
 mod tui;
 mod verify;
 mod work;
@@ -83,6 +84,7 @@ COCKPIT
 WORK
   wecode assign <task> --to <post>     check the post may do it, then make it ready
   wecode start <task>                  worktree + envelope; marks it running
+  wecode run <task>                    spawn its agent, supervise it, then verify
   wecode verify <task>                 judge it: diff against scope, then acceptance
   wecode worktree [remove <task>]      list them, or remove one (--force if dirty)
   wecode approve <merge|admission|budget|measure> [<what>] --as <post>
@@ -138,6 +140,7 @@ fn run(a: &Args) -> Res {
         ("brief", _) => brief(a),
         ("start", _) => start(a),
         ("verify", _) => verify_task(a),
+        ("run", _) => run_task(a),
         ("worktree", "remove") | ("worktree", "rm") => worktree_remove(a),
         ("worktree", _) => worktree_list(a),
         ("archive", _) => set_archived(a, true),
@@ -952,15 +955,26 @@ fn brief(a: &Args) -> Res {
 
 /// Begins work on a task: prepares the worktree its playbook asks for, marks it
 /// running, and prints the envelope for whoever does the work.
-fn start(a: &Args) -> Res {
-    let (ws, store, company) = open_full(a)?;
-    let id = TaskId::new(require(a.cmd(1), "task id")?);
-    let plan = store.load_plan()?;
-    let task = plan
-        .task(&id)
-        .ok_or_else(|| format!("no such task: {id}"))?
-        .clone();
+/// A task made ready to work on: where, and with what instructions.
+struct Prepared {
+    cwd: PathBuf,
+    envelope: String,
+    /// What preparation did, for the operator to read.
+    notes: String,
+}
 
+/// Everything both `start` and `run` must do before any work happens.
+///
+/// One function because they must not drift: a task prepared by hand and a task
+/// prepared for an agent have to land in the same directory, on the same branch,
+/// with the same instructions.
+fn prepare(
+    ws: &Workspace,
+    company: &Company,
+    plan: &Plan,
+    task: &Task,
+) -> Result<Prepared, Box<dyn std::error::Error>> {
+    let id = task.id.clone();
     if task.status.is_closed() {
         return Err(format!(
             "{id} is {} — reopen it with `wecode status {id} waiting` first",
@@ -968,39 +982,43 @@ fn start(a: &Args) -> Res {
         )
         .into());
     }
-    let defects = admission::check_task(&task, &plan);
+    let defects = admission::check_task(task, plan);
     if !defects.is_empty() {
-        let mut out = render::admission(&render::task_heading(&task), &defects, None);
-        out.push_str("\n  not started — a draft cannot be worked on\n");
-        return Ok(out);
+        return Err(format!(
+            "{}\n  a draft cannot be worked on",
+            render::admission(&render::task_heading(task), &defects, None)
+        )
+        .into());
     }
     let blockers = plan.blockers(&id);
     if !blockers.is_empty() {
-        let mut out = format!("  {id} is not ready\n");
+        let mut msg = format!("{id} is not ready\n");
         for b in &blockers {
-            out.push_str(&format!("    waiting on {}\n", blocker_note(b)));
+            msg.push_str(&format!("    waiting on {}\n", blocker_note(b)));
         }
-        return Ok(out);
+        return Err(msg.into());
     }
 
     let project = plan
         .project(&task.project)
         .ok_or_else(|| format!("no such project: {}", task.project))?;
-    let pb = playbook_of(&company, project)?;
+    let pb = playbook_of(company, project)?;
 
     // The worktree belongs to the main task, so a subtask joins its parent's tree
     // rather than opening a second checkout of the same work.
-    let owner = work::owner(&plan, &id).expect("task is in the plan");
-    let kind_pb = pb.as_ref().and_then(|p| p.for_kind(owner.kind));
-    let wants_worktree = kind_pb.is_some_and(|k| k.worktree);
+    let owner = work::owner(plan, &id).expect("task is in the plan");
+    let wants_worktree = pb
+        .as_ref()
+        .and_then(|p| p.for_kind(owner.kind))
+        .is_some_and(|k| k.worktree);
 
-    let mut out = String::new();
-    let mut cwd = repo_path(&company, project)?;
+    let mut notes = String::new();
+    let mut cwd = repo_path(company, project)?;
 
     if wants_worktree {
         let branch = work::branch_for(&owner.id);
         let path = work::worktree_for(&work::org_name(ws.root()), &owner.id);
-        let repo = repo_path(&company, project)?;
+        let repo = cwd.clone();
         if !git::is_repo(&repo) {
             return Err(format!("{} is not a git repository", repo.display()).into());
         }
@@ -1014,26 +1032,47 @@ fn start(a: &Args) -> Res {
 
         if path.is_dir() {
             git::reset_hard(&path)?;
-            out.push_str(&format!("  worktree {} (reset)\n", path.display()));
+            notes.push_str(&format!("  worktree {} (reset)\n", path.display()));
         } else {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             git::worktree_add(&repo, &path, &branch, base.as_deref())?;
-            out.push_str(&format!("  worktree {}\n", path.display()));
+            notes.push_str(&format!("  worktree {}\n", path.display()));
         }
-        out.push_str(&format!("  branch   {branch}\n"));
+        notes.push_str(&format!("  branch   {branch}\n"));
         if owner.id != id {
-            out.push_str(&format!("  shared with {} (its main task)\n", owner.id));
+            notes.push_str(&format!("  shared with {} (its main task)\n", owner.id));
         }
         cwd = path;
     } else {
-        out.push_str(&format!(
+        notes.push_str(&format!(
             "  no worktree — the {} playbook does not ask for one\n  work in {}\n",
             owner.kind.as_str(),
             cwd.display()
         ));
     }
+
+    Ok(Prepared {
+        envelope: render::envelope(&company.templates.task_envelope, task, project, plan, &cwd),
+        cwd,
+        notes,
+    })
+}
+
+/// Begins work on a task by hand: prepares it and hands you the envelope.
+///
+/// The counterpart to `run`, for when the operator is the worker.
+fn start(a: &Args) -> Res {
+    let (ws, store, company) = open_full(a)?;
+    let id = TaskId::new(require(a.cmd(1), "task id")?);
+    let plan = store.load_plan()?;
+    let task = plan
+        .task(&id)
+        .ok_or_else(|| format!("no such task: {id}"))?
+        .clone();
+
+    let prepared = prepare(&ws, &company, &plan, &task)?;
 
     // Starting is staffing: it changes who is expected to act.
     let who = actor(a, &store, &company)?;
@@ -1046,16 +1085,131 @@ fn start(a: &Args) -> Res {
         "starting a task",
     )?;
     store.set_task_status(&id, TaskStatus::Running)?;
-    out.push_str(&format!("  status   {} → running\n", task.status.as_str()));
 
-    out.push('\n');
-    out.push_str(&render::envelope(
-        &company.templates.task_envelope,
-        &task,
-        project,
-        &plan,
-        &cwd,
+    let mut out = prepared.notes;
+    out.push_str(&format!(
+        "  status   {} → running\n\n",
+        task.status.as_str()
     ));
+    out.push_str(&prepared.envelope);
+    Ok(out)
+}
+
+/// The `never_run` pattern a command line matches, if any.
+///
+/// Invariants outrank every grant, so this is checked even though the launch line is
+/// operator-written: a grant that permits an invariant violation is itself the bug,
+/// and so is a config that does.
+fn forbidden_by_charter(company: &Company, line: &str) -> Option<String> {
+    company.charter.invariants.iter().find_map(|inv| match inv {
+        wecode_gov::Invariant::NeverRun(patterns) => patterns
+            .iter()
+            .find(|p| glob::matches(p, line))
+            .map(ToString::to_string),
+        _ => None,
+    })
+}
+
+/// Runs a task: prepares it, spawns the agent that holds its post, then judges it.
+///
+/// The agent is never given a session. The supervisor opens one and records on its
+/// behalf — if workers presented session ids, one could present another's and inherit
+/// its authority. Presenting nothing removes that class of escalation entirely.
+fn run_task(a: &Args) -> Res {
+    let (ws, store, company) = open_full(a)?;
+    let id = TaskId::new(require(a.cmd(1), "task id")?);
+    let plan = store.load_plan()?;
+    let task = plan
+        .task(&id)
+        .ok_or_else(|| format!("no such task: {id}"))?
+        .clone();
+
+    let post_name = task
+        .assignee
+        .clone()
+        .ok_or_else(|| format!("{id} is unassigned — `wecode assign {id} --to <post>`"))?;
+    let post = find_post(&company, &post_name)?;
+    let template = company
+        .agents
+        .get(&post.agent)
+        .ok_or_else(|| {
+            format!(
+                "post `{post_name}` names agent `{}`, which has no template",
+                post.agent
+            )
+        })?
+        .clone();
+
+    // Prepare exactly as `start` does, so the two cannot drift apart.
+    let prepared = prepare(&ws, &company, &plan, &task)?;
+
+    let who = actor(a, &store, &company)?;
+    let supervisor = Session::new(
+        who.session.clone(),
+        post_name.clone(),
+        post.agent.clone(),
+        company.effective(&post),
+    )
+    .on(Some(task.project.to_string()), Some(id.to_string()))
+    .with_human(who.human.clone());
+
+    // The launch line as configured, with `{{prompt}}` left standing. Substituting
+    // first would put the whole envelope into the command being judged — kilobytes of
+    // task text, matched as if it were an argument.
+    let launch = spawn::argv(&template, "{{prompt}}").join(" ");
+
+    // Only the charter is consulted here, not the post's `run` grant. That grant says
+    // what the *agent* may run while working — `cargo *` for an engineer — and wecode
+    // cannot intercept those anyway. Starting the harness is wecode's own action, and
+    // the harness is named in company.toml, which only the operator writes. Judging
+    // the launch against the agent's grant would refuse every real configuration:
+    // `claude` is not `cargo`.
+    if let Some(pattern) = forbidden_by_charter(&company, &launch) {
+        return Err(format!(
+            "agent `{}` would run `{launch}`, which the charter forbids: never_run {pattern}",
+            post.agent
+        )
+        .into());
+    }
+
+    store.set_task_status(&id, TaskStatus::Running)?;
+    let limits = spawn::Limits::from(&template);
+    let outcome = spawn::run(&template, &prepared.envelope, &prepared.cwd, limits)?;
+
+    // The exit is a fact we observed, not a claim the agent made.
+    let mut broker = Broker::new(company.charter.clone());
+    broker.observe(
+        &supervisor,
+        Action::Run {
+            // The configured launch line, not just the binary: `sh` alone says
+            // nothing about what was run, and the substituted prompt would bury it.
+            argv: vec![format!("{launch} — {}", outcome.ended.describe())],
+        },
+        if outcome.ended.ok() {
+            wecode_gov::Decision::Allow
+        } else {
+            wecode_gov::Decision::Deny {
+                reason: wecode_gov::DenyReason::CommandNotPermitted {
+                    argv: outcome.ended.describe(),
+                },
+                mode: wecode_gov::ControlMode::Sanctioned,
+                alarm: false,
+            }
+        },
+        wecode_gov::Source::Supervisor,
+    );
+    store.append_records(broker.ledger())?;
+
+    let mut out = render::ran(&task, &post, &prepared.cwd, &outcome);
+    if outcome.ended.ok() {
+        // Verification is the same code path a hand-run task takes, so the two can
+        // never disagree about what passing means.
+        out.push('\n');
+        out.push_str(&verify_task(a)?);
+    } else {
+        store.set_task_status(&id, TaskStatus::Failed)?;
+        out.push_str("\n  not verified — the agent did not finish cleanly\n");
+    }
     Ok(out)
 }
 

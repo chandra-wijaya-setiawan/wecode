@@ -133,6 +133,22 @@ impl Org {
         repo
     }
 
+    /// Replaces the agent template so a test can stand in a shell script for a
+    /// coding CLI. Real process, real supervision — only the binary differs.
+    fn agent(&self, script: &str) {
+        let conf = self.path("company.toml");
+        let text = std::fs::read_to_string(&conf).unwrap();
+        let args = format!("args = [\"-c\", \"{}\"]", script.replace('"', "\\\""));
+        let replaced = text
+            .replace("command = \"claude\"", "command = \"sh\"")
+            .replace(
+                "args = [\"-p\", \"{{prompt}}\", \"--output-format\", \"stream-json\", \"--verbose\"]",
+                &args,
+            );
+        assert_ne!(replaced, text, "agent template was not replaced");
+        std::fs::write(&conf, replaced).unwrap();
+    }
+
     /// Writes a playbook into the repo. Explicit rather than via `playbook init`, so
     /// a test states exactly the guidance it depends on.
     fn playbook(&self, repo: &Path, body: &str) {
@@ -1931,4 +1947,170 @@ fn amending_a_scope_needs_at_least_one_glob() {
     let r = org.run(&["task", "scope", "t"]);
     assert!(!r.ok());
     r.assert_contains("at least one");
+}
+
+// ------------------------------------------------------------------- run ------
+
+/// A workspace whose `impl` post is a shell script rather than a coding CLI.
+fn with_agent(name: &str, script: &str) -> (Org, PathBuf) {
+    let (org, repo) = with_playbook(name);
+    org.agent(script);
+    (org, repo)
+}
+
+fn a_task(org: &Org, id: &str, glob: &str, accept: &str) {
+    org.run(&[
+        "task",
+        "add",
+        id,
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "append a marker comment to the source",
+        "--write",
+        glob,
+        "--write",
+        ".wecode/run/**",
+        "--accept-cmd",
+        accept,
+        "--tokens",
+        "100",
+        "--wall",
+        "30",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("task add");
+}
+
+#[test]
+fn run_spawns_the_agent_and_verifies_what_it_did() {
+    let (org, _) = with_agent("run-ok", "echo done >> a.txt");
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+
+    let r = org.run(&["run", "t"]);
+    r.assert_ok("run")
+        .assert_contains("post     impl")
+        .assert_contains("exit 0")
+        .assert_contains("✓ a.txt")
+        .assert_contains("passed");
+    org.run(&["show", "t"]).assert_contains("status     done");
+}
+
+#[test]
+fn a_failing_agent_is_not_verified() {
+    // Verification would be meaningless: the work never finished.
+    let (org, _) = with_agent("run-fail", "echo nope >&2; exit 4");
+    a_task(&org, "t", "a.txt", "true");
+
+    org.run(&["run", "t"])
+        .assert_ok("command itself succeeds")
+        .assert_contains("exit 4")
+        .assert_contains("not verified");
+    org.run(&["show", "t"]).assert_contains("status     failed");
+}
+
+#[test]
+fn work_outside_the_declared_scope_fails_a_run_that_exited_cleanly() {
+    // The case the whole design turns on: the agent says it succeeded, and the diff
+    // says it went somewhere it was not allowed.
+    let (org, _) = with_agent(
+        "run-scope",
+        "echo done >> a.txt; echo sneaky >> elsewhere.txt",
+    );
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+
+    let r = org.run(&["run", "t"]);
+    r.assert_contains("exit 0")
+        .assert_contains("elsewhere.txt")
+        .assert_contains("outside scope")
+        .assert_contains("failed");
+    org.run(&["audit", "--denied", "--task", "t"])
+        .assert_contains("elsewhere.txt");
+}
+
+#[test]
+fn an_agent_that_hangs_is_killed_on_its_idle_limit() {
+    let (org, _) = with_agent("run-idle", "sleep 60");
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(&conf, text.replace("idle_secs = 300", "idle_secs = 1")).unwrap();
+    a_task(&org, "t", "a.txt", "true");
+
+    let r = org.run(&["run", "t"]);
+    r.assert_contains("no output")
+        .assert_contains("not verified");
+    org.run(&["show", "t"]).assert_contains("status     failed");
+}
+
+#[test]
+fn the_agent_is_launched_where_the_task_says_and_the_launch_is_recorded() {
+    let (org, _) = with_agent("run-record", "pwd > where.txt; echo done >> a.txt");
+    a_task(&org, "t", "*.txt", "grep -q done a.txt");
+    org.run(&["run", "t"]).assert_ok("run");
+
+    // The configured launch line reaches the ledger, prompt placeholder intact.
+    org.run(&["audit", "--task", "t"])
+        .assert_contains("sh -c")
+        .assert_contains("exit 0");
+}
+
+#[test]
+fn an_unassigned_task_cannot_be_run() {
+    // There is no post to name an agent, so there is nothing to launch. The fixture
+    // playbook has no [chore] section, so nothing fills the assignee either.
+    let (org, _) = with_agent("run-unassigned", "true");
+    org.run(&[
+        "task",
+        "add",
+        "t",
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "append a marker comment to the source",
+        "--write",
+        "a.txt",
+        "--accept-cmd",
+        "true",
+        "--tokens",
+        "10",
+        "--wall",
+        "5",
+    ])
+    .assert_ok("task add");
+
+    let r = org.run(&["run", "t"]);
+    assert!(!r.ok());
+    r.assert_contains("unassigned")
+        .assert_contains("wecode assign");
+}
+
+#[test]
+fn running_a_task_that_does_not_exist_says_so() {
+    let (org, _) = with_agent("run-ghost", "true");
+    let r = org.run(&["run", "ghost"]);
+    assert!(!r.ok());
+    r.assert_contains("no such task");
+}
+
+#[test]
+fn a_charter_forbidden_launch_is_refused_before_anything_runs() {
+    // Invariants outrank configuration: an agent template that would run a forbidden
+    // command is itself the bug, and is caught before the process starts.
+    let (org, _) = with_agent("run-charter", "true");
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        text.replace("never_run = [", "never_run = [\"sh *\", "),
+    )
+    .unwrap();
+    a_task(&org, "t", "a.txt", "true");
+
+    let r = org.run(&["run", "t"]);
+    assert!(!r.ok(), "should refuse");
+    r.assert_contains("charter forbids")
+        .assert_contains("never_run");
 }
