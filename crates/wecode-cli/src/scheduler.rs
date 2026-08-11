@@ -1,0 +1,307 @@
+//! The tick: keeping the stored status honest about what is startable.
+//!
+//! `Waiting` and `Ready` differ only by whether prerequisites are finished, which the
+//! plan can always compute. The stored value is a **cache**, and this is its single
+//! author — a missed tick delays a promotion, it cannot lose one.
+//!
+//! Archived projects are skipped. Archiving parks a project, so its tasks stop being
+//! promoted as well as stop being shown.
+
+use std::time::Duration;
+
+use wecode_core::{Plan, Task, TaskId, TaskStatus};
+
+/// One status change a tick implies.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Move {
+    pub(crate) task: TaskId,
+    pub(crate) from: TaskStatus,
+    pub(crate) to: TaskStatus,
+}
+
+/// What this tick would change, computed and returned rather than applied.
+///
+/// Pure so the decision is testable without a database, and so the caller can record
+/// each move before making it.
+pub(crate) fn transitions(plan: &Plan) -> Vec<Move> {
+    let mut moves: Vec<Move> = plan
+        .tasks()
+        .filter(|t| plan.project(&t.project).is_some_and(|p| !p.archived))
+        .filter_map(|t| {
+            let ready = plan.is_ready(&t.id);
+            match t.status {
+                TaskStatus::Waiting if ready => Some(TaskStatus::Ready),
+                // Demotion matters as much as promotion. Reopening a finished
+                // prerequisite must put its dependents back, or the queue offers work
+                // whose groundwork has been undone.
+                TaskStatus::Ready if !ready => Some(TaskStatus::Waiting),
+                _ => None,
+            }
+            .map(|to| Move {
+                task: t.id.clone(),
+                from: t.status,
+                to,
+            })
+        })
+        .collect();
+    moves.sort_by(|a, b| a.task.cmp(&b.task));
+    moves
+}
+
+/// How many tasks may run at once, given what the operator can absorb.
+///
+/// Concurrency derives from attention, not from cores. `max_open_items` is the number
+/// of things the operator is willing to have in flight; a machine limit only ever
+/// narrows it further.
+#[must_use]
+pub(crate) fn parallelism(max_open_items: u64, cores: usize) -> usize {
+    let by_attention = max_open_items.max(1) as usize;
+    // Leave two: one for wecode, one for the operator's own shell.
+    let by_machine = cores.saturating_sub(2).max(1);
+    by_attention.min(by_machine)
+}
+
+/// Tasks the loop should dispatch this pass, in id order, capped by `slots`.
+///
+/// Only `Ready`. A `Waiting` task has not been promoted yet, and promoting and
+/// dispatching in the same breath would skip the record of it becoming startable.
+pub(crate) fn dispatchable(plan: &Plan, slots: usize) -> Vec<&Task> {
+    if slots == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<&Task> = plan
+        .tasks()
+        .filter(|t| t.status == TaskStatus::Ready && t.assignee.is_some())
+        .filter(|t| plan.project(&t.project).is_some_and(|p| !p.archived))
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out.truncate(slots);
+    out
+}
+
+/// How many slots are free, given what is already running.
+#[must_use]
+pub(crate) fn free_slots(plan: &Plan, limit: usize) -> usize {
+    let running = plan
+        .tasks()
+        .filter(|t| t.status == TaskStatus::Running)
+        .count();
+    limit.saturating_sub(running)
+}
+
+/// Whether anything is waiting on a person. The loop pauses rather than piling more
+/// on: unanswered questions are the one thing more work cannot help with.
+#[must_use]
+pub(crate) fn awaiting_a_human(plan: &Plan) -> Vec<&Task> {
+    let mut out: Vec<&Task> = plan
+        .tasks()
+        .filter(|t| t.status.needs_a_human())
+        .filter(|t| plan.project(&t.project).is_some_and(|p| !p.archived))
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// How long to sleep between passes.
+pub(crate) const INTERVAL: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wecode_core::{Budget, Measure, Project, Scope, Task};
+
+    fn task(id: &str) -> Task {
+        Task::new(id, "p", "do something specific here")
+            .accepting(Measure::Command {
+                cmd: "true".into(),
+                expect_status: 0,
+            })
+            .scoped(Scope::write(&[&format!("{id}/**")]))
+            .budgeted(Budget {
+                tokens: Some(10),
+                wall_secs: Some(1),
+            })
+    }
+
+    /// `a` then `b`, both waiting.
+    fn plan() -> Plan {
+        let mut p = Plan::new();
+        p.add_project(Project::new("p", "an objective sentence", "repo"))
+            .unwrap();
+        let mut a = task("a");
+        a.status = TaskStatus::Waiting;
+        p.add_task(a).unwrap();
+        let mut b = task("b").after("a");
+        b.status = TaskStatus::Waiting;
+        p.add_task(b).unwrap();
+        p
+    }
+
+    fn set(p: &mut Plan, id: &str, s: TaskStatus) {
+        let mut t = p.task(&TaskId::new(id)).unwrap().clone();
+        t.status = s;
+        p.update_task(t).unwrap();
+    }
+
+    #[test]
+    fn an_unblocked_waiting_task_is_promoted_and_a_blocked_one_is_not() {
+        let m = transitions(&plan());
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert_eq!(m[0].task.as_str(), "a");
+        assert_eq!(m[0].to, TaskStatus::Ready);
+    }
+
+    #[test]
+    fn finishing_a_prerequisite_releases_its_dependent_on_the_next_tick() {
+        let mut p = plan();
+        set(&mut p, "a", TaskStatus::Done);
+        let m = transitions(&p);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].task.as_str(), "b");
+        assert_eq!(m[0].to, TaskStatus::Ready);
+    }
+
+    #[test]
+    fn reopening_a_prerequisite_puts_its_dependent_back() {
+        // Without demotion the queue would keep offering work whose groundwork has
+        // been undone.
+        let mut p = plan();
+        set(&mut p, "a", TaskStatus::Done);
+        set(&mut p, "b", TaskStatus::Ready);
+        assert!(transitions(&p).is_empty(), "settled");
+
+        set(&mut p, "a", TaskStatus::Waiting);
+        let m = transitions(&p);
+        assert_eq!(m.len(), 2, "{m:?}");
+        let b = m.iter().find(|x| x.task.as_str() == "b").unwrap();
+        assert_eq!(b.from, TaskStatus::Ready);
+        assert_eq!(b.to, TaskStatus::Waiting);
+    }
+
+    #[test]
+    fn a_tick_over_a_settled_plan_changes_nothing() {
+        // Idempotence is what makes running this on a timer safe.
+        let mut p = plan();
+        set(&mut p, "a", TaskStatus::Ready);
+        assert!(transitions(&p).is_empty());
+    }
+
+    #[test]
+    fn statuses_the_scheduler_does_not_own_are_left_alone() {
+        // Running, verifying, needs-approval, failed and done all belong to someone
+        // else. A tick that touched them would fight the thing that set them.
+        for s in [
+            TaskStatus::Draft,
+            TaskStatus::Running,
+            TaskStatus::Verifying,
+            TaskStatus::NeedsApproval,
+            TaskStatus::NeedsInput,
+            TaskStatus::Failed,
+            TaskStatus::Done,
+            TaskStatus::Dropped,
+        ] {
+            let mut p = plan();
+            set(&mut p, "a", s);
+            assert!(
+                !transitions(&p).iter().any(|m| m.task.as_str() == "a"),
+                "{s:?} should not be touched"
+            );
+        }
+    }
+
+    #[test]
+    fn an_archived_project_is_not_scanned() {
+        // Archiving parks the work, so promotion stops with visibility.
+        let mut p = plan();
+        let mut proj = p.project(&"p".into()).unwrap().clone();
+        proj.archived = true;
+        p.update_project(proj).unwrap();
+        assert!(transitions(&p).is_empty());
+    }
+
+    #[test]
+    fn concurrency_comes_from_attention_and_is_narrowed_by_the_machine() {
+        // The operator's capacity is the binding constraint; cores only ever reduce it.
+        assert_eq!(parallelism(5, 32), 5);
+        assert_eq!(parallelism(5, 4), 2, "cores - 2");
+        assert_eq!(parallelism(1, 64), 1);
+        // Never zero: a degenerate config must not silently stop all work.
+        assert_eq!(parallelism(0, 1), 1);
+    }
+
+    #[test]
+    fn only_ready_assigned_tasks_are_dispatched() {
+        let mut p = plan();
+        set(&mut p, "a", TaskStatus::Ready);
+        // Unassigned: there is no post, so no agent to launch.
+        assert!(dispatchable(&p, 10).is_empty());
+
+        let mut a = p.task(&TaskId::new("a")).unwrap().clone();
+        a.assignee = Some("impl".into());
+        p.update_task(a).unwrap();
+        let d = dispatchable(&p, 10);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].id.as_str(), "a");
+    }
+
+    #[test]
+    fn dispatch_is_capped_by_the_slots_given() {
+        let mut p = plan();
+        for id in ["a", "b"] {
+            let mut t = p.task(&TaskId::new(id)).unwrap().clone();
+            t.status = TaskStatus::Ready;
+            t.assignee = Some("impl".into());
+            p.update_task(t).unwrap();
+        }
+        assert_eq!(dispatchable(&p, 1).len(), 1);
+        assert_eq!(dispatchable(&p, 2).len(), 2);
+        assert!(dispatchable(&p, 0).is_empty(), "no slots, no dispatch");
+    }
+
+    #[test]
+    fn running_work_consumes_slots() {
+        let mut p = plan();
+        set(&mut p, "a", TaskStatus::Running);
+        assert_eq!(free_slots(&p, 3), 2);
+        set(&mut p, "b", TaskStatus::Running);
+        assert_eq!(free_slots(&p, 3), 1);
+        // Never negative, however many were started by hand.
+        assert_eq!(free_slots(&p, 1), 0);
+    }
+
+    #[test]
+    fn work_stuck_on_a_person_is_reported() {
+        let mut p = plan();
+        set(&mut p, "a", TaskStatus::NeedsApproval);
+        set(&mut p, "b", TaskStatus::Failed);
+        let waiting: Vec<&str> = awaiting_a_human(&p).iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(waiting, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn an_archived_project_is_never_dispatched_from() {
+        let mut p = plan();
+        let mut a = p.task(&TaskId::new("a")).unwrap().clone();
+        a.status = TaskStatus::Ready;
+        a.assignee = Some("impl".into());
+        p.update_task(a).unwrap();
+        assert_eq!(dispatchable(&p, 10).len(), 1, "control");
+
+        let mut proj = p.project(&"p".into()).unwrap().clone();
+        proj.archived = true;
+        p.update_project(proj).unwrap();
+        assert!(dispatchable(&p, 10).is_empty());
+        assert!(awaiting_a_human(&p).is_empty());
+    }
+
+    #[test]
+    fn a_missed_tick_delays_a_promotion_rather_than_losing_it() {
+        // The property that makes the cache safe: readiness is recomputed from the
+        // graph every time, never accumulated.
+        let mut p = plan();
+        set(&mut p, "a", TaskStatus::Done);
+        let once = transitions(&p);
+        let twice = transitions(&p);
+        assert_eq!(once, twice, "the same tick twice says the same thing");
+    }
+}

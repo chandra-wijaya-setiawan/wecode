@@ -2114,3 +2114,77 @@ fn a_charter_forbidden_launch_is_refused_before_anything_runs() {
     r.assert_contains("charter forbids")
         .assert_contains("never_run");
 }
+
+#[test]
+fn naming_a_post_on_task_add_assigns_it_rather_than_half_assigning_it() {
+    // A task left `draft` with an assignee is invisible to `ready` and to the loop,
+    // with nothing on screen saying why. The playbook fills assign_to on most tasks,
+    // so this was the common case.
+    let (org, _) = with_playbook("add-assigns");
+    org.run(&[
+        "task",
+        "add",
+        "t",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "src/**",
+    ])
+    .assert_ok("task add")
+    .assert_contains("draft → waiting");
+
+    org.run(&["ready"]).assert_contains("t");
+}
+
+#[test]
+fn a_post_that_cannot_reach_the_work_keeps_the_task_but_not_the_assignment() {
+    // Refusing outright would discard a whole declaration over a post that one flag
+    // could change.
+    let (org, _) = with_playbook("add-uncovered");
+    org.run(&[
+        "task",
+        "add",
+        "t",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "somewhere-else/**",
+    ])
+    .assert_ok("the task is still created")
+    .assert_contains("not assigned")
+    .assert_contains("may not write");
+
+    org.run(&["show", "t"]).assert_contains("status     draft");
+    org.run(&["ready"]).assert_lacks("stale entry");
+}
+
+#[test]
+fn declaring_the_worker_area_does_not_break_assignment() {
+    // `verify` exempts .wecode/run/** because the envelope tells the agent to write
+    // there. The assign-time check has to agree, or declaring it fails one and passes
+    // the other.
+    let (org, _) = with_playbook("worker-area");
+    org.run(&[
+        "task",
+        "add",
+        "t",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "src/**",
+        "--write",
+        ".wecode/run/**",
+    ])
+    .assert_ok("task add")
+    .assert_contains("draft → waiting")
+    .assert_lacks("not assigned");
+}

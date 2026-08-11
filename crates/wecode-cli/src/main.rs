@@ -4,6 +4,7 @@ mod args;
 mod board;
 mod git;
 mod render;
+mod scheduler;
 mod spawn;
 mod tui;
 mod verify;
@@ -84,6 +85,8 @@ COCKPIT
 WORK
   wecode assign <task> --to <post>     check the post may do it, then make it ready
   wecode start <task>                  worktree + envelope; marks it running
+  wecode tick                          promote waiting tasks whose work is unblocked
+  wecode loop [--once]                 tick, then dispatch what is ready, forever
   wecode run <task>                    spawn its agent, supervise it, then verify
   wecode verify <task>                 judge it: diff against scope, then acceptance
   wecode worktree [remove <task>]      list them, or remove one (--force if dirty)
@@ -141,6 +144,8 @@ fn run(a: &Args) -> Res {
         ("start", _) => start(a),
         ("verify", _) => verify_task(a),
         ("run", _) => run_task(a),
+        ("tick", _) => tick(a),
+        ("loop", _) | ("serve", _) => serve(a),
         ("worktree", "remove") | ("worktree", "rm") => worktree_remove(a),
         ("worktree", _) => worktree_list(a),
         ("archive", _) => set_archived(a, true),
@@ -487,6 +492,28 @@ fn task_add(a: &Args) -> Res {
             out.push_str("\n  forced — defects recorded as waivers\n");
         }
         out.push_str(&format!("\n  saved task {}\n", t.id));
+
+        // Naming a post means assigning to it. Leaving the task `draft` with an
+        // assignee is a half-state: `ready` would not list it, the loop would not
+        // dispatch it, and nothing on screen would say why. The playbook fills
+        // `assign_to` on most tasks, so this was the common case, not a corner.
+        if let Some(name) = t.assignee.clone() {
+            let post = find_post(&company, &name)?;
+            match covers_the_work(&company, &post, &t) {
+                Ok(()) => {
+                    let mut assigned = t.clone();
+                    assigned.status = TaskStatus::Waiting;
+                    store.save_task(&assigned)?;
+                    out.push_str(&format!("  assigned to {name} — draft → waiting\n"));
+                }
+                // The task is kept. Losing it would mean retyping the whole
+                // declaration over a post that can be changed with one flag.
+                Err(why) => {
+                    out.push_str(&format!("\n  not assigned — {why}\n"));
+                }
+            }
+        }
+
         if !probe.is_ready(&t.id) {
             for b in probe.blockers(&t.id) {
                 out.push_str(&format!("  waiting: {}\n", blocker_note(&b)));
@@ -580,7 +607,12 @@ fn show(a: &Args) -> Res {
         return Ok(render::project_detail(&plan, &ProjectId::new(id)));
     }
     if plan.task(&TaskId::new(id)).is_some() {
-        return Ok(render::task_detail(&plan, &TaskId::new(id)));
+        let runs = store.executions(&TaskId::new(id))?;
+        return Ok(format!(
+            "{}{}",
+            render::task_detail(&plan, &TaskId::new(id)),
+            render::executions(&runs)
+        ));
     }
     Err(format!("no project or task `{id}` — `wecode tree` lists both").into())
 }
@@ -775,31 +807,7 @@ fn assign(a: &Args) -> Res {
         return Ok(out);
     }
 
-    let grant = company
-        .grant_of(&post)
-        .ok_or_else(|| format!("post `{post_name}` has no role grant"))?;
-    let uncovered: Vec<&str> = task
-        .scope
-        .write
-        .iter()
-        .filter(|w| !grant.write.iter().any(|g| glob::covers(g, w)))
-        .map(String::as_str)
-        .collect();
-
-    if !uncovered.is_empty() {
-        return Err(format!(
-            "post `{post_name}` (role {}) may not write {} — it writes only: {}\n\
-             \x20 assign a post whose scope covers the work, or widen the role",
-            post.role,
-            uncovered.join(", "),
-            if grant.write.is_empty() {
-                "nothing".to_string()
-            } else {
-                grant.write.join(", ")
-            }
-        )
-        .into());
-    }
+    covers_the_work(&company, &post, task)?;
 
     // Assigning is the chief's job, so the chief's authority is what gets checked
     // — not the assignee's. Staffing requires the `staff` capability.
@@ -1095,6 +1103,141 @@ fn start(a: &Args) -> Res {
     Ok(out)
 }
 
+/// One pass of the scheduler: bring stored statuses in line with the graph.
+///
+/// Separate from dispatch so it can be run, read and trusted on its own. The loop
+/// calls the same function.
+fn tick(a: &Args) -> Res {
+    let (_, store, company) = open_full(a)?;
+    let plan = store.load_plan()?;
+    let moves = scheduler::transitions(&plan);
+    if moves.is_empty() {
+        return Ok("  nothing to promote\n".to_string());
+    }
+
+    // Recorded as observed rather than decided: the scheduler read the graph, it did
+    // not choose anything a person could have chosen differently.
+    let who = actor(a, &store, &company)?;
+    let mut broker = Broker::new(company.charter.clone());
+    let mut out = String::new();
+    for m in &moves {
+        store.set_task_status(&m.task, m.to)?;
+        let project = plan.task(&m.task).map(|t| t.project.to_string());
+        let session = Session::new(
+            who.session.clone(),
+            who.post.clone(),
+            who.agent.clone(),
+            who.effective.clone(),
+        )
+        .on(project, Some(m.task.to_string()))
+        .with_human(who.human.clone());
+        broker.observe(
+            &session,
+            Action::Staff,
+            wecode_gov::Decision::Allow,
+            wecode_gov::Source::Supervisor,
+        );
+        out.push_str(&format!(
+            "  {}  {} → {}\n",
+            m.task,
+            m.from.as_str(),
+            m.to.as_str()
+        ));
+    }
+    store.append_records(broker.ledger())?;
+    Ok(out)
+}
+
+/// The background loop: tick, then dispatch, forever.
+///
+/// Two passes per cycle, kept separate. Promotion is a record of work becoming
+/// startable; dispatch is a record of it being started. Collapsing them would lose
+/// the first, and it is the one that explains why the second happened.
+///
+/// Runs in the foreground. Backgrounding is the operator's job — `&`, systemd, a cron
+/// entry — because a daemon that forks is a daemon whose logs you cannot find.
+fn serve(a: &Args) -> Res {
+    let (_, store, company) = open_full(a)?;
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let limit = scheduler::parallelism(company.attention.max_open_items, cores);
+    let once = a.has("once");
+
+    println!(
+        "  watching {} · {limit} at a time ({} open items, {cores} cores)\n  ctrl-c to stop\n",
+        company.name, company.attention.max_open_items
+    );
+
+    loop {
+        let plan = store.load_plan()?;
+
+        // Promotion first, and recorded, so the queue is honest before anything is
+        // taken from it.
+        let moves = scheduler::transitions(&plan);
+        for m in &moves {
+            store.set_task_status(&m.task, m.to)?;
+            println!("  {}  {} → {}", m.task, m.from.as_str(), m.to.as_str());
+        }
+
+        let plan = if moves.is_empty() {
+            plan
+        } else {
+            store.load_plan()?
+        };
+
+        // Nothing new while a person is holding something. More work in flight does
+        // not help an unanswered question, and the attention budget is the point.
+        let blocked = scheduler::awaiting_a_human(&plan);
+        if !blocked.is_empty() {
+            for t in blocked.iter().take(3) {
+                println!("  ⏸ {} needs you — {}", t.id, t.status.as_str());
+            }
+        } else {
+            let slots = scheduler::free_slots(&plan, limit);
+            let ready: Vec<TaskId> = scheduler::dispatchable(&plan, slots)
+                .iter()
+                .map(|t| t.id.clone())
+                .collect();
+            for id in ready {
+                println!("  ▶ {id}");
+                // Serially, and one failure does not stop the loop: the next pass
+                // sees the new state and decides again.
+                match run_task(&forward(a, "run", id.as_str())) {
+                    Ok(out) => println!("{}", indent(&out)),
+                    Err(e) => println!("    error: {e}"),
+                }
+            }
+        }
+
+        if once {
+            return Ok(String::new());
+        }
+        std::thread::sleep(scheduler::INTERVAL);
+    }
+}
+
+/// Builds the arguments for a subcommand the loop invokes on the operator's behalf.
+///
+/// Carries the flags that say *who and where*, and nothing else — a stray `--force`
+/// or `--all` inherited from the loop's own invocation would change what the
+/// subcommand does.
+fn forward(a: &Args, cmd: &str, target: &str) -> Args {
+    let mut argv = vec![cmd.to_string(), target.to_string()];
+    for flag in ["org", "session", "as"] {
+        if let Some(v) = a.get(flag) {
+            argv.push(format!("--{flag}"));
+            argv.push(v.to_string());
+        }
+    }
+    Args::parse(argv)
+}
+
+fn indent(s: &str) -> String {
+    s.lines()
+        .map(|l| format!("    {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The `never_run` pattern a command line matches, if any.
 ///
 /// Invariants outrank every grant, so this is checked even though the launch line is
@@ -1173,6 +1316,9 @@ fn run_task(a: &Args) -> Res {
     }
 
     store.set_task_status(&id, TaskStatus::Running)?;
+    // Opened before the process starts, so a crash leaves a row saying `working`
+    // rather than no trace of the run at all.
+    let exec = store.start_execution(&id, &who.session, prepared.cwd.to_str(), None)?;
     let limits = spawn::Limits::from(&template);
     let outcome = spawn::run(&template, &prepared.envelope, &prepared.cwd, limits)?;
 
@@ -1205,9 +1351,37 @@ fn run_task(a: &Args) -> Res {
         // Verification is the same code path a hand-run task takes, so the two can
         // never disagree about what passing means.
         out.push('\n');
-        out.push_str(&verify_task(a)?);
+        let verdict = verify_task(a)?;
+        // `Rejected` rather than `Failed` when the run itself was clean: the agent
+        // finished and we declined what it produced. A2A keeps those apart, and so
+        // should the record.
+        let after = store
+            .load_plan()?
+            .task(&id)
+            .map(|t| t.status)
+            .unwrap_or(TaskStatus::Failed);
+        store.finish_execution(
+            exec,
+            if after == TaskStatus::Failed {
+                wecode_core::ExecutionStatus::Rejected
+            } else {
+                wecode_core::ExecutionStatus::Completed
+            },
+            &outcome.ended.describe(),
+        )?;
+        out.push_str(&verdict);
     } else {
         store.set_task_status(&id, TaskStatus::Failed)?;
+        store.finish_execution(
+            exec,
+            match outcome.ended {
+                spawn::Ended::Wall | spawn::Ended::Idle | spawn::Ended::Signalled => {
+                    wecode_core::ExecutionStatus::Canceled
+                }
+                spawn::Ended::Exited(_) => wecode_core::ExecutionStatus::Failed,
+            },
+            &outcome.ended.describe(),
+        )?;
         out.push_str("\n  not verified — the agent did not finish cleanly\n");
     }
     Ok(out)
@@ -1389,6 +1563,44 @@ fn worktree_remove(a: &Args) -> Res {
         work::branch_for(&id)
     ));
     Ok(out)
+}
+
+/// Refuses a post whose grant cannot reach the task's write scope.
+///
+/// Checked when the post is named rather than when the agent runs: a post that cannot
+/// legally do the work will be refused at the boundary later anyway, and finding that
+/// out after dispatch wastes an agent's whole run.
+fn covers_the_work(company: &Company, post: &Post, task: &Task) -> Result<(), String> {
+    let grant = company
+        .grant_of(post)
+        .ok_or_else(|| format!("post `{}` has no role grant", post.name))?;
+    let uncovered: Vec<&str> = task
+        .scope
+        .write
+        .iter()
+        // The worker area is exempt here for the same reason it is exempt in
+        // `verify`: the envelope instructs the agent to write its result there, so
+        // no role needs a grant for it and declaring it must not break assignment.
+        // The two checks have to agree or a natural declaration fails one of them.
+        .filter(|w| !w.starts_with(playbook::RUN_DIR))
+        .filter(|w| !grant.write.iter().any(|g| glob::covers(g, w)))
+        .map(String::as_str)
+        .collect();
+    if uncovered.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "post `{}` (role {}) may not write {} — it writes only: {}\n\
+         \x20 assign a post whose scope covers the work, or widen the role",
+        post.name,
+        post.role,
+        uncovered.join(", "),
+        if grant.write.is_empty() {
+            "nothing".to_string()
+        } else {
+            grant.write.join(", ")
+        }
+    ))
 }
 
 fn find_post(company: &Company, name: &str) -> Result<Post, String> {

@@ -13,8 +13,8 @@ use rusqlite::Connection;
 
 /// Bumped whenever the schema changes. Stored in `user_version`.
 ///
-/// 2 adds `projects.archived`.
-pub const VERSION: i64 = 2;
+/// 2 adds `projects.archived`. 3 adds `task_executions`.
+pub const VERSION: i64 = 3;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -119,11 +119,50 @@ CREATE INDEX audit_by_task    ON audit_log(task_id);
 CREATE INDEX audit_by_project ON audit_log(project_id);
 CREATE INDEX audit_by_outcome ON audit_log(outcome);
 
--- Deferred: task_executions. One row per run of a task, holding the worktree
--- path, pid, the A2A-aligned status lifecycle, spend totals, and `attempt` as a
--- retry counter. Not created until a scheduler exists to write it — every column
--- would otherwise be a guess about code that does not exist. The execution is the
--- entity; attempt is which try it is.
+-- One run of one task. The execution is the entity; `attempt` is which try it is.
+--
+-- Deferred until something wrote it, which is why `spent_tokens` is absent: nothing
+-- counts tokens yet, and a column that is always NULL is a guess wearing a schema.
+-- `pid` is written at spawn and left behind if wecode dies, so a row still saying
+-- `working` is exactly the recovery information wanted.
+--
+-- No foreign key on session_id: the ledger and its executions outlive sessions.
+CREATE TABLE task_executions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    session_id  TEXT NOT NULL,
+    attempt     INTEGER NOT NULL,
+    status      TEXT NOT NULL,          -- A2A's eight states
+    worktree    TEXT,
+    pid         INTEGER,
+    started     INTEGER NOT NULL,
+    ended       INTEGER,
+    wall_secs   INTEGER,
+    detail      TEXT NOT NULL DEFAULT '',
+    UNIQUE (task_id, attempt)
+) STRICT;
+
+CREATE INDEX executions_by_task ON task_executions(task_id);
+";
+
+/// The `task_executions` table, as an upgrade for a database that predates it.
+const ADD_EXECUTIONS: &str = "
+CREATE TABLE task_executions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    session_id  TEXT NOT NULL,
+    attempt     INTEGER NOT NULL,
+    status      TEXT NOT NULL,
+    worktree    TEXT,
+    pid         INTEGER,
+    started     INTEGER NOT NULL,
+    ended       INTEGER,
+    wall_secs   INTEGER,
+    detail      TEXT NOT NULL DEFAULT '',
+    UNIQUE (task_id, attempt)
+) STRICT;
+
+CREATE INDEX executions_by_task ON task_executions(task_id);
 ";
 
 /// What `migrate` should do about a file at `current`.
@@ -166,10 +205,13 @@ fn step_for(current: i64, target: i64, have: &[i64]) -> Step {
 ///
 /// A list rather than a match so `migrate` applies them in sequence: a version-1 file
 /// meeting a future version 4 runs 1→2, 2→3, 3→4 rather than needing a direct step.
-const UPGRADES: &[(i64, &str)] = &[(
-    1,
-    "ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
-)];
+const UPGRADES: &[(i64, &str)] = &[
+    (
+        1,
+        "ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+    ),
+    (2, ADD_EXECUTIONS),
+];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
 ///
@@ -250,6 +292,38 @@ mod tests {
         // would make every existing wecode.db unopenable.
         let have: Vec<i64> = UPGRADES.iter().map(|(v, _)| *v).collect();
         assert_eq!(step_for(1, VERSION, &have), Step::Upgrade(1));
+    }
+
+    #[test]
+    fn a_version_one_file_climbs_every_step_to_the_current_version() {
+        // Two upgrades now, so this also proves they chain rather than needing a
+        // direct 1→3 step.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE projects (
+                 id TEXT PRIMARY KEY, repo TEXT NOT NULL, objective TEXT NOT NULL,
+                 status TEXT NOT NULL, budget_tokens INTEGER, budget_wall INTEGER
+             ) STRICT;
+             CREATE TABLE tasks (id TEXT PRIMARY KEY) STRICT;",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 1i64).unwrap();
+        migrate(&c).unwrap();
+
+        let v: i64 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, VERSION);
+        // Both upgrades landed. Counting rather than selecting a row, so an empty
+        // table still proves the column and the table exist.
+        let archived: i64 = c
+            .query_row("SELECT count(archived) FROM projects", [], |r| r.get(0))
+            .expect("projects.archived exists after 1→2");
+        assert_eq!(archived, 0);
+        let runs: i64 = c
+            .query_row("SELECT count(*) FROM task_executions", [], |r| r.get(0))
+            .expect("task_executions exists after 2→3");
+        assert_eq!(runs, 0);
     }
 
     #[test]

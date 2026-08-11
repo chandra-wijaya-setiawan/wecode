@@ -5,6 +5,7 @@
 //! projects, tasks, sessions, and the audit ledger.
 
 pub mod audit;
+pub mod execution;
 pub mod plan;
 pub mod schema;
 pub mod session;
@@ -15,6 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 pub use audit::{AuditLine, AuditQuery};
+pub use execution::Execution;
 pub use session::SessionInfo;
 
 #[derive(Debug)]

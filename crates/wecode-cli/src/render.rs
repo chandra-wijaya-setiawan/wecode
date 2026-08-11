@@ -645,6 +645,33 @@ pub(crate) fn envelope(
     format!("{}\nWorking directory: {}\n", filled.trim(), cwd.display())
 }
 
+/// Every run of a task, so a retry does not erase what happened last time.
+#[must_use]
+pub(crate) fn executions(runs: &[wecode_store::Execution]) -> String {
+    if runs.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\nruns ({})\n", runs.len());
+    for r in runs {
+        out.push_str(&format!(
+            "  #{}  {:<10} {:<18} {}\n",
+            r.attempt,
+            r.status.as_str(),
+            match r.wall_secs {
+                Some(w) => format!("{w}s"),
+                // No end time means it never closed — wecode died mid-run, and the
+                // pid is the only handle left on whatever it started.
+                None => match r.pid {
+                    Some(p) => format!("unfinished, pid {p}"),
+                    None => "unfinished".to_string(),
+                },
+            },
+            r.detail
+        ));
+    }
+    out
+}
+
 /// What running the agent did. Facts only — the verdict comes from `verify`.
 #[must_use]
 pub(crate) fn ran(

@@ -14,6 +14,7 @@
 
 pub mod admission;
 pub mod common;
+pub mod execution;
 pub mod id;
 pub mod plan;
 pub mod project;
@@ -21,6 +22,7 @@ pub mod task;
 
 pub use admission::{Admission, Defect, Waiver};
 pub use common::{Budget, Cmp, Measure, ProjectStatus, Scope, TaskStatus};
+pub use execution::ExecutionStatus;
 pub use id::{ProjectId, TaskId};
 pub use plan::{Blocker, Plan, PlanError};
 pub use project::Project;
