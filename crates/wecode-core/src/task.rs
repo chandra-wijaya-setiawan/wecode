@@ -18,6 +18,9 @@ pub enum TaskKind {
     #[default]
     Feature,
     Bug,
+    /// Behaviour must not change. Distinct from a chore because that claim is
+    /// checkable: the existing suite passes and no test needed editing.
+    Refactor,
     Chore,
     /// Time-boxed investigation. Expected to produce an answer, not a change.
     Spike,
@@ -30,6 +33,7 @@ impl TaskKind {
         match self {
             Self::Feature => "feature",
             Self::Bug => "bug",
+            Self::Refactor => "refactor",
             Self::Chore => "chore",
             Self::Spike => "spike",
             Self::Docs => "docs",
@@ -40,6 +44,7 @@ impl TaskKind {
         Some(match s {
             "feature" | "feat" => Self::Feature,
             "bug" | "fix" => Self::Bug,
+            "refactor" | "refac" => Self::Refactor,
             "chore" => Self::Chore,
             "spike" => Self::Spike,
             "docs" | "doc" => Self::Docs,
@@ -59,6 +64,7 @@ impl TaskKind {
         &[
             Self::Feature,
             Self::Bug,
+            Self::Refactor,
             Self::Chore,
             Self::Spike,
             Self::Docs,
@@ -179,9 +185,12 @@ mod tests {
     #[test]
     fn a_spike_needs_no_write_scope_but_others_do() {
         assert!(!TaskKind::Spike.requires_write_scope());
+        // A refactor changes code, so it needs a scope like any other change.
+        assert!(TaskKind::Refactor.requires_write_scope());
         for k in [
             TaskKind::Feature,
             TaskKind::Bug,
+            TaskKind::Refactor,
             TaskKind::Chore,
             TaskKind::Docs,
         ] {

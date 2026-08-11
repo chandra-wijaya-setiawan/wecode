@@ -1,0 +1,134 @@
+# How work is broken down in this project.
+#
+# Read by whoever decomposes a request into tasks — usually an orchestrator agent,
+# via `wecode playbook <kind>`. It is guidance, not a workflow anything runs: the
+# tasks it produces are still checked by the admission gate.
+#
+# Committed to the repo on purpose, so it is versioned with the code it describes.
+# `.wecode/run/` is the worker-writable area and is gitignored; this file is not.
+
+[project]
+language = "rust"
+# The integration branch. Task branches are cut from it.
+# Unset for now: this repo works on master directly, and naming a branch that does
+# not exist would fail at `wecode start`.
+
+[feature]
+worktree  = true
+assign_to = "impl"
+accept    = ["cargo test --workspace", "cargo clippy --all-targets -- -D warnings"]
+guidance  = """
+One main task per behaviour that changes. Subtasks only when the work spans crates —
+each must be independently reviewable.
+
+The crate boundaries are the natural seam, and they are ordered:
+  core   pure types, no dependencies at all — no serde, no I/O, no async
+  gov    the Broker: authorisation as a pure function of its inputs
+  org    hand-edited config: company.toml and project playbooks
+  store  SQLite; the database is the event bus
+  cli    the only crate that executes anything
+
+A task that needs a new type in core and its use in cli is two subtasks, in that
+order, because core cannot depend on anything above it.
+
+Tests go to `impl` along with the code: this repo keeps them beside the source, so the
+tester post's tests/** scope cannot reach them. See the bug playbook.
+
+Acceptance is an executable command, never a description. `Judged` is illegal on a
+task and the gate will refuse it.
+"""
+
+[bug]
+worktree  = true
+assign_to = "impl"
+accept    = ["cargo test --workspace"]
+guidance  = """
+Reproduce first.
+
+For a small bug, one task: the test and the fix together. "One cause per task" already
+makes that atomic, and a ten-line fix does not need decomposing.
+
+For a bug big enough to split, the main task is a container and the work goes in
+ordered subtasks:
+
+  main               the bug
+   ├─ …-test         a test that fails today
+   └─ …-fix          --after the test
+
+Do not make the main task the fix and the test a subtask of it: that needs the parent
+to depend on its own child, and there is no way to add a dependency after a task
+exists anyway. Declare `--after` when you create the task.
+
+Both go to `impl`, not `test`. In this repo tests live beside the code — 25 src files
+carry inline `#[cfg(test)] mod tests`, and the integration suite is at
+crates/wecode-cli/tests/cli.rs. The tester post's scope is tests/** and spec/**, so it
+can write none of them; check with `wecode guard test write <path>`.
+
+That means the usual guarantee — a tester that cannot weaken the code to make a test
+pass — does not hold for this project. Rust's convention defeats it. Do not assign
+test work to `test` here expecting it to be enforced; it will be refused at the
+boundary.
+
+One cause per task. Two symptoms with one cause is one task; one symptom with two
+causes is two.
+
+State the wrong behaviour in the title, not the intended fix — "audit seq restarts
+at 1 per process", not "make seq monotonic". The fix is what acceptance proves.
+
+If the cause is unclear, make a spike subtask first. A spike needs no write scope,
+which is why it is the right shape for "find out why".
+"""
+
+[refactor]
+worktree  = true
+assign_to = "impl"
+accept    = ["cargo test --workspace", "cargo clippy --all-targets -- -D warnings"]
+guidance  = """
+Behaviour must not change, so the acceptance is the existing suite passing unchanged.
+
+Do not put tests/** or any test module in the write scope. Needing to edit a test
+means behaviour changed and this is a feature or a bug, not a refactor. That is the
+whole distinction from a chore.
+
+Renaming a public item is a refactor; changing what it returns is not.
+"""
+
+[chore]
+worktree  = true
+assign_to = "impl"
+accept    = ["cargo test --workspace"]
+guidance  = """
+Dependency bumps, config, tooling, gitignore. No behaviour change intended, but
+unlike a refactor no claim is made about it either.
+
+Keep these separate from feature work — a dependency bump inside a feature diff
+hides both.
+"""
+
+[spike]
+worktree  = false
+assign_to = "impl"
+accept    = ["test -f docs/theory.md"]
+guidance  = """
+Answers a question; changes no code. Needs no write scope, which is the one
+admission exemption any kind gets.
+
+Say in the title what question is being answered, and put the answer in
+docs/theory.md under the open questions — that file exists for exactly this and is
+explicitly not required to implement anything.
+
+Time-box it. A spike that turns into an implementation should have been a feature.
+"""
+
+[docs]
+worktree  = false
+assign_to = "impl"
+accept    = ["test -f docs/architecture.md"]
+guidance  = """
+Single task. No subtasks, no worktree — prose does not conflict the way code does,
+so edit in place.
+
+architecture.md is current-state only. The reasoning and the evolution belong in git
+history, and the supporting theory in docs/theory.md. Anyone reading the design
+document should not have to work out which parts still apply.
+"""

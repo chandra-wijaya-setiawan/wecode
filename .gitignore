@@ -1,5 +1,13 @@
 /target
 **/*.rs.bk
-.wecode/
 .claude/settings.local.json
 Cargo.lock
+
+# The worker-writable area inside a worktree: result.json and anything task-local.
+# Untrusted by construction, so it never enters history.
+.wecode/run/
+
+# .wecode/playbook.toml is deliberately NOT ignored. It is this project's guidance
+# for how work is broken down, and it describes this code — so it belongs in history
+# with the code, and changes to it should be reviewed. `.wecode/` was previously
+# ignored wholesale, which would have kept it out silently.

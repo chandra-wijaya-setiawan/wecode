@@ -121,6 +121,35 @@ CREATE INDEX audit_by_outcome ON audit_log(outcome);
 -- entity; attempt is which try it is.
 ";
 
+/// What `migrate` should do about a file at `current`.
+///
+/// Split out as a pure function so every case is testable without depending on what
+/// `VERSION` happens to be today. Inline, the `Unsupported` arm was unreachable at
+/// version 1 and so untested — which is how the original hole survived.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Step {
+    /// At or ahead of this build. Nothing to do.
+    UpToDate,
+    /// Empty file: install the schema.
+    Install,
+    /// Behind, with no path from here.
+    Unsupported,
+}
+
+fn step_for(current: i64, target: i64) -> Step {
+    if current >= target {
+        Step::UpToDate
+    } else if current == 0 {
+        Step::Install
+    } else {
+        // Reachable the moment `VERSION` is bumped without adding a migration. The
+        // original code matched neither branch here, returned `Ok`, and left a live
+        // database un-migrated while reporting success — the caller then queried
+        // columns the file does not have.
+        Step::Unsupported
+    }
+}
+
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
 ///
 /// `AUTOINCREMENT` on `audit_log.seq` is what makes the ledger monotonic across
@@ -129,17 +158,24 @@ CREATE INDEX audit_by_outcome ON audit_log(outcome);
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version >= VERSION {
-        return Ok(());
+    match step_for(version, VERSION) {
+        Step::UpToDate => Ok(()),
+        Step::Install => {
+            // WAL is a persistent property of the file, so it is set once here.
+            // In-memory databases do not support it, hence the ignored result.
+            let _ = conn.pragma_update(None, "journal_mode", "WAL");
+            conn.execute_batch(SCHEMA)?;
+            conn.pragma_update(None, "user_version", VERSION)?;
+            Ok(())
+        }
+        Step::Unsupported => Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(format!(
+                "wecode.db is at schema version {version}; this build expects {VERSION} \
+                 and has no migration between them"
+            )),
+        )),
     }
-    if version == 0 {
-        // WAL is a persistent property of the file, so it is set once here.
-        // In-memory databases do not support it, hence the ignored result.
-        let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", VERSION)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -150,6 +186,31 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         migrate(&c).unwrap();
         c
+    }
+
+    #[test]
+    fn a_version_behind_with_no_migration_is_refused() {
+        // The hole this closes, tested at a target this build has not reached yet:
+        // version 1 against target 2 used to satisfy neither branch, so `migrate`
+        // returned Ok and left a live database un-migrated.
+        assert_eq!(step_for(1, 2), Step::Unsupported);
+        assert_eq!(step_for(3, 9), Step::Unsupported);
+    }
+
+    #[test]
+    fn an_empty_file_is_installed_and_a_current_one_left_alone() {
+        assert_eq!(step_for(0, 1), Step::Install);
+        assert_eq!(step_for(0, 7), Step::Install);
+        assert_eq!(step_for(1, 1), Step::UpToDate);
+        // A file written by a newer build: leave it, do not downgrade it.
+        assert_eq!(step_for(2, 1), Step::UpToDate);
+    }
+
+    #[test]
+    fn a_database_from_the_future_is_opened_without_complaint() {
+        let c = Connection::open_in_memory().unwrap();
+        c.pragma_update(None, "user_version", VERSION + 1).unwrap();
+        assert!(migrate(&c).is_ok());
     }
 
     fn seed_project(c: &Connection) {

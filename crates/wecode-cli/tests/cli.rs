@@ -106,6 +106,41 @@ impl Org {
         decode(cmd.output().expect("binary runs"))
     }
 
+    /// Creates a real git repository and points the workspace's `app` repo at it.
+    ///
+    /// Real git, because git is a subprocess here — a fake would test nothing.
+    fn repo(&self) -> PathBuf {
+        let repo = self.dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            git(&repo, &args);
+        }
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "first"]);
+
+        let conf = self.path("company.toml");
+        let text = std::fs::read_to_string(&conf).unwrap();
+        std::fs::write(
+            &conf,
+            text.replace("~/projects/your-repo", repo.to_str().unwrap()),
+        )
+        .unwrap();
+        repo
+    }
+
+    /// Writes a playbook into the repo. Explicit rather than via `playbook init`, so
+    /// a test states exactly the guidance it depends on.
+    fn playbook(&self, repo: &Path, body: &str) {
+        let dir = repo.join(".wecode");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("playbook.toml"), body).unwrap();
+    }
+
     fn path(&self, rel: &str) -> PathBuf {
         self.dir.join(rel)
     }
@@ -165,6 +200,20 @@ impl Org {
         ])
         .assert_ok("add dependent task");
     }
+}
+
+fn git(repo: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// A well-formed `project add`, for tests about sessions and authority rather
@@ -1129,4 +1178,441 @@ fn templates_are_listed_with_summaries() {
         .assert_ok("templates")
         .assert_contains("software-company")
         .assert_contains("solo");
+}
+
+// -------------------------------------------------------------- playbook ------
+
+/// Guidance with everything a test might lean on, stated explicitly.
+const PLAYBOOK: &str = r#"
+[project]
+language = "rust"
+
+[bug]
+worktree = true
+assign_to = "impl"
+accept = ["true"]
+tokens = 1000
+wall_secs = 60
+guidance = "Reproduce first, then a failing test, then the fix."
+
+[docs]
+worktree = false
+assign_to = "impl"
+accept = ["true"]
+tokens = 1000
+wall_secs = 60
+guidance = "Single task, no worktree."
+"#;
+
+/// A workspace with a real repo and a playbook in it.
+fn with_playbook(name: &str) -> (Org, PathBuf) {
+    let org = Org::new(name, "solo");
+    let repo = org.repo();
+    org.playbook(&repo, PLAYBOOK);
+    org.run(&[
+        "project",
+        "add",
+        "caching",
+        "add response caching to the export endpoint",
+        "--repo",
+        "app",
+        "--measure-cmd",
+        "true",
+        "--tokens",
+        "1000",
+        "--wall",
+        "60",
+    ])
+    .assert_ok("add project");
+    (org, repo)
+}
+
+#[test]
+fn playbook_init_writes_a_file_that_then_parses() {
+    let org = Org::new("pb-init", "solo");
+    let repo = org.repo();
+    org.run(&[
+        "project",
+        "add",
+        "p",
+        "add response caching to the export endpoint",
+        "--repo",
+        "app",
+        "--measure-cmd",
+        "true",
+        "--tokens",
+        "10",
+        "--wall",
+        "1",
+    ])
+    .assert_ok("project");
+
+    org.run(&["playbook", "init", "--language", "rust"])
+        .assert_ok("playbook init")
+        .assert_contains("playbook.toml");
+    assert!(repo.join(".wecode/playbook.toml").is_file());
+
+    // The starter must be valid, or adoption fails at the first step.
+    org.run(&["playbook"])
+        .assert_ok("playbook")
+        .assert_contains("rust")
+        .assert_contains("bug");
+
+    // And it refuses to overwrite.
+    let again = org.run(&["playbook", "init"]);
+    assert!(!again.ok());
+    again.assert_contains("already exists");
+}
+
+#[test]
+fn a_project_with_no_playbook_says_how_to_make_one() {
+    let org = Org::new("pb-absent", "solo");
+    org.repo();
+    org.run(&[
+        "project",
+        "add",
+        "p",
+        "add response caching to the export endpoint",
+        "--repo",
+        "app",
+        "--measure-cmd",
+        "true",
+        "--tokens",
+        "10",
+        "--wall",
+        "1",
+    ])
+    .assert_ok("project");
+
+    org.run(&["playbook"])
+        .assert_ok("no playbook is not an error")
+        .assert_contains("no playbook")
+        .assert_contains("playbook init");
+}
+
+#[test]
+fn playbook_shows_the_guidance_for_one_kind() {
+    let (org, _) = with_playbook("pb-kind");
+    org.run(&["playbook", "bug"])
+        .assert_ok("playbook bug")
+        .assert_contains("Reproduce first")
+        .assert_contains("worktree  yes");
+
+    org.run(&["playbook", "docs"])
+        .assert_ok("playbook docs")
+        .assert_contains("worktree  no");
+
+    // A kind the project has said nothing about.
+    org.run(&["playbook", "spike"])
+        .assert_ok("playbook spike")
+        .assert_contains("no [spike] section");
+}
+
+#[test]
+fn task_add_fills_the_defaults_the_playbook_supplies() {
+    let (org, _) = with_playbook("pb-defaults");
+    org.run(&[
+        "task",
+        "add",
+        "fix-it",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "src/**",
+    ])
+    .assert_ok("task add")
+    .assert_contains("(from playbook)")
+    .assert_contains("admitted");
+
+    org.run(&["show", "fix-it"])
+        .assert_contains("impl")
+        .assert_contains("`true` exits 0");
+}
+
+#[test]
+fn an_explicit_flag_beats_the_playbook() {
+    let (org, _) = with_playbook("pb-explicit");
+    org.run(&[
+        "task",
+        "add",
+        "fix-it",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "src/**",
+        "--accept-cmd",
+        "cargo test",
+        "--to",
+        "impl",
+        "--tokens",
+        "50",
+        "--wall",
+        "5",
+    ])
+    .assert_ok("task add")
+    .assert_lacks("(from playbook)");
+
+    org.run(&["show", "fix-it"]).assert_contains("cargo test");
+}
+
+#[test]
+fn a_kind_the_playbook_omits_gets_no_defaults() {
+    let (org, _) = with_playbook("pb-omitted");
+    // No [chore] section, so nothing is filled and the task is defective as written.
+    org.run(&[
+        "task",
+        "add",
+        "tidy",
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "remove the deprecated export helper",
+        "--write",
+        "src/**",
+    ])
+    .assert_lacks("(from playbook)");
+}
+
+// ------------------------------------------------------------- worktrees ------
+
+#[test]
+fn start_creates_the_worktree_the_playbook_asks_for() {
+    let (org, repo) = with_playbook("wt-bug");
+    org.run(&[
+        "task",
+        "add",
+        "fix-it",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "src/**",
+    ])
+    .assert_ok("task add");
+
+    let r = org.run(&["start", "fix-it"]);
+    r.assert_ok("start");
+    r.assert_contains("worktree")
+        .assert_contains("wecode/fix-it")
+        .assert_contains("running")
+        // The envelope, which was inert template text before anything rendered it.
+        .assert_contains("YOUR TASK: the cache returns a stale entry")
+        .assert_contains("You may modify only: src/**");
+
+    let wt = org.path("config/run");
+    assert!(
+        wt.exists(),
+        "worktree root should exist under the isolated config"
+    );
+    org.run(&["worktree"])
+        .assert_ok("worktree list")
+        .assert_contains("fix-it");
+
+    // git agrees, and the branch is real.
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["branch", "--list", "wecode/fix-it"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("wecode/fix-it"),
+        "branch should exist"
+    );
+}
+
+#[test]
+fn start_creates_no_worktree_when_the_playbook_says_not_to() {
+    let (org, _) = with_playbook("wt-docs");
+    org.run(&[
+        "task",
+        "add",
+        "write-docs",
+        "--project",
+        "caching",
+        "--kind",
+        "docs",
+        "document the eviction policy",
+        "--write",
+        "docs/**",
+    ])
+    .assert_ok("task add");
+
+    org.run(&["start", "write-docs"])
+        .assert_ok("start")
+        .assert_contains("no worktree")
+        .assert_contains("running");
+    org.run(&["worktree"]).assert_contains("no worktrees");
+}
+
+#[test]
+fn a_subtask_shares_its_main_tasks_worktree() {
+    // The rule that makes `parent` and `depends_on` do separate jobs: hierarchy picks
+    // the tree, dependencies pick the order.
+    let (org, _) = with_playbook("wt-shared");
+    org.run(&[
+        "task",
+        "add",
+        "fix-it",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "src/**",
+    ])
+    .assert_ok("main task");
+    org.run(&[
+        "task",
+        "add",
+        "fix-it-test",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "--parent",
+        "fix-it",
+        "no test covers eviction of a stale entry",
+        "--write",
+        "src/**",
+    ])
+    .assert_ok("subtask shares its parent's scope legally");
+
+    org.run(&["start", "fix-it-test"])
+        .assert_ok("start subtask")
+        .assert_contains("shared with fix-it")
+        .assert_contains("wecode/fix-it");
+
+    // One tree, not two.
+    let listed = org.run(&["worktree"]).assert_ok("worktree").stdout.clone();
+    assert_eq!(
+        listed.lines().filter(|l| l.contains("fix-it")).count(),
+        1,
+        "exactly one worktree:\n{listed}"
+    );
+
+    // And removing it must be done via the owner.
+    let r = org.run(&["worktree", "remove", "fix-it-test"]);
+    assert!(!r.ok());
+    r.assert_contains("shares").assert_contains("fix-it");
+}
+
+#[test]
+fn removing_a_worktree_refuses_to_discard_uncommitted_work() {
+    let (org, _) = with_playbook("wt-dirty");
+    org.run(&[
+        "task",
+        "add",
+        "fix-it",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "src/**",
+    ])
+    .assert_ok("task add");
+
+    // Nothing has committed this work — wecode does that, after checks pass — so
+    // removing the tree would lose it outright.
+    //
+    // The path is read from `start` rather than guessed: the run directory is keyed on
+    // the workspace directory name, not the test name.
+    let started = org.run(&["start", "fix-it"]);
+    let wt = PathBuf::from(
+        started
+            .stdout
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("worktree "))
+            .expect("start prints the worktree path")
+            .trim()
+            .trim_end_matches(" (reset)"),
+    );
+    assert!(wt.is_dir(), "{wt:?} should exist");
+    std::fs::write(wt.join("new.rs"), "fn x() {}\n").unwrap();
+
+    let r = org.run(&["worktree", "remove", "fix-it"]);
+    assert!(!r.ok(), "should refuse");
+    r.assert_contains("uncommitted").assert_contains("new.rs");
+
+    org.run(&["worktree", "remove", "fix-it", "--force"])
+        .assert_ok("forced")
+        .assert_contains("discarded");
+    org.run(&["worktree"]).assert_contains("no worktrees");
+}
+
+#[test]
+fn start_refuses_a_task_that_is_not_ready() {
+    let (org, _) = with_playbook("wt-blocked");
+    for (id, title) in [
+        ("first", "the cache returns a stale entry after eviction"),
+        ("second", "record the cache hit rate"),
+    ] {
+        let mut args = vec![
+            "task",
+            "add",
+            id,
+            "--project",
+            "caching",
+            "--kind",
+            "bug",
+            title,
+            "--write",
+        ];
+        args.push(if id == "first" {
+            "src/a/**"
+        } else {
+            "src/b/**"
+        });
+        if id == "second" {
+            args.extend(["--after", "first"]);
+        }
+        org.run(&args).assert_ok(id);
+    }
+    let r = org.run(&["start", "second"]);
+    r.assert_contains("not ready").assert_contains("first");
+}
+
+// ----------------------------------------------------------------- brief ------
+
+#[test]
+fn brief_states_what_this_seat_may_and_may_not_do() {
+    let (org, _) = with_playbook("brief-chief");
+    let r = org.run(&["brief"]);
+    r.assert_ok("brief");
+    r.assert_contains("as `chief`")
+        .assert_contains("YOU MAY")
+        .assert_contains("task add")
+        .assert_contains("YOU MAY NOT")
+        // The chief holds define and staff precisely so it cannot execute.
+        .assert_contains("write files")
+        .assert_contains("NEVER")
+        .assert_contains("caching");
+}
+
+#[test]
+fn brief_tells_a_worker_something_different_from_the_chief() {
+    // Derived from the grant, not a stored per-role prompt — so a seat with no
+    // `define` must not be told to create tasks.
+    let org = Org::unattended("brief-worker", "software-company");
+    org.repo();
+    org.run(&["login", "you", "--as", "impl"])
+        .assert_ok("login");
+    let out = org.run(&["brief"]).assert_ok("brief").all();
+    assert!(
+        !out.contains("task add"),
+        "an engineer cannot define:\n{out}"
+    );
+    assert!(out.contains("wecode ready"), "{out}");
 }

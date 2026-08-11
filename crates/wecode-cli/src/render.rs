@@ -9,6 +9,7 @@ use wecode_core::{
     TaskStatus,
 };
 use wecode_gov::{Action, ControlMode, Decision, Grant, Invariant, WorkKind};
+use wecode_org::Playbook;
 use wecode_org::{Company, Post};
 use wecode_store::{AuditLine, SessionInfo};
 
@@ -17,6 +18,9 @@ pub(crate) fn kind_tag(kind: TaskKind) -> &'static str {
     match kind {
         TaskKind::Feature => "feat",
         TaskKind::Bug => "bug",
+        // Five characters at most: the tag column is padded to 5, and `refactor`
+        // would push every title out of alignment.
+        TaskKind::Refactor => "refac",
         TaskKind::Chore => "chore",
         TaskKind::Spike => "spike",
         TaskKind::Docs => "docs",
@@ -334,6 +338,290 @@ pub(crate) fn task_heading(t: &Task) -> String {
         h.push_str(&format!("\n  writes     {}", t.scope.write.join(", ")));
     }
     h
+}
+
+// -------------------------------------------------------------- playbook ------
+
+fn playbook_header(project: &Project, pb: &Playbook) -> String {
+    let lang = if pb.project.language.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", pb.project.language)
+    };
+    format!("  project   {}  [{}{}]\n", project.id, project.repo, lang)
+}
+
+/// Every kind this project has guidance for.
+#[must_use]
+pub(crate) fn playbook_all(project: &Project, pb: &Playbook) -> String {
+    let mut out = playbook_header(project, pb);
+    if let Some(b) = &pb.project.merge_to {
+        out.push_str(&format!("  branch    from {b}\n"));
+    }
+    if pb.is_empty() {
+        out.push_str("\n  no kinds have guidance yet\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "\n  {:<10} {:<9} {:<9} {}\n",
+        "kind", "worktree", "assign", "accept"
+    ));
+    for (kind, k) in pb.kinds() {
+        out.push_str(&format!(
+            "  {:<10} {:<9} {:<9} {}\n",
+            kind.as_str(),
+            if k.worktree { "yes" } else { "no" },
+            k.assign_to.as_deref().unwrap_or("—"),
+            if k.accept.is_empty() {
+                "—".to_string()
+            } else {
+                k.accept.join(", ")
+            }
+        ));
+    }
+    out.push_str("\n  wecode playbook <kind>  for the guidance itself\n");
+    out
+}
+
+/// One kind in full: the typed defaults, then the prose.
+#[must_use]
+pub(crate) fn playbook_kind(project: &Project, pb: &Playbook, kind: TaskKind) -> String {
+    let mut out = playbook_header(project, pb);
+    let Some(k) = pb.for_kind(kind) else {
+        out.push_str(&format!(
+            "\n  no [{}] section — this project has no guidance for that kind\n",
+            kind.as_str()
+        ));
+        return out;
+    };
+    out.push_str(&format!(
+        "  kind      {}\n  worktree  {}\n",
+        kind.as_str(),
+        if k.worktree {
+            match &pb.project.merge_to {
+                Some(b) => format!("yes, branched from {b}"),
+                None => "yes".to_string(),
+            }
+        } else {
+            "no".to_string()
+        }
+    ));
+    if let Some(post) = &k.assign_to {
+        out.push_str(&format!("  assign    {post}\n"));
+    }
+    for cmd in &k.accept {
+        out.push_str(&format!("  accept    {cmd}\n"));
+    }
+    if !k.guidance.is_empty() {
+        out.push_str("  ---\n");
+        for line in k.guidance.lines() {
+            out.push_str(&format!("  {line}\n"));
+        }
+    }
+    out
+}
+
+// ----------------------------------------------------------------- brief ------
+
+/// What an agent needs to act as this seat.
+///
+/// Every claim is derived: the permissions come from the grant, the prohibitions from
+/// the charter. A stored prompt would keep asserting authority after a role was
+/// narrowed, and the Broker would then refuse what the briefing promised.
+#[must_use]
+pub(crate) fn brief(
+    company: &Company,
+    s: &SessionInfo,
+    post: &Post,
+    grant: Option<&Grant>,
+    plan: &Plan,
+    playbooks: &[(Project, Vec<&str>)],
+    org: String,
+) -> String {
+    let mut out = format!(
+        "You are working in {} as `{}` ({}), through {}.\n",
+        company.name, post.name, post.role, post.agent
+    );
+    if let Some(h) = &s.human {
+        out.push_str(&format!("The person in this seat is {h}.\n"));
+    }
+    if !company.vision.is_empty() {
+        out.push_str(&format!("\n{}\n", company.vision));
+    }
+
+    let Some(g) = grant else {
+        out.push_str("\n  ⚠ this role has no grant — the seat can do nothing\n");
+        return out;
+    };
+
+    out.push_str("\nYOU MAY\n");
+    for (cmd, note) in available_commands(g) {
+        out.push_str(&format!("  {cmd:<26} {note}\n"));
+    }
+    if !g.write.is_empty() {
+        out.push_str(&format!("  {:<26} {}\n", "write", g.write.join(", ")));
+    }
+    if !g.run.is_empty() {
+        out.push_str(&format!("  {:<26} {}\n", "run", g.run.join(", ")));
+    }
+
+    // Stated explicitly, because an absent capability is invisible otherwise and the
+    // agent would discover it as a refusal mid-task.
+    out.push_str("\nYOU MAY NOT\n");
+    if g.write.is_empty() {
+        out.push_str("  write files                this seat assigns, it does not execute\n");
+    }
+    if g.run.is_empty() {
+        out.push_str("  run commands\n");
+    }
+    out.push_str("  commit or merge            wecode does both, after checks pass\n");
+
+    out.push_str("\nNEVER — charter invariants, which outrank every grant above\n");
+    for inv in &company.charter.invariants {
+        out.push_str(&format!("  {}\n", invariant_line(inv)));
+    }
+
+    out.push_str("\nPROJECTS\n");
+    if playbooks.is_empty() {
+        out.push_str("  none yet\n");
+    }
+    for (p, kinds) in playbooks {
+        let total = plan.tasks_of(&p.id).count();
+        out.push_str(&format!(
+            "  {:<14} [{}]  {} task{}, {:.0}%   playbook: {}\n",
+            p.id.to_string(),
+            p.repo,
+            total,
+            if total == 1 { "" } else { "s" },
+            plan.progress(&p.id) * 100.0,
+            if kinds.is_empty() {
+                "none — wecode playbook init".to_string()
+            } else {
+                kinds.join(" ")
+            }
+        ));
+    }
+
+    let ready: Vec<&Task> = plan.ready_tasks().collect();
+    let waiting: Vec<&Task> = plan.tasks().filter(|t| t.status.needs_a_human()).collect();
+
+    out.push_str("\nHOW TO WORK\n");
+    if g.define.contains(&WorkKind::Task) {
+        out.push_str(
+            "  1  wecode playbook <kind>      read the project's guidance FIRST\n\
+             \x20 2  wecode task add ...         one atomic task per outcome\n\
+             \x20 3  wecode assign <t> --to <p>  admit it to the queue\n\
+             \x20 4  wecode start <t>            worktree + envelope for the worker\n",
+        );
+    } else {
+        out.push_str(
+            "  1  wecode ready                what you may pick up\n\
+             \x20 2  wecode start <task>         your worktree and instructions\n\
+             \x20 3  wecode show <task>          the acceptance you are judged by\n",
+        );
+    }
+    out.push_str(&format!(
+        "\n  {} ready · {} needs a human · worktrees under ~/.wecode/run/{}\n",
+        ready.len(),
+        waiting.len(),
+        org
+    ));
+    if !waiting.is_empty() {
+        for t in waiting.iter().take(5) {
+            out.push_str(&format!(
+                "    {} {}  {}\n",
+                t.status.mark(),
+                t.id,
+                t.status.as_str()
+            ));
+        }
+    }
+    out
+}
+
+/// One row of `wecode worktree`: the path, its project, and the task that owns it
+/// when one does.
+pub(crate) type WorktreeRow = (String, String, Option<(String, TaskStatus)>);
+
+/// The registered worktrees, and which task each belongs to.
+#[must_use]
+pub(crate) fn worktrees(rows: &[WorktreeRow]) -> String {
+    if rows.is_empty() {
+        return "no worktrees\n".to_string();
+    }
+    let mut out = format!(
+        "{:<18} {:<12} {:<11} {}\n",
+        "task", "project", "status", "path"
+    );
+    for (path, project, owned) in rows {
+        let (task, status) = match owned {
+            Some((t, s)) => (t.clone(), s.as_str().to_string()),
+            // A tree with no matching task: left behind, or made by hand.
+            None => ("— orphan".to_string(), "—".to_string()),
+        };
+        out.push_str(&format!("{task:<18} {project:<12} {status:<11} {path}\n"));
+    }
+    out
+}
+
+/// Fills the task envelope from `company.toml`.
+///
+/// The placeholders have existed in the template since it was written; nothing ever
+/// substituted them, so the envelope has been inert text until now.
+#[must_use]
+pub(crate) fn envelope(
+    template: &str,
+    task: &Task,
+    project: &Project,
+    plan: &Plan,
+    cwd: &std::path::Path,
+) -> String {
+    let acceptance = if task.acceptance.is_empty() {
+        "(none declared)".to_string()
+    } else {
+        task.acceptance
+            .iter()
+            .map(|m| format!("- {}", m.describe()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let write_scope = if task.scope.write.is_empty() {
+        "nothing — this task changes no files".to_string()
+    } else {
+        task.scope.write.join(", ")
+    };
+    // Only finished predecessors: unfinished work is not context, it is a blocker.
+    let context = {
+        let done: Vec<String> = task
+            .depends_on
+            .iter()
+            .filter_map(|d| plan.task(d))
+            .filter(|t| t.status.is_done())
+            .map(|t| format!("- {} ({})", t.title, t.id))
+            .collect();
+        if done.is_empty() {
+            "(nothing yet)".to_string()
+        } else {
+            done.join("\n")
+        }
+    };
+
+    let filled = template
+        .replace("{{task_id}}", task.id.as_str())
+        .replace("{{project_id}}", project.id.as_str())
+        .replace("{{objective}}", &project.objective)
+        .replace("{{title}}", &task.title)
+        .replace("{{acceptance}}", &acceptance)
+        .replace("{{write_scope}}", &write_scope)
+        .replace("{{context}}", &context);
+
+    if filled.trim().is_empty() {
+        return format!(
+            "  no task_envelope in company.toml — nothing to hand to the worker\n  work in {}\n",
+            cwd.display()
+        );
+    }
+    format!("{}\nWorking directory: {}\n", filled.trim(), cwd.display())
 }
 
 /// Available org templates.

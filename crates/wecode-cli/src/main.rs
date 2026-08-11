@@ -2,10 +2,14 @@
 
 mod args;
 mod board;
+mod git;
 mod render;
 mod tui;
+mod work;
 
 use std::process::ExitCode;
+
+use std::path::PathBuf;
 
 use args::Args;
 use wecode_core::{
@@ -13,7 +17,7 @@ use wecode_core::{
     TaskStatus, admission,
 };
 use wecode_gov::{Action, ActionKind, Broker, Effective, Grant, Session, WorkKind, glob};
-use wecode_org::{Company, Post, Workspace, workspace};
+use wecode_org::{Company, Playbook, Post, Workspace, playbook, workspace};
 use wecode_store::{AuditQuery, Store};
 
 const USAGE: &str = "\
@@ -49,7 +53,7 @@ PLAN
   wecode project list
 
   wecode task add <id> --project <p> \"<title>\"
-        --kind <feature|bug|chore|spike|docs>     default: feature
+        --kind <feature|bug|refactor|chore|spike|docs>   default: feature
         --parent <task>          is part of that task
         --after <task>           must come after it (repeatable)
         --accept-cmd \"<cmd>\"     executable acceptance (repeatable)
@@ -58,6 +62,9 @@ PLAN
         --tokens <n>  --wall <secs>     --to <post>
         --force                  save despite defects, recorded as waivers
 
+  wecode playbook [<kind>]             this project's guidance for that kind
+        --project <p>   init            `init` writes a starter into the repo
+  wecode brief                         who you are and how to work — read this first
   wecode tree                          projects and their task trees
   wecode ready                         what is schedulable right now
   wecode show <id>                     one project or task in full
@@ -70,6 +77,8 @@ COCKPIT
 
 WORK
   wecode assign <task> --to <post>     check the post may do it, then make it ready
+  wecode start <task>                  worktree + envelope; marks it running
+  wecode worktree [remove <task>]      list them, or remove one (--force if dirty)
   wecode approve <merge|admission|budget|measure> [<what>] --as <post>
   wecode guard <post> <verb> <target>  authorise an action; records the decision
         verbs: read write run merge spend        --tokens <n> for spend
@@ -117,6 +126,12 @@ fn run(a: &Args) -> Res {
             let (store, _) = open(a)?;
             Ok(render::ready(&store.load_plan()?))
         }
+        ("playbook", "init") => playbook_init(a),
+        ("playbook", _) => playbook_show(a),
+        ("brief", _) => brief(a),
+        ("start", _) => start(a),
+        ("worktree", "remove") | ("worktree", "rm") => worktree_remove(a),
+        ("worktree", _) => worktree_list(a),
         ("show", _) => show(a),
         ("check", _) => check(a),
         ("status", _) => set_status(a),
@@ -139,10 +154,70 @@ fn run(a: &Args) -> Res {
 
 /// Resolves the workspace, then its store and validated profile.
 fn open(a: &Args) -> Result<(Store, Company), Box<dyn std::error::Error>> {
+    let (_, store, company) = open_full(a)?;
+    Ok((store, company))
+}
+
+/// The same, keeping the workspace — needed by anything that resolves a repo path or
+/// names the run directory.
+fn open_full(a: &Args) -> Result<(Workspace, Store, Company), Box<dyn std::error::Error>> {
     let ws = workspace::resolve(a.get("org"))?;
     let company = ws.load()?;
     let store = Store::open(ws.db_path())?;
-    Ok((store, company))
+    Ok((ws, store, company))
+}
+
+/// Resolves which project is meant, the way sessions resolve: one is unambiguous,
+/// several need naming.
+fn which_project(
+    a: &Args,
+    plan: &Plan,
+) -> Result<wecode_core::Project, Box<dyn std::error::Error>> {
+    if let Some(id) = a.get("project") {
+        return plan
+            .project(&ProjectId::new(id))
+            .cloned()
+            .ok_or_else(|| format!("no such project: {id}").into());
+    }
+    let all: Vec<&wecode_core::Project> = plan.projects().collect();
+    match all.len() {
+        1 => Ok(all[0].clone()),
+        0 => {
+            Err("no projects yet — `wecode project add <id> --repo <name> \"<objective>\"`".into())
+        }
+        _ => {
+            let names: Vec<&str> = all.iter().map(|p| p.id.as_str()).collect();
+            Err(format!(
+                "several projects — name one with --project: {}",
+                names.join(", ")
+            )
+            .into())
+        }
+    }
+}
+
+/// The absolute path of a project's repository.
+fn repo_path(
+    company: &Company,
+    project: &wecode_core::Project,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let repo = company.repo(&project.repo).ok_or_else(|| {
+        format!(
+            "project `{}` names repo `{}`, which is not in [[repos]] — have: {}",
+            project.id,
+            project.repo,
+            company.repo_names().join(", ")
+        )
+    })?;
+    Ok(workspace::expand_home(&repo.path))
+}
+
+/// The project's playbook, if it has one. A project without one keeps working.
+fn playbook_of(
+    company: &Company,
+    project: &wecode_core::Project,
+) -> Result<Option<Playbook>, Box<dyn std::error::Error>> {
+    Ok(Playbook::at(&repo_path(company, project)?)?)
 }
 
 fn require<'a>(value: &'a str, what: &str) -> Result<&'a str, String> {
@@ -319,7 +394,8 @@ fn build_task(a: &Args) -> Result<Task, Box<dyn std::error::Error>> {
 
 fn task_add(a: &Args) -> Res {
     let (store, company) = open(a)?;
-    let t = build_task(a)?;
+    let mut t = build_task(a)?;
+    let mut from_playbook = Vec::new();
 
     if !store.project_exists(&t.project)? {
         return Err(format!(
@@ -328,6 +404,43 @@ fn task_add(a: &Args) -> Res {
         )
         .into());
     }
+    let plan = store.load_plan()?;
+
+    // Defaults the project's playbook supplies. An explicit flag always wins, and
+    // whatever is filled in is named in the output — never a silent substitution.
+    if let Some(project) = plan.project(&t.project)
+        && let Some(pb) = playbook_of(&company, project)?
+        && let Some(k) = pb.for_kind(t.kind)
+    {
+        if t.acceptance.is_empty() && !k.accept.is_empty() {
+            for cmd in &k.accept {
+                t = t.accepting(Measure::Command {
+                    cmd: cmd.clone(),
+                    expect_status: 0,
+                });
+            }
+            from_playbook.push(format!("accept    {}", k.accept.join(", ")));
+        }
+        if t.assignee.is_none()
+            && let Some(post) = &k.assign_to
+        {
+            t = t.assigned_to(post.clone());
+            from_playbook.push(format!("assignee  {post}"));
+        }
+        if !t.budget.is_set() && (k.tokens.is_some() || k.wall_secs.is_some()) {
+            t = t.budgeted(Budget {
+                tokens: k.tokens,
+                wall_secs: k.wall_secs,
+            });
+            from_playbook.push(format!(
+                "budget    {} tokens, {}s",
+                k.tokens.map_or_else(|| "—".to_string(), |n| n.to_string()),
+                k.wall_secs
+                    .map_or_else(|| "—".to_string(), |n| n.to_string())
+            ));
+        }
+    }
+
     if let Some(post) = &t.assignee {
         find_post(&company, post)?;
     }
@@ -343,11 +456,12 @@ fn task_add(a: &Args) -> Res {
         },
         "defining a task",
     )?;
-
-    let plan = store.load_plan()?;
     let defects = admission::check_task(&t, &plan);
     let verdict = Admission::decide(defects.clone(), "operator", Vec::new());
     let mut out = render::admission(&render::task_heading(&t), &defects, Some(&verdict));
+    for line in &from_playbook {
+        out.push_str(&format!("  {line}  (from playbook)\n"));
+    }
 
     if defects.is_empty() || a.has("force") {
         // Probe a scratch plan first. A cycle must be caught before anything is
@@ -544,6 +658,300 @@ fn assign(a: &Args) -> Res {
 /// the profile rather than being defaulted at each call site.
 fn repo_names(company: &Company) -> Vec<String> {
     company.repos.iter().map(|r| r.name.clone()).collect()
+}
+
+// -------------------------------------------------------------- playbook ------
+
+/// Prints a project's guidance. This is what an orchestrator reads before it
+/// decomposes a request into tasks.
+fn playbook_show(a: &Args) -> Res {
+    let (_, store, company) = open_full(a)?;
+    let plan = store.load_plan()?;
+    let project = which_project(a, &plan)?;
+    let path = repo_path(&company, &project)?;
+
+    let Some(pb) = playbook_of(&company, &project)? else {
+        return Ok(format!(
+            "project {} has no playbook\n  {}\n  wecode playbook init --project {}  writes a starter\n",
+            project.id,
+            path.join(playbook::PLAYBOOK_PATH).display(),
+            project.id
+        ));
+    };
+
+    match a.cmd(1) {
+        "" => Ok(render::playbook_all(&project, &pb)),
+        want => {
+            let kind = TaskKind::parse(want).ok_or_else(|| {
+                format!(
+                    "unknown kind `{want}` — have: {}",
+                    TaskKind::all()
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+            Ok(render::playbook_kind(&project, &pb, kind))
+        }
+    }
+}
+
+/// Writes a starter playbook into the project's repo.
+fn playbook_init(a: &Args) -> Res {
+    let (_, store, company) = open_full(a)?;
+    let plan = store.load_plan()?;
+    let project = which_project(a, &plan)?;
+    let repo = repo_path(&company, &project)?;
+
+    if !repo.is_dir() {
+        return Err(format!(
+            "repo `{}` is not a directory: {}",
+            project.repo,
+            repo.display()
+        )
+        .into());
+    }
+    let language = a.get("language").unwrap_or("");
+    let path = playbook::init(&repo, language)?;
+    Ok(format!(
+        "  wrote {}\n\n  Fill in the guidance for each kind, then:\n    wecode playbook bug --project {}\n\n  Commit it — it describes this code, so it belongs with it.\n  Add {}/ to .gitignore; it is the worker-writable area.\n",
+        path.display(),
+        project.id,
+        playbook::RUN_DIR
+    ))
+}
+
+// ----------------------------------------------------------------- brief ------
+
+/// Orients an agent: who it is, what it may do, and where the guidance lives.
+///
+/// Derived from the grant rather than stored as a prompt. A hand-written briefing
+/// drifts from the roles the moment one is edited, and then tells an agent it has
+/// authority the Broker will refuse.
+fn brief(a: &Args) -> Res {
+    let (ws, store, company) = open_full(a)?;
+    let live = store.sessions(company.session_ttl)?;
+    let Some(s) = live.first() else {
+        return Ok(format!("{}\n", no_session_error(&company)));
+    };
+    let post = find_post(&company, &s.post)?;
+    let grant = company.grant_of(&post);
+    let plan = store.load_plan()?;
+
+    let mut playbooks = Vec::new();
+    for p in plan.projects() {
+        let kinds = playbook_of(&company, p)
+            .ok()
+            .flatten()
+            .map(|pb| {
+                pb.kinds()
+                    .iter()
+                    .map(|(k, _)| k.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        playbooks.push((p.clone(), kinds));
+    }
+
+    Ok(render::brief(
+        &company,
+        s,
+        &post,
+        grant,
+        &plan,
+        &playbooks,
+        work::org_name(ws.root()),
+    ))
+}
+
+// ------------------------------------------------------------------ work ------
+
+/// Begins work on a task: prepares the worktree its playbook asks for, marks it
+/// running, and prints the envelope for whoever does the work.
+fn start(a: &Args) -> Res {
+    let (ws, store, company) = open_full(a)?;
+    let id = TaskId::new(require(a.cmd(1), "task id")?);
+    let plan = store.load_plan()?;
+    let task = plan
+        .task(&id)
+        .ok_or_else(|| format!("no such task: {id}"))?
+        .clone();
+
+    if task.status.is_closed() {
+        return Err(format!(
+            "{id} is {} — reopen it with `wecode status {id} waiting` first",
+            task.status.as_str()
+        )
+        .into());
+    }
+    let defects = admission::check_task(&task, &plan);
+    if !defects.is_empty() {
+        let mut out = render::admission(&render::task_heading(&task), &defects, None);
+        out.push_str("\n  not started — a draft cannot be worked on\n");
+        return Ok(out);
+    }
+    let blockers = plan.blockers(&id);
+    if !blockers.is_empty() {
+        let mut out = format!("  {id} is not ready\n");
+        for b in &blockers {
+            out.push_str(&format!("    waiting on {}\n", blocker_note(b)));
+        }
+        return Ok(out);
+    }
+
+    let project = plan
+        .project(&task.project)
+        .ok_or_else(|| format!("no such project: {}", task.project))?;
+    let pb = playbook_of(&company, project)?;
+
+    // The worktree belongs to the main task, so a subtask joins its parent's tree
+    // rather than opening a second checkout of the same work.
+    let owner = work::owner(&plan, &id).expect("task is in the plan");
+    let kind_pb = pb.as_ref().and_then(|p| p.for_kind(owner.kind));
+    let wants_worktree = kind_pb.is_some_and(|k| k.worktree);
+
+    let mut out = String::new();
+    let mut cwd = repo_path(&company, project)?;
+
+    if wants_worktree {
+        let branch = work::branch_for(&owner.id);
+        let path = work::worktree_for(&work::org_name(ws.root()), &owner.id);
+        let repo = repo_path(&company, project)?;
+        if !git::is_repo(&repo) {
+            return Err(format!("{} is not a git repository", repo.display()).into());
+        }
+        // The playbook's integration branch when it names one, else wherever the
+        // repo is standing. Guessing a name like "dev" would fail on repos that
+        // have no such branch.
+        let base = match pb.as_ref().and_then(|p| p.project.merge_to.clone()) {
+            Some(b) => Some(b),
+            None => git::current_branch(&repo)?,
+        };
+
+        if path.is_dir() {
+            git::reset_hard(&path)?;
+            out.push_str(&format!("  worktree {} (reset)\n", path.display()));
+        } else {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            git::worktree_add(&repo, &path, &branch, base.as_deref())?;
+            out.push_str(&format!("  worktree {}\n", path.display()));
+        }
+        out.push_str(&format!("  branch   {branch}\n"));
+        if owner.id != id {
+            out.push_str(&format!("  shared with {} (its main task)\n", owner.id));
+        }
+        cwd = path;
+    } else {
+        out.push_str(&format!(
+            "  no worktree — the {} playbook does not ask for one\n  work in {}\n",
+            owner.kind.as_str(),
+            cwd.display()
+        ));
+    }
+
+    // Starting is staffing: it changes who is expected to act.
+    let who = actor(a, &store, &company)?;
+    require_allowed(
+        &store,
+        &company,
+        &who,
+        (Some(task.project.to_string()), Some(id.to_string())),
+        &Action::Staff,
+        "starting a task",
+    )?;
+    store.set_task_status(&id, TaskStatus::Running)?;
+    out.push_str(&format!("  status   {} → running\n", task.status.as_str()));
+
+    out.push('\n');
+    out.push_str(&render::envelope(
+        &company.templates.task_envelope,
+        &task,
+        project,
+        &plan,
+        &cwd,
+    ));
+    Ok(out)
+}
+
+fn worktree_list(a: &Args) -> Res {
+    let (ws, store, company) = open_full(a)?;
+    let plan = store.load_plan()?;
+    let org = work::org_name(ws.root());
+
+    let mut rows = Vec::new();
+    for p in plan.projects() {
+        let repo = repo_path(&company, p)?;
+        if !git::is_repo(&repo) {
+            continue;
+        }
+        for path in git::worktree_list(&repo)? {
+            let owned = plan
+                .tasks_of(&p.id)
+                .find(|t| work::worktree_for(&org, &t.id).to_string_lossy() == path)
+                .map(|t| (t.id.to_string(), t.status));
+            rows.push((path, p.id.to_string(), owned));
+        }
+    }
+    Ok(render::worktrees(&rows))
+}
+
+fn worktree_remove(a: &Args) -> Res {
+    let (ws, store, company) = open_full(a)?;
+    let id = TaskId::new(require(a.cmd(2), "task id")?);
+    let plan = store.load_plan()?;
+    let task = plan
+        .task(&id)
+        .ok_or_else(|| format!("no such task: {id}"))?;
+    let project = plan
+        .project(&task.project)
+        .ok_or_else(|| format!("no such project: {}", task.project))?;
+
+    let owner = work::owner(&plan, &id).expect("task is in the plan");
+    if owner.id != id {
+        return Err(format!(
+            "{id} shares {}'s worktree — remove that one instead",
+            owner.id
+        )
+        .into());
+    }
+    let path = work::worktree_for(&work::org_name(ws.root()), &id);
+    if !path.exists() {
+        return Ok(format!("  no worktree at {}\n", path.display()));
+    }
+    let repo = repo_path(&company, project)?;
+
+    // Uncommitted work in a worktree is unrecoverable once the tree is gone, and
+    // nothing has committed it yet — wecode does that, after checks pass.
+    let dirty = git::changed_files(&path).unwrap_or_default();
+    if !dirty.is_empty() && !a.has("force") {
+        let mut msg = format!(
+            "{id} has {} uncommitted change{} — removing the worktree would lose them:\n",
+            dirty.len(),
+            if dirty.len() == 1 { "" } else { "s" }
+        );
+        for f in dirty.iter().take(10) {
+            msg.push_str(&format!("    {f}\n"));
+        }
+        msg.push_str("  pass --force to discard them");
+        return Err(msg.into());
+    }
+
+    git::worktree_remove(&repo, &path)?;
+    let mut out = format!("  removed {}\n", path.display());
+    if !dirty.is_empty() {
+        out.push_str(&format!(
+            "  discarded {} uncommitted change(s)\n",
+            dirty.len()
+        ));
+    }
+    out.push_str(&format!(
+        "  branch {} kept — delete it once merged\n",
+        work::branch_for(&id)
+    ));
+    Ok(out)
 }
 
 fn find_post(company: &Company, name: &str) -> Result<Post, String> {
