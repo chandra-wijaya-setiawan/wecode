@@ -3,10 +3,9 @@
 
 use std::fmt;
 
-use wecode_core::{IntentId, IntentKind};
 
 use crate::glob;
-use crate::grant::{ActionKind, Effective, Introspect};
+use crate::grant::{ActionKind, Effective, Introspect, WorkKind};
 
 /// Something a post wants to do.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -18,7 +17,7 @@ pub enum Action {
     Spend { tokens: u64, wall_secs: u64 },
     Merge { branch: String },
     Approve { kind: ActionKind },
-    Define { kind: IntentKind },
+    Define { kind: WorkKind },
     Introspect { level: Introspect },
     Staff,
 }
@@ -182,7 +181,10 @@ pub struct Session {
     pub post: String,
     pub occupant: String,
     pub human: Option<String>,
-    pub intent: IntentId,
+    /// What the action is for. Both may be set: a task always belongs to a
+    /// project, and the ledger is queried by either.
+    pub project: Option<String>,
+    pub task: Option<String>,
     pub effective: Effective,
     pub spent: Spend,
 }
@@ -193,7 +195,6 @@ impl Session {
         id: impl Into<String>,
         post: impl Into<String>,
         occupant: impl Into<String>,
-        intent: IntentId,
         effective: Effective,
     ) -> Self {
         Self {
@@ -201,10 +202,19 @@ impl Session {
             post: post.into(),
             occupant: occupant.into(),
             human: None,
-            intent,
+            project: None,
+            task: None,
             effective,
             spent: Spend::default(),
         }
+    }
+
+    /// Names the work this session is acting on.
+    #[must_use]
+    pub fn on(mut self, project: Option<String>, task: Option<String>) -> Self {
+        self.project = project;
+        self.task = task;
+        self
     }
 
     /// Names the human in this seat alongside the agent.
@@ -235,7 +245,8 @@ pub struct Record {
     pub post: String,
     pub occupant: String,
     pub human: Option<String>,
-    pub intent: IntentId,
+    pub project: Option<String>,
+    pub task: Option<String>,
     pub action: Action,
     pub decision: Decision,
     pub source: Source,
@@ -274,7 +285,8 @@ impl Broker {
             post: session.post.clone(),
             occupant: session.occupant.clone(),
             human: session.human.clone(),
-            intent: session.intent.clone(),
+            project: session.project.clone(),
+            task: session.task.clone(),
             action: action.clone(),
             decision: decision.clone(),
             source: Source::Broker,
@@ -463,7 +475,8 @@ impl Broker {
             post: session.post.clone(),
             occupant: session.occupant.clone(),
             human: session.human.clone(),
-            intent: session.intent.clone(),
+            project: session.project.clone(),
+            task: session.task.clone(),
             action,
             decision: Decision::Allow,
             source,
@@ -502,13 +515,8 @@ mod tests {
     use crate::grant::Grant;
 
     fn session(effective: Effective) -> Session {
-        Session::new(
-            "s1",
-            "impl-api",
-            "claude-code",
-            IntentId::new("proj"),
-            effective,
-        )
+        Session::new("s1", "impl-api", "claude-code", effective)
+            .on(Some("caching".into()), Some("cache-layer".into()))
     }
 
     fn confined() -> Session {
@@ -799,7 +807,7 @@ mod tests {
         let d = b.authorize(
             &s,
             &Action::Define {
-                kind: IntentKind::Task,
+                kind: WorkKind::Task,
             },
         );
         assert!(matches!(
@@ -860,20 +868,8 @@ mod tests {
     #[test]
     fn ledger_answers_cross_harness_path_questions() {
         let mut b = Broker::new(Charter::default());
-        let a = Session::new(
-            "s1",
-            "impl",
-            "claude-code",
-            IntentId::new("p"),
-            Effective::of(vec![Grant::root()]),
-        );
-        let c = Session::new(
-            "s2",
-            "test",
-            "codex",
-            IntentId::new("p"),
-            Effective::of(vec![Grant::root()]),
-        );
+        let a = Session::new("s1", "impl", "claude-code", Effective::of(vec![Grant::root()]));
+        let c = Session::new("s2", "test", "codex", Effective::of(vec![Grant::root()]));
         b.authorize(
             &a,
             &Action::Write {

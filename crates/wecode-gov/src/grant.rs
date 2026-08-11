@@ -3,9 +3,33 @@
 
 use std::collections::BTreeSet;
 
-use wecode_core::IntentKind;
 
 use crate::glob;
+
+/// The two levels of work authority can be granted over.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum WorkKind {
+    Project,
+    Task,
+}
+
+impl WorkKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Task => "task",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "project" => Some(Self::Project),
+            "task" => Some(Self::Task),
+            _ => None,
+        }
+    }
+}
 
 /// Things a holder may approve.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -54,7 +78,7 @@ pub struct Grant {
     pub wall_secs: Option<u64>,
     pub merge_to: Vec<String>,
     pub approve: BTreeSet<ActionKind>,
-    pub define: BTreeSet<IntentKind>,
+    pub define: BTreeSet<WorkKind>,
     pub introspect: Introspect,
     pub staff: bool,
 }
@@ -80,13 +104,7 @@ impl Grant {
                 ActionKind::MeasureAmendment,
             ]
             .into(),
-            define: [
-                IntentKind::Vision,
-                IntentKind::Goal,
-                IntentKind::Project,
-                IntentKind::Task,
-            ]
-            .into(),
+            define: [WorkKind::Project, WorkKind::Task].into(),
             introspect: Introspect::Tree,
             staff: true,
         }
@@ -261,7 +279,7 @@ impl Effective {
         self.all(|g| g.approve.contains(&kind))
     }
 
-    pub fn allows_define(&self, kind: IntentKind) -> bool {
+    pub fn allows_define(&self, kind: WorkKind) -> bool {
         self.all(|g| g.define.contains(&kind))
     }
 

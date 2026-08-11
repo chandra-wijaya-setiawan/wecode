@@ -20,4 +20,4 @@ pub use broker::{
     Action, Broker, Charter, ControlMode, Decision, DenyReason, Invariant, Record, Session, Source,
     Spend,
 };
-pub use grant::{ActionKind, Effective, Escalation, Grant, Introspect, Network};
+pub use grant::{ActionKind, Effective, Escalation, Grant, Introspect, Network, WorkKind};

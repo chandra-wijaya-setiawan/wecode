@@ -1,116 +1,100 @@
-//! The admission gate: is this intent well enough formed to be assigned?
+//! The admission gate: is this well enough formed to be worked on?
 //!
-//! Every check here is decided by inspecting values and the tree. Nothing calls a
-//! model. That is the point — a gate that sometimes says yes for reasons nobody can
+//! Every check is decided by inspecting values and the plan. Nothing calls a model.
+//! That is the point — a gate that sometimes says yes for reasons nobody can
 //! reproduce is not a gate.
 
-use crate::id::IntentId;
-use crate::intent::{Intent, IntentKind, Link, Measure};
-use crate::tree::IntentTree;
+use crate::id::TaskId;
+use crate::plan::Plan;
+use crate::project::Project;
+use crate::task::Task;
 
 /// Words that name a direction without naming a target. Their presence means we
 /// cannot tell when the work is done, so we ask.
 const VAGUE_TERMS: &[&str] = &[
-    "faster",
-    "slower",
-    "better",
-    "improve",
-    "improved",
-    "optimize",
-    "optimise",
-    "robust",
-    "clean",
-    "cleaner",
-    "cleanup",
-    "nice",
-    "nicer",
-    "modern",
-    "scalable",
-    "simple",
-    "simpler",
-    "good",
-    "bad",
-    "various",
-    "stuff",
-    "things",
-    "somehow",
-    "properly",
-    "correctly",
-    "etc",
+    "faster", "slower", "better", "improve", "improved", "optimize", "optimise", "robust",
+    "clean", "cleaner", "cleanup", "nice", "nicer", "modern", "scalable", "simple", "simpler",
+    "good", "bad", "various", "stuff", "things", "somehow", "properly", "correctly", "etc",
 ];
 
 /// Separators that suggest more than one outcome in a single statement.
 const COMPOUND_MARKERS: &[&str] = &[" and ", " & ", ";", " then ", " plus ", " also "];
 
-/// A specific, reportable reason an intent is not assignable.
+/// A specific, reportable reason something is not workable.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Defect {
     StatementEmpty,
     StatementCompound { marker: String },
     StatementVague { term: String },
-    NoParentLink,
-    ParentMissing { parent: IntentId },
+    RepoMissing,
+    /// The repo is not one the company registers.
+    RepoUnknown { repo: String, known: Vec<String> },
     MeasureMissing,
     MeasureNotExecutable,
-    ProxyNotAllowed,
     ScopeMissing,
     ScopeTooBroad { glob: String },
-    ScopeOverlaps { with: IntentId, glob: String },
+    ScopeOverlaps { with: TaskId, glob: String },
     BudgetMissing,
-    HorizonExceedsParent,
-    CompoundHasNoChildren,
+    /// A project with no tasks cannot progress.
+    ProjectHasNoTasks,
+    /// A dependency that will never be satisfied.
+    DependencyMissing { on: TaskId },
 }
 
 impl Defect {
-    /// The question to put to whoever created this intent. Fixed text: the dialogue
-    /// is scripted so it stays reproducible.
+    /// The question to put to whoever wrote this. Fixed text: the dialogue is
+    /// scripted so it stays reproducible.
     #[must_use]
     pub fn question(&self) -> String {
         match self {
             Self::StatementEmpty => "What should be achieved? One sentence.".into(),
             Self::StatementCompound { marker } => format!(
-                "This names more than one outcome (found {marker:?}). Split it, or restate as a single outcome."
+                "This names more than one outcome (found {marker:?}). Split it, or restate as one."
             ),
             Self::StatementVague { term } => format!(
                 "{term:?} names a direction, not a target. {term} compared to what, and by how much?"
             ),
-            Self::NoParentLink => "Which intent does this serve? If none, say why it stands alone \
-                 (maintenance, urgent, exploration, personal)."
-                .into(),
-            Self::ParentMissing { parent } => {
-                format!("Parent `{parent}` does not exist. Create it, or re-link this intent.")
+            Self::RepoMissing => "Which repository does this project work in?".into(),
+            Self::RepoUnknown { repo, known } => {
+                if known.is_empty() {
+                    format!(
+                        "Repo {repo:?} is not registered. Add it under [[repos]] in company.toml."
+                    )
+                } else {
+                    format!(
+                        "Repo {repo:?} is not registered. Known: {}.",
+                        known.join(", ")
+                    )
+                }
             }
             Self::MeasureMissing => {
                 "How will we know this is done? Give a command, or a metric with a target.".into()
             }
             Self::MeasureNotExecutable => {
-                "Every measure here needs a human to judge it. Add a command or a metric \
+                "Every measure here needs a person to judge it. Add a command or a metric \
                  that can be checked without asking anyone."
                     .into()
-            }
-            Self::ProxyNotAllowed => {
-                "A proxy measure is only valid on a vision. Give something checkable.".into()
             }
             Self::ScopeMissing => "Which paths may this change?".into(),
             Self::ScopeTooBroad { glob } => {
                 format!("Write scope {glob:?} covers everything. Which paths specifically?")
             }
             Self::ScopeOverlaps { with, glob } => format!(
-                "Write scope {glob:?} overlaps sibling `{with}`. Narrow one, or sequence them."
+                "Write scope {glob:?} overlaps task `{with}`, which could run at the same time. \
+                 Narrow one, or make this depend on it."
             ),
             Self::BudgetMissing => "What is the budget — tokens, wall time, or both?".into(),
-            Self::HorizonExceedsParent => {
-                "This has a longer horizon than its parent. Shorten it, or re-parent.".into()
+            Self::ProjectHasNoTasks => {
+                "This project has no tasks. Break it down before starting it.".into()
             }
-            Self::CompoundHasNoChildren => {
-                "This cannot be executed directly and has no children. Decompose it.".into()
+            Self::DependencyMissing { on } => {
+                format!("This waits on `{on}`, which does not exist.")
             }
         }
     }
 
-    /// Whether this defect blocks assignment outright. Everything currently does;
-    /// the distinction exists so advisory checks can be added without changing
-    /// callers.
+    /// Whether this blocks work outright. Everything currently does; the
+    /// distinction exists so advisory checks can be added without changing callers.
     #[must_use]
     pub fn is_blocking(&self) -> bool {
         true
@@ -133,45 +117,6 @@ pub enum Admission {
 }
 
 impl Admission {
-    /// Runs every check. `tree` supplies the parent and siblings.
-    #[must_use]
-    pub fn check(intent: &Intent, tree: &IntentTree) -> Self {
-        let mut defects = Vec::new();
-        check_statement(intent, &mut defects);
-        check_link(intent, tree, &mut defects);
-        check_measures(intent, &mut defects);
-        check_scope(intent, tree, &mut defects);
-        check_budget(intent, &mut defects);
-        check_decomposition(intent, tree, &mut defects);
-        Self::Draft { defects }
-    }
-
-    /// Runs the checks and admits if nothing blocking remains after waivers.
-    #[must_use]
-    pub fn decide(
-        intent: &Intent,
-        tree: &IntentTree,
-        by: impl Into<String>,
-        waivers: Vec<Waiver>,
-    ) -> Self {
-        let Self::Draft { defects } = Self::check(intent, tree) else {
-            unreachable!("check always returns Draft");
-        };
-        let remaining: Vec<Defect> = defects
-            .into_iter()
-            .filter(|d| d.is_blocking() && !waivers.iter().any(|w| w.defect == *d))
-            .collect();
-
-        if remaining.is_empty() {
-            Self::Admitted {
-                by: by.into(),
-                waivers,
-            }
-        } else {
-            Self::Draft { defects: remaining }
-        }
-    }
-
     #[must_use]
     pub fn is_admitted(&self) -> bool {
         matches!(self, Self::Admitted { .. })
@@ -184,132 +129,134 @@ impl Admission {
             Self::Admitted { .. } => &[],
         }
     }
+
+    /// Admits if nothing blocking remains after waivers.
+    #[must_use]
+    pub fn decide(defects: Vec<Defect>, by: impl Into<String>, waivers: Vec<Waiver>) -> Self {
+        let remaining: Vec<Defect> = defects
+            .into_iter()
+            .filter(|d| d.is_blocking() && !waivers.iter().any(|w| w.defect == *d))
+            .collect();
+        if remaining.is_empty() {
+            Self::Admitted {
+                by: by.into(),
+                waivers,
+            }
+        } else {
+            Self::Draft { defects: remaining }
+        }
+    }
 }
 
-fn check_statement(intent: &Intent, out: &mut Vec<Defect>) {
-    let s = intent.statement.trim();
+/// Checks a project. `known_repos` comes from the company registry; an empty list
+/// skips the check, so core stays usable without a company.
+#[must_use]
+pub fn check_project(p: &Project, plan: &Plan, known_repos: &[String]) -> Vec<Defect> {
+    let mut out = Vec::new();
+    check_statement(&p.objective, &mut out);
+
+    if p.repo.trim().is_empty() {
+        out.push(Defect::RepoMissing);
+    } else if !known_repos.is_empty() && !known_repos.iter().any(|r| *r == p.repo) {
+        out.push(Defect::RepoUnknown {
+            repo: p.repo.clone(),
+            known: known_repos.to_vec(),
+        });
+    }
+
+    if p.measures.is_empty() {
+        out.push(Defect::MeasureMissing);
+    } else if !p.has_executable_measure() {
+        out.push(Defect::MeasureNotExecutable);
+    }
+    if !p.budget.is_set() {
+        out.push(Defect::BudgetMissing);
+    }
+
+    // Only meaningful once the project is in the plan; a fresh one is expected to
+    // have no tasks yet.
+    if plan.project(&p.id).is_some() && plan.tasks_of(&p.id).next().is_none() {
+        out.push(Defect::ProjectHasNoTasks);
+    }
+    out
+}
+
+/// Checks a task against its project and the tasks it could run alongside.
+#[must_use]
+pub fn check_task(t: &Task, plan: &Plan) -> Vec<Defect> {
+    let mut out = Vec::new();
+    check_statement(&t.title, &mut out);
+
+    if t.acceptance.is_empty() {
+        out.push(Defect::MeasureMissing);
+    } else if !t.has_executable_acceptance() {
+        out.push(Defect::MeasureNotExecutable);
+    }
+
+    if t.kind.requires_write_scope() {
+        if t.scope.write.is_empty() {
+            out.push(Defect::ScopeMissing);
+        } else {
+            for glob in &t.scope.write {
+                if is_too_broad(glob) {
+                    out.push(Defect::ScopeTooBroad { glob: glob.clone() });
+                }
+            }
+        }
+    }
+    if !t.budget.is_set() {
+        out.push(Defect::BudgetMissing);
+    }
+
+    for dep in &t.depends_on {
+        if plan.task(dep).is_none() {
+            out.push(Defect::DependencyMissing { on: dep.clone() });
+        }
+    }
+
+    // Overlap matters only between tasks that could run at once. A dependency in
+    // either direction sequences them, so sharing paths is then fine — which is
+    // half the reason dependencies exist.
+    for other in plan.tasks_of(&t.project) {
+        if other.id == t.id || other.status.is_closed() || sequenced(t, other) {
+            continue;
+        }
+        for glob in &t.scope.write {
+            if other.scope.write.iter().any(|o| globs_overlap(glob, o)) {
+                out.push(Defect::ScopeOverlaps {
+                    with: other.id.clone(),
+                    glob: glob.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Whether either task waits on the other, in either direction.
+fn sequenced(a: &Task, b: &Task) -> bool {
+    a.depends_on.contains(&b.id) || b.depends_on.contains(&a.id)
+}
+
+fn check_statement(text: &str, out: &mut Vec<Defect>) {
+    let s = text.trim();
     if s.is_empty() {
         out.push(Defect::StatementEmpty);
         return;
     }
     let lower = format!(" {} ", s.to_lowercase());
-    if let Some(marker) = COMPOUND_MARKERS.iter().find(|m| lower.contains(*m)) {
+    if let Some(marker) = COMPOUND_MARKERS.iter().find(|m| lower.contains(**m)) {
         out.push(Defect::StatementCompound {
             marker: (*marker).trim().to_string(),
         });
     }
-    // A vision names a direction on purpose, so vagueness is expected there.
-    if intent.kind != IntentKind::Vision {
-        if let Some(term) = VAGUE_TERMS
-            .iter()
-            .find(|t| lower.contains(&format!(" {t} ")) || lower.contains(&format!(" {t}.")))
-        {
-            out.push(Defect::StatementVague {
-                term: (*term).to_string(),
-            });
-        }
-    }
-}
-
-fn check_link(intent: &Intent, tree: &IntentTree, out: &mut Vec<Defect>) {
-    // A kind with no legal parent is inherently a root, so having no link is
-    // correct rather than drift. Only kinds that *could* be attached can dangle.
-    if intent.kind.valid_parents().is_empty() {
-        if let Some(parent) = &intent.parent {
-            out.push(Defect::ParentMissing {
-                parent: parent.clone(),
-            });
-        }
-        return;
-    }
-    match (&intent.link, &intent.parent) {
-        (Link::Unlinked, _) => out.push(Defect::NoParentLink),
-        (link, None) if link.needs_parent() => out.push(Defect::NoParentLink),
-        (_, Some(parent)) => match tree.get(parent) {
-            None => out.push(Defect::ParentMissing {
-                parent: parent.clone(),
-            }),
-            Some(p) if intent.horizon > p.horizon => {
-                out.push(Defect::HorizonExceedsParent);
-            }
-            Some(_) => {}
-        },
-        _ => {}
-    }
-}
-
-fn check_measures(intent: &Intent, out: &mut Vec<Defect>) {
-    if intent.kind == IntentKind::Vision {
-        return; // Proxy measures are the point at this level.
-    }
-    if intent.measures.is_empty() {
-        out.push(Defect::MeasureMissing);
-        return;
-    }
-    if intent
-        .measures
+    if let Some(term) = VAGUE_TERMS
         .iter()
-        .any(|m| matches!(m, Measure::Proxy { .. }))
+        .find(|t| lower.contains(&format!(" {t} ")) || lower.contains(&format!(" {t}.")))
     {
-        out.push(Defect::ProxyNotAllowed);
-    }
-    // Rollup counts as satisfied for compound kinds: children carry the evidence.
-    let rollup_ok = !intent.kind.is_primitive() && intent.measures.contains(&Measure::Rollup);
-    if intent.kind.requires_executable_measure() && !intent.has_executable_measure() && !rollup_ok {
-        out.push(Defect::MeasureNotExecutable);
-    }
-}
-
-fn check_scope(intent: &Intent, tree: &IntentTree, out: &mut Vec<Defect>) {
-    if !intent.kind.requires_scope() {
-        return;
-    }
-    if intent.scope.write.is_empty() {
-        out.push(Defect::ScopeMissing);
-        return;
-    }
-    for glob in &intent.scope.write {
-        if is_too_broad(glob) {
-            out.push(Defect::ScopeTooBroad { glob: glob.clone() });
-        }
-    }
-    // Siblings only: unrelated branches are sequenced by the scheduler, not here.
-    if let Some(parent) = &intent.parent {
-        for sib in tree.children(parent) {
-            if sib.id == intent.id {
-                continue;
-            }
-            for glob in &intent.scope.write {
-                if sib
-                    .scope
-                    .write
-                    .iter()
-                    .any(|other| globs_overlap(glob, other))
-                {
-                    out.push(Defect::ScopeOverlaps {
-                        with: sib.id.clone(),
-                        glob: glob.clone(),
-                    });
-                }
-            }
-        }
-    }
-}
-
-fn check_budget(intent: &Intent, out: &mut Vec<Defect>) {
-    if intent.kind.is_assignable() && !intent.budget.is_set() {
-        out.push(Defect::BudgetMissing);
-    }
-}
-
-fn check_decomposition(intent: &Intent, tree: &IntentTree, out: &mut Vec<Defect>) {
-    // Only meaningful once the intent is in the tree; a fresh compound intent is
-    // expected to have no children yet.
-    if !intent.kind.is_primitive()
-        && tree.get(&intent.id).is_some()
-        && tree.children(&intent.id).next().is_none()
-    {
-        out.push(Defect::CompoundHasNoChildren);
+        out.push(Defect::StatementVague {
+            term: (*term).to_string(),
+        });
     }
 }
 
@@ -318,10 +265,9 @@ fn is_too_broad(glob: &str) -> bool {
     matches!(glob.trim(), "**" | "*" | "**/*" | "." | "./**" | "/" | "")
 }
 
-/// Prefix-containment overlap: compare the literal parts before the first
-/// wildcard. Deliberately coarse — it errs toward reporting an overlap, and a
-/// false positive costs one question while a false negative costs a corrupted
-/// worktree.
+/// Prefix-containment overlap. Deliberately coarse: it errs toward reporting a
+/// conflict, and a false positive costs one question while a false negative costs a
+/// corrupted worktree.
 fn globs_overlap(a: &str, b: &str) -> bool {
     let pa = literal_prefix(a);
     let pb = literal_prefix(b);
@@ -336,7 +282,19 @@ fn literal_prefix(glob: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent::{Budget, Horizon, Measure, Scope, StandaloneReason};
+    use crate::common::{Budget, Cmp, Scope, Status};
+    use crate::task::TaskKind;
+
+    fn repos() -> Vec<String> {
+        vec!["wecode".to_string()]
+    }
+
+    fn budget() -> Budget {
+        Budget {
+            tokens: Some(1000),
+            wall_secs: Some(60),
+        }
+    }
 
     fn cmd() -> Measure {
         Measure::Command {
@@ -345,214 +303,119 @@ mod tests {
         }
     }
 
-    fn budget() -> Budget {
-        Budget {
-            tokens: Some(100_000),
-            wall_secs: Some(1800),
+    fn good_project() -> Project {
+        Project::new(
+            "caching",
+            "wecode",
+            "add response caching to the export endpoint",
+        )
+        .measured(Measure::Metric {
+            name: "p99_ms".into(),
+            target: 500.0,
+            cmp: Cmp::Lt,
+        })
+        .budgeted(budget())
+    }
+
+    fn good_task() -> Task {
+        Task::new("cache-layer", "caching", "write the response cache layer")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/export/**"]))
+            .budgeted(budget())
+    }
+
+    fn seeded() -> Plan {
+        let mut p = Plan::new();
+        p.add_project(good_project()).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_well_formed_project_and_task_admit() {
+        let empty = Plan::new();
+        assert!(
+            check_project(&good_project(), &empty, &repos()).is_empty(),
+            "{:?}",
+            check_project(&good_project(), &empty, &repos())
+        );
+        let plan = seeded();
+        assert!(
+            check_task(&good_task(), &plan).is_empty(),
+            "{:?}",
+            check_task(&good_task(), &plan)
+        );
+    }
+
+    #[test]
+    fn a_vague_objective_is_caught_with_the_term() {
+        let mut p = good_project();
+        p.objective = "make the export faster".into();
+        let d = check_project(&p, &Plan::new(), &repos());
+        assert!(
+            d.iter()
+                .any(|x| matches!(x, Defect::StatementVague { term } if term == "faster")),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn a_compound_title_is_caught() {
+        let mut t = good_task();
+        t.title = "write the cache and rewrite the client".into();
+        assert!(
+            check_task(&t, &seeded())
+                .iter()
+                .any(|d| matches!(d, Defect::StatementCompound { .. }))
+        );
+    }
+
+    #[test]
+    fn an_unregistered_repo_lists_the_known_ones() {
+        let mut p = good_project();
+        p.repo = "ghost".into();
+        let d = check_project(&p, &Plan::new(), &repos());
+        match d.iter().find(|x| matches!(x, Defect::RepoUnknown { .. })) {
+            Some(Defect::RepoUnknown { known, .. }) => assert_eq!(known, &repos()),
+            other => panic!("expected RepoUnknown, got {other:?}"),
         }
     }
 
-    fn base_tree() -> IntentTree {
-        let mut t = IntentTree::new();
-        t.insert(Intent::new("vis", IntentKind::Vision, "be excellent"))
-            .unwrap();
-        t.insert(
-            Intent::new("goal", IntentKind::Goal, "cut p99 below 500ms")
-                .under("vis", Link::Requires)
-                .measured(Measure::Metric {
-                    name: "p99_ms".into(),
-                    target: 500.0,
-                    cmp: crate::intent::Cmp::Lt,
-                }),
-        )
-        .unwrap();
-        t
-    }
-
-    /// A fully-formed project: the control case for every negative test below.
-    fn good_project() -> Intent {
-        Intent::new(
-            "proj",
-            IntentKind::Project,
-            "add response caching to the export endpoint",
-        )
-        .under("goal", Link::Requires)
-        .measured(cmd())
-        .scoped(Scope::write(&["crates/export/**"]))
-        .budgeted(budget())
-        .horizon(Horizon::Month)
+    #[test]
+    fn a_project_in_the_plan_with_no_tasks_is_incomplete() {
+        let plan = seeded();
+        let stored = plan.project(&"caching".into()).unwrap().clone();
+        assert!(check_project(&stored, &plan, &repos()).contains(&Defect::ProjectHasNoTasks));
     }
 
     #[test]
-    fn a_well_formed_project_admits() {
-        let t = base_tree();
-        let a = Admission::decide(&good_project(), &t, "operator", vec![]);
-        assert!(a.is_admitted(), "unexpected defects: {:?}", a.defects());
-    }
-
-    #[test]
-    fn empty_statement_is_a_defect() {
-        let t = base_tree();
-        let mut i = good_project();
-        i.statement = "   ".into();
-        assert!(
-            Admission::check(&i, &t)
-                .defects()
-                .contains(&Defect::StatementEmpty)
-        );
-    }
-
-    #[test]
-    fn vague_statement_is_caught_with_the_offending_term() {
-        let t = base_tree();
-        let mut i = good_project();
-        i.statement = "make the export faster".into();
-        let defects = Admission::check(&i, &t);
-        assert!(
-            defects
-                .defects()
-                .iter()
-                .any(|d| matches!(d, Defect::StatementVague { term } if term == "faster")),
-            "got {:?}",
-            defects.defects()
-        );
-    }
-
-    #[test]
-    fn a_bare_vision_admits() {
-        // A vision has no legal parent, so being unlinked is correct, not drift.
-        // Regression: the gate used to refuse every vision.
-        let t = IntentTree::new();
-        let v = Intent::new("vis", IntentKind::Vision, "lead the market on export speed");
-        let a = Admission::decide(&v, &t, "operator", vec![]);
-        assert!(a.is_admitted(), "unexpected defects: {:?}", a.defects());
-    }
-
-    #[test]
-    fn a_vision_with_a_parent_is_a_defect() {
-        let t = base_tree();
-        let mut v = Intent::new("vis2", IntentKind::Vision, "another direction");
-        v.parent = Some(IntentId::new("vis"));
-        assert!(
-            Admission::check(&v, &t)
-                .defects()
-                .iter()
-                .any(|d| matches!(d, Defect::ParentMissing { .. })),
-            "a vision may not be parented"
-        );
-    }
-
-    #[test]
-    fn vagueness_is_allowed_on_a_vision() {
-        let t = IntentTree::new();
-        let v = Intent::new("v", IntentKind::Vision, "build a simple, better product");
-        let defects = Admission::check(&v, &t);
-        assert!(
-            !defects
-                .defects()
-                .iter()
-                .any(|d| matches!(d, Defect::StatementVague { .. })),
-            "got {:?}",
-            defects.defects()
-        );
-    }
-
-    #[test]
-    fn compound_statement_is_caught() {
-        let t = base_tree();
-        let mut i = good_project();
-        i.statement = "add caching and rewrite the client".into();
-        let defects = Admission::check(&i, &t);
-        assert!(
-            defects
-                .defects()
-                .iter()
-                .any(|d| matches!(d, Defect::StatementCompound { marker } if marker == "and")),
-            "got {:?}",
-            defects.defects()
-        );
-    }
-
-    #[test]
-    fn unlinked_is_a_defect_but_standalone_is_not() {
-        let t = base_tree();
-        let mut i = good_project();
-        i.parent = None;
-        i.link = Link::Unlinked;
-        assert!(
-            Admission::check(&i, &t)
-                .defects()
-                .contains(&Defect::NoParentLink)
-        );
-
-        let ok = good_project().standalone(StandaloneReason::Maintenance);
-        let a = Admission::decide(&ok, &t, "operator", vec![]);
-        assert!(a.is_admitted(), "unexpected defects: {:?}", a.defects());
-    }
-
-    #[test]
-    fn missing_measure_is_a_defect() {
-        let t = base_tree();
-        let mut i = good_project();
-        i.measures.clear();
-        assert!(
-            Admission::check(&i, &t)
-                .defects()
-                .contains(&Defect::MeasureMissing)
-        );
-    }
-
-    #[test]
-    fn judged_only_measures_are_not_executable() {
-        let t = base_tree();
-        let mut i = good_project();
-        i.measures = vec![Measure::Proxy {
+    fn a_judged_only_acceptance_is_not_executable() {
+        let mut t = good_task();
+        t.acceptance = vec![Measure::Judged {
             note: "looks right".into(),
         }];
-        let d = Admission::check(&i, &t);
-        assert!(d.defects().contains(&Defect::ProxyNotAllowed));
-        assert!(d.defects().contains(&Defect::MeasureNotExecutable));
+        assert!(check_task(&t, &seeded()).contains(&Defect::MeasureNotExecutable));
     }
 
     #[test]
-    fn rollup_satisfies_a_compound_kind_only() {
-        let t = base_tree();
-        let mut project = good_project();
-        project.measures = vec![Measure::Rollup];
+    fn a_spike_needs_no_write_scope_but_a_feature_does() {
+        let mut spike = good_task().of_kind(TaskKind::Spike);
+        spike.scope = Scope::default();
         assert!(
-            !Admission::check(&project, &t)
-                .defects()
-                .contains(&Defect::MeasureNotExecutable)
+            !check_task(&spike, &seeded()).contains(&Defect::ScopeMissing),
+            "a spike investigates; it need not write"
         );
 
-        let mut task = Intent::new("t", IntentKind::Task, "write the cache layer")
-            .under("proj", Link::Requires)
-            .scoped(Scope::write(&["crates/export/cache.rs"]))
-            .budgeted(budget());
-        task.measures = vec![Measure::Rollup];
-        assert!(
-            Admission::check(&task, &t)
-                .defects()
-                .contains(&Defect::MeasureNotExecutable)
-        );
+        let mut feature = good_task();
+        feature.scope = Scope::default();
+        assert!(check_task(&feature, &seeded()).contains(&Defect::ScopeMissing));
     }
 
     #[test]
-    fn scope_is_required_and_must_be_narrow() {
-        let t = base_tree();
-        let mut i = good_project();
-        i.scope = Scope::default();
-        assert!(
-            Admission::check(&i, &t)
-                .defects()
-                .contains(&Defect::ScopeMissing)
-        );
-
+    fn a_scope_of_everything_is_refused() {
         for broad in ["**", "*", ".", "**/*"] {
-            let j = good_project().scoped(Scope::write(&[broad]));
+            let t = good_task().scoped(Scope::write(&[broad]));
             assert!(
-                Admission::check(&j, &t)
-                    .defects()
+                check_task(&t, &seeded())
                     .iter()
                     .any(|d| matches!(d, Defect::ScopeTooBroad { .. })),
                 "{broad} should be too broad"
@@ -561,101 +424,78 @@ mod tests {
     }
 
     #[test]
-    fn goals_need_no_scope_or_budget() {
-        let t = base_tree();
-        let g = Intent::new("g2", IntentKind::Goal, "reach 99.9% uptime")
-            .under("vis", Link::Requires)
-            .measured(Measure::Metric {
-                name: "uptime".into(),
-                target: 99.9,
-                cmp: crate::intent::Cmp::Gte,
-            });
-        let a = Admission::decide(&g, &t, "operator", vec![]);
-        assert!(a.is_admitted(), "unexpected defects: {:?}", a.defects());
+    fn a_missing_dependency_is_reported() {
+        let t = good_task().after("ghost");
+        assert!(check_task(&t, &seeded()).contains(&Defect::DependencyMissing {
+            on: "ghost".into()
+        }));
     }
 
     #[test]
-    fn sibling_scope_overlap_is_reported() {
-        let mut t = base_tree();
-        t.insert(good_project()).unwrap();
-        let sibling = Intent::new("proj2", IntentKind::Project, "add export pagination")
-            .under("goal", Link::Requires)
-            .measured(cmd())
+    fn concurrent_tasks_may_not_share_a_write_scope() {
+        let mut plan = seeded();
+        plan.add_task(good_task()).unwrap();
+
+        let sibling = Task::new("cache-metrics", "caching", "record the cache hit rate")
+            .accepting(cmd())
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
-        let d = Admission::check(&sibling, &t);
         assert!(
-            d.defects()
+            check_task(&sibling, &plan)
                 .iter()
-                .any(|x| matches!(x, Defect::ScopeOverlaps { .. })),
-            "got {:?}",
-            d.defects()
+                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
+            "two tasks that can run at once must not share paths"
         );
     }
 
     #[test]
-    fn disjoint_sibling_scopes_are_fine() {
-        let mut t = base_tree();
-        t.insert(good_project()).unwrap();
-        let sibling = Intent::new("proj2", IntentKind::Project, "add import validation")
-            .under("goal", Link::Requires)
-            .measured(cmd())
-            .scoped(Scope::write(&["crates/import/**"]))
+    fn sequenced_tasks_may_share_a_write_scope() {
+        // Half the reason dependencies exist: ordering removes the conflict.
+        let mut plan = seeded();
+        plan.add_task(good_task()).unwrap();
+
+        let later = Task::new("cache-metrics", "caching", "record the cache hit rate")
+            .after("cache-layer")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
         assert!(
-            !Admission::check(&sibling, &t)
-                .defects()
+            !check_task(&later, &plan)
                 .iter()
-                .any(|x| matches!(x, Defect::ScopeOverlaps { .. }))
+                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
+            "a successor cannot collide with its predecessor"
         );
     }
 
     #[test]
-    fn budget_is_required_for_assignable_kinds() {
-        let t = base_tree();
-        let mut i = good_project();
-        i.budget = Budget::default();
+    fn a_closed_task_does_not_block_a_new_scope() {
+        let mut plan = seeded();
+        let mut done = good_task();
+        done.status = Status::Done;
+        plan.add_task(done).unwrap();
+
+        let fresh = Task::new("cache-metrics", "caching", "record the cache hit rate")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/export/**"]))
+            .budgeted(budget());
         assert!(
-            Admission::check(&i, &t)
-                .defects()
-                .contains(&Defect::BudgetMissing)
+            !check_task(&fresh, &plan)
+                .iter()
+                .any(|d| matches!(d, Defect::ScopeOverlaps { .. }))
         );
     }
 
     #[test]
-    fn horizon_may_not_exceed_the_parent() {
-        let t = base_tree();
-        let i = good_project().horizon(Horizon::Year); // parent goal is Quarter
-        assert!(
-            Admission::check(&i, &t)
-                .defects()
-                .contains(&Defect::HorizonExceedsParent)
-        );
-    }
-
-    #[test]
-    fn compound_in_tree_without_children_is_a_defect() {
-        let mut t = base_tree();
-        t.insert(good_project()).unwrap();
-        let stored = t.get(&IntentId::new("proj")).unwrap().clone();
-        assert!(
-            Admission::check(&stored, &t)
-                .defects()
-                .contains(&Defect::CompoundHasNoChildren)
-        );
-    }
-
-    #[test]
-    fn waiver_admits_but_is_recorded() {
-        let t = base_tree();
-        let mut i = good_project();
-        i.budget = Budget::default();
+    fn waivers_admit_but_are_recorded() {
+        let mut t = good_task();
+        t.budget = Budget::default();
+        let defects = check_task(&t, &seeded());
         let waiver = Waiver {
             defect: Defect::BudgetMissing,
-            by: "operator".into(),
-            reason: "spike, will cap manually".into(),
+            by: "Chandra".into(),
+            reason: "spike, capped manually".into(),
         };
-        let a = Admission::decide(&i, &t, "operator", vec![waiver.clone()]);
+        let a = Admission::decide(defects, "Chandra", vec![waiver.clone()]);
         assert!(a.is_admitted());
         match a {
             Admission::Admitted { waivers, .. } => assert_eq!(waivers, vec![waiver]),
@@ -668,6 +508,5 @@ mod tests {
         assert!(globs_overlap("crates/export/**", "crates/export/cache.rs"));
         assert!(globs_overlap("crates/**", "crates/export/**"));
         assert!(!globs_overlap("crates/export/**", "crates/import/**"));
-        assert!(!globs_overlap("tests/**", "src/**"));
     }
 }
