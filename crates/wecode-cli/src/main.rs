@@ -401,7 +401,7 @@ fn find_post(company: &Company, name: &str) -> Result<Post, String> {
 /// to that post's grant. That asymmetry is the point: an agent cannot quietly
 /// inherit the operator's authority by omitting a flag.
 /// Whoever an action is performed by: a seat, the agent typing for it, and the
-/// human crewing it when there is one.
+/// human in it when there is one.
 struct Actor {
     post: String,
     agent: String,
@@ -527,7 +527,7 @@ fn record(
         intent.clone(),
         actor.effective.clone(),
     )
-    .crewed_with(actor.human.clone());
+    .with_human(actor.human.clone());
     let decision = broker.authorize(&session, action);
     store.append_records(broker.ledger())?;
     Ok(decision)

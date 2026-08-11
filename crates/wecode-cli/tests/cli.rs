@@ -168,7 +168,10 @@ fn bare(args: &[&str]) -> Run {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_wecode"));
     cmd.args(args);
     cmd.env_remove("WECODE_ORG");
-    cmd.env("WECODE_CONFIG", std::env::temp_dir().join("wecode-e2e-noconfig"));
+    cmd.env(
+        "WECODE_CONFIG",
+        std::env::temp_dir().join("wecode-e2e-noconfig"),
+    );
     // A directory guaranteed to contain no company.toml, and no parent that does.
     cmd.current_dir(Path::new("/"));
     decode(cmd.output().expect("binary runs"))
@@ -386,7 +389,7 @@ fn whoami_lists_only_the_commands_this_seat_may_call() {
 
 #[test]
 fn the_ledger_names_both_the_human_and_the_agent() {
-    let org = Org::new("sess-crew", "software-company");
+    let org = Org::new("sess-who", "software-company");
     org.run(&["intent", "add", "vision", "v", "lead on export speed"])
         .assert_ok("add");
 

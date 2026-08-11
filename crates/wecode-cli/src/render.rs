@@ -270,7 +270,7 @@ pub(crate) fn whoami(
     grant: Option<&Grant>,
 ) -> String {
     let mut out = format!(
-        "{}  ·  {}\n  seat     {} ({})\n  crew     {}\n",
+        "{}  ·  {}\n  seat     {} ({})\n  who      {}\n",
         company.name,
         s.id,
         post.name,
@@ -314,7 +314,7 @@ pub(crate) fn who(sessions: &[SessionInfo], ttl: Duration, now: u64) -> String {
     }
     let mut out = format!(
         "{:<11} {:<10} {:<24} {:<7} {:<7} {}\n",
-        "session", "post", "crew", "age", "idle", "state"
+        "session", "post", "who", "age", "idle", "state"
     );
     for s in sessions {
         let expired = s.is_expired(ttl, now);

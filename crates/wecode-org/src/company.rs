@@ -138,7 +138,7 @@ impl Company {
         self.users.iter().find(|u| u.name == name)
     }
 
-    /// The people crewing a seat. Empty means the seat is agent-only.
+    /// The people in a seat. Empty means the seat is agent-only.
     #[must_use]
     pub fn users_of(&self, post: &str) -> Vec<&User> {
         self.users.iter().filter(|u| u.post == post).collect()

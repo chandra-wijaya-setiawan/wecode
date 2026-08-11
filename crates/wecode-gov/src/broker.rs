@@ -173,10 +173,9 @@ pub struct Spend {
 
 /// One post working on one intent, with a subset of its roles activated.
 ///
-/// A seat is crewed by an agent, and often by a human alongside it. `occupant` is
-/// the agent that acted; `human` is the person crewing the same seat. Both are
-/// recorded flatly, with no implied direction between them — the human is not the
-/// agent's owner, and the agent is not merely the human's tool.
+/// `occupant` is the agent that acted; `human` is the person in the same seat, when
+/// there is one. Both are recorded flatly, with no implied direction between them —
+/// the human is not the agent's owner, and the agent is not merely the human's tool.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Session {
     pub id: String,
@@ -208,9 +207,9 @@ impl Session {
         }
     }
 
-    /// Names the human crewing this seat alongside the agent.
+    /// Names the human in this seat alongside the agent.
     #[must_use]
-    pub fn crewed_with(mut self, human: Option<String>) -> Self {
+    pub fn with_human(mut self, human: Option<String>) -> Self {
         self.human = human;
         self
     }

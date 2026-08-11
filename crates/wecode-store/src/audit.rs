@@ -87,7 +87,7 @@ pub struct AuditLine {
     pub session: String,
     pub post: String,
     pub occupant: String,
-    /// The person crewing the seat; empty for an autonomous agent.
+    /// The person in the seat; empty for an autonomous agent.
     pub human: String,
     pub intent: String,
     pub source: String,
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn the_human_crewing_the_seat_is_recorded() {
+    fn the_human_in_the_seat_is_recorded() {
         let mut b = Broker::new(Charter::default());
         let s = Session::new(
             "s1",
@@ -292,7 +292,7 @@ mod tests {
             IntentId::new("caching"),
             Effective::of(vec![Grant::root()]),
         )
-        .crewed_with(Some("chandra".into()));
+        .with_human(Some("chandra".into()));
         b.authorize(
             &s,
             &Action::Write {
