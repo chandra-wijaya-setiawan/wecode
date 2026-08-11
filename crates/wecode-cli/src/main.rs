@@ -62,6 +62,8 @@ PLAN
         --write <glob>  --read <glob>   scope (repeatable)
         --tokens <n>  --wall <secs>     --to <post>
         --force                  save despite defects, recorded as waivers
+  wecode task scope <id> --write <glob> [--read <glob>]
+        replace a scope after the fact; recorded violations are not erased
 
   wecode playbook [<kind>]             this project's guidance for that kind
         --project <p>   init            `init` writes a starter into the repo
@@ -122,6 +124,7 @@ fn run(a: &Args) -> Res {
             Ok(render::tree(&store.load_plan()?, a.has("all")))
         }
         ("task", "add") => task_add(a),
+        ("task", "scope") => task_scope(a),
         ("tree", _) => {
             let (store, _) = open(a)?;
             Ok(render::tree(&store.load_plan()?, a.has("all")))
@@ -497,6 +500,70 @@ fn blocker_note(b: &wecode_core::Blocker) -> String {
         wecode_core::Blocker::Waiting(id) => format!("{id} is not done"),
         wecode_core::Blocker::Missing(id) => format!("{id} does not exist"),
     }
+}
+
+/// Replaces a task's write and read scope.
+///
+/// Re-planning, not laundering. The distinction is that the ledger is append-only:
+/// widening a scope cannot erase a violation already recorded against the old one.
+/// A later `verify` will pass, and the earlier denial stays visible in `audit`.
+///
+/// Deliberately not offered for acceptance measures. Those are frozen at dispatch —
+/// amending what counts as done, after seeing what was produced, is how criteria
+/// drift to fit the work.
+fn task_scope(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    let id = TaskId::new(require(a.cmd(2), "task id")?);
+    let scope = scope_from(a).ok_or("give at least one --write or --read glob")?;
+
+    let plan = store.load_plan()?;
+    let mut task = plan
+        .task(&id)
+        .ok_or_else(|| format!("no such task: {id}"))?
+        .clone();
+    let was = task.scope.clone();
+    task.scope = scope;
+
+    let who = actor(a, &store, &company)?;
+    require_allowed(
+        &store,
+        &company,
+        &who,
+        (Some(task.project.to_string()), Some(id.to_string())),
+        &Action::Define {
+            kind: WorkKind::Task,
+        },
+        "changing a task's scope",
+    )?;
+
+    // The new scope faces the same checks the original did — a widened scope that now
+    // collides with a sibling is a real conflict, not a formality.
+    let mut probe = plan.clone();
+    probe.update_task(task.clone())?;
+    let defects = admission::check_task(&task, &probe);
+    let blocking: Vec<_> = defects
+        .iter()
+        .filter(|d| matches!(d, wecode_core::Defect::ScopeOverlaps { .. }))
+        .collect();
+    if !blocking.is_empty() && !a.has("force") {
+        let mut out = render::admission(&render::task_heading(&task), &defects, None);
+        out.push_str("\n  not changed — narrow it, sequence the tasks, or pass --force\n");
+        return Ok(out);
+    }
+
+    store.save_task(&task)?;
+    let show = |s: &Scope| {
+        if s.write.is_empty() {
+            "nothing".to_string()
+        } else {
+            s.write.join(", ")
+        }
+    };
+    Ok(format!(
+        "  {id} writes\n    was  {}\n    now  {}\n\n  Earlier violations stay in the ledger — `wecode audit --denied --task {id}`\n",
+        show(&was),
+        show(&task.scope)
+    ))
 }
 
 /// `show <id>` accepts either level. Ids are unique per level, not globally, so a

@@ -139,6 +139,10 @@ impl Org {
         let dir = repo.join(".wecode");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("playbook.toml"), body).unwrap();
+        // Committed, as it would be in a real repo. Left uncommitted it shows up in
+        // every diff as a change the task did not make.
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-qm", "playbook"]);
     }
 
     fn path(&self, rel: &str) -> PathBuf {
@@ -1835,4 +1839,96 @@ fn archive_applies_to_projects_not_tasks() {
     let r = org.run(&["archive", "t"]);
     assert!(!r.ok());
     r.assert_contains("projects, not tasks");
+}
+
+// ----------------------------------------------------------- task scope ------
+
+#[test]
+fn a_scope_can_be_amended_without_erasing_what_was_recorded() {
+    // Re-planning, not laundering. The ledger is append-only, so widening a scope
+    // lets a later verify pass while the earlier violation stays visible.
+    let (org, repo) = with_playbook("scope-amend");
+    org.run(&[
+        "task",
+        "add",
+        "t",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "declared/**",
+    ])
+    .assert_ok("task add");
+
+    // Work that lands outside the declared scope.
+    std::fs::write(repo.join("elsewhere.rs"), "fn x() {}\n").unwrap();
+    org.run(&["verify", "t"])
+        .assert_ok("verify runs")
+        .assert_contains("outside scope")
+        .assert_contains("failed");
+    org.run(&["audit", "--denied", "--task", "t"])
+        .assert_contains("elsewhere.rs");
+
+    org.run(&["task", "scope", "t", "--write", "elsewhere.rs"])
+        .assert_ok("amend")
+        .assert_contains("was  declared/**")
+        .assert_contains("now  elsewhere.rs");
+
+    org.run(&["verify", "t"])
+        .assert_ok("verify again")
+        .assert_lacks("outside scope");
+
+    // The point: the old denial is still on the record.
+    org.run(&["audit", "--denied", "--task", "t"])
+        .assert_contains("elsewhere.rs");
+}
+
+#[test]
+fn amending_a_scope_into_a_collision_is_refused() {
+    let (org, _) = with_playbook("scope-collide");
+    for (id, glob) in [("a", "one/**"), ("b", "two/**")] {
+        org.run(&[
+            "task",
+            "add",
+            id,
+            "--project",
+            "caching",
+            "--kind",
+            "bug",
+            "the cache returns a stale entry after eviction",
+            "--write",
+            glob,
+        ])
+        .assert_ok(id);
+    }
+    // Widening `a` onto `b`'s files is a real conflict, not a formality.
+    let r = org.run(&["task", "scope", "a", "--write", "two/**"]);
+    r.assert_contains("overlaps").assert_contains("not changed");
+
+    org.run(&["task", "scope", "a", "--write", "two/**", "--force"])
+        .assert_ok("forced")
+        .assert_contains("now  two/**");
+}
+
+#[test]
+fn amending_a_scope_needs_at_least_one_glob() {
+    let (org, _) = with_playbook("scope-empty");
+    org.run(&[
+        "task",
+        "add",
+        "t",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "src/**",
+    ])
+    .assert_ok("task add");
+    let r = org.run(&["task", "scope", "t"]);
+    assert!(!r.ok());
+    r.assert_contains("at least one");
 }

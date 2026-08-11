@@ -18,6 +18,7 @@ use std::process::Command;
 
 use wecode_core::{Measure, Scope};
 use wecode_gov::glob;
+use wecode_org::playbook;
 
 /// One acceptance command, run.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -80,6 +81,13 @@ impl Verdict {
     }
 }
 
+/// The worker-writable area. The task envelope instructs the agent to write its
+/// result here, so counting it as a scope violation would fail every task for doing
+/// exactly what it was told.
+fn is_worker_area(path: &str) -> bool {
+    path.starts_with(playbook::RUN_DIR)
+}
+
 /// Changed paths the scope does not permit.
 ///
 /// An empty write scope means the task claimed it would change nothing, so *any*
@@ -88,7 +96,7 @@ impl Verdict {
 pub(crate) fn violations(changed: &[String], scope: &Scope) -> Vec<String> {
     changed
         .iter()
-        .filter(|p| !glob::any_matches(&scope.write, p))
+        .filter(|p| !is_worker_area(p) && !glob::any_matches(&scope.write, p))
         .cloned()
         .collect()
 }
@@ -165,6 +173,25 @@ mod tests {
         // never said it would, so the fail-closed reading is the correct one.
         let v = violations(&changed(&["src/a.rs"]), &Scope::default());
         assert_eq!(v.len(), 1);
+    }
+
+    #[test]
+    fn the_workers_own_result_file_is_not_a_violation() {
+        // The envelope tells the agent to write .wecode/run/result.json. Counting that
+        // against it would fail every task for following instructions.
+        let v = violations(
+            &changed(&[".wecode/run/result.json", "src/a.rs"]),
+            &scope(&["src/**"]),
+        );
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn the_playbook_itself_is_still_guarded() {
+        // Only the run directory is exempt. A task quietly rewriting the guidance it
+        // was given is exactly what the split of .wecode/ exists to prevent.
+        let v = violations(&changed(&[".wecode/playbook.toml"]), &scope(&["src/**"]));
+        assert_eq!(v, vec![".wecode/playbook.toml".to_string()]);
     }
 
     #[test]
