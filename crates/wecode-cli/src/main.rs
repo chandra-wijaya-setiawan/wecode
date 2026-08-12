@@ -62,6 +62,7 @@ PLAN
         --write <glob>  --read <glob>   scope (repeatable)
         --tokens <n>  --wall <secs>     --to <post>
         --force                  save despite defects, recorded as waivers
+  wecode task rm <id>                  erase a task that never ran
   wecode task scope <id> --write <glob> [--read <glob>]
         replace a scope after the fact; recorded violations are not erased
 
@@ -127,6 +128,7 @@ fn run(a: &Args) -> Res {
             Ok(render::tree(&store.load_plan()?, a.has("all")))
         }
         ("task", "add") => task_add(a),
+        ("task", "rm") => task_rm(a),
         ("task", "scope") => task_scope(a),
         ("tree", _) => {
             let (store, _) = open(a)?;

@@ -43,6 +43,7 @@ PLAN
         --write <glob>  --read <glob>   scope (repeatable)
         --tokens <n>  --wall <secs>     --to <post>
         --force                  save despite defects, recorded as waivers
+  wecode task rm <id>                  erase a task that never ran
   wecode task scope <id> --write <glob> [--read <glob>]
         replace a scope after the fact; recorded violations are not erased
 

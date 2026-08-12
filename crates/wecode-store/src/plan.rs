@@ -431,6 +431,28 @@ impl Store {
         Ok(())
     }
 
+    /// Erases a task and everything hanging off it.
+    ///
+    /// Only ever for a task that never ran — the caller checks that, because the
+    /// reason is a policy one and belongs where the policy is stated. Deleting a task
+    /// with executions would orphan rows that record real work.
+    ///
+    /// The audit ledger is deliberately untouched: it records that the task was
+    /// created and then removed, and rewriting history to hide a mistake is the one
+    /// thing an audit log must never do.
+    pub fn delete_task(&self, id: &TaskId) -> Result<(), StoreError> {
+        let c = self.conn();
+        for sql in [
+            "DELETE FROM task_scopes WHERE task_id = ?1",
+            "DELETE FROM task_depends_on WHERE task_id = ?1",
+            "DELETE FROM task_acceptance WHERE task_id = ?1",
+            "DELETE FROM tasks WHERE id = ?1",
+        ] {
+            c.execute(sql, [id.as_str()])?;
+        }
+        Ok(())
+    }
+
     /// Files a project away, or brings it back. Separate from status on purpose:
     /// this changes what the operator sees, never what is dispatchable.
     pub fn set_project_archived(&self, id: &ProjectId, archived: bool) -> Result<(), StoreError> {

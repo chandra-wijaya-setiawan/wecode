@@ -916,6 +916,81 @@ fn sequenced_tasks_may_share_a_scope() {
     .assert_contains("admitted");
 }
 
+#[test]
+fn a_chain_stays_admissible_past_its_second_link() {
+    // Ordering is transitive, so the overlap exemption must be too. The third link
+    // here shares the first's scope and can never run beside it.
+    let org = Org::new("overlap-chain", "solo");
+    org.seed();
+    let add = |id: &str, after: &str, glob: &str| {
+        org.run(&[
+            "task",
+            "add",
+            id,
+            "a link in the chain",
+            "--project",
+            "caching",
+            "--after",
+            after,
+            "--accept-cmd",
+            "cargo test",
+            "--write",
+            glob,
+            "--tokens",
+            "1000",
+        ])
+    };
+    // Seeded: cache-tests (tests/**) <- bench. The fourth link below shares
+    // cache-tests' scope, three edges upstream.
+    add("link-two", "bench", "crates/two/**").assert_contains("admitted");
+    add("link-three", "link-two", "tests/**")
+        .assert_ok("third link")
+        .assert_contains("admitted");
+}
+
+// ------------------------------------------------------------- task rm ---------
+
+#[test]
+fn a_task_that_never_ran_can_be_removed_outright() {
+    // Distinct from dropping it. Dropping records a judgement; removing says the task
+    // should not have existed, and leaving those on the board makes it a graveyard.
+    let org = Org::new("task-rm", "solo");
+    org.seed();
+    org.run(&["task", "rm", "bench"])
+        .assert_ok("rm")
+        .assert_contains("removed bench");
+    org.run(&["tree"]).assert_lacks("bench");
+
+    // The ledger is not rewritten — that is the one thing an audit log must not do.
+    org.run(&["audit", "--task", "bench"])
+        .assert_ok("audit")
+        .assert_contains("define");
+}
+
+#[test]
+fn removing_a_task_something_waits_on_is_refused() {
+    // Seeded: `bench` waits on `cache-tests`.
+    let org = Org::new("task-rm-dep", "solo");
+    org.seed();
+
+    let r = org.run(&["task", "rm", "cache-tests"]);
+    assert!(!r.ok(), "removing a prerequisite must be refused");
+    r.assert_contains("waited on by bench");
+    // Refused, not half-done.
+    org.run(&["tree"]).assert_contains("cache-tests");
+}
+
+#[test]
+fn a_task_that_ran_is_history_and_cannot_be_removed() {
+    let (org, _) = with_agent("task-rm-ran", "true");
+    a_task(&org, "t", "src/**", "true");
+    org.run(&["run", "t"]).assert_ok("run");
+
+    let r = org.run(&["task", "rm", "t"]);
+    assert!(!r.ok(), "a task with an execution must not be removable");
+    r.assert_contains("it ran, so it is history");
+}
+
 // --------------------------------------------------------------- assign --------
 
 #[test]

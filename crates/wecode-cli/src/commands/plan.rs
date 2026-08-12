@@ -277,6 +277,84 @@ pub(crate) fn task_add(a: &Args) -> Res {
 /// Deliberately not offered for acceptance measures. Those are frozen at dispatch —
 /// amending what counts as done, after seeing what was produced, is how criteria
 /// drift to fit the work.
+/// Erases a task that never ran.
+///
+/// Distinct from `status <id> dropped`, and both are needed. Dropping records a
+/// judgement — this was considered and abandoned — and belongs on the board where the
+/// reasoning stays visible. Removing says the task should never have existed: a typo,
+/// a mis-scoped draft, a breakdown replaced wholesale. Keeping those as `dropped`
+/// makes the board a graveyard of corrections.
+///
+/// Refused once anything real has happened to it. The line is executions rather than
+/// status, because an execution is the point at which a diff, a commit or a spend
+/// exists to be orphaned.
+pub(crate) fn task_rm(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    let id = TaskId::new(require(a.cmd(2), "task id")?);
+    let plan = store.load_plan()?;
+    let task = plan
+        .task(&id)
+        .ok_or_else(|| format!("no such task: {id}"))?
+        .clone();
+
+    let runs = store.executions(&id)?;
+    if !runs.is_empty() {
+        return Err(format!(
+            "{id} has {} execution{} — it ran, so it is history. \
+             `wecode status {id} dropped` records that it was abandoned.",
+            runs.len(),
+            if runs.len() == 1 { "" } else { "s" }
+        )
+        .into());
+    }
+
+    // A dangling prerequisite would leave dependents permanently unschedulable, and
+    // silently rewriting someone else's dependencies to fix that is worse than
+    // refusing. Naming them lets the operator decide the order.
+    let dependents: Vec<&str> = plan
+        .tasks()
+        .filter(|t| t.depends_on.contains(&id))
+        .map(|t| t.id.as_str())
+        .collect();
+    if !dependents.is_empty() {
+        return Err(format!(
+            "{id} is waited on by {} — remove those first, or re-point them.",
+            dependents.join(", ")
+        )
+        .into());
+    }
+    let children: Vec<&str> = plan
+        .tasks()
+        .filter(|t| t.parent.as_ref() == Some(&id))
+        .map(|t| t.id.as_str())
+        .collect();
+    if !children.is_empty() {
+        return Err(format!(
+            "{id} is the parent of {} — remove those first.",
+            children.join(", ")
+        )
+        .into());
+    }
+
+    let who = actor(a, &store, &company)?;
+    require_allowed(
+        &store,
+        &company,
+        &who,
+        (Some(task.project.to_string()), Some(id.to_string())),
+        &Action::Define {
+            kind: WorkKind::Task,
+        },
+        "removing a task",
+    )?;
+
+    store.delete_task(&id)?;
+    Ok(format!(
+        "  removed {id} — {}\n  the ledger still records that it existed: `wecode audit --task {id}`\n",
+        task.title
+    ))
+}
+
 pub(crate) fn task_scope(a: &Args) -> Res {
     let (store, company) = open(a)?;
     let id = TaskId::new(require(a.cmd(2), "task id")?);
