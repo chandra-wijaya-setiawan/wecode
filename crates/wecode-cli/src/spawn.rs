@@ -89,9 +89,42 @@ pub(crate) struct Outcome {
 ///
 /// Exposed so the Broker can be asked about the real command line before anything
 /// starts — an argv check after the fact would be worthless.
-pub(crate) fn argv(t: &AgentTemplate, prompt: &str) -> Vec<String> {
+/// The post's grant, in the form a coding CLI accepts as its own allow-list.
+///
+/// The two vocabularies line up almost exactly: a `run` grant is already a glob
+/// matched against a command line, which is what `Bash(...)` takes. So the authority
+/// wecode records and the authority the harness enforces come from one declaration
+/// instead of two that can disagree.
+///
+/// This is enforcement moving from post-hoc to intercepted. wecode still checks the
+/// diff afterwards — a harness is not a sandbox, and one that ignored the flag would
+/// still be caught — but a command outside the grant is now refused before it runs
+/// rather than noticed after.
+///
+/// File tools are all-or-nothing here: the harness cannot express "write only
+/// `src/**`", so a role with any write scope gets the editing tools and the diff check
+/// remains what holds it to the declared paths. A role with none gets neither.
+#[must_use]
+pub(crate) fn allowed_tools(grant: &wecode_gov::Grant) -> String {
+    let mut out: Vec<String> = grant.run.iter().map(|g| format!("Bash({g})")).collect();
+    if !grant.read.is_empty() {
+        out.extend(["Read", "Glob", "Grep"].map(str::to_string));
+    }
+    if !grant.write.is_empty() {
+        out.extend(["Edit", "Write"].map(str::to_string));
+    }
+    // Comma-separated: a run glob contains spaces, and space separation would split
+    // `cargo *` into two tools, one of which is `*`.
+    out.join(",")
+}
+
+pub(crate) fn argv(t: &AgentTemplate, prompt: &str, tools: &str) -> Vec<String> {
     let mut out = vec![t.command.clone()];
-    out.extend(t.args.iter().map(|a| a.replace("{{prompt}}", prompt)));
+    out.extend(
+        t.args
+            .iter()
+            .map(|a| a.replace("{{prompt}}", prompt).replace("{{tools}}", tools)),
+    );
     out
 }
 
@@ -99,14 +132,11 @@ pub(crate) fn argv(t: &AgentTemplate, prompt: &str) -> Vec<String> {
 pub(crate) fn run(
     t: &AgentTemplate,
     prompt: &str,
+    tools: &str,
     cwd: &Path,
     limits: Limits,
 ) -> std::io::Result<Outcome> {
-    let args: Vec<String> = t
-        .args
-        .iter()
-        .map(|a| a.replace("{{prompt}}", prompt))
-        .collect();
+    let args: Vec<String> = argv(t, prompt, tools).into_iter().skip(1).collect();
 
     let mut cmd = Command::new(&t.command);
     cmd.args(&args)
@@ -264,6 +294,41 @@ fn reap_group(pid: u32) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_run_grant_becomes_the_harness_allow_list() {
+        // The point of deriving it: one declaration, so what wecode records and what
+        // the harness enforces cannot disagree.
+        let mut g = wecode_gov::Grant::writer(&["src/**"]);
+        g.run = vec!["cargo *".into(), "npm test*".into()];
+        let tools = allowed_tools(&g);
+        assert!(tools.contains("Bash(cargo *)"), "{tools}");
+        assert!(tools.contains("Bash(npm test*)"), "{tools}");
+        assert!(tools.contains("Edit"), "{tools}");
+        // Comma, not space: `cargo *` would otherwise split into two tools.
+        assert!(!tools.contains("Bash(cargo *) Bash"), "{tools}");
+    }
+
+    #[test]
+    fn a_role_that_writes_nothing_is_given_no_editing_tools() {
+        // The reviewer reads and reports. Handing it Edit would make the grant a
+        // description rather than a limit.
+        let g = wecode_gov::Grant::default().with_read(&["**"]);
+        let tools = allowed_tools(&g);
+        assert!(tools.contains("Read"), "{tools}");
+        assert!(!tools.contains("Edit"), "{tools}");
+        assert!(!tools.contains("Write"), "{tools}");
+    }
+
+    #[test]
+    fn the_placeholder_is_substituted_into_the_launch_line() {
+        let t = agent("--allowedTools {{tools}}", None, None);
+        // `agent` builds `sh -c <script>`, so the placeholder is inside arg 2.
+        assert_eq!(
+            argv(&t, "p", "Bash(cargo *),Edit")[2],
+            "--allowedTools Bash(cargo *),Edit"
+        );
+    }
+
     /// A stand-in agent. `sh` is the one interpreter guaranteed present, and using a
     /// real process is the whole point — a fake would test none of this.
     fn agent(script: &str, wall: Option<u64>, idle: Option<u64>) -> AgentTemplate {
@@ -285,7 +350,7 @@ mod tests {
     fn a_prompt_is_substituted_into_the_argv() {
         let t = agent("echo {{prompt}}", None, None);
         assert_eq!(
-            argv(&t, "do the thing"),
+            argv(&t, "do the thing", ""),
             vec!["sh", "-c", "echo do the thing"]
         );
     }
@@ -293,7 +358,7 @@ mod tests {
     #[test]
     fn output_is_captured_and_the_exit_code_kept() {
         let t = agent("echo hello; echo oops >&2; exit 3", None, None);
-        let o = run(&t, "", &cwd(), Limits::default()).unwrap();
+        let o = run(&t, "", "", &cwd(), Limits::default()).unwrap();
         assert_eq!(o.ended, Ended::Exited(3));
         assert!(!o.ended.ok());
         assert!(o.output.contains("hello"), "{}", o.output);
@@ -311,7 +376,7 @@ mod tests {
         let mut t = agent("echo path=[$PATH] home=[$HOME]", None, None);
         t.env_allowlist = vec!["PATH".to_string()];
 
-        let o = run(&t, "", &cwd(), Limits::default()).unwrap();
+        let o = run(&t, "", "", &cwd(), Limits::default()).unwrap();
         assert!(
             o.output.contains("path=[/"),
             "PATH should pass: {}",
@@ -332,7 +397,7 @@ mod tests {
         std::fs::write(dir.join("marker"), "x").unwrap();
 
         let t = agent("test -f marker", None, None);
-        assert!(run(&t, "", &dir, Limits::default()).unwrap().ended.ok());
+        assert!(run(&t, "", "", &dir, Limits::default()).unwrap().ended.ok());
     }
 
     #[test]
@@ -340,6 +405,7 @@ mod tests {
         let t = agent("sleep 30", None, None);
         let o = run(
             &t,
+            "",
             "",
             &cwd(),
             Limits {
@@ -364,6 +430,7 @@ mod tests {
         let o = run(
             &t,
             "",
+            "",
             &cwd(),
             Limits {
                 wall: Some(Duration::from_secs(60)),
@@ -386,6 +453,7 @@ mod tests {
         let o = run(
             &t,
             "",
+            "",
             &cwd(),
             Limits {
                 wall: Some(Duration::from_secs(30)),
@@ -403,6 +471,7 @@ mod tests {
         let t = agent("sleep 30 & exit 0", None, None);
         let o = run(
             &t,
+            "",
             "",
             &cwd(),
             Limits {
@@ -425,7 +494,7 @@ mod tests {
             None,
             None,
         );
-        let o = run(&t, "", &cwd(), Limits::default()).unwrap();
+        let o = run(&t, "", "", &cwd(), Limits::default()).unwrap();
         assert!(o.truncated, "should have hit the cap");
         assert!(o.output.len() <= OUTPUT_CAP, "{}", o.output.len());
         // The point of draining past the cap: the child still gets to finish.

@@ -142,13 +142,21 @@ impl Org {
     fn agent(&self, script: &str) {
         let conf = self.path("company.toml");
         let text = std::fs::read_to_string(&conf).unwrap();
+        // Matched by shape rather than by literal, so adding a flag to the shipped
+        // template does not silently turn every stub agent into `sh --allowedTools`.
         let args = format!("args = [\"-c\", \"{}\"]", script.replace('"', "\\\""));
-        let replaced = text
+        let replaced: String = text
             .replace("command = \"claude\"", "command = \"sh\"")
-            .replace(
-                "args = [\"-p\", \"{{prompt}}\", \"--output-format\", \"stream-json\", \"--verbose\"]",
-                &args,
-            );
+            .lines()
+            .map(|l| {
+                if l.starts_with("args = [\"-p\"") {
+                    args.clone()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_ne!(replaced, text, "agent template was not replaced");
         std::fs::write(&conf, replaced).unwrap();
     }

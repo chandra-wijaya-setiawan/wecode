@@ -394,11 +394,16 @@ pub(crate) fn run_task(a: &Args) -> Res {
     // The launch line as configured, with `{{prompt}}` left standing. Substituting
     // first would put the whole envelope into the command being judged — kilobytes of
     // task text, matched as if it were an argument.
-    let launch = spawn::argv(&template, "{{prompt}}").join(" ");
+    let tools = company
+        .grant_of(&post)
+        .map(spawn::allowed_tools)
+        .unwrap_or_default();
+    let launch = spawn::argv(&template, "{{prompt}}", &tools).join(" ");
 
     // Only the charter is consulted here, not the post's `run` grant. That grant says
-    // what the *agent* may run while working — `cargo *` for an engineer — and wecode
-    // cannot intercept those anyway. Starting the harness is wecode's own action, and
+    // what the *agent* may run while working — `cargo *` for an engineer — and it is
+    // handed to the harness as its own allow-list above, so it is enforced there
+    // rather than here. Starting the harness is wecode's own action, and
     // the harness is named in company.toml, which only the operator writes. Judging
     // the launch against the agent's grant would refuse every real configuration:
     // `claude` is not `cargo`.
@@ -415,7 +420,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
     // rather than no trace of the run at all.
     let exec = store.start_execution(&id, &who.session, prepared.cwd.to_str(), None)?;
     let limits = spawn::Limits::from(&template);
-    let outcome = spawn::run(&template, &prepared.envelope, &prepared.cwd, limits)?;
+    let outcome = spawn::run(&template, &prepared.envelope, &tools, &prepared.cwd, limits)?;
 
     // The exit is a fact we observed, not a claim the agent made.
     let mut broker = Broker::new(company.charter.clone());

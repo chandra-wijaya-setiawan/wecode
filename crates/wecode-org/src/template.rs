@@ -160,7 +160,7 @@ post = "chief"
 [agents.claude-code]
 command = "claude"
 protocol = "claude-stream-json"
-args = ["-p", "{{prompt}}", "--output-format", "stream-json", "--verbose"]
+args = ["-p", "{{prompt}}", "--output-format", "stream-json", "--verbose", "--allowedTools", "{{tools}}"]
 env_allowlist = ["ANTHROPIC_API_KEY", "PATH", "HOME", "LANG"]
 wall_secs = 1800
 idle_secs = 300
@@ -193,7 +193,7 @@ CONTEXT FROM COMPLETED WORK
 {{context}}
 
 WHEN FINISHED
-Write .wecode/result.json in your working directory:
+Write .wecode/run/result.json in your working directory:
 {"status":"succeeded"|"failed"|"blocked",
  "summary":"<2-4 sentences>",
  "changed_files":["..."],
@@ -266,7 +266,7 @@ post = "chief"
 [agents.claude-code]
 command = "claude"
 protocol = "claude-stream-json"
-args = ["-p", "{{prompt}}", "--output-format", "stream-json", "--verbose"]
+args = ["-p", "{{prompt}}", "--output-format", "stream-json", "--verbose", "--allowedTools", "{{tools}}"]
 env_allowlist = ["ANTHROPIC_API_KEY", "PATH", "HOME", "LANG"]
 wall_secs = 1800
 idle_secs = 300
@@ -289,7 +289,7 @@ CONTEXT FROM COMPLETED WORK
 {{context}}
 
 WHEN FINISHED
-Write .wecode/result.json:
+Write .wecode/run/result.json:
 {"status":"succeeded"|"failed"|"blocked","summary":"...","changed_files":["..."]}
 
 Do not commit. Do not merge.
