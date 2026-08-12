@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod execution;
+mod int;
 pub mod plan;
 pub mod schema;
 pub mod session;

@@ -248,13 +248,26 @@ fn leaf_statuses(plan: &Plan, t: &Task) -> Vec<TaskStatus> {
     kids.iter().flat_map(|k| leaf_statuses(plan, k)).collect()
 }
 
-fn bar(fraction: f32) -> String {
-    let filled = (fraction * 6.0).round().clamp(0.0, 6.0) as usize;
+/// A progress bar `cells` wide, followed by the percentage.
+///
+/// Decided per cell rather than by converting a float to a count: a cell lights up
+/// once the fraction covers its midpoint, which is what rounding meant. Out-of-range
+/// input needs no clamp — `cells` comparisons cannot fill one more.
+pub(crate) fn bar_of(fraction: f32, cells: u8) -> String {
+    let covered = fraction * f32::from(cells);
     let mut s = String::new();
-    for i in 0..6 {
-        s.push(if i < filled { '█' } else { '▁' });
+    for i in 0..cells {
+        s.push(if f32::from(i) + 0.5 <= covered {
+            '█'
+        } else {
+            '▁'
+        });
     }
     format!("{s} {:>3.0}%", fraction * 100.0)
+}
+
+fn bar(fraction: f32) -> String {
+    bar_of(fraction, 6)
 }
 
 fn spend_cell(spent: u64, budget: Option<u64>) -> String {

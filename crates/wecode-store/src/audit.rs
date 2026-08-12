@@ -116,7 +116,7 @@ impl Store {
     /// Broker and wrong for the ledger. The database assigns `seq`, so its numbers
     /// are simply ignored here.
     pub fn append_records(&self, records: &[Record]) -> Result<(), StoreError> {
-        let at = now_secs() as i64;
+        let at = crate::int::to_db(now_secs());
         for r in records {
             let (action, target) = action_parts(&r.action);
             let (outcome, mode, detail) = decision_parts(&r.decision);
@@ -181,7 +181,7 @@ impl Store {
             .query_map(binds.as_slice(), |r| {
                 Ok(AuditLine {
                     seq: r.get(0)?,
-                    at: r.get::<_, i64>(1)? as u64,
+                    at: crate::int::from_row(r.get(1)?, 1)?,
                     session: r.get(2)?,
                     post: r.get(3)?,
                     agent: r.get(4)?,

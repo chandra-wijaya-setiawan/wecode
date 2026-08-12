@@ -95,8 +95,8 @@ impl Store {
                 value: status.clone(),
             })?;
             p.budget = Budget {
-                tokens: tokens.map(|n| n as u64),
-                wall_secs: wall.map(|n| n as u64),
+                tokens: crate::int::opt_from_db(tokens, "budget tokens")?,
+                wall_secs: crate::int::opt_from_db(wall, "budget wall")?,
             };
             p.archived = archived != 0;
             p.measures = self.measures(&MeasureTable::Project, &id)?;
@@ -151,8 +151,8 @@ impl Store {
             t.parent = parent.map(TaskId::new);
             t.assignee = assignee;
             t.budget = Budget {
-                tokens: tokens.map(|n| n as u64),
-                wall_secs: wall.map(|n| n as u64),
+                tokens: crate::int::opt_from_db(tokens, "budget tokens")?,
+                wall_secs: crate::int::opt_from_db(wall, "budget wall")?,
             };
             t.acceptance = self.measures(&MeasureTable::Task, &id)?;
             t.scope = self.scope(&id)?;
@@ -217,7 +217,12 @@ impl Store {
                 |(kind, cmd, status, name, target, cmp, path, note)| match kind.as_str() {
                     "command" => Ok(Measure::Command {
                         cmd: cmd.unwrap_or_default(),
-                        expect_status: status.unwrap_or(0) as i32,
+                        expect_status: i32::try_from(status.unwrap_or(0)).map_err(|_| {
+                            StoreError::Corrupt {
+                                what: "expected exit status",
+                                value: status.unwrap_or(0).to_string(),
+                            }
+                        })?,
                     }),
                     "metric" => Ok(Measure::Metric {
                         name: name.unwrap_or_default(),
@@ -278,8 +283,8 @@ impl Store {
                 p.repo,
                 p.objective,
                 p.status.as_str(),
-                p.budget.tokens.map(|n| n as i64),
-                p.budget.wall_secs.map(|n| n as i64),
+                crate::int::opt_to_db(p.budget.tokens),
+                crate::int::opt_to_db(p.budget.wall_secs),
                 i64::from(p.archived),
             ],
         )?;
@@ -305,8 +310,8 @@ impl Store {
                 t.parent.as_ref().map(TaskId::as_str),
                 t.status.as_str(),
                 t.assignee,
-                t.budget.tokens.map(|n| n as i64),
-                t.budget.wall_secs.map(|n| n as i64),
+                crate::int::opt_to_db(t.budget.tokens),
+                crate::int::opt_to_db(t.budget.wall_secs),
             ],
         )?;
         self.replace_measures(&MeasureTable::Task, t.id.as_str(), &t.acceptance)?;
@@ -355,7 +360,7 @@ impl Store {
             table.owner()
         );
         for (seq, m) in measures.iter().enumerate() {
-            let seq = seq as i64;
+            let seq = i64::try_from(seq).unwrap_or(i64::MAX);
             match m {
                 Measure::Command { cmd, expect_status } => c.execute(
                     &sql,

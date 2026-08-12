@@ -133,7 +133,10 @@ pub(crate) fn audit(a: &Args) -> Res {
         alarms_only: a.has("alarms"),
         project: a.get("project").map(str::to_string),
         task: a.get("task").map(str::to_string),
-        limit: a.num("limit").map(|n| n as usize),
+        // A limit larger than this machine can index is a limit of "everything".
+        limit: a
+            .num("limit")
+            .map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
     };
     let mut lines = store.audit(&q)?;
     if let Some(pattern) = a.get("path") {

@@ -55,7 +55,7 @@ pub(crate) fn transitions(plan: &Plan) -> Vec<Move> {
 /// narrows it further.
 #[must_use]
 pub(crate) fn parallelism(max_open_items: u64, cores: usize) -> usize {
-    let by_attention = max_open_items.max(1) as usize;
+    let by_attention = usize::try_from(max_open_items.max(1)).unwrap_or(usize::MAX);
     // Leave two: one for wecode, one for the operator's own shell.
     let by_machine = cores.saturating_sub(2).max(1);
     by_attention.min(by_machine)

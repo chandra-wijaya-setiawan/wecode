@@ -47,7 +47,7 @@ impl Store {
                 ExecutionStatus::Working.as_str(),
                 worktree,
                 pid.map(i64::from),
-                now_secs() as i64,
+                crate::int::to_db(now_secs()),
             ],
         )?;
         Ok(c.last_insert_rowid())
@@ -65,7 +65,7 @@ impl Store {
             params![id],
             |r| r.get(0),
         )?;
-        let ended = now_secs() as i64;
+        let ended = crate::int::to_db(now_secs());
         self.conn().execute(
             "UPDATE task_executions
                 SET status = ?2, ended = ?3, wall_secs = ?4, detail = ?5
@@ -124,9 +124,9 @@ impl Store {
                 })?,
                 worktree,
                 pid,
-                started: started as u64,
-                ended: ended.map(|n| n as u64),
-                wall_secs: wall.map(|n| n as u64),
+                started: crate::int::from_db(started, "execution start")?,
+                ended: crate::int::opt_from_db(ended, "execution end")?,
+                wall_secs: crate::int::opt_from_db(wall, "execution wall")?,
                 detail,
             });
         }

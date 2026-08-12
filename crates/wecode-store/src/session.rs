@@ -71,7 +71,10 @@ fn mint_id(seed: u64) -> String {
     h ^= h >> 33;
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
     h ^= h >> 33;
-    format!("s-{:08x}", h as u32)
+    // The low 32 bits, masked rather than cast: eight hex digits is what makes an id
+    // readable in a ledger, and the mask says that outright instead of relying on a
+    // truncating cast to mean it.
+    format!("s-{:08x}", h & 0xFFFF_FFFF)
 }
 
 impl Store {
@@ -87,7 +90,7 @@ impl Store {
             .query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))?;
         let at = now_secs();
         let s = SessionInfo {
-            id: mint_id(count as u64),
+            id: mint_id(u64::try_from(count).unwrap_or(0)),
             post: post.to_string(),
             agent: agent.to_string(),
             human: human.map(str::to_string),
@@ -97,7 +100,7 @@ impl Store {
         self.conn().execute(
             "INSERT INTO sessions (id, post, agent, human, opened, last_seen)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![s.id, s.post, s.agent, s.human, at as i64],
+            params![s.id, s.post, s.agent, s.human, crate::int::to_db(at)],
         )?;
         Ok(s)
     }
@@ -105,7 +108,7 @@ impl Store {
     pub fn logout(&self, id: &str) -> Result<(), StoreError> {
         self.conn().execute(
             "UPDATE sessions SET closed = ?2 WHERE id = ?1 AND closed IS NULL",
-            params![id, now_secs() as i64],
+            params![id, crate::int::to_db(now_secs())],
         )?;
         Ok(())
     }
@@ -115,7 +118,7 @@ impl Store {
     pub fn logout_all_interactive(&self) -> Result<usize, StoreError> {
         let n = self.conn().execute(
             "UPDATE sessions SET closed = ?1 WHERE closed IS NULL AND human IS NOT NULL",
-            [now_secs() as i64],
+            [crate::int::to_db(now_secs())],
         )?;
         Ok(n)
     }
@@ -127,7 +130,11 @@ impl Store {
         self.conn().execute(
             "UPDATE sessions SET last_seen = ?2
              WHERE id = ?1 AND closed IS NULL AND ?2 - last_seen >= ?3",
-            params![id, now as i64, TOUCH_INTERVAL as i64],
+            params![
+                id,
+                crate::int::to_db(now),
+                crate::int::to_db(TOUCH_INTERVAL)
+            ],
         )?;
         Ok(())
     }
@@ -146,8 +153,8 @@ impl Store {
                     post: r.get(1)?,
                     agent: r.get(2)?,
                     human: r.get(3)?,
-                    opened: r.get::<_, i64>(4)? as u64,
-                    last_seen: r.get::<_, i64>(5)? as u64,
+                    opened: crate::int::from_row(r.get(4)?, 4)?,
+                    last_seen: crate::int::from_row(r.get(5)?, 5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -177,8 +184,8 @@ impl Store {
                         post: r.get(1)?,
                         agent: r.get(2)?,
                         human: r.get(3)?,
-                        opened: r.get::<_, i64>(4)? as u64,
-                        last_seen: r.get::<_, i64>(5)? as u64,
+                        opened: crate::int::from_row(r.get(4)?, 4)?,
+                        last_seen: crate::int::from_row(r.get(5)?, 5)?,
                     })
                 },
             )
@@ -191,7 +198,7 @@ impl Store {
     pub fn backdate_session(&self, id: &str, last_seen: u64) -> Result<(), StoreError> {
         self.conn().execute(
             "UPDATE sessions SET opened = ?2, last_seen = ?2 WHERE id = ?1",
-            params![id, last_seen as i64],
+            params![id, crate::int::to_db(last_seen)],
         )?;
         Ok(())
     }

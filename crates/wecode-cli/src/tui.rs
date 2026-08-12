@@ -196,9 +196,12 @@ impl App {
         if self.rows.is_empty() {
             return;
         }
-        let cur = self.table.selected().unwrap_or(0) as isize;
-        let next = (cur + delta).clamp(0, self.rows.len() as isize - 1);
-        self.table.select(Some(next as usize));
+        // `checked_add_signed` keeps the whole thing in `usize`: moving up from the
+        // first row underflows rather than wrapping, and lands on the first row.
+        let cur = self.table.selected().unwrap_or(0);
+        let last = self.rows.len().saturating_sub(1);
+        self.table
+            .select(Some(cur.checked_add_signed(delta).unwrap_or(0).min(last)));
     }
 
     fn descend(&mut self) {
@@ -353,12 +356,8 @@ fn health_span(h: Health) -> Span<'static> {
 }
 
 fn bar(fraction: f32) -> String {
-    let filled = (fraction * 8.0).round().clamp(0.0, 8.0) as usize;
-    let mut s = String::new();
-    for i in 0..8 {
-        s.push(if i < filled { '█' } else { '▁' });
-    }
-    format!("{s} {:>3.0}%", fraction * 100.0)
+    // Wider than the board's, because the cockpit has the room for it.
+    crate::board::bar_of(fraction, 8)
 }
 
 fn spend_text(v: &Vitals) -> String {
