@@ -106,12 +106,17 @@ impl Org {
         decode(cmd.output().expect("binary runs"))
     }
 
-    /// Creates a real git repository and points the workspace's `app` repo at it.
+    /// Plants the committed toy fixture as a real git repository, and points the
+    /// workspace's `app` repo at it.
     ///
-    /// Real git, because git is a subprocess here — a fake would test nothing.
+    /// Copied from `fixtures/toy/` rather than generated inline: a fixture that lives
+    /// in the tree can be read, changed deliberately, and reproduced by hand a week
+    /// later. It cannot be committed *as* a repository — nested repos — so `git init`
+    /// happens here.
     fn repo(&self) -> PathBuf {
         let repo = self.dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        copy_dir(&fixture_root().join("toy"), &repo);
         for args in [
             vec!["init", "-q", "-b", "main"],
             vec!["config", "user.email", "t@t"],
@@ -119,9 +124,8 @@ impl Org {
         ] {
             git(&repo, &args);
         }
-        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
         git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-qm", "first"]);
+        git(&repo, &["commit", "-qm", "the toy fixture"]);
 
         let conf = self.path("company.toml");
         let text = std::fs::read_to_string(&conf).unwrap();
@@ -147,6 +151,15 @@ impl Org {
             );
         assert_ne!(replaced, text, "agent template was not replaced");
         std::fs::write(&conf, replaced).unwrap();
+    }
+
+    /// The fixture with its playbook removed, for the tests about not having one.
+    fn repo_without_playbook(&self) -> PathBuf {
+        let repo = self.repo();
+        std::fs::remove_file(repo.join(".wecode/playbook.toml")).unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "no playbook"]);
+        repo
     }
 
     /// Writes a playbook into the repo. Explicit rather than via `playbook init`, so
@@ -219,6 +232,27 @@ impl Org {
             "20000",
         ])
         .assert_ok("add dependent task");
+    }
+}
+
+/// Where the committed fixtures live, independent of the test's working directory.
+fn fixture_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/wecode-cli has a workspace root")
+        .join("fixtures")
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).expect("fixture exists").flatten() {
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        if src.is_dir() {
+            copy_dir(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).unwrap();
+        }
     }
 }
 
@@ -1250,7 +1284,7 @@ fn with_playbook(name: &str) -> (Org, PathBuf) {
 #[test]
 fn playbook_init_writes_a_file_that_then_parses() {
     let org = Org::new("pb-init", "solo");
-    let repo = org.repo();
+    let repo = org.repo_without_playbook();
     org.run(&[
         "project",
         "add",
@@ -1287,7 +1321,7 @@ fn playbook_init_writes_a_file_that_then_parses() {
 #[test]
 fn a_project_with_no_playbook_says_how_to_make_one() {
     let org = Org::new("pb-absent", "solo");
-    org.repo();
+    org.repo_without_playbook();
     org.run(&[
         "project",
         "add",
@@ -2187,4 +2221,30 @@ fn declaring_the_worker_area_does_not_break_assignment() {
     .assert_ok("task add")
     .assert_contains("draft → waiting")
     .assert_lacks("not assigned");
+}
+
+#[test]
+fn the_fixture_is_planted_as_a_real_repository() {
+    // The fixture cannot be committed as a repo — nested repos — so this checks the
+    // planting worked rather than assuming it.
+    let org = Org::new("fixture", "solo");
+    let repo = org.repo();
+    assert!(repo.join("src/app.txt").is_file(), "content copied");
+    assert!(
+        repo.join(".wecode/playbook.toml").is_file(),
+        "playbook copied"
+    );
+    assert!(repo.join(".git").is_dir(), "git init ran");
+
+    // Committed, so a task's diff shows only what the task did.
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "the fixture must start clean"
+    );
 }

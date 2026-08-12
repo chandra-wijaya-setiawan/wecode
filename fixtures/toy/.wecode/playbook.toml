@@ -1,0 +1,32 @@
+# The toy project's guidance. Small on purpose, but the same shape a real one has.
+
+[project]
+language = "text"
+
+[feature]
+worktree  = true
+assign_to = "impl"
+accept    = ["test -f src/app.txt"]
+tokens    = 100
+wall_secs = 30
+guidance  = """
+One task per line that changes in src/app.txt. Acceptance greps for the marker the
+task is named after, so a task that writes the wrong thing fails rather than passing
+quietly.
+"""
+
+[bug]
+worktree  = true
+assign_to = "impl"
+accept    = ["test -f src/app.txt"]
+tokens    = 100
+wall_secs = 30
+guidance  = "Reproduce, then fix. One cause per task."
+
+[docs]
+worktree  = false
+assign_to = "impl"
+accept    = ["test -f README.md"]
+tokens    = 50
+wall_secs = 15
+guidance  = "No worktree — prose does not conflict the way code does."
