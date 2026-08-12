@@ -28,7 +28,7 @@ pub const PLAYBOOK_PATH: &str = ".wecode/playbook.toml";
 /// The worker-writable area. Separate from the playbook on purpose: a role granted
 /// `.wecode/**` so it could write a result file would also be able to rewrite the
 /// guidance it was given.
-pub const RUN_DIR: &str = ".wecode/run";
+pub const RUN_DIR: &str = wecode_core::WORKER_DIR;
 
 #[derive(Debug)]
 pub enum PlaybookError {

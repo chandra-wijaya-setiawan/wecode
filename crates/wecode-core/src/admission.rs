@@ -270,6 +270,9 @@ pub fn check_task(t: &Task, plan: &Plan) -> Vec<Defect> {
             continue;
         }
         for glob in &t.scope.write {
+            if glob.starts_with(crate::WORKER_DIR) {
+                continue;
+            }
             if other.scope.write.iter().any(|o| globs_overlap(glob, o)) {
                 out.push(Defect::ScopeOverlaps {
                     with: other.id.clone(),
@@ -588,6 +591,29 @@ mod tests {
             check_task(&done, &plan).is_empty(),
             "a finished task cannot conflict: {:?}",
             check_task(&done, &plan)
+        );
+    }
+
+    #[test]
+    fn two_tasks_may_both_claim_the_worker_area() {
+        // Every task is told to write its result there, and each runs in its own
+        // worktree, so it is not a resource they compete for. Treating it as one made
+        // any two tasks that declared it un-admittable together.
+        let mut plan = seeded();
+        let mut first = good_task();
+        first.scope = Scope::write(&["crates/export/**", ".wecode/run/**"]);
+        plan.add_task(first).unwrap();
+
+        let other = Task::new("other", "caching", "a different piece of work")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/other/**", ".wecode/run/**"]))
+            .budgeted(budget());
+        assert!(
+            !check_task(&other, &plan)
+                .iter()
+                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
+            "{:?}",
+            check_task(&other, &plan)
         );
     }
 

@@ -1,5 +1,14 @@
 //! Value types shared by projects and tasks.
 
+/// Where a running task may write its own scratch — the result file, notes, anything
+/// task-local.
+///
+/// Not a resource tasks compete for: each runs in its own worktree, and the envelope
+/// tells every one of them to write here. It is therefore exempt from all three scope
+/// checks — coverage at assignment, overlap at admission, and the diff at verify — and
+/// they have to agree or declaring it passes one and fails another.
+pub const WORKER_DIR: &str = ".wecode/run";
+
 /// How we know something is done. Ordered by trustworthiness: a command either
 /// exits zero or it does not; a judgement is an opinion.
 #[derive(Clone, PartialEq, Debug)]

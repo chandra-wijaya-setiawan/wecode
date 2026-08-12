@@ -2431,3 +2431,77 @@ fn a_task_with_no_predecessors_says_so_plainly() {
         .assert_ok("start")
         .assert_contains("nothing came before this task");
 }
+
+#[test]
+fn a_dependent_task_starts_from_its_predecessors_work() {
+    // Being *told* what came before is not the same as *having* it. Cut from the base,
+    // a chain touching the same file conflicts the moment it merges.
+    let (org, _) = with_agent("chain-base", "echo groundwork >> src/app.txt");
+    a_task(&org, "first", "src/**", "grep -q groundwork src/app.txt");
+    org.run(&[
+        "task",
+        "add",
+        "second",
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "build on what the first task laid down",
+        "--after",
+        "first",
+        "--write",
+        "src/**",
+        "--accept-cmd",
+        "grep -q groundwork src/app.txt",
+        "--tokens",
+        "100",
+        "--wall",
+        "30",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("second");
+
+    org.run(&["run", "first"]).assert_contains("passed");
+    org.run(&["status", "first", "done"]).assert_ok("close it");
+
+    // `second`'s acceptance greps for what `first` wrote. It can only pass if the
+    // worktree actually contains it.
+    org.run(&["run", "second"])
+        .assert_ok("run")
+        .assert_contains("passed");
+}
+
+#[test]
+fn an_independent_task_still_starts_from_the_base() {
+    // Only a dependency moves the branch point; two unrelated tasks must not inherit
+    // each other's changes.
+    let (org, _) = with_agent("chain-indep", "echo mine >> src/app.txt");
+    // Disjoint scopes: `src/**` would swallow the other and the gate would refuse it.
+    a_task(&org, "one", "src/app.txt", "grep -q mine src/app.txt");
+    a_task(&org, "two", "src/other.txt", "test -f src/app.txt");
+
+    org.run(&["run", "one"]).assert_contains("passed");
+    org.run(&["status", "one", "done"]).assert_ok("close");
+
+    org.run(&["run", "two"]).assert_ok("run");
+
+    // Asserted on history, not on file content: the stand-in agent writes the same
+    // line for every task, so content proves nothing. What matters is whether one's
+    // *commit* is an ancestor of two's branch.
+    let wt = org
+        .path("config/run")
+        .join("wecode-e2e-chain-indep")
+        .join("two");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&wt)
+        .args(["log", "--oneline"])
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !log.contains("one: attempt"),
+        "an unrelated task inherited a predecessor's commit:\n{log}"
+    );
+}

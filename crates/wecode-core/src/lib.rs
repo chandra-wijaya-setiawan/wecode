@@ -21,7 +21,7 @@ pub mod project;
 pub mod task;
 
 pub use admission::{Admission, Defect, Waiver};
-pub use common::{Budget, Cmp, Measure, ProjectStatus, Scope, TaskStatus};
+pub use common::{Budget, Cmp, Measure, ProjectStatus, Scope, TaskStatus, WORKER_DIR};
 pub use execution::ExecutionStatus;
 pub use id::{ProjectId, TaskId};
 pub use plan::{Blocker, Plan, PlanError};

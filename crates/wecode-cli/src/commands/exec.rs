@@ -17,6 +17,30 @@ use crate::{git, render, scheduler, spawn, verify, work};
 
 /// Begins work on a task: prepares the worktree its playbook asks for, marks it
 /// running, and prints the envelope for whoever does the work.
+/// The branch of the predecessor this task should build on, if it has one.
+///
+/// The *last* done predecessor by id, and only one: merging several branch points is
+/// a real decision — which order, and what to do about a conflict — and guessing at it
+/// would be worse than saying so. A task with two predecessors that both changed code
+/// wants a merge task between them, which the plan can express.
+fn predecessor_branch(repo: &std::path::Path, plan: &Plan, task: &Task) -> Option<String> {
+    let mut candidates: Vec<&Task> = task
+        .depends_on
+        .iter()
+        .filter_map(|d| plan.task(d))
+        .filter(|t| t.status.is_done())
+        .collect();
+    candidates.sort_by(|a, b| a.id.cmp(&b.id));
+
+    candidates.iter().rev().find_map(|t| {
+        // The branch belongs to whichever task owns the worktree — a subtask shares its
+        // parent's, and there is no branch of its own to build on.
+        let owner = work::owner(plan, &t.id)?;
+        let branch = work::branch_for(&owner.id);
+        git::branch_exists(repo, &branch).then_some(branch)
+    })
+}
+
 /// A task made ready to work on: where, and with what instructions.
 pub(crate) struct Prepared {
     pub(crate) cwd: PathBuf,
@@ -85,12 +109,19 @@ pub(crate) fn prepare(
         if !git::is_repo(&repo) {
             return Err(format!("{} is not a git repository", repo.display()).into());
         }
-        // The playbook's integration branch when it names one, else wherever the
-        // repo is standing. Guessing a name like "dev" would fail on repos that
-        // have no such branch.
-        let base = match pb.as_ref().and_then(|p| p.project.merge_to.clone()) {
+        // Where this branch starts. A predecessor's branch when there is one, so a
+        // dependent task *has* the work it comes after rather than merely being told
+        // about it — otherwise every chain touching the same files conflicts at merge,
+        // and the task would be building on a base that is missing its groundwork.
+        //
+        // Falling back to the playbook's integration branch, then to wherever the repo
+        // is standing. Guessing a name like "dev" would fail on repos without one.
+        let base = match predecessor_branch(&repo, plan, task) {
             Some(b) => Some(b),
-            None => git::current_branch(&repo)?,
+            None => match pb.as_ref().and_then(|p| p.project.merge_to.clone()) {
+                Some(b) => Some(b),
+                None => git::current_branch(&repo)?,
+            },
         };
 
         if path.is_dir() {

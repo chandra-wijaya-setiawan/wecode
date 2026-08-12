@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use wecode_core::{Plan, ProjectId, Task, TaskId};
 use wecode_gov::{Action, Broker, Effective, Grant, Session, glob};
-use wecode_org::{Company, Playbook, Post, Workspace, playbook, workspace};
+use wecode_org::{Company, Playbook, Post, Workspace, workspace};
 use wecode_store::Store;
 
 use crate::args::Args;
@@ -140,7 +140,7 @@ pub(crate) fn covers_the_work(company: &Company, post: &Post, task: &Task) -> Re
         // `verify`: the envelope instructs the agent to write its result there, so
         // no role needs a grant for it and declaring it must not break assignment.
         // The two checks have to agree or a natural declaration fails one of them.
-        .filter(|w| !w.starts_with(playbook::RUN_DIR))
+        .filter(|w| !w.starts_with(wecode_core::WORKER_DIR))
         .filter(|w| !grant.write.iter().any(|g| glob::covers(g, w)))
         .map(String::as_str)
         .collect();

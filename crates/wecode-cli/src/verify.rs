@@ -18,7 +18,6 @@ use std::process::Command;
 
 use wecode_core::{Measure, Scope};
 use wecode_gov::glob;
-use wecode_org::playbook;
 
 /// One acceptance command, run.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -85,7 +84,7 @@ impl Verdict {
 /// result here, so counting it as a scope violation would fail every task for doing
 /// exactly what it was told.
 fn is_worker_area(path: &str) -> bool {
-    path.starts_with(playbook::RUN_DIR)
+    path.starts_with(wecode_core::WORKER_DIR)
 }
 
 /// Changed paths the scope does not permit.
