@@ -131,6 +131,37 @@ pub(crate) fn worktree_list(repo: &Path) -> Result<Vec<String>, GitError> {
         .collect())
 }
 
+/// Commits everything in a worktree, and returns the new sha.
+///
+/// `Ok(None)` when there was nothing to commit — an agent that changed nothing is a
+/// fact to record, not an error to raise.
+///
+/// The author is wecode, not the agent: the commit is our account of what a run
+/// produced, and attributing it to a model would make `git log` claim something the
+/// design says nowhere else — that the agent's own word is evidence.
+pub(crate) fn commit_all(worktree: &Path, message: &str) -> Result<Option<String>, GitError> {
+    git(worktree, &["add", "-A"])?;
+    // `--quiet` still exits non-zero with nothing staged, so ask first rather than
+    // reading failure as an outcome.
+    if git(worktree, &["diff", "--cached", "--name-only"])?.is_empty() {
+        return Ok(None);
+    }
+    git(
+        worktree,
+        &[
+            "-c",
+            "user.name=wecode",
+            "-c",
+            "user.email=wecode@localhost",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    )?;
+    Ok(Some(git(worktree, &["rev-parse", "--short", "HEAD"])?))
+}
+
 /// Paths changed in a worktree against its branch point — uncommitted work included.
 pub(crate) fn changed_files(worktree: &Path) -> Result<Vec<String>, GitError> {
     let tracked = git(worktree, &["diff", "--name-only", "HEAD"])?;
@@ -262,6 +293,47 @@ mod tests {
         fs::write(r.join("a.txt"), "edited\n").unwrap();
         fs::write(r.join("b.txt"), "added\n").unwrap();
         assert_eq!(changed_files(&r).unwrap(), vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn a_commit_captures_the_work_and_reports_its_sha() {
+        let r = repo("commit");
+        fs::write(r.join("a.txt"), "changed\n").unwrap();
+        fs::write(r.join("new.txt"), "added\n").unwrap();
+
+        let sha = commit_all(&r, "attempt 1")
+            .unwrap()
+            .expect("something to commit");
+        assert!(!sha.is_empty());
+        // Nothing left behind: a retry resetting this tree would destroy nothing.
+        assert!(changed_files(&r).unwrap().is_empty());
+
+        let mut files = git(&r, &["show", "--name-only", "--format=", &sha])
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        files.sort();
+        assert_eq!(files, vec!["a.txt", "new.txt"]);
+    }
+
+    #[test]
+    fn committing_nothing_is_reported_rather_than_failing() {
+        // An agent that changed nothing is a fact for the verdict to weigh, not an
+        // error — and `git commit` exits non-zero on an empty index.
+        let r = repo("commit-empty");
+        assert_eq!(commit_all(&r, "attempt 1").unwrap(), None);
+    }
+
+    #[test]
+    fn the_commit_is_authored_by_wecode_not_by_the_agent() {
+        // git log must not imply the agent vouched for anything. The commit is our
+        // record of what a run produced.
+        let r = repo("commit-author");
+        fs::write(r.join("a.txt"), "x\n").unwrap();
+        commit_all(&r, "attempt 1").unwrap();
+        let who = git(&r, &["log", "-1", "--format=%an <%ae>"]).unwrap();
+        assert_eq!(who, "wecode <wecode@localhost>");
     }
 
     #[test]

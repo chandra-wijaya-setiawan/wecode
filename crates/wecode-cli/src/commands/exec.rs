@@ -9,6 +9,8 @@ use wecode_core::{Plan, Task, TaskId, TaskStatus, admission};
 use wecode_gov::{Action, Broker, Session, glob};
 use wecode_org::{Company, Workspace};
 
+use wecode_store::Store;
+
 use crate::args::Args;
 use crate::commands::ctx::*;
 use crate::{git, render, scheduler, spawn, verify, work};
@@ -406,6 +408,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
             &outcome.ended.describe(),
         )?;
         out.push_str(&verdict);
+        out.push_str(&commit_attempt(&store, &id, &prepared.cwd, &outcome)?);
     } else {
         store.set_task_status(&id, TaskStatus::Failed)?;
         store.finish_execution(
@@ -419,8 +422,39 @@ pub(crate) fn run_task(a: &Args) -> Res {
             &outcome.ended.describe(),
         )?;
         out.push_str("\n  not verified — the agent did not finish cleanly\n");
+        out.push_str(&commit_attempt(&store, &id, &prepared.cwd, &outcome)?);
     }
     Ok(out)
+}
+
+/// Commits whatever the attempt produced, pass or fail.
+///
+/// **After** the verdict, never before: `verify` reads the *uncommitted* diff, so
+/// committing first would leave it nothing to check and every run would pass its
+/// scope check trivially.
+///
+/// A failed attempt is committed too, and that is the point. The failed diff is what
+/// a retry learns from — left uncommitted, the next attempt's `git reset --hard`
+/// destroys the only evidence of what went wrong.
+///
+/// Only inside a worktree. Committing into the operator's own checkout would be
+/// taking a decision that is not wecode's to take.
+fn commit_attempt(
+    store: &Store,
+    id: &TaskId,
+    cwd: &std::path::Path,
+    outcome: &spawn::Outcome,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if !cwd.starts_with(work::run_root()) {
+        return Ok(String::new());
+    }
+    // `next_attempt` is what the *next* run would be, so this run is one below it.
+    let attempt = store.next_attempt(id)?.saturating_sub(1).max(1);
+    let message = format!("{id}: attempt {attempt}\n\n{}", outcome.ended.describe());
+    Ok(match git::commit_all(cwd, &message)? {
+        Some(sha) => format!("  committed {sha} — attempt {attempt}\n"),
+        None => "  nothing to commit — the agent changed no files\n".to_string(),
+    })
 }
 
 /// Judges a finished task from its diff and its acceptance commands.

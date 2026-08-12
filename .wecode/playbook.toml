@@ -36,6 +36,11 @@ order, because core cannot depend on anything above it.
 Tests go to `impl` along with the code: this repo keeps them beside the source, so the
 tester post's tests/** scope cannot reach them. See the bug playbook.
 
+Put the test file in the write scope. Unit tests sit inside the module being changed,
+so they are covered already — but anything touching the CLI almost always edits
+crates/wecode-cli/tests/cli.rs too, and leaving it out fails the scope check after the
+work is done. Three tasks in a row have been caught by this.
+
 Acceptance is an executable command, never a description. `Judged` is illegal on a
 task and the gate will refuse it.
 """

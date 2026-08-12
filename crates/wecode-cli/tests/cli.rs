@@ -1249,6 +1249,14 @@ tokens = 1000
 wall_secs = 60
 guidance = "Reproduce first, then a failing test, then the fix."
 
+[chore]
+worktree = true
+assign_to = "impl"
+accept = ["true"]
+tokens = 1000
+wall_secs = 60
+guidance = "Uses a worktree, like most work here."
+
 [docs]
 worktree = false
 assign_to = "impl"
@@ -1418,7 +1426,7 @@ fn an_explicit_flag_beats_the_playbook() {
 #[test]
 fn a_kind_the_playbook_omits_gets_no_defaults() {
     let (org, _) = with_playbook("pb-omitted");
-    // No [chore] section, so nothing is filled and the task is defective as written.
+    // `refactor` has no section, so nothing is filled and the task is bare.
     org.run(&[
         "task",
         "add",
@@ -1426,7 +1434,7 @@ fn a_kind_the_playbook_omits_gets_no_defaults() {
         "--project",
         "caching",
         "--kind",
-        "chore",
+        "refactor",
         "remove the deprecated export helper",
         "--write",
         "src/**",
@@ -2029,7 +2037,11 @@ fn run_spawns_the_agent_and_verifies_what_it_did() {
         .assert_contains("exit 0")
         .assert_contains("✓ a.txt")
         .assert_contains("passed");
-    org.run(&["show", "t"]).assert_contains("status     done");
+
+    // Passing is not landed. The work is on a branch nobody has merged, so it waits
+    // for the signature rather than claiming to be done.
+    org.run(&["show", "t"])
+        .assert_contains("status     needs-approval");
 }
 
 #[test]
@@ -2093,7 +2105,7 @@ fn the_agent_is_launched_where_the_task_says_and_the_launch_is_recorded() {
 #[test]
 fn an_unassigned_task_cannot_be_run() {
     // There is no post to name an agent, so there is nothing to launch. The fixture
-    // playbook has no [chore] section, so nothing fills the assignee either.
+    // playbook has no [refactor] section, so nothing fills the assignee either.
     let (org, _) = with_agent("run-unassigned", "true");
     org.run(&[
         "task",
@@ -2102,7 +2114,7 @@ fn an_unassigned_task_cannot_be_run() {
         "--project",
         "caching",
         "--kind",
-        "chore",
+        "refactor",
         "append a marker comment to the source",
         "--write",
         "a.txt",
@@ -2247,4 +2259,94 @@ fn the_fixture_is_planted_as_a_real_repository() {
         String::from_utf8_lossy(&out.stdout).trim().is_empty(),
         "the fixture must start clean"
     );
+}
+
+// ---------------------------------------------------------------- commit ------
+
+#[test]
+fn a_passing_attempt_is_committed_on_its_branch() {
+    let (org, repo) = with_agent("commit-pass", "echo done >> src/app.txt");
+    a_task(&org, "t", "src/**", "grep -q done src/app.txt");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed")
+        .assert_contains("committed");
+
+    // The main branch is untouched — output is a branch to review.
+    let main = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["show", "main:src/app.txt"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&main.stdout).contains("done"),
+        "main must not move until a merge"
+    );
+}
+
+#[test]
+fn a_failed_attempt_is_committed_too_so_a_retry_can_learn_from_it() {
+    // The reason this matters: a retry resets the worktree. Uncommitted, the failed
+    // diff — the only evidence of what went wrong — would be destroyed.
+    let (org, _) = with_agent("commit-fail", "echo wrong >> src/app.txt");
+    a_task(&org, "t", "src/**", "grep -q correct src/app.txt");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("failed")
+        .assert_contains("committed");
+}
+
+#[test]
+fn two_attempts_leave_two_commits() {
+    let (org, _) = with_agent("commit-twice", "echo mark >> src/app.txt");
+    a_task(&org, "t", "src/**", "grep -q nope src/app.txt");
+
+    org.run(&["run", "t"]).assert_contains("attempt 1");
+    org.run(&["status", "t", "waiting"]).assert_ok("reopen");
+    org.run(&["run", "t"]).assert_contains("attempt 2");
+
+    // Both runs are on the record, and the first is not overwritten.
+    org.run(&["show", "t"])
+        .assert_contains("#1")
+        .assert_contains("#2");
+}
+
+#[test]
+fn an_agent_that_changed_nothing_is_reported_rather_than_committed() {
+    let (org, _) = with_agent("commit-none", "true");
+    a_task(&org, "t", "src/**", "test -f src/app.txt");
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("nothing to commit");
+}
+
+#[test]
+fn work_without_a_worktree_is_never_committed() {
+    // Committing into the operator's own checkout is not wecode's decision to take.
+    let (org, repo) = with_agent("commit-nowt", "echo x >> README.md");
+    org.playbook(
+        &repo,
+        "[docs]\nworktree = false\nassign_to = \"impl\"\naccept = [\"true\"]\n\
+         tokens = 10\nwall_secs = 5\nguidance = \"x\"\n",
+    );
+    org.run(&[
+        "task",
+        "add",
+        "d",
+        "--project",
+        "caching",
+        "--kind",
+        "docs",
+        "note the eviction policy in the readme",
+        "--write",
+        "README.md",
+    ])
+    .assert_ok("task add");
+
+    org.run(&["run", "d"])
+        .assert_ok("run")
+        .assert_lacks("committed");
 }
