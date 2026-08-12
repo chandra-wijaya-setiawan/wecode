@@ -2350,3 +2350,84 @@ fn work_without_a_worktree_is_never_committed() {
         .assert_ok("run")
         .assert_lacks("committed");
 }
+
+// --------------------------------------------------------------- handoff ------
+
+#[test]
+fn a_retry_is_told_what_it_tried_and_why_it_was_refused() {
+    // The whole point of a retry envelope: without the previous diff and the failing
+    // check, the second attempt is the first attempt again.
+    let (org, _) = with_agent("handoff-retry", "echo wrong >> src/app.txt");
+    a_task(&org, "t", "src/**", "grep -q right src/app.txt");
+
+    org.run(&["run", "t"]).assert_contains("failed");
+    org.run(&["status", "t", "waiting"]).assert_ok("reopen");
+
+    let r = org.run(&["start", "t"]);
+    r.assert_ok("start")
+        .assert_contains("YOUR PREVIOUS ATTEMPTS")
+        .assert_contains("attempt 1")
+        // Why it was rejected, not how the process exited.
+        .assert_contains("grep -q right src/app.txt")
+        .assert_contains("exit 1, wanted 0")
+        // And the diff it produced.
+        .assert_contains("+wrong");
+}
+
+#[test]
+fn a_first_attempt_has_no_previous_attempts_section() {
+    // An empty heading would read as though something were missing.
+    let (org, _) = with_agent("handoff-first", "true");
+    a_task(&org, "t", "src/**", "true");
+    org.run(&["start", "t"])
+        .assert_ok("start")
+        .assert_lacks("YOUR PREVIOUS ATTEMPTS");
+}
+
+#[test]
+fn a_successor_is_shown_what_its_predecessor_produced() {
+    // The handoff travels along depends_on, and is read out of git rather than taken
+    // from the agent that produced it.
+    let (org, _) = with_agent("handoff-chain", "echo groundwork >> src/app.txt");
+    a_task(&org, "first", "src/**", "grep -q groundwork src/app.txt");
+    org.run(&[
+        "task",
+        "add",
+        "second",
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "build on what the first task laid down",
+        "--after",
+        "first",
+        "--write",
+        "src/**",
+        "--accept-cmd",
+        "true",
+        "--tokens",
+        "100",
+        "--wall",
+        "30",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("second");
+
+    org.run(&["run", "first"]).assert_contains("passed");
+    org.run(&["status", "first", "done"]).assert_ok("close it");
+
+    let r = org.run(&["start", "second"]);
+    r.assert_ok("start")
+        .assert_contains("first — append a marker comment to the source")
+        .assert_contains("+groundwork");
+}
+
+#[test]
+fn a_task_with_no_predecessors_says_so_plainly() {
+    let (org, _) = with_agent("handoff-none", "true");
+    a_task(&org, "t", "src/**", "true");
+    org.run(&["start", "t"])
+        .assert_ok("start")
+        .assert_contains("nothing came before this task");
+}

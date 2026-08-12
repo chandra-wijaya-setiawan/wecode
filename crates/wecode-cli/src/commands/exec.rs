@@ -35,6 +35,7 @@ pub(crate) fn prepare(
     company: &Company,
     plan: &Plan,
     task: &Task,
+    runs: &[wecode_store::Execution],
 ) -> Result<Prepared, Box<dyn std::error::Error>> {
     let id = task.id.clone();
     if task.status.is_closed() {
@@ -116,7 +117,14 @@ pub(crate) fn prepare(
     }
 
     Ok(Prepared {
-        envelope: render::envelope(&company.templates.task_envelope, task, project, plan, &cwd),
+        envelope: render::envelope(
+            &company.templates.task_envelope,
+            task,
+            project,
+            plan,
+            &cwd,
+            runs,
+        ),
         cwd,
         notes,
     })
@@ -134,7 +142,10 @@ pub(crate) fn start(a: &Args) -> Res {
         .ok_or_else(|| format!("no such task: {id}"))?
         .clone();
 
-    let prepared = prepare(&ws, &company, &plan, &task)?;
+    // The envelope carries what earlier attempts did, so a retry can see its own
+    // failure rather than starting blind.
+    let runs = store.executions(&id)?;
+    let prepared = prepare(&ws, &company, &plan, &task, &runs)?;
 
     // Starting is staffing: it changes who is expected to act.
     let who = actor(a, &store, &company)?;
@@ -322,7 +333,10 @@ pub(crate) fn run_task(a: &Args) -> Res {
         .clone();
 
     // Prepare exactly as `start` does, so the two cannot drift apart.
-    let prepared = prepare(&ws, &company, &plan, &task)?;
+    // The envelope carries what earlier attempts did, so a retry can see its own
+    // failure rather than starting blind.
+    let runs = store.executions(&id)?;
+    let prepared = prepare(&ws, &company, &plan, &task, &runs)?;
 
     let who = actor(a, &store, &company)?;
     let supervisor = Session::new(
@@ -389,7 +403,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
         // Verification is the same code path a hand-run task takes, so the two can
         // never disagree about what passing means.
         out.push('\n');
-        let verdict = verify_task(a)?;
+        let (verdict, why) = judge(a)?;
         // `Rejected` rather than `Failed` when the run itself was clean: the agent
         // finished and we declined what it produced. A2A keeps those apart, and so
         // should the record.
@@ -405,7 +419,9 @@ pub(crate) fn run_task(a: &Args) -> Res {
             } else {
                 wecode_core::ExecutionStatus::Completed
             },
-            &outcome.ended.describe(),
+            // Why it was rejected, not how the process exited. A retry reading
+            // "exit 0" learns nothing; the failing check is the whole message.
+            &why.unwrap_or_else(|| outcome.ended.describe()),
         )?;
         out.push_str(&verdict);
         out.push_str(&commit_attempt(&store, &id, &prepared.cwd, &outcome)?);
@@ -463,6 +479,15 @@ fn commit_attempt(
 /// are ours, and both reach the ledger as `Source::Supervisor` — observed, not
 /// self-reported, and therefore admissible.
 pub(crate) fn verify_task(a: &Args) -> Res {
+    Ok(judge(a)?.0)
+}
+
+/// The verdict, and a one-line reason when it went against the work.
+///
+/// Split from `verify_task` so `run` can put the reason on the execution record. The
+/// process exit is not the reason a task failed — "exit 0" tells a retry nothing,
+/// where "grep -q V2 exited 1" tells it everything.
+fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
     let (ws, store, company) = open_full(a)?;
     let id = TaskId::new(require(a.cmd(1), "task id")?);
     let plan = store.load_plan()?;
@@ -552,7 +577,21 @@ pub(crate) fn verify_task(a: &Args) -> Res {
     };
     store.set_task_status(&id, next)?;
 
-    Ok(render::verdict(&task, &dir, &v, next))
+    let reason = (!v.passed()).then(|| {
+        let mut parts = Vec::new();
+        if !v.violations.is_empty() {
+            parts.push(format!("outside scope: {}", v.violations.join(", ")));
+        }
+        for c in v.checks.iter().filter(|c| !c.passed()) {
+            parts.push(format!("{} — {}", c.cmd, c.describe()));
+        }
+        if parts.is_empty() {
+            parts.push("nothing to judge by".to_string());
+        }
+        parts.join("; ")
+    });
+
+    Ok((render::verdict(&task, &dir, &v, next), reason))
 }
 
 pub(crate) fn worktree_list(a: &Args) -> Res {

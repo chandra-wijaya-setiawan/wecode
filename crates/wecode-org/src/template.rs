@@ -276,6 +276,9 @@ SCOPE
 You may modify only: {{write_scope}}
 Writes outside this list are rejected.
 
+CONTEXT FROM COMPLETED WORK
+{{context}}
+
 WHEN FINISHED
 Write .wecode/result.json:
 {"status":"succeeded"|"failed"|"blocked","summary":"...","changed_files":["..."]}

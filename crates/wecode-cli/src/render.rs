@@ -585,6 +585,120 @@ pub(crate) fn worktrees(rows: &[WorktreeRow]) -> String {
     out
 }
 
+/// What the next agent needs to know, assembled from what wecode observed.
+///
+/// Never passed by the agent that produced it. Posts do not talk to each other, and an
+/// agent's account of its own work is inadmissible — so the handoff is read out of git
+/// and the execution record instead.
+///
+/// Two payloads, and they answer different questions:
+///
+/// - **what came before you**, following `depends_on`, because that relation already
+///   means "must come after" and is therefore exactly the edge a handoff travels
+/// - **what you tried last time**, from this task's own earlier commits, because a
+///   retry that cannot see its previous failure just repeats it
+fn handoff(task: &Task, plan: &Plan, cwd: &std::path::Path) -> String {
+    /// Enough of a diff to work from; not so much that it crowds out the instruction.
+    const DIFF_CAP: usize = 4000;
+
+    let mut out = String::new();
+
+    let done: Vec<&Task> = task
+        .depends_on
+        .iter()
+        .filter_map(|d| plan.task(d))
+        // Unfinished work is not context, it is a blocker — and the task would not be
+        // running if it had any.
+        .filter(|t| t.status.is_done())
+        .collect();
+
+    if done.is_empty() {
+        out.push_str("(nothing came before this task)\n");
+    }
+    for t in &done {
+        out.push_str(&format!("{} — {}\n", t.id, t.title));
+        // A predecessor may have worked in its own worktree — worktrees are per main
+        // task, and two sibling tasks are two trees. They sit beside each other under
+        // the run root, so the sibling path is where its commits are.
+        //
+        // Reading them is not the same as *having* them: this task's branch was cut
+        // from the base, so the predecessor's changes are visible here but not
+        // present. See `branch-from-predecessor`.
+        let their_tree = plan
+            .task(&t.id)
+            .and_then(|p| crate::work::owner(plan, &p.id))
+            .map(|o| cwd.with_file_name(o.id.as_str()))
+            .filter(|d| d.is_dir())
+            .unwrap_or_else(|| cwd.to_path_buf());
+        match crate::git::attempts_on(&their_tree) {
+            Ok(commits) => {
+                let mine: Vec<&(String, String)> = commits
+                    .iter()
+                    .filter(|(_, subject)| subject.starts_with(&format!("{}: ", t.id)))
+                    .collect();
+                if mine.is_empty() {
+                    out.push_str("  (no commits in this worktree)\n");
+                }
+                for (sha, subject) in mine.iter().take(1) {
+                    out.push_str(&format!("  {sha}  {subject}\n"));
+                    if let Ok((files, diff)) =
+                        crate::git::commit_summary(&their_tree, sha, DIFF_CAP)
+                    {
+                        for f in &files {
+                            out.push_str(&format!("    {f}\n"));
+                        }
+                        out.push_str(&indent_block(&diff));
+                    }
+                }
+            }
+            Err(_) => out.push_str("  (not a worktree — no diff to show)\n"),
+        }
+    }
+    out
+}
+
+/// What this task tried last time, for the envelope of a retry.
+///
+/// Empty on a first attempt, which is the common case and should read as such rather
+/// than as a heading with nothing under it.
+fn prior_attempts(task: &Task, runs: &[wecode_store::Execution], cwd: &std::path::Path) -> String {
+    const DIFF_CAP: usize = 4000;
+    let finished: Vec<&wecode_store::Execution> =
+        runs.iter().filter(|r| r.status.is_finished()).collect();
+    if finished.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("\nYOUR PREVIOUS ATTEMPTS\n");
+    let commits = crate::git::attempts_on(cwd).unwrap_or_default();
+    for r in finished.iter().rev().take(2) {
+        out.push_str(&format!(
+            "attempt {} — {} ({})\n",
+            r.attempt,
+            r.status.as_str(),
+            r.detail
+        ));
+        let wanted = format!("{}: attempt {}", task.id, r.attempt);
+        if let Some((sha, _)) = commits.iter().find(|(_, s)| s == &wanted)
+            && let Ok((files, diff)) = crate::git::commit_summary(cwd, sha, DIFF_CAP)
+        {
+            for f in &files {
+                out.push_str(&format!("  {f}\n"));
+            }
+            out.push_str(&indent_block(&diff));
+        }
+    }
+    out.push_str("Do not repeat what failed. Read the diff above before changing anything.\n");
+    out
+}
+
+fn indent_block(s: &str) -> String {
+    s.lines()
+        .map(|l| format!("    {l}\n"))
+        .collect::<Vec<_>>()
+        .concat()
+}
+
 /// Fills the task envelope from `company.toml`.
 ///
 /// The placeholders have existed in the template since it was written; nothing ever
@@ -596,6 +710,7 @@ pub(crate) fn envelope(
     project: &Project,
     plan: &Plan,
     cwd: &std::path::Path,
+    runs: &[wecode_store::Execution],
 ) -> String {
     let acceptance = if task.acceptance.is_empty() {
         "(none declared)".to_string()
@@ -611,20 +726,15 @@ pub(crate) fn envelope(
     } else {
         task.scope.write.join(", ")
     };
-    // Only finished predecessors: unfinished work is not context, it is a blocker.
-    let context = {
-        let done: Vec<String> = task
-            .depends_on
-            .iter()
-            .filter_map(|d| plan.task(d))
-            .filter(|t| t.status.is_done())
-            .map(|t| format!("- {} ({})", t.title, t.id))
-            .collect();
-        if done.is_empty() {
-            "(nothing yet)".to_string()
-        } else {
-            done.join("\n")
-        }
+    let context = handoff(task, plan, cwd);
+
+    // Appended when the template has no `{{context}}`. A project whose envelope omits
+    // the placeholder would otherwise lose the handoff without saying so, and what a
+    // predecessor produced is not optional detail.
+    let orphaned_context = if template.contains("{{context}}") || context.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nCONTEXT FROM COMPLETED WORK\n{context}")
     };
 
     let filled = template
@@ -642,7 +752,13 @@ pub(crate) fn envelope(
             cwd.display()
         );
     }
-    format!("{}\nWorking directory: {}\n", filled.trim(), cwd.display())
+    format!(
+        "{}{}{}\nWorking directory: {}\n",
+        filled.trim(),
+        orphaned_context,
+        prior_attempts(task, runs, cwd),
+        cwd.display()
+    )
 }
 
 /// Every run of a task, so a retry does not erase what happened last time.

@@ -162,6 +162,54 @@ pub(crate) fn commit_all(worktree: &Path, message: &str) -> Result<Option<String
     Ok(Some(git(worktree, &["rev-parse", "--short", "HEAD"])?))
 }
 
+/// The files one commit touched, and the diff, capped.
+///
+/// Used to build a handoff: what a predecessor produced is read out of git rather
+/// than asked of the agent that produced it.
+pub(crate) fn commit_summary(
+    worktree: &Path,
+    sha: &str,
+    max_diff: usize,
+) -> Result<(Vec<String>, String), GitError> {
+    let files = git(
+        worktree,
+        &["show", "--name-only", "--format=", "--no-renames", sha],
+    )?
+    .lines()
+    .filter(|l| !l.is_empty())
+    .map(str::to_string)
+    .collect();
+    let diff = git(worktree, &["show", "--format=", "--no-color", sha])?;
+    let diff = if diff.len() <= max_diff {
+        diff
+    } else {
+        let cut: String = diff.chars().take(max_diff).collect();
+        format!("{cut}\n… truncated, {} bytes in full", diff.len())
+    };
+    Ok((files, diff))
+}
+
+/// The commits wecode made on this branch, newest first, as `(sha, subject)`.
+///
+/// Filtered by author because only wecode commits here — the agent is told not to,
+/// and anything else on the branch came from the base and is not this task's work.
+pub(crate) fn attempts_on(worktree: &Path) -> Result<Vec<(String, String)>, GitError> {
+    let out = git(
+        worktree,
+        &[
+            "log",
+            "--author=wecode@localhost",
+            "--format=%h\t%s",
+            "--max-count=20",
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect())
+}
+
 /// Paths changed in a worktree against its branch point — uncommitted work included.
 pub(crate) fn changed_files(worktree: &Path) -> Result<Vec<String>, GitError> {
     let tracked = git(worktree, &["diff", "--name-only", "HEAD"])?;
@@ -334,6 +382,44 @@ mod tests {
         commit_all(&r, "attempt 1").unwrap();
         let who = git(&r, &["log", "-1", "--format=%an <%ae>"]).unwrap();
         assert_eq!(who, "wecode <wecode@localhost>");
+    }
+
+    #[test]
+    fn a_commits_files_and_diff_can_be_read_back() {
+        let r = repo("summary");
+        fs::write(r.join("a.txt"), "changed\n").unwrap();
+        let sha = commit_all(&r, "attempt 1").unwrap().unwrap();
+
+        let (files, diff) = commit_summary(&r, &sha, 10_000).unwrap();
+        assert_eq!(files, vec!["a.txt"]);
+        assert!(diff.contains("changed"), "{diff}");
+    }
+
+    #[test]
+    fn a_huge_diff_is_capped_but_says_how_big_it_really_was() {
+        // An envelope is a prompt. An unbounded diff would crowd out the instruction.
+        let r = repo("summary-big");
+        fs::write(r.join("big.txt"), "x".repeat(5000)).unwrap();
+        let sha = commit_all(&r, "big").unwrap().unwrap();
+        let (_, diff) = commit_summary(&r, &sha, 500).unwrap();
+        assert!(diff.len() < 700, "{}", diff.len());
+        assert!(diff.contains("bytes in full"), "{diff}");
+    }
+
+    #[test]
+    fn only_wecodes_own_commits_count_as_attempts() {
+        // Commits inherited from the base branch are not this task's work.
+        let r = repo("attempts");
+        // Distinct content each time: the fixture already holds "one", and writing it
+        // again would stage nothing and commit nothing.
+        fs::write(r.join("a.txt"), "first try\n").unwrap();
+        assert!(commit_all(&r, "t: attempt 1").unwrap().is_some());
+        fs::write(r.join("a.txt"), "second try\n").unwrap();
+        assert!(commit_all(&r, "t: attempt 2").unwrap().is_some());
+
+        let a = attempts_on(&r).unwrap();
+        assert_eq!(a.len(), 2, "the base commit is not ours: {a:?}");
+        assert!(a[0].1.contains("attempt 2"), "newest first: {a:?}");
     }
 
     #[test]
