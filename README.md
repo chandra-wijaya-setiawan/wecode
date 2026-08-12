@@ -1,41 +1,51 @@
 # wecode
 
-A Rust runtime for running coding agents as staff. You talk only to the
-orchestrator: it holds every project, task and goal in one hierarchy of intent,
-enforces what each agent may do, and attenuates what reaches you — so nothing
-drifts from the objective it was meant to serve.
+Run coding agents as staff.
+
+You talk to one orchestrator; it holds the plan, dispatches work to agents under
+enforced scopes and budgets, judges what came back from the diff rather than from the
+agent's account of itself, and shows you one board for all of it.
 
 ```bash
-./wecode init ~/companies/acme     # a company: profile, roles, posts, state
-./wecode company show              # your staff, and what each may do
-./wecode board                     # the cockpit
-./wecode audit --path 'crates/**'  # who touched this, any agent
+wecode init mycompany            # a workspace: company.toml + wecode.db
+wecode login you                 # take a seat
+wecode project add api "cut export p99 below 500ms" --repo app --measure-cmd "cargo bench"
+wecode task add cache --project api "add a response cache" --write "src/cache/**"
+wecode run cache                 # worktree, agent, verification, commit
+wecode board                     # what is happening, and what needs you
 ```
 
-## Docs
+## Three ideas it rests on
+
+**Enforce at the boundary, never in the prompt.** A scope is a check the Broker makes,
+not a sentence in an instruction. What cannot be checked before the action is advice,
+and belongs in the prompt where it will be treated as such.
+
+**Ground truth over self-report.** Status comes from diffs, exit codes and spend. An
+agent's account of its own work is useful for debugging and inadmissible as evidence,
+and the ledger records which is which at write time.
+
+**Your attention is the binding constraint.** Concurrency derives from it rather than
+from cores; the loop throttles itself and stops entirely while something needs you.
+Silence on green.
+
+## Where to read next
 
 | | |
 |---|---|
-| **[Getting started](docs/getting-started.md)** | **Install, walkthrough, command reference.** Start here. |
-| [Architecture](docs/architecture.md) | The design. Current state, authoritative. |
-| [Theory](docs/theory.md) | Grounding, prior art, open questions. Not needed to implement. |
-| `git log` | How the design got here, and why it changed. |
+| [docs/concepts.md](docs/concepts.md) | what a project, task, post and grant are |
+| [docs/lifecycle.md](docs/lifecycle.md) | how work moves from draft to merged |
+| [docs/features.md](docs/features.md) | what is built — and what is weak |
+| [plan.md](plan.md) | what is next |
+| [docs/guides/getting-started.md](docs/guides/getting-started.md) | do it for real |
 
-## Three rules
+## Building
 
-1. **Authority is enforced, never prompted.** A role is a set of checked
-   capabilities or it is nothing.
-2. **Ground truth over self-report.** Status comes from diffs, exit codes and
-   spend — never from an agent's account of its own work.
-3. **The operator's attention is the binding constraint.** Concurrency derives
-   from it; the runtime throttles itself rather than flooding you.
+```bash
+cargo test --workspace
+cargo clippy --all-targets -- -D warnings
+```
 
-## Status
-
-Working: the intent ontology and admission gate, company workspaces and templates,
-capability grants, the Broker, the audit ledger, assignment with scope checking, and
-the board. 199 tests.
-
-Not yet built: a real TUI, and agent execution — nothing spawns `claude` or `codex`
-yet. Both need a native build; see [Status](docs/getting-started.md#status) for why,
-and [architecture.md §11](docs/architecture.md#11-build-order) for the build order.
+Five crates: `core` is pure domain types with no dependencies at all, `gov` is the
+Broker, `org` is hand-edited config, `store` is SQLite, `a2a` is the protocol data
+model, and `cli` is the only one that executes anything.

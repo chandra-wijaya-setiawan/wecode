@@ -1,6 +1,6 @@
 # Theory, prior art, and open questions
 
-Supporting material for [`architecture.md`](./architecture.md). Nothing here is
+Supporting material for [`architecture.md`](../concepts.md). Nothing here is
 required to implement the system; it records where the design came from, what has
 already been built elsewhere, and which claims are untested.
 
@@ -15,7 +15,7 @@ Organizational cybernetics. Any viable system has five necessary subsystems, and
 structurally identical. That recursion is why `Unit` is one type used at every
 scale.
 
-| VSM | Beer's name | architecture.md |
+| VSM | Beer's name | where it shows up |
 |---|---|---|
 | S1 | Operations | `Post` — the leaf where work happens |
 | S2 | Coordination | Coordination |
@@ -84,15 +84,18 @@ profile, where accountability is always the operator.
 
 ### Goal and task hierarchies
 
-The intent ontology is assembled from three existing formalisms rather than invented.
+> **Superseded in part.** This section described a four-level `Intent` tree — vision,
+> goal, project, task — with typed links between nodes. That was replaced by two levels
+> and two relations (see [../concepts.md](../concepts.md)). The prior art below is still
+> where the ideas came from; the notes say what survived.
 
 | Source | Contributes |
 |---|---|
-| **KAOS** (goal-oriented requirements engineering) | AND/OR goal refinement — `Link::Requires` and `Link::Alternative`. Also *obstacles*: things that block a goal, refinable like goals themselves |
+| **KAOS** (goal-oriented requirements engineering) | AND/OR goal refinement. *Dropped* with the goal tree: a task either happens or it does not, and alternatives are a planning conversation rather than a stored edge. Its *obstacles* idea is still unused and still interesting |
 | **i\* / Tropos** | means-ends refinement; actor-dependency modelling. Strong on stakeholders, weak on multi-level decomposition, which is why KAOS supplies the tree |
-| **GRL** | **contribution links** with positive and negative polarity, plus satisfaction levels — `Link::Contributes { polarity }`. Also *correlation*: side effects rather than intended impact |
-| **HTN planning** | the **compound vs. primitive** distinction: compound tasks cannot execute and must decompose via methods until only primitive tasks remain. This is why only `Task` is executable and a compound intent without children is incomplete |
-| **OKRs** | objectives paired with measurable key results; `weight` for relative priority among siblings |
+| **GRL** | contribution links with polarity and satisfaction levels. *Dropped*: weighted partial contribution needs calibration a two-level plan has nowhere to put |
+| **HTN planning** | the **compound vs. primitive** distinction. *Survived*, and is the load-bearing one: a project cannot execute and a task can, which is why a project with no tasks is a defect |
+| **OKRs** | objectives paired with measurable key results. *Survived* as a project's objective and its `Measure`s; `weight` was dropped along with sibling priority |
 
 Two things deliberately *not* taken: KAOS obstacles (worth adding later — see §3.11)
 and GRL's quantitative satisfaction propagation, which needs calibration the tree
@@ -151,7 +154,7 @@ That lowers confidence in novelty and raises it in feasibility.
   authority, budget or enforcement.
 - **Vague cybernetics.** VSM write-ups tend to be concrete about the S1–S5 labels
   and silent on mechanics. The alarm triggers, rollup bound and overload response
-  in architecture.md are engineering, not citation.
+  in the shipped design are engineering, not citation.
 
 ---
 
@@ -224,22 +227,29 @@ It already implements S1–S5 with an algedonic channel in Elixir. Whether to ta
 it, port from it, or ignore it depends on how much of its alpha status is nominal.
 Worth a day's investigation before building depth >1.
 
-### 3.11 The intent tree needs a gardener
+### 3.11 Plans rot, and nothing gardens them
 
-Ontologies rot. Goals get achieved and stay open; visions get restated; projects
-outlive the goal that justified them. `Trajectory` detects *starved* and *stalled*
-nodes but nothing prunes or merges. Unresolved: whether pruning is an operator chore
-surfaced in the digest, or an Intelligence function. The failure mode is a tree
-elaborate enough that alignment metrics look healthy while meaning nothing.
+Largely defused by dropping the goal tree: with two levels there is no elaborate
+structure to look healthy while meaning nothing. What still rots is smaller and real —
+finished projects accumulate, dropped tasks stay in the tree, and a playbook drifts from
+the code it describes with nothing to notice.
 
-Related: KAOS *obstacles* would give blockers first-class status (refinable, with
-their own mitigation subtrees) instead of the current flat `Exception`. Probably
-worth adding once real usage shows what blocks work.
+Archiving handles the first deliberately. The other two are unaddressed: nothing detects
+a playbook whose acceptance commands no longer exist, and dropped tasks are visible
+forever because task-level archiving was judged not yet worth its cost.
+
+KAOS *obstacles* would still give blockers first-class status — refinable, with their
+own mitigation subtrees — instead of a flat failure. Worth revisiting once real usage
+shows what actually blocks work.
 
 ### 3.12 Classification is a model call on the critical path
 
-Intake proposes `kind`, `parent` and `link` with a model. Confirmation gates it, but
-a plausible-looking wrong parent is easy to accept — and a mis-parented intent
-corrupts every rollup above it. No mitigation beyond the confirm step, which relies
-on the operator caring at the moment of capture, exactly when they are least likely
-to.
+An orchestrator proposes `kind`, `parent` and `--after` when it decomposes a request,
+and a plausible-looking wrong one is easy to accept. The damage is smaller than it was
+under a deep tree — a wrong `parent` now means sharing the wrong worktree, and a wrong
+`--after` means starting too early or too late — but nothing detects either.
+
+Playbook guidance is the only mitigation, and it is advice: it shapes what gets
+proposed without checking what was. The admission gate catches structural mistakes —
+cycles, overlaps, missing acceptance — and is silent on a task that is well-formed and
+attached to the wrong thing.

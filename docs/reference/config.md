@@ -1,0 +1,140 @@
+# Configuration
+
+Two hand-edited files. Everything else is in `wecode.db`, which no one edits by hand.
+
+| file | scope | describes |
+|---|---|---|
+| `company.toml` | the workspace | who exists, what they may do, what outranks them |
+| `.wecode/playbook.toml` | one repository | how work is broken down *here* |
+
+The split is deliberate. The company is one thing; a project is a codebase with its own
+conventions, and its guidance is versioned with the code it describes.
+
+## company.toml
+
+Lives in the workspace, alongside `wecode.db`. Unknown keys are an **error**, not a
+warning — a typo like `writ = [...]` would otherwise leave a role with no write scope
+and no complaint.
+
+```toml
+[company]
+name = "cws"
+profile = "solo"                  # solo | team | enterprise
+description = "..."
+
+[attention]                       # concurrency derives from this, not from cores
+max_open_items = 5
+max_interrupts_per_hour = 3
+digest_interval_mins = 20
+
+[invariants]                      # outrank every grant below
+never_touch = [".github/**", "infra/**", "**/*.pem", "**/.env"]
+never_run = ["git push --force*", "rm -rf /*"]
+approval_to_merge = ["main", "master", "release/**"]
+max_tokens = 1000000
+
+[[repos]]                         # declared by path; they live elsewhere
+name = "app"
+path = "~/projects/app"
+
+[roles.engineer]                  # a role is enforced capabilities, or it is nothing
+read = ["**"]
+write = ["src/**", "crates/**"]
+run = ["cargo *", "npm test*"]
+tokens = 200000
+wall_secs = 1800
+
+[roles.chief]
+read = ["**"]
+define = ["project", "task"]      # may create work
+staff = true                      # may assign it
+merge_to = ["**"]                 # may land it — the charter says where a signature is needed
+approve = ["admission", "merge"]
+# no write, no run: loading a company whose chief has either is an error
+
+[[posts]]                         # a seat, and the harness in it
+name = "impl"
+role = "engineer"
+agent = "claude-code"
+
+[[users]]                         # a person against a seat
+name = "Chandra"
+post = "chief"
+
+[session]
+ttl = "8h"                        # idle timeout, not age
+
+[agents.claude-code]              # how to actually launch it
+command = "claude"
+args = ["-p", "{{prompt}}", "--output-format", "stream-json", "--verbose"]
+env_allowlist = ["ANTHROPIC_API_KEY", "PATH", "HOME", "LANG"]
+wall_secs = 1800
+idle_secs = 300
+
+[templates]
+task_envelope = """..."""         # the prompt shape; see below
+```
+
+The **env allowlist is the whole environment** a spawned agent gets — nothing is
+inherited. Absent a container, that is the only network control there is.
+
+`{{prompt}}` in `args` is where the rendered envelope goes.
+
+## .wecode/playbook.toml
+
+In the repository, committed. `.wecode/run/` is the worker-writable area and should be
+gitignored; the playbook should not be.
+
+```toml
+[project]
+language = "rust"
+merge_to = "dev"                  # the integration branch: branch from it, merge to it
+merge = "approved"                # approved | auto — the charter still outranks this
+
+[feature]
+worktree  = true
+assign_to = "impl"
+accept    = ["cargo test --workspace"]
+tokens    = 120000
+wall_secs = 5400
+guidance  = """
+Prose, read by whoever decomposes a request into tasks. Say how work is split here,
+what the seams are, and what a task of this kind must not do.
+"""
+```
+
+One section per task kind. A kind with no section gets no defaults and no worktree. Only
+the typed fields are acted on; `guidance` is carried, never parsed.
+
+See [../guides/playbooks.md](../guides/playbooks.md) for what to write in it.
+
+## The envelope
+
+`templates.task_envelope` is the prompt a worker receives. Placeholders:
+
+`{{task_id}}` `{{project_id}}` `{{objective}}` `{{title}}` `{{acceptance}}`
+`{{write_scope}}` `{{context}}`
+
+`{{context}}` carries the handoff — what predecessors produced. If the template omits
+it, the handoff is **appended** rather than dropped: losing it silently would be worse
+than putting it somewhere unexpected.
+
+Previous attempts are appended after the template, always.
+
+## Where things live
+
+```
+~/.wecode/
+  current                        the default org, set by `wecode use`
+  workspaces/<org>/
+    company.toml
+    wecode.db
+  run/<org>/<task>/              worktrees — outside the repo and the workspace
+```
+
+Worktrees sit outside both on purpose, so a glob rooted at a worktree cannot sweep up
+the file that defines the worker's own grants. Note this is hygiene rather than a
+boundary: `run/` and `workspaces/` are siblings, so traversal still reaches it, and what
+actually refuses the write is the Broker.
+
+`$WECODE_CONFIG` relocates all of it, which is how the test suite stays isolated.
