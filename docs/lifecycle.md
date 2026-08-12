@@ -95,7 +95,8 @@ passed by the agent that produced it. Posts do not talk to each other, and an ag
 account of its own work is inadmissible — so it is read out of git and the execution
 record.
 
-Two payloads:
+Both payloads are [A2A](design/decisions.md#a2a) **artifacts**, because that is what
+they are — the output of a run that already happened:
 
 - **what came before you** — follows `depends_on`, since that relation already means
   "must come after"
@@ -104,6 +105,12 @@ Two payloads:
 
 Both carry the real diff, capped, because an envelope is a prompt and an unbounded diff
 would crowd out the instruction.
+
+The instruction itself is an A2A `Message`, and the two together are one A2A `Task` —
+wecode's *execution*, in state `submitted` until something is spawned. `wecode start
+<task>` renders it as the prompt; `--json` emits the record. Where the artifacts land in
+the prompt is the template's call: inline at `{{context}}`, or appended when it has no
+such slot.
 
 ## Landing it
 

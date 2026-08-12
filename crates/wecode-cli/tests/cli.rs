@@ -2424,6 +2424,58 @@ fn a_successor_is_shown_what_its_predecessor_produced() {
 }
 
 #[test]
+fn the_instruction_is_also_available_as_a2a_json() {
+    // Why adopting the protocol is worth anything: a caller that can parse gets the
+    // acceptance and the scope as data, rather than scraping them back out of prose.
+    let (org, _) = with_agent("a2a-json", "true");
+    a_task(&org, "t", "src/**", "grep -q right src/app.txt");
+
+    let r = org.run(&["start", "t", "--json"]);
+    r.assert_ok("start --json");
+    let v: serde_json::Value =
+        serde_json::from_str(&r.stdout).expect("start --json must emit valid JSON");
+
+    // A2A's Task is one wecode *execution*, and nothing has been spawned yet.
+    assert_eq!(v["id"], "t-attempt-1");
+    assert_eq!(v["contextId"], "t");
+    assert_eq!(v["status"]["state"], "submitted");
+    assert_eq!(v["history"][0]["role"], "user");
+
+    let parts = v["history"][0]["parts"].as_array().expect("parts");
+    let data = &parts
+        .iter()
+        .find(|p| p["kind"] == "data")
+        .expect("a data part")["data"];
+    assert!(
+        data["acceptance"][0]
+            .as_str()
+            .unwrap()
+            .contains("grep -q right src/app.txt"),
+        "{data}"
+    );
+    // The declared scope, plus the worker area every task may write to.
+    let scope = data["writeScope"].as_array().expect("writeScope");
+    assert!(scope.iter().any(|g| g == "src/**"), "{data}");
+    assert!(scope.iter().any(|g| g == ".wecode/run/**"), "{data}");
+    assert_eq!(data["attempt"], 1);
+
+    // ...and that structured half never reaches the text a coding CLI is handed,
+    // where it would read as noise inside the instruction.
+    let text = parts
+        .iter()
+        .find(|p| p["kind"] == "text")
+        .expect("a text part")["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!text.contains("writeScope"), "{text}");
+    assert!(
+        text.contains("You may modify only: .wecode/run/**, src/**"),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_task_with_no_predecessors_says_so_plainly() {
     let (org, _) = with_agent("handoff-none", "true");
     a_task(&org, "t", "src/**", "true");

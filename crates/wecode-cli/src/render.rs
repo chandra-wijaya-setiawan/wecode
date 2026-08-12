@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use wecode_a2a as a2a;
 use wecode_core::{
     Admission, Blocker, Defect, Plan, Project, ProjectId, Task, TaskId, TaskKind, TaskStatus,
 };
@@ -585,111 +586,96 @@ pub(crate) fn worktrees(rows: &[WorktreeRow]) -> String {
     out
 }
 
-/// What the next agent needs to know, assembled from what wecode observed.
-///
-/// Never passed by the agent that produced it. Posts do not talk to each other, and an
-/// agent's account of its own work is inadmissible — so the handoff is read out of git
-/// and the execution record instead.
-///
-/// Two payloads, and they answer different questions:
-///
-/// - **what came before you**, following `depends_on`, because that relation already
-///   means "must come after" and is therefore exactly the edge a handoff travels
-/// - **what you tried last time**, from this task's own earlier commits, because a
-///   retry that cannot see its previous failure just repeats it
-fn handoff(task: &Task, plan: &Plan, cwd: &std::path::Path) -> String {
-    /// Enough of a diff to work from; not so much that it crowds out the instruction.
-    const DIFF_CAP: usize = 4000;
+/// Enough of a diff to work from; not so much that it crowds out the instruction.
+const DIFF_CAP: usize = 4000;
 
-    let mut out = String::new();
-
-    let done: Vec<&Task> = task
-        .depends_on
+/// What predecessors produced, as A2A artifacts.
+///
+/// Artifacts rather than prose because that is what they are — the output of a run
+/// that already happened. Modelling them as such is what lets the same handoff reach a
+/// remote agent as JSON without being rewritten for it.
+fn predecessor_artifacts(task: &Task, plan: &Plan, cwd: &std::path::Path) -> Vec<a2a::Artifact> {
+    task.depends_on
         .iter()
         .filter_map(|d| plan.task(d))
         // Unfinished work is not context, it is a blocker — and the task would not be
         // running if it had any.
         .filter(|t| t.status.is_done())
-        .collect();
-
-    if done.is_empty() {
-        out.push_str("(nothing came before this task)\n");
-    }
-    for t in &done {
-        out.push_str(&format!("{} — {}\n", t.id, t.title));
-        // A predecessor may have worked in its own worktree — worktrees are per main
-        // task, and two sibling tasks are two trees. They sit beside each other under
-        // the run root, so the sibling path is where its commits are.
-        //
-        // Reading them is not the same as *having* them: this task's branch was cut
-        // from the base, so the predecessor's changes are visible here but not
-        // present. See `branch-from-predecessor`.
-        let their_tree = plan
-            .task(&t.id)
-            .and_then(|p| crate::work::owner(plan, &p.id))
-            .map(|o| cwd.with_file_name(o.id.as_str()))
-            .filter(|d| d.is_dir())
-            .unwrap_or_else(|| cwd.to_path_buf());
-        match crate::git::attempts_on(&their_tree) {
-            Ok(commits) => {
-                let mine: Vec<&(String, String)> = commits
-                    .iter()
-                    .filter(|(_, subject)| subject.starts_with(&format!("{}: ", t.id)))
-                    .collect();
-                if mine.is_empty() {
-                    out.push_str("  (no commits in this worktree)\n");
-                }
-                for (sha, subject) in mine.iter().take(1) {
-                    out.push_str(&format!("  {sha}  {subject}\n"));
-                    if let Ok((files, diff)) =
-                        crate::git::commit_summary(&their_tree, sha, DIFF_CAP)
-                    {
-                        for f in &files {
-                            out.push_str(&format!("    {f}\n"));
+        .map(|t| {
+            let mut body = String::new();
+            // A predecessor may have worked in its own worktree — worktrees are per
+            // main task, and two sibling tasks are two trees. They sit beside each
+            // other under the run root, so the sibling path is where its commits are.
+            //
+            // Reading them is not the same as *having* them: this task's branch was
+            // cut from the base, so the predecessor's changes are visible here but not
+            // present. See `branch-from-predecessor`.
+            let their_tree = crate::work::owner(plan, &t.id)
+                .map(|o| cwd.with_file_name(o.id.as_str()))
+                .filter(|d| d.is_dir())
+                .unwrap_or_else(|| cwd.to_path_buf());
+            match crate::git::attempts_on(&their_tree) {
+                Ok(commits) => {
+                    let mine: Vec<&(String, String)> = commits
+                        .iter()
+                        .filter(|(_, subject)| subject.starts_with(&format!("{}: ", t.id)))
+                        .collect();
+                    if mine.is_empty() {
+                        body.push_str("  (no commits in this worktree)\n");
+                    }
+                    for (sha, subject) in mine.iter().take(1) {
+                        body.push_str(&format!("  {sha}  {subject}\n"));
+                        if let Ok((files, diff)) =
+                            crate::git::commit_summary(&their_tree, sha, DIFF_CAP)
+                        {
+                            for f in &files {
+                                body.push_str(&format!("    {f}\n"));
+                            }
+                            body.push_str(&indent_block(&diff));
                         }
-                        out.push_str(&indent_block(&diff));
                     }
                 }
+                Err(_) => body.push_str("  (not a worktree — no diff to show)\n"),
             }
-            Err(_) => out.push_str("  (not a worktree — no diff to show)\n"),
-        }
-    }
-    out
+            a2a::Artifact::new(t.id.as_str(), t.id.as_str(), vec![a2a::Part::text(body)])
+                .described(t.title.clone())
+        })
+        .collect()
 }
 
-/// What this task tried last time, for the envelope of a retry.
+/// What this task tried last time — the artifacts of its own earlier executions.
 ///
 /// Empty on a first attempt, which is the common case and should read as such rather
 /// than as a heading with nothing under it.
-fn prior_attempts(task: &Task, runs: &[wecode_store::Execution], cwd: &std::path::Path) -> String {
-    const DIFF_CAP: usize = 4000;
-    let finished: Vec<&wecode_store::Execution> =
-        runs.iter().filter(|r| r.status.is_finished()).collect();
-    if finished.is_empty() {
-        return String::new();
-    }
-
-    let mut out = String::from("\nYOUR PREVIOUS ATTEMPTS\n");
+fn attempt_artifacts(
+    task: &Task,
+    runs: &[wecode_store::Execution],
+    cwd: &std::path::Path,
+) -> Vec<a2a::Artifact> {
     let commits = crate::git::attempts_on(cwd).unwrap_or_default();
-    for r in finished.iter().rev().take(2) {
-        out.push_str(&format!(
-            "attempt {} — {} ({})\n",
-            r.attempt,
-            r.status.as_str(),
-            r.detail
-        ));
-        let wanted = format!("{}: attempt {}", task.id, r.attempt);
-        if let Some((sha, _)) = commits.iter().find(|(_, s)| s == &wanted)
-            && let Ok((files, diff)) = crate::git::commit_summary(cwd, sha, DIFF_CAP)
-        {
-            for f in &files {
-                out.push_str(&format!("  {f}\n"));
+    runs.iter()
+        .filter(|r| r.status.is_finished())
+        .rev()
+        .take(2)
+        .map(|r| {
+            let mut body = String::new();
+            let wanted = format!("{}: attempt {}", task.id, r.attempt);
+            if let Some((sha, _)) = commits.iter().find(|(_, s)| s == &wanted)
+                && let Ok((files, diff)) = crate::git::commit_summary(cwd, sha, DIFF_CAP)
+            {
+                for f in &files {
+                    body.push_str(&format!("  {f}\n"));
+                }
+                body.push_str(&indent_block(&diff));
             }
-            out.push_str(&indent_block(&diff));
-        }
-    }
-    out.push_str("Do not repeat what failed. Read the diff above before changing anything.\n");
-    out
+            a2a::Artifact::new(
+                format!("{}-attempt-{}", task.id, r.attempt),
+                format!("attempt {}", r.attempt),
+                vec![a2a::Part::text(body)],
+            )
+            .described(format!("{} ({})", r.status.as_str(), r.detail))
+        })
+        .collect()
 }
 
 fn indent_block(s: &str) -> String {
@@ -699,25 +685,39 @@ fn indent_block(s: &str) -> String {
         .concat()
 }
 
-/// Fills the task envelope from `company.toml`.
+/// One attempt at one task, as the protocol models it.
 ///
-/// The placeholders have existed in the template since it was written; nothing ever
-/// substituted them, so the envelope has been inert text until now.
+/// Everything the worker is told is **assembled here from what wecode observed**,
+/// never passed along by the agent that produced it. Posts do not talk to each other,
+/// and an agent's account of its own work is inadmissible — so the handoff is read out
+/// of git and the execution record instead. Two payloads, answering different
+/// questions:
+///
+/// - **what came before you**, following `depends_on`, because that relation already
+///   means "must come after" and is therefore exactly the edge a handoff travels
+/// - **what you tried last time**, from this task's own earlier commits, because a
+///   retry that cannot see its previous failure just repeats it
+///
+/// A2A's `Task` is wecode's *execution*: the state is `submitted` because nothing has
+/// been spawned yet. The instruction is a message, and everything the worker is given
+/// to read is an artifact — so the CLI prompt below and a remote agent's JSON are two
+/// renderings of one record rather than two formats to keep in step.
 #[must_use]
-pub(crate) fn envelope(
+pub(crate) fn a2a_task(
     template: &str,
     task: &Task,
     project: &Project,
     plan: &Plan,
     cwd: &std::path::Path,
     runs: &[wecode_store::Execution],
-) -> String {
-    let acceptance = if task.acceptance.is_empty() {
+) -> a2a::Task {
+    let acceptance: Vec<String> = task.acceptance.iter().map(|m| m.describe()).collect();
+    let acceptance_text = if acceptance.is_empty() {
         "(none declared)".to_string()
     } else {
-        task.acceptance
+        acceptance
             .iter()
-            .map(|m| format!("- {}", m.describe()))
+            .map(|m| format!("- {m}"))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -726,15 +726,24 @@ pub(crate) fn envelope(
     } else {
         task.scope.write.join(", ")
     };
-    let context = handoff(task, plan, cwd);
+
+    let context = predecessor_artifacts(task, plan, cwd);
+    let attempts = attempt_artifacts(task, runs, cwd);
+    let attempt = runs.iter().map(|r| r.attempt).max().unwrap_or(0) + 1;
+
+    let context_text = if context.is_empty() {
+        "(nothing came before this task)\n".to_string()
+    } else {
+        a2a::render::artifacts(&context)
+    };
 
     // Appended when the template has no `{{context}}`. A project whose envelope omits
     // the placeholder would otherwise lose the handoff without saying so, and what a
     // predecessor produced is not optional detail.
-    let orphaned_context = if template.contains("{{context}}") || context.trim().is_empty() {
+    let orphaned_context = if template.contains("{{context}}") || context.is_empty() {
         String::new()
     } else {
-        format!("\n\nCONTEXT FROM COMPLETED WORK\n{context}")
+        format!("\n\nCONTEXT FROM COMPLETED WORK\n{context_text}")
     };
 
     let filled = template
@@ -742,23 +751,70 @@ pub(crate) fn envelope(
         .replace("{{project_id}}", project.id.as_str())
         .replace("{{objective}}", &project.objective)
         .replace("{{title}}", &task.title)
-        .replace("{{acceptance}}", &acceptance)
+        .replace("{{acceptance}}", &acceptance_text)
         .replace("{{write_scope}}", &write_scope)
-        .replace("{{context}}", &context);
+        .replace("{{context}}", &context_text);
 
-    if filled.trim().is_empty() {
-        return format!(
+    let prior = if attempts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nYOUR PREVIOUS ATTEMPTS\n{}Do not repeat what failed. Read the diff above before changing anything.\n",
+            a2a::render::artifacts(&attempts)
+        )
+    };
+
+    let text = if filled.trim().is_empty() {
+        format!(
             "  no task_envelope in company.toml — nothing to hand to the worker\n  work in {}\n",
             cwd.display()
-        );
-    }
-    format!(
-        "{}{}{}\nWorking directory: {}\n",
-        filled.trim(),
-        orphaned_context,
-        prior_attempts(task, runs, cwd),
-        cwd.display()
+        )
+    } else {
+        format!(
+            "{}{}{}\nWorking directory: {}\n",
+            filled.trim(),
+            orphaned_context,
+            prior,
+            cwd.display()
+        )
+    };
+
+    // The structured half of the instruction. A coding CLI never sees it — only text
+    // parts render — but anything that can parse gets the acceptance and the scope
+    // without scraping them back out of the prose.
+    let spec = serde_json::json!({
+        "taskId": task.id.as_str(),
+        "projectId": project.id.as_str(),
+        "kind": task.kind.as_str(),
+        "attempt": attempt,
+        "acceptance": acceptance,
+        "writeScope": task.scope.write,
+        "workingDirectory": cwd.display().to_string(),
+    });
+
+    let execution = format!("{}-attempt-{attempt}", task.id);
+    let message = a2a::Message::to_agent(
+        format!("{execution}-instruction"),
+        vec![a2a::Part::text(text), a2a::Part::data(spec)],
     )
+    .about(task.id.as_str(), execution.clone());
+
+    let mut out = a2a::Task::new(execution, task.id.as_str(), a2a::TaskState::Submitted);
+    out.history.push(message);
+    out.artifacts = context.into_iter().chain(attempts).collect();
+    out
+}
+
+/// The prompt a coding CLI receives: the text of the instruction, nothing else.
+///
+/// The structured parts stay in the record. Handing a CLI agent a JSON blob on argv
+/// would put it in the instruction, where it reads as noise.
+#[must_use]
+pub(crate) fn envelope(t: &a2a::Task) -> String {
+    t.history
+        .first()
+        .map(a2a::Message::as_text)
+        .unwrap_or_default()
 }
 
 /// Every run of a task, so a retry does not erase what happened last time.

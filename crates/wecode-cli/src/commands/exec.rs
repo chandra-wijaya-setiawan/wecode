@@ -45,6 +45,9 @@ fn predecessor_branch(repo: &std::path::Path, plan: &Plan, task: &Task) -> Optio
 pub(crate) struct Prepared {
     pub(crate) cwd: PathBuf,
     pub(crate) envelope: String,
+    /// The same instruction as the protocol models it. `envelope` is one rendering of
+    /// this, so the two cannot describe different work.
+    pub(crate) a2a: wecode_a2a::Task,
     /// What preparation did, for the operator to read.
     pub(crate) notes: String,
 }
@@ -147,15 +150,17 @@ pub(crate) fn prepare(
         ));
     }
 
+    let a2a = render::a2a_task(
+        &company.templates.task_envelope,
+        task,
+        project,
+        plan,
+        &cwd,
+        runs,
+    );
     Ok(Prepared {
-        envelope: render::envelope(
-            &company.templates.task_envelope,
-            task,
-            project,
-            plan,
-            &cwd,
-            runs,
-        ),
+        envelope: render::envelope(&a2a),
+        a2a,
         cwd,
         notes,
     })
@@ -189,6 +194,13 @@ pub(crate) fn start(a: &Args) -> Res {
         "starting a task",
     )?;
     store.set_task_status(&id, TaskStatus::Running)?;
+
+    // For a caller that speaks the protocol rather than reading prose. The state is
+    // `submitted`: prepared, not yet spawned.
+    if a.has("json") {
+        return Ok(serde_json::to_string_pretty(&prepared.a2a)
+            .map_err(|e| format!("cannot render the task as A2A: {e}"))?);
+    }
 
     let mut out = prepared.notes;
     out.push_str(&format!(

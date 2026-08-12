@@ -63,7 +63,8 @@ COCKPIT
 
 WORK
   wecode assign <task> --to <post>     check the post may do it, then make it ready
-  wecode start <task>                  worktree + envelope; marks it running
+  wecode start <task> [--json]         worktree + envelope; marks it running
+                                       --json emits the A2A task instead of prose
   wecode tick                          promote waiting tasks whose work is unblocked
   wecode loop [--once]                 tick, then dispatch what is ready, forever
   wecode run <task>                    spawn its agent, supervise it, then verify

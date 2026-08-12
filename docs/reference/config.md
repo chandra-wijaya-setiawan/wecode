@@ -126,6 +126,9 @@ than putting it somewhere unexpected.
 
 Previous attempts are appended after the template, always.
 
+Both are rendered from A2A artifacts, so `wecode start <task> --json` shows exactly what
+a worker is being given — including the structured part it never sees in the prose.
+
 ## Where things live
 
 ```

@@ -93,6 +93,12 @@ specification sanctions rather than a compromise.
 What it buys is a *named* contract. The envelope previously carried headings invented on
 the spot, which nothing could parse and nothing pinned down.
 
+The model is wired rather than kept beside the code it describes: the instruction is a
+`Message`, the handoff is a set of `Artifact`s, and the prompt is one rendering of them.
+A parallel format that merely *corresponded* to the protocol would drift from it by the
+second change — and for a while this one did nothing at all, which is the same mistake
+the rule below is about.
+
 The status mapping is identity, not translation: `submitted`, `working`,
 `input-required`, `auth-required`, `completed`, `failed`, `canceled`, `rejected` are the
 protocol's own names. A2A's `Task` maps to a wecode **execution**, never to a wecode

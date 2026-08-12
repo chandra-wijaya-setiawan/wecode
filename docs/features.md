@@ -51,12 +51,19 @@ which is how you check a scope before assigning work to a seat that cannot reach
 | **Merge** | `--no-ff`, configurable policy, with a report |
 | **Rollback** | revert, not reset |
 | **Scheduler** | a tick that promotes, a loop that dispatches |
-| **A2A** | the data model, so a bridge stays a mapping |
+| **A2A** | the instruction *is* an A2A task; the prompt is one rendering of it |
 
 The **environment is built, not inherited** — a coding CLI would otherwise read every
 secret in the shell, and absent a container that is the only network control there is. A
 **new process group** matters because coding CLIs spawn children, and signalling only
 the parent leaves them running.
+
+The **instruction is an A2A task**, not a string built beside one. What the worker is
+told is a `Message`; what it is given to read — a predecessor's commit, its own failed
+attempt — is an `Artifact`. The text prompt is `wecode start <task>`, the same record as
+JSON is `wecode start <task> --json`, and neither can drift from the other because there
+is only one. The structured half never reaches the prompt: a coding CLI reads a JSON
+blob on argv as part of its instruction.
 
 **Nothing reads `.wecode/result.json`.** The diff is ground truth and an agent's account
 of its own work is inadmissible, so the file is written and ignored.
@@ -118,6 +125,7 @@ And if the loop dies mid-run the task stays `running` forever, leaking a slot ea
 
 ## Other absences
 
-Sending work to a remote A2A agent, streaming progress or token accounting (the
+Serving or calling A2A over JSON-RPC — the model is wired, the transport is not — plus
+streaming progress or token accounting (the
 `protocol` field is an unvalidated string that nothing matches on), containers, RACI, and
 the recursive management functions the theory describes.
