@@ -13,6 +13,16 @@ language = "rust"
 # Unset for now: this repo works on master directly, and naming a branch that does
 # not exist would fail at `wecode start`.
 
+# Traps that have cost a task each, in this repo:
+#
+#   A task that adds or changes a CLI command also changes docs/reference/commands.md
+#   and docs/reference/schema.md — both are generated from the source, so they move
+#   whether or not you touch them. Declare docs/** or the scope check refuses the work
+#   after it is done, and acceptance is frozen so the task cannot be repaired.
+#
+#   A task that changes a crate's public API changes the crate defining it, its
+#   Cargo.toml, and every caller. Declare the crates, not the files.
+
 [feature]
 worktree  = true
 assign_to = "impl"
