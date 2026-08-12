@@ -264,7 +264,7 @@ pub fn check_task(t: &Task, plan: &Plan) -> Vec<Defect> {
     for other in plan.tasks_of(&t.project) {
         if other.id == t.id
             || other.status.is_closed()
-            || sequenced(t, other)
+            || sequenced(plan, t, other)
             || nested(plan, t, other)
         {
             continue;
@@ -284,9 +284,38 @@ pub fn check_task(t: &Task, plan: &Plan) -> Vec<Defect> {
     out
 }
 
-/// Whether either task waits on the other, in either direction.
-fn sequenced(a: &Task, b: &Task) -> bool {
-    a.depends_on.contains(&b.id) || b.depends_on.contains(&a.id)
+/// Whether either task waits on the other, in either direction, at any remove.
+///
+/// Transitively, because ordering is transitive: if `c` waits on `b` and `b` waits on
+/// `a`, then `c` and `a` cannot run at the same time, and refusing them for a scope
+/// overlap states something untrue. A chain of tasks each building on the last is the
+/// ordinary shape of a slice, and the direct-only version made the third and every
+/// later link impossible to admit.
+fn sequenced(plan: &Plan, a: &Task, b: &Task) -> bool {
+    waits_on(plan, a, &b.id) || waits_on(plan, b, &a.id)
+}
+
+/// Whether `t` waits on `target`, directly or through other tasks.
+///
+/// Seeded from `t`'s own declared dependencies rather than looked up by id: the task
+/// being admitted is not in the plan yet, so looking it up would find nothing.
+fn waits_on(plan: &Plan, t: &Task, target: &TaskId) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack: Vec<TaskId> = t.depends_on.clone();
+    while let Some(id) = stack.pop() {
+        if &id == target {
+            return true;
+        }
+        // A cycle is its own defect, reported by another check. This walk has to
+        // terminate whether or not that check has run yet.
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(next) = plan.task(&id) {
+            stack.extend(next.depends_on.iter().cloned());
+        }
+    }
+    false
 }
 
 /// Whether one task is part of the other, at any depth.
@@ -532,6 +561,54 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "a successor cannot collide with its predecessor"
+        );
+    }
+
+    #[test]
+    fn ordering_holds_across_a_chain_not_just_one_link() {
+        // Found by using the tool: a slice is a chain, and the third link was refused
+        // for overlapping the first — which it can never run beside. The message even
+        // said "could run at the same time", which was false.
+        let mut plan = seeded();
+        plan.add_task(good_task()).unwrap();
+
+        let second = Task::new("cache-metrics", "caching", "record the cache hit rate")
+            .after("cache-layer")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/metrics/**"]))
+            .budgeted(budget());
+        plan.add_task(second).unwrap();
+
+        let third = Task::new("cache-report", "caching", "publish the hit rate weekly")
+            .after("cache-metrics")
+            .accepting(cmd())
+            // The same scope as `cache-layer`, two links back.
+            .scoped(Scope::write(&["crates/export/**"]))
+            .budgeted(budget());
+        assert!(
+            !check_task(&third, &plan)
+                .iter()
+                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
+            "a task cannot collide with something it transitively waits on"
+        );
+    }
+
+    #[test]
+    fn an_unordered_task_still_collides() {
+        // The guard above must not swallow the check it guards: with no path between
+        // them, the same two scopes are a genuine conflict.
+        let mut plan = seeded();
+        plan.add_task(good_task()).unwrap();
+
+        let loose = Task::new("cache-report", "caching", "publish the hit rate weekly")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/export/**"]))
+            .budgeted(budget());
+        assert!(
+            check_task(&loose, &plan)
+                .iter()
+                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
+            "two tasks with no ordering between them still compete"
         );
     }
 
