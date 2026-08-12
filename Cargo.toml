@@ -30,6 +30,13 @@ unreachable_pub = "warn"
 all = { level = "warn", priority = -1 }
 todo = "warn"
 dbg_macro = "warn"
+# The `as` casts that lose information, rather than all of pedantic. A budget read
+# back as `-1 as u64` is a limit nothing can exhaust, which is the failure this
+# family prevents; the rest of pedantic is style, and would bury it.
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+cast_lossless = "warn"
 
 [profile.release]
 lto = "thin"
