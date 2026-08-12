@@ -138,14 +138,17 @@ Time-box it. A spike that turns into an implementation should have been a featur
 [docs]
 worktree  = false
 assign_to = "impl"
-accept    = ["test -f docs/architecture.md"]
+accept    = ["test -f docs/README.md"]
 tokens    = 30000
 wall_secs = 1800
 guidance  = """
 Single task. No subtasks, no worktree — prose does not conflict the way code does,
 so edit in place.
 
-architecture.md is current-state only. The reasoning and the evolution belong in git
-history, and the supporting theory in docs/theory.md. Anyone reading the design
-document should not have to work out which parts still apply.
+Every page describes what **exists**. Anything planned goes in plan.md; anything built
+but weak goes in the gaps section of docs/features.md. Mixing the two is how the old
+architecture.md became untrustworthy enough to delete.
+
+The reasoning behind a change belongs in its commit message, where it stays true.
+docs/design/decisions.md keeps only the arguments a reader still needs.
 """

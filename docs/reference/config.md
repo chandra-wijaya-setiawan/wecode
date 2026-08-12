@@ -108,6 +108,11 @@ the typed fields are acted on; `guidance` is carried, never parsed.
 
 See [../guides/playbooks.md](../guides/playbooks.md) for what to write in it.
 
+Like `company.toml`, a playbook is **hand-edited and deliberately in no role's write
+scope**. A task that tried to change one would be refused at assignment, which is the
+right answer: letting a worker rewrite the guidance it was given is the same problem as
+letting it define its own acceptance.
+
 ## The envelope
 
 `templates.task_envelope` is the prompt a worker receives. Placeholders:

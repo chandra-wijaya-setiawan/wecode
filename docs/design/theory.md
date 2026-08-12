@@ -1,6 +1,6 @@
 # Theory, prior art, and open questions
 
-Supporting material for [`architecture.md`](../concepts.md). Nothing here is
+Supporting material for [the concepts](../concepts.md) and [the decisions](decisions.md). Nothing here is
 required to implement the system; it records where the design came from, what has
 already been built elsewhere, and which claims are untested.
 
