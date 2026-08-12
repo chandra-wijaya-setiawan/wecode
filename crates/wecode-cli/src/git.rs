@@ -8,7 +8,7 @@
 //! the process's working directory.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug)]
@@ -160,6 +160,220 @@ pub(crate) fn commit_all(worktree: &Path, message: &str) -> Result<Option<String
         ],
     )?;
     Ok(Some(git(worktree, &["rev-parse", "--short", "HEAD"])?))
+}
+
+/// What one merge did, and what undoes it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Merged {
+    /// Where the target stood before. `git reset --hard` to this undoes the merge
+    /// entirely, if nothing has been pushed.
+    pub(crate) was: String,
+    /// The merge commit. `git revert -m 1` on this undoes it safely either way.
+    pub(crate) sha: String,
+    /// Files the merge brought in, with their line counts.
+    pub(crate) files: Vec<(String, u32, u32)>,
+}
+
+impl Merged {
+    pub(crate) fn insertions(&self) -> u32 {
+        self.files.iter().map(|(_, a, _)| a).sum()
+    }
+
+    pub(crate) fn deletions(&self) -> u32 {
+        self.files.iter().map(|(_, _, d)| d).sum()
+    }
+}
+
+/// Where `branch` is checked out, if anywhere.
+///
+/// git refuses to check one branch out twice, and the integration branch is usually
+/// the one the operator is standing on — so this is the normal case, not an edge.
+pub(crate) fn checked_out_at(repo: &Path, branch: &str) -> Option<PathBuf> {
+    let out = git(repo, &["worktree", "list", "--porcelain"]).ok()?;
+    let mut dir: Option<&str> = None;
+    for line in out.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            dir = Some(p);
+        } else if line.strip_prefix("branch refs/heads/") == Some(branch) {
+            return dir.map(PathBuf::from);
+        }
+    }
+    None
+}
+
+/// Whether a tree has uncommitted work.
+pub(crate) fn is_dirty(dir: &Path) -> bool {
+    !changed_files(dir).unwrap_or_default().is_empty()
+}
+
+/// Merges `branch` into `target`.
+///
+/// In a scratch worktree when it can, so the operator's checkout is untouched. When
+/// the target is already checked out — usually because they are standing on it — the
+/// merge happens there, because git will not check a branch out twice and moving the
+/// ref underneath a live tree would leave their `git status` showing the change in
+/// reverse. A dirty tree is refused rather than merged into.
+///
+/// Always `--no-ff`. A fast-forward leaves no merge commit, and then there is no single
+/// thing to revert; forcing one means every merge is exactly one commit you can undo.
+pub(crate) fn merge_into(
+    repo: &Path,
+    scratch: &Path,
+    target: &str,
+    branch: &str,
+    message: &str,
+) -> Result<Merged, GitError> {
+    if !branch_exists(repo, target) {
+        return Err(GitError::Failed {
+            argv: format!("merge into {target}"),
+            stderr: format!("no branch `{target}` — nothing to merge into"),
+        });
+    }
+    let (dir, borrowed) = tree_for(repo, scratch, target)?;
+
+    let outcome = (|| -> Result<Merged, GitError> {
+        let dir = dir.as_path();
+        let was = git(dir, &["rev-parse", "HEAD"])?;
+        git(
+            dir,
+            &[
+                "-c",
+                "user.name=wecode",
+                "-c",
+                "user.email=wecode@localhost",
+                "merge",
+                "--no-ff",
+                "-m",
+                message,
+                branch,
+            ],
+        )?;
+        let sha = git(dir, &["rev-parse", "HEAD"])?;
+        if sha == was {
+            // `git merge --no-ff` on an already-merged branch says "Already up to
+            // date" and creates nothing. Reporting that as a merge of zero files
+            // would be a lie of omission, and it is exactly what happens after a
+            // rollback: reverting a merge does not un-merge the branch, so git still
+            // considers it merged. Restoring the work means reverting the revert.
+            return Err(GitError::Failed {
+                argv: format!("merge {branch} into {target}"),
+                stderr: format!(
+                    "`{branch}` is already merged into `{target}`, so nothing happened.\n                       If it was rolled back, git still counts it as merged — restore it by\n                       reverting the revert, not by merging again."
+                ),
+            });
+        }
+        let files = numstat(dir, &was, &sha)?;
+        Ok(Merged { was, sha, files })
+    })();
+
+    // A scratch tree goes whether the merge worked or not; a conflicted one left
+    // behind would block the next attempt with a confusing error. A borrowed one is
+    // the operator's and stays.
+    if !borrowed {
+        let _ = worktree_remove(repo, scratch);
+    }
+    outcome
+}
+
+/// A directory with `target` checked out, and whether it belongs to the operator.
+fn tree_for(repo: &Path, scratch: &Path, target: &str) -> Result<(PathBuf, bool), GitError> {
+    if let Some(theirs) = checked_out_at(repo, target) {
+        if is_dirty(&theirs) {
+            return Err(GitError::Failed {
+                argv: format!("merge into {target}"),
+                stderr: format!(
+                    "{} has uncommitted changes on `{target}` — commit or stash them first",
+                    theirs.display()
+                ),
+            });
+        }
+        return Ok((theirs, true));
+    }
+    let _ = worktree_remove(repo, scratch);
+    if let Some(parent) = scratch.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    git(
+        repo,
+        &["worktree", "add", &scratch.to_string_lossy(), target],
+    )?;
+    Ok((scratch.to_path_buf(), false))
+}
+
+/// Per-file insertions and deletions between two revisions.
+fn numstat(dir: &Path, from: &str, to: &str) -> Result<Vec<(String, u32, u32)>, GitError> {
+    let out = git(dir, &["diff", "--numstat", from, to])?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            let add = f.next()?;
+            let del = f.next()?;
+            let path = f.next()?;
+            // A binary file reports `-` rather than a count.
+            Some((
+                path.to_string(),
+                add.parse().unwrap_or(0),
+                del.parse().unwrap_or(0),
+            ))
+        })
+        .collect())
+}
+
+/// The merge commit that landed a task on `target`, if one did.
+///
+/// Found in git rather than stored: the merge message names the task, and git is
+/// already the record of what happened. A second copy in the database could disagree
+/// with it.
+pub(crate) fn merge_commit_for(repo: &Path, target: &str, task: &str) -> Option<String> {
+    let out = git(
+        repo,
+        &[
+            "log",
+            target,
+            "--merges",
+            "--grep",
+            &format!("^{task}: "),
+            "--format=%H",
+            "-n",
+            "1",
+        ],
+    )
+    .ok()?;
+    (!out.is_empty()).then_some(out)
+}
+
+/// Undoes a merge by reverting it. Safe whether or not the branch has been shared,
+/// which `reset --hard` is not.
+pub(crate) fn revert_merge(
+    repo: &Path,
+    scratch: &Path,
+    target: &str,
+    sha: &str,
+) -> Result<String, GitError> {
+    let (dir, borrowed) = tree_for(repo, scratch, target)?;
+    let outcome = (|| -> Result<String, GitError> {
+        let dir = dir.as_path();
+        git(
+            dir,
+            &[
+                "-c",
+                "user.name=wecode",
+                "-c",
+                "user.email=wecode@localhost",
+                "revert",
+                "--no-edit",
+                "-m",
+                "1",
+                sha,
+            ],
+        )?;
+        git(dir, &["rev-parse", "--short", "HEAD"])
+    })();
+    if !borrowed {
+        let _ = worktree_remove(repo, scratch);
+    }
+    outcome
 }
 
 /// The files one commit touched, and the diff, capped.
@@ -420,6 +634,97 @@ mod tests {
         let a = attempts_on(&r).unwrap();
         assert_eq!(a.len(), 2, "the base commit is not ours: {a:?}");
         assert!(a[0].1.contains("attempt 2"), "newest first: {a:?}");
+    }
+
+    #[test]
+    fn a_merge_lands_the_work_and_reports_what_undoes_it() {
+        let r = repo("merge");
+        let wt = r.parent().unwrap().join("wecode-git-merge-wt");
+        let scratch = r.parent().unwrap().join("wecode-git-merge-scratch");
+        let _ = fs::remove_dir_all(&wt);
+
+        worktree_add(&r, &wt, "wecode/t1", Some("main")).unwrap();
+        fs::write(wt.join("a.txt"), "from the task\n").unwrap();
+        commit_all(&wt, "t1: attempt 1").unwrap();
+
+        let m = merge_into(&r, &scratch, "main", "wecode/t1", "merge t1").unwrap();
+        assert_eq!(m.files.len(), 1);
+        assert_eq!(m.files[0].0, "a.txt");
+        assert_eq!(m.insertions(), 1);
+        assert_eq!(m.deletions(), 1);
+
+        // main really moved, and the scratch tree is gone.
+        let on_main = git(&r, &["show", "main:a.txt"]).unwrap();
+        assert_eq!(on_main, "from the task");
+        assert!(!scratch.exists(), "scratch worktree left behind");
+    }
+
+    #[test]
+    fn the_merge_is_never_a_fast_forward() {
+        // Without a merge commit there is no single thing to revert.
+        let r = repo("merge-noff");
+        let wt = r.parent().unwrap().join("wecode-git-noff-wt");
+        let scratch = r.parent().unwrap().join("wecode-git-noff-scratch");
+        let _ = fs::remove_dir_all(&wt);
+        worktree_add(&r, &wt, "wecode/t1", Some("main")).unwrap();
+        fs::write(wt.join("a.txt"), "x\n").unwrap();
+        commit_all(&wt, "t1: attempt 1").unwrap();
+
+        let m = merge_into(&r, &scratch, "main", "wecode/t1", "merge t1").unwrap();
+        let parents = git(&r, &["rev-list", "--parents", "-n", "1", &m.sha]).unwrap();
+        assert_eq!(
+            parents.split_whitespace().count(),
+            3,
+            "a merge commit has two parents: {parents}"
+        );
+    }
+
+    #[test]
+    fn a_merge_can_be_reverted() {
+        let r = repo("merge-revert");
+        let wt = r.parent().unwrap().join("wecode-git-revert-wt");
+        let scratch = r.parent().unwrap().join("wecode-git-revert-scratch");
+        let _ = fs::remove_dir_all(&wt);
+        worktree_add(&r, &wt, "wecode/t1", Some("main")).unwrap();
+        fs::write(wt.join("a.txt"), "unwanted\n").unwrap();
+        commit_all(&wt, "t1: attempt 1").unwrap();
+
+        let m = merge_into(&r, &scratch, "main", "wecode/t1", "merge t1").unwrap();
+        assert_eq!(git(&r, &["show", "main:a.txt"]).unwrap(), "unwanted");
+
+        revert_merge(&r, &scratch, "main", &m.sha).unwrap();
+        assert_eq!(
+            git(&r, &["show", "main:a.txt"]).unwrap(),
+            "one",
+            "the file is back to where it started"
+        );
+    }
+
+    #[test]
+    fn merging_a_branch_that_is_already_in_says_so_rather_than_reporting_nothing() {
+        // The trap after a rollback: git still counts the branch as merged, so a
+        // second merge is a silent no-op that reads like success.
+        let r = repo("merge-again");
+        let wt = r.parent().unwrap().join("wecode-git-again-wt");
+        let scratch = r.parent().unwrap().join("wecode-git-again-scratch");
+        let _ = fs::remove_dir_all(&wt);
+        worktree_add(&r, &wt, "wecode/t1", Some("main")).unwrap();
+        fs::write(wt.join("a.txt"), "x\n").unwrap();
+        commit_all(&wt, "t1: attempt 1").unwrap();
+        merge_into(&r, &scratch, "main", "wecode/t1", "merge t1").unwrap();
+
+        let e = merge_into(&r, &scratch, "main", "wecode/t1", "merge t1").unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("already merged"), "{msg}");
+        assert!(msg.contains("reverting the revert"), "{msg}");
+    }
+
+    #[test]
+    fn merging_into_a_branch_that_does_not_exist_says_so() {
+        let r = repo("merge-nobranch");
+        let scratch = r.parent().unwrap().join("wecode-git-nb-scratch");
+        let e = merge_into(&r, &scratch, "dev", "main", "x").unwrap_err();
+        assert!(e.to_string().contains("no branch `dev`"), "{e}");
     }
 
     #[test]

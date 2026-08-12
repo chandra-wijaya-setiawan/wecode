@@ -87,6 +87,8 @@ WORK
   wecode loop [--once]                 tick, then dispatch what is ready, forever
   wecode run <task>                    spawn its agent, supervise it, then verify
   wecode verify <task>                 judge it: diff against scope, then acceptance
+  wecode merge <task>                  land it on the integration branch, and report
+  wecode rollback <task>               revert that merge; the report says when to
   wecode worktree [remove <task>]      list them, or remove one (--force if dirty)
   wecode approve <merge|admission|budget|measure> [<what>] --as <post>
   wecode guard <post> <verb> <target>  authorise an action; records the decision
@@ -138,6 +140,8 @@ fn run(a: &Args) -> Res {
         ("brief", _) => brief(a),
         ("start", _) => start(a),
         ("verify", _) => verify_task(a),
+        ("merge", _) => merge_task(a),
+        ("rollback", _) => rollback_task(a),
         ("run", _) => run_task(a),
         ("tick", _) => tick(a),
         ("loop", _) | ("serve", _) => serve(a),

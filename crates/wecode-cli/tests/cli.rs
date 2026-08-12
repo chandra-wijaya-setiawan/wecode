@@ -2505,3 +2505,179 @@ fn an_independent_task_still_starts_from_the_base() {
         "an unrelated task inherited a predecessor's commit:\n{log}"
     );
 }
+
+// ----------------------------------------------------------------- merge ------
+
+/// A workspace whose repo has a `dev` branch and the given merge policy.
+fn mergeable(name: &str, policy: &str) -> (Org, PathBuf) {
+    let (org, repo) = with_agent(name, "echo landed >> src/app.txt");
+    org.playbook(
+        &repo,
+        &format!(
+            "[project]\nlanguage = \"text\"\nmerge_to = \"dev\"\nmerge = \"{policy}\"\n\n\
+             [chore]\nworktree = true\nassign_to = \"impl\"\naccept = [\"true\"]\n\
+             tokens = 100\nwall_secs = 30\nguidance = \"x\"\n"
+        ),
+    );
+    git(&repo, &["branch", "dev"]);
+    // The chief already carries `merge_to` from the template: landing work is its job.
+    (org, repo)
+}
+
+fn landed_task(org: &Org, id: &str) {
+    org.run(&[
+        "task",
+        "add",
+        id,
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "append a marker comment to the source",
+        "--write",
+        "src/**",
+        "--accept-cmd",
+        "grep -q landed src/app.txt",
+        "--tokens",
+        "100",
+        "--wall",
+        "30",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("task add");
+    org.run(&["run", id]).assert_contains("passed");
+}
+
+#[test]
+fn an_auto_project_merges_without_being_asked_and_reports_what_it_did() {
+    let (org, repo) = mergeable("merge-auto", "auto");
+    landed_task(&org, "t");
+
+    let r = org.run(&["merge", "t"]);
+    r.assert_ok("merge")
+        .assert_contains("MERGED  t → dev")
+        .assert_contains("how        automatic")
+        // The way back leads, because auto-merge is only defensible if it is undoable.
+        .assert_contains("undo       wecode rollback t")
+        .assert_contains("src/app.txt");
+    org.run(&["show", "t"]).assert_contains("status     done");
+
+    let on_dev = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["show", "dev:src/app.txt"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&on_dev.stdout).contains("landed"));
+}
+
+#[test]
+fn an_approved_project_waits_for_a_signature() {
+    let (org, _) = mergeable("merge-approved", "approved");
+    landed_task(&org, "t");
+
+    let r = org.run(&["merge", "t"]);
+    assert!(!r.ok(), "should refuse");
+    r.assert_contains("needs a signature")
+        .assert_contains("wecode approve merge --task t");
+
+    // A recorded signature, not a flag: the ledger is what the charter reads.
+    org.run(&["approve", "merge", "--task", "t"])
+        .assert_ok("sign");
+    org.run(&["merge", "t"])
+        .assert_ok("signed")
+        .assert_contains("how        signed off");
+}
+
+#[test]
+fn the_charter_outranks_an_auto_project() {
+    // A project may be stricter than the company, never laxer. `merge = "auto"` on a
+    // branch the charter protects changes nothing.
+    let (org, _) = mergeable("merge-charter", "auto");
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        text.replace("approval_to_merge = [", "approval_to_merge = [\"dev\", "),
+    )
+    .unwrap();
+
+    landed_task(&org, "t");
+    let r = org.run(&["merge", "t"]);
+    assert!(!r.ok(), "the charter protects dev");
+    r.assert_contains("charter protects that branch");
+
+    // And a signature still lands it — the charter demands one, it does not forbid.
+    org.run(&["approve", "merge", "--task", "t"])
+        .assert_ok("sign");
+    org.run(&["merge", "t"])
+        .assert_ok("signed")
+        .assert_contains("MERGED");
+}
+
+#[test]
+fn only_verified_work_merges() {
+    let (org, _) = mergeable("merge-unverified", "auto");
+    org.run(&[
+        "task",
+        "add",
+        "t",
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "append a marker comment to the source",
+        "--write",
+        "src/**",
+        "--accept-cmd",
+        "true",
+        "--tokens",
+        "10",
+        "--wall",
+        "5",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("task add");
+    let r = org.run(&["merge", "t"]);
+    assert!(!r.ok());
+    r.assert_contains("only verified work merges");
+}
+
+#[test]
+fn a_merge_can_be_rolled_back_and_says_how_to_restore_it() {
+    let (org, repo) = mergeable("merge-rollback", "auto");
+    landed_task(&org, "t");
+    org.run(&["merge", "t"]).assert_ok("merge");
+
+    org.run(&["rollback", "t"])
+        .assert_ok("rollback")
+        .assert_contains("ROLLED BACK")
+        // The trap, named before it is sprung.
+        .assert_contains("will not")
+        .assert_contains("git revert");
+    org.run(&["show", "t"])
+        .assert_contains("status     needs-approval");
+
+    let on_dev = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["show", "dev:src/app.txt"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&on_dev.stdout).contains("landed"));
+}
+
+#[test]
+fn merging_twice_is_refused_rather_than_silently_doing_nothing() {
+    let (org, _) = mergeable("merge-twice", "auto");
+    landed_task(&org, "t");
+    org.run(&["merge", "t"]).assert_ok("merge");
+    org.run(&["status", "t", "needs-approval"])
+        .assert_ok("reopen");
+
+    let r = org.run(&["merge", "t"]);
+    assert!(!r.ok(), "a no-op merge must not read as success");
+    r.assert_contains("already merged");
+}

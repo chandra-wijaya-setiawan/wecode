@@ -788,6 +788,139 @@ pub(crate) fn executions(runs: &[wecode_store::Execution]) -> String {
     out
 }
 
+/// What a merge did: a summary anyone can act on, then the detail behind it.
+///
+/// The summary leads with what undoes it. Auto-merging is only defensible because it
+/// is reversible, so the way back is the first thing worth knowing, not a footnote.
+#[must_use]
+pub(crate) fn merged(
+    task: &Task,
+    plan: &Plan,
+    target: &str,
+    branch: &str,
+    m: &crate::git::Merged,
+    signed: bool,
+) -> String {
+    let short = |sha: &str| sha.chars().take(9).collect::<String>();
+    let unblocked: Vec<&Task> = plan
+        .tasks()
+        .filter(|t| t.depends_on.contains(&task.id) && !t.status.is_closed())
+        .collect();
+
+    let mut out = format!("MERGED  {} → {target}\n\nsummary\n", task.id);
+    out.push_str(&format!(
+        "  {} file{}, +{} −{}\n",
+        m.files.len(),
+        if m.files.len() == 1 { "" } else { "s" },
+        m.insertions(),
+        m.deletions()
+    ));
+    out.push_str(&format!(
+        "  how        {}\n",
+        if signed { "signed off" } else { "automatic" }
+    ));
+    if !unblocked.is_empty() {
+        // The thing only wecode knows: what this merge lets start.
+        out.push_str(&format!(
+            "  unblocks   {}\n",
+            unblocked
+                .iter()
+                .map(|t| t.id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    out.push_str(&format!(
+        "  undo       wecode rollback {}   (was {})\n",
+        task.id,
+        short(&m.was)
+    ));
+
+    out.push_str("\nwhat changed\n");
+    if m.files.is_empty() {
+        out.push_str("  nothing — the branch held no changes against the target\n");
+    }
+    for (path, add, del) in &m.files {
+        out.push_str(&format!(
+            "  {:<52} +{add:<5} −{del}\n",
+            truncate_cmd(path, 52)
+        ));
+    }
+
+    // Only when it actually groups. One line per file under a heading called "by
+    // area" is the same list twice.
+    let areas = by_area(&m.files);
+    if areas.len() > 1 && areas.len() < m.files.len() {
+        out.push_str("\nby area\n");
+        for (area, files, add, del) in areas {
+            out.push_str(&format!(
+                "  {:<24} {files} file{}, +{add} −{del}\n",
+                area,
+                if files == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
+    out.push_str("\nacceptance\n");
+    if task.acceptance.is_empty() {
+        out.push_str("  none declared\n");
+    }
+    for a in &task.acceptance {
+        out.push_str(&format!("  ✓ {}\n", a.describe()));
+    }
+
+    out.push_str(&format!(
+        "\nprovenance\n  branch     {branch}\n  merge      {}\n  target was {}\n",
+        short(&m.sha),
+        short(&m.was)
+    ));
+    out
+}
+
+/// Files grouped by their first two path segments, largest first.
+///
+/// Two segments because one is usually `crates` or `src` and tells you nothing.
+fn by_area(files: &[(String, u32, u32)]) -> Vec<(String, usize, u32, u32)> {
+    let mut acc: std::collections::BTreeMap<String, (usize, u32, u32)> = Default::default();
+    for (path, add, del) in files {
+        // The directory it sits in. Splitting on a fixed depth made a top-level file
+        // its own "area", which is the file list again with a different heading.
+        let area = match path.rfind('/') {
+            Some(i) => path[..i].to_string(),
+            None => ".".to_string(),
+        };
+        let e = acc.entry(area).or_default();
+        e.0 += 1;
+        e.1 += add;
+        e.2 += del;
+    }
+    let mut v: Vec<(String, usize, u32, u32)> =
+        acc.into_iter().map(|(k, (n, a, d))| (k, n, a, d)).collect();
+    v.sort_by_key(|x| std::cmp::Reverse(x.2 + x.3));
+    v
+}
+
+/// What a rollback undid.
+#[must_use]
+pub(crate) fn rolled_back(task: &Task, target: &str, merge: &str, revert: &str) -> String {
+    let mut out = format!("ROLLED BACK  {} from {target}\n\n", task.id);
+    out.push_str(&format!(
+        "  reverted   {}\n",
+        merge.chars().take(9).collect::<String>()
+    ));
+    out.push_str(&format!("  revert     {revert}\n"));
+    out.push_str("  status     needs-approval — verified, no longer landed\n\n");
+    // Said plainly, because "rolled back" could be read as "erased".
+    out.push_str("  The merge stays in history: a revert is a new commit, not a rewrite,\n");
+    out.push_str("  so this is safe whether or not the branch has been shared.\n\n");
+    // The trap, said before it is sprung.
+    out.push_str("  git still counts the branch as merged, so `wecode merge` will not\n");
+    out.push_str(&format!(
+        "  bring it back. To restore it: git revert {revert}\n"
+    ));
+    out
+}
+
 /// What running the agent did. Facts only — the verdict comes from `verify`.
 #[must_use]
 pub(crate) fn ran(

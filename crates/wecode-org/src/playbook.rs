@@ -39,6 +39,12 @@ pub enum PlaybookError {
         key: String,
         known: Vec<String>,
     },
+    /// A field whose value is not one of the ones it accepts.
+    BadValue {
+        at: String,
+        value: String,
+        known: String,
+    },
     AlreadyExists(PathBuf),
 }
 
@@ -49,6 +55,9 @@ impl fmt::Display for PlaybookError {
             Self::Io(e) => write!(f, "{PLAYBOOK_PATH}: {e}"),
             Self::UnknownKind { key, known } => {
                 write!(f, "[{key}] is not a task kind — have: {}", known.join(", "))
+            }
+            Self::BadValue { at, value, known } => {
+                write!(f, "{at}: `{value}` is not one of {known}")
             }
             Self::AlreadyExists(p) => write!(f, "{} already exists", p.display()),
         }
@@ -90,6 +99,8 @@ struct ProjectBlock {
     language: String,
     #[serde(default)]
     merge_to: Option<String>,
+    #[serde(default)]
+    merge: Option<String>,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -119,6 +130,42 @@ pub struct ProjectSettings {
     /// The integration branch: what a task branch is cut from, and where it will
     /// eventually merge back to.
     pub merge_to: Option<String>,
+    /// Whether passing work merges by itself.
+    pub merge: MergePolicy,
+}
+
+/// Who decides that verified work may land.
+///
+/// A project preference, not a rule. The charter's `approval_to_merge` outranks it, so
+/// a project may be *stricter* than the company — never laxer. Choosing `Auto` for a
+/// branch the charter protects changes nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum MergePolicy {
+    /// A capability holder signs first. The safe default: a project that has not
+    /// thought about it does not get automatic merges by omission.
+    #[default]
+    Approved,
+    /// Verified work lands without asking. Safe only because every merge is one
+    /// revertable commit and reports what it did.
+    Auto,
+}
+
+impl MergePolicy {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "approved" => Self::Approved,
+            "auto" => Self::Auto,
+            _ => return None,
+        })
+    }
 }
 
 /// What this project says about one kind of work.
@@ -174,6 +221,14 @@ impl Playbook {
             project: ProjectSettings {
                 language: w.project.language,
                 merge_to: w.project.merge_to,
+                merge: match w.project.merge.as_deref() {
+                    None => MergePolicy::default(),
+                    Some(v) => MergePolicy::parse(v).ok_or_else(|| PlaybookError::BadValue {
+                        at: "[project] merge".to_string(),
+                        value: v.to_string(),
+                        known: "auto, approved".to_string(),
+                    })?,
+                },
             },
             kinds,
         })
@@ -243,8 +298,13 @@ pub fn starter(language: &str) -> String {
 
 [project]
 language = "{language}"
-# The integration branch. Task branches are cut from it.
+# The integration branch. Task branches are cut from it, and merge back into it.
 # merge_to = "dev"
+#
+# Whether verified work lands by itself. `approved` (the default) waits for a
+# signature; `auto` merges and reports what it did. The charter still outranks this —
+# a branch it protects needs a signature whatever this says.
+# merge = "approved"
 
 [feature]
 worktree  = true
