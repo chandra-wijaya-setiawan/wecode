@@ -82,7 +82,7 @@ pub(crate) fn approve(a: &Args) -> Res {
         &Action::Approve { kind },
         "approving",
     )?;
-    Ok(format!(
+    let mut out = format!(
         "  {} approved {}{}\n",
         who.describe(),
         kind.as_str(),
@@ -91,7 +91,37 @@ pub(crate) fn approve(a: &Args) -> Res {
         } else {
             format!(": {}", a.cmd(2))
         }
-    ))
+    );
+
+    // A design approval is the transition, not a note about one. Merge approval is
+    // read later by `merge`, which does its own work afterwards; a design has no
+    // later step to read it, so signing is the last thing that happens to it.
+    if kind == ActionKind::Design
+        && let Some(id) = a.get("task")
+    {
+        let id = TaskId::new(id);
+        let plan = store.load_plan()?;
+        let task = plan
+            .task(&id)
+            .ok_or_else(|| format!("no such task: {id}"))?;
+        if !task.kind.needs_a_signature() {
+            return Err(format!(
+                "{id} is a {} task — only a design is signed off this way",
+                task.kind.as_str()
+            )
+            .into());
+        }
+        if task.status != TaskStatus::NeedsApproval {
+            return Err(format!(
+                "{id} is {} — a design is signed once it has passed, not before",
+                task.status.as_str()
+            )
+            .into());
+        }
+        store.set_task_status(&id, TaskStatus::Done)?;
+        out.push_str(&format!("  {id}  needs-approval → done\n"));
+    }
+    Ok(out)
 }
 
 pub(crate) fn audit(a: &Args) -> Res {

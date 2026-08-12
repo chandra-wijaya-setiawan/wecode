@@ -948,6 +948,54 @@ fn a_chain_stays_admissible_past_its_second_link() {
         .assert_contains("admitted");
 }
 
+// -------------------------------------------------------------- design ---------
+
+#[test]
+fn a_design_that_passes_waits_for_a_signature_rather_than_finishing() {
+    // Every other kind is done when its acceptance passes. A design is a proposal,
+    // and whether it is the right one is exactly what no command can check.
+    let (org, _) = with_agent("design-sign", "mkdir -p docs && echo proposal > docs/d.md");
+    org.run(&[
+        "task",
+        "add",
+        "d",
+        "propose how threading is reconstructed",
+        "--project",
+        "caching",
+        "--kind",
+        "design",
+        "--accept-cmd",
+        "test -f docs/d.md",
+        "--write",
+        "docs/**",
+        "--tokens",
+        "1000",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("add design");
+
+    org.run(&["run", "d"])
+        .assert_ok("run")
+        .assert_contains("passed");
+    org.run(&["show", "d"]).assert_contains("needs-approval");
+
+    // Nothing downstream may treat it as settled until someone signs.
+    org.run(&["approve", "design", "--task", "d"])
+        .assert_ok("approve design")
+        .assert_contains("needs-approval → done");
+    org.run(&["show", "d"]).assert_contains("done");
+}
+
+#[test]
+fn only_a_design_is_signed_off_that_way() {
+    let (org, _) = with_agent("design-wrong-kind", "true");
+    a_task(&org, "t", "src/**", "true");
+    let r = org.run(&["approve", "design", "--task", "t"]);
+    assert!(!r.ok(), "a feature must not be signed off as a design");
+    r.assert_contains("only a design is signed");
+}
+
 // ------------------------------------------------------------- task rm ---------
 
 #[test]

@@ -610,7 +610,12 @@ fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error
         // Passing acceptance is not the same as landed. A task with a worktree has a
         // branch nobody has merged, and merging is a signature wecode does not yet
         // collect — so it waits for a person rather than claiming to be done.
-        if dir.starts_with(work::run_root()) {
+        //
+        // A design waits for the same reason with a different cause: the document
+        // exists, which is all a command can check, and whether it is the right
+        // design is exactly the part no command can. Dependents must not start on the
+        // strength of a file being present.
+        if task.kind.needs_a_signature() || dir.starts_with(work::run_root()) {
             TaskStatus::NeedsApproval
         } else {
             TaskStatus::Done

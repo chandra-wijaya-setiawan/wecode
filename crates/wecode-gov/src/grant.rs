@@ -35,6 +35,8 @@ impl WorkKind {
 pub enum ActionKind {
     Merge,
     Admission,
+    /// Signing off a proposal before anything is built on it.
+    Design,
     BudgetIncrease,
     MeasureAmendment,
 }
@@ -48,6 +50,7 @@ impl ActionKind {
         match self {
             Self::Merge => "merge",
             Self::Admission => "admission",
+            Self::Design => "design",
             Self::BudgetIncrease => "budget-increase",
             Self::MeasureAmendment => "measure-amendment",
         }
@@ -57,6 +60,7 @@ impl ActionKind {
         Some(match s {
             "merge" => Self::Merge,
             "admission" => Self::Admission,
+            "design" => Self::Design,
             "budget" | "budget-increase" => Self::BudgetIncrease,
             "measure" | "measure-amendment" => Self::MeasureAmendment,
             _ => return None,
@@ -68,6 +72,7 @@ impl ActionKind {
         &[
             Self::Merge,
             Self::Admission,
+            Self::Design,
             Self::BudgetIncrease,
             Self::MeasureAmendment,
         ]
@@ -134,6 +139,7 @@ impl Grant {
             approve: [
                 ActionKind::Merge,
                 ActionKind::Admission,
+                ActionKind::Design,
                 ActionKind::BudgetIncrease,
                 ActionKind::MeasureAmendment,
             ]

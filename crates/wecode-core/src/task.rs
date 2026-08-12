@@ -24,6 +24,10 @@ pub enum TaskKind {
     Chore,
     /// Time-boxed investigation. Expected to produce an answer, not a change.
     Spike,
+    /// Proposes a change and writes no code. Distinct from a spike: a spike answers a
+    /// question, a design proposes an answer to it — and unlike every other kind, it
+    /// is not finished when it passes. It is finished when someone signs it.
+    Design,
     Docs,
 }
 
@@ -36,6 +40,7 @@ impl TaskKind {
             Self::Refactor => "refactor",
             Self::Chore => "chore",
             Self::Spike => "spike",
+            Self::Design => "design",
             Self::Docs => "docs",
         }
     }
@@ -47,6 +52,7 @@ impl TaskKind {
             "refactor" | "refac" => Self::Refactor,
             "chore" => Self::Chore,
             "spike" => Self::Spike,
+            "design" => Self::Design,
             "docs" | "doc" => Self::Docs,
             _ => return None,
         })
@@ -54,9 +60,23 @@ impl TaskKind {
 
     /// A spike answers a question; it is not expected to change the codebase, so it
     /// is the one kind that may be admitted without a write scope.
+    ///
+    /// A design is not exempt: it writes a document, and that document is the whole
+    /// deliverable. A design task with no write scope has nothing to show for itself.
     #[must_use]
     pub fn requires_write_scope(self) -> bool {
         !matches!(self, Self::Spike)
+    }
+
+    /// Whether passing verification finishes the work, or only makes it reviewable.
+    ///
+    /// A design is a proposal. Nothing downstream should proceed on the strength of a
+    /// document existing — the point of writing it down is that a human can disagree
+    /// with it while disagreeing is still cheap. So verification moves a design to
+    /// `needs-approval`, and only a recorded signature moves it to `done`.
+    #[must_use]
+    pub fn needs_a_signature(self) -> bool {
+        matches!(self, Self::Design)
     }
 
     #[must_use]
@@ -67,6 +87,7 @@ impl TaskKind {
             Self::Refactor,
             Self::Chore,
             Self::Spike,
+            Self::Design,
             Self::Docs,
         ]
     }

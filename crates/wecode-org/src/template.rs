@@ -94,7 +94,7 @@ define = ["project", "task"]
 # Landing work is the chief's job — it staffs and it merges, but writes no code.
 # Where a signature is *required* is the charter's business, not this list's.
 merge_to = ["**"]
-approve = ["admission", "budget-increase"]
+approve = ["admission", "design", "budget-increase"]
 introspect = "tree"
 staff = true
 tokens = 100000
@@ -237,7 +237,7 @@ merge_to = ["**"]
 # No reviewer post here, and the solo profile omits separation of duties: there is
 # one person and they cannot countersign themselves. A team profile moves `merge`
 # to a reviewer who writes no code.
-approve = ["admission", "merge"]
+approve = ["admission", "design", "merge"]
 introspect = "tree"
 staff = true
 tokens = 50000

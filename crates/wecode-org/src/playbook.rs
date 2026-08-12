@@ -358,6 +358,20 @@ TODO. A spike answers a question and needs no write scope. Say where the answer
 should be written down.
 """
 
+[design]
+worktree  = false
+assign_to = "impl"
+tokens    = 40000
+wall_secs = 1800
+accept    = ["test -f docs/wecode/{{{{task}}}}/design.md"]
+guidance  = """
+TODO. A design proposes a change and writes no code. It is the only kind that is not
+finished when it passes: it goes to needs-approval and waits for a signature, because
+whether a design is right is the part no command can check.
+
+Say what a design here must decide before anyone builds against it.
+"""
+
 [docs]
 worktree  = false
 assign_to = "impl"

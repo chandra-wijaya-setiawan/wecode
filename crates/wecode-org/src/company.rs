@@ -459,7 +459,7 @@ fn grant_of(name: &str, b: &RoleBlock) -> Result<Grant, OrgError> {
 
     let mut approve = BTreeSet::new();
     for a in &b.approve {
-        approve.insert(action_kind(a).ok_or_else(|| OrgError::BadValue {
+        approve.insert(ActionKind::parse(a).ok_or_else(|| OrgError::BadValue {
             at: at("approve"),
             value: a.clone(),
         })?);
@@ -507,16 +507,6 @@ fn grant_of(name: &str, b: &RoleBlock) -> Result<Grant, OrgError> {
         define,
         introspect,
         staff: b.staff,
-    })
-}
-
-fn action_kind(s: &str) -> Option<ActionKind> {
-    Some(match s {
-        "merge" => ActionKind::Merge,
-        "admission" => ActionKind::Admission,
-        "budget-increase" => ActionKind::BudgetIncrease,
-        "measure-amendment" => ActionKind::MeasureAmendment,
-        _ => return None,
     })
 }
 

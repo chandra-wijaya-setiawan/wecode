@@ -23,6 +23,7 @@ pub(crate) fn kind_tag(kind: TaskKind) -> &'static str {
         TaskKind::Refactor => "refac",
         TaskKind::Chore => "chore",
         TaskKind::Spike => "spike",
+        TaskKind::Design => "dsgn",
         TaskKind::Docs => "docs",
     }
 }

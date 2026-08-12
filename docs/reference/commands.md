@@ -73,7 +73,8 @@ WORK
   wecode merge <task>                  land it on the integration branch, and report
   wecode rollback <task>               revert that merge; the report says when to
   wecode worktree [remove <task>]      list them, or remove one (--force if dirty)
-  wecode approve <merge|admission|budget|measure> [<what>] --as <post>
+  wecode approve <merge|admission|design|budget|measure> [<what>] --as <post>
+        approve design --task <id>   signs a design off: needs-approval → done
   wecode guard <post> <verb> <target>  authorise an action; records the decision
         verbs: read write run merge spend        --tokens <n> for spend
         --task <id> / --project <id> attributes the record
