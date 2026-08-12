@@ -11,6 +11,7 @@ repository = "https://github.com/local/wecode"
 
 [workspace.dependencies]
 wecode-core = { path = "crates/wecode-core" }
+wecode-a2a = { path = "crates/wecode-a2a" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
