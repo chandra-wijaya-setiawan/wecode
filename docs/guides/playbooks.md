@@ -23,6 +23,7 @@ Only a few fields are typed, because wecode itself acts on them:
 | field | what wecode does with it |
 |---|---|
 | `worktree` | creates one, or does not |
+| `design_required` | refuses the kind at admission unless a design task stands before it |
 | `assign_to` | fills the assignee when you omit `--to` |
 | `accept` | fills acceptance when you omit `--accept-cmd` |
 | `tokens`, `wall_secs` | fill the budget |
@@ -74,6 +75,37 @@ Two rules worth knowing before you write one:
 Ceremony on small work is the real risk. Three tasks for a two-line change is absurd,
 which is why `--expand` is opt-in and per kind: `bug` should get no design step here —
 it gets a reproduction, which its guidance already demands and which is a better gate.
+
+## The design gate
+
+Without it, a feature can go from an idea to a merged branch with no human ever seeing
+a design. Turning it on is one line on the kind:
+
+```toml
+[feature]
+design_required = true
+```
+
+A feature is then refused at admission unless a `design` task stands before it — a
+predecessor anywhere up its dependency chain, or a subtask inside it, which is the
+shape `--expand` creates. That relation is the entire check. A design goes to
+`needs-approval` when it passes and reaches `done` only through `wecode approve design`,
+and nothing dispatches while a predecessor is unfinished — so the ordering machinery,
+not a status inspection, is what keeps the build step from running until a person has
+signed. `--force` admits an undesigned task and records the waiver, as with every other
+defect.
+
+Three claims, and the gate checks two: a design exists (a task at a known place), a
+human approved it (a record in the ledger). Whether the design is *good* is checkable
+by nobody but a reader, which is exactly why the design waits for a signature instead
+of finishing when its file exists.
+
+Pair it with `subtasks` so satisfying the gate costs one flag rather than two hand-typed
+tasks. A gated kind whose template declares a `design` step passes at `task add
+--expand` time on the strength of the step about to be created; every later check finds
+the design in the plan. A feature created before the gate was turned on can be repaired
+the same way — a dependency cannot be added to an existing task, but a subtask can:
+`wecode task add <id>-design --parent <id> --kind design ...`.
 
 ## Writing a good one
 

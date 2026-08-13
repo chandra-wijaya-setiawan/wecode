@@ -22,8 +22,15 @@ pub(crate) fn board_snapshot(a: &Args) -> Res {
     let known_repos = repo_names(&company);
     let plan = store.load_plan()?;
     let audit = store.audit(&AuditQuery::default())?;
+    let gates = design_gates(&company, &plan);
     match a.cmd(1) {
-        "" => Ok(board::portfolio(&plan, &audit, &known_repos, a.has("all"))),
-        id => Ok(board::focus(&plan, &audit, id, &known_repos)),
+        "" => Ok(board::portfolio(
+            &plan,
+            &audit,
+            &known_repos,
+            &gates,
+            a.has("all"),
+        )),
+        id => Ok(board::focus(&plan, &audit, id, &known_repos, &gates)),
     }
 }

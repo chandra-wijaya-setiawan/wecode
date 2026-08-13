@@ -35,9 +35,11 @@ A subtask is **not** blocked by its parent. A predecessor is **not** a parent. E
 its own cycle check, and each does one job: `parent` decides which worktree you work in,
 `depends_on` decides when you may start and what your handoff contains.
 
-A task has a **kind** — `feature`, `bug`, `refactor`, `chore`, `spike`, `docs` — which
-selects guidance and defaults. A spike is the one kind admitted without a write scope,
-because it answers a question rather than changing code.
+A task has a **kind** — `feature`, `bug`, `refactor`, `chore`, `spike`, `design`,
+`docs` — which selects guidance and defaults. A spike is the one kind admitted without
+a write scope, because it answers a question rather than changing code. A design is
+the one kind not finished when it passes: it goes to `needs-approval` and waits for a
+signature, because whether a design is right is the part no command can check.
 
 ## Who does the work
 

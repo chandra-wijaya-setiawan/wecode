@@ -414,6 +414,18 @@ pub(crate) fn playbook_all(project: &Project, pb: &Playbook) -> String {
             templated.join(", ")
         ));
     }
+    let gated: Vec<&str> = pb
+        .kinds()
+        .iter()
+        .filter(|(_, k)| k.design_required)
+        .map(|(kind, _)| kind.as_str())
+        .collect();
+    if !gated.is_empty() {
+        out.push_str(&format!(
+            "\n  a design must stand before: {}\n",
+            gated.join(", ")
+        ));
+    }
     out.push_str("\n  wecode playbook <kind>  for the guidance itself\n");
     out
 }
@@ -441,6 +453,9 @@ pub(crate) fn playbook_kind(project: &Project, pb: &Playbook, kind: TaskKind) ->
             "no".to_string()
         }
     ));
+    if k.design_required {
+        out.push_str("  design    required — admitted only behind a design task\n");
+    }
     if let Some(post) = &k.assign_to {
         out.push_str(&format!("  assign    {post}\n"));
     }
@@ -1711,7 +1726,7 @@ mod tests {
         p.add_project(Project::new("x", "an objective sentence", "api"))
             .unwrap();
         let t = Task::new("t", "x", "make the export faster");
-        let defects = admission::check_task(&t, &p);
+        let defects = admission::check_task(&t, &p, &[]);
         let out = admission(&task_heading(&t), &defects, None);
         assert!(out.contains("defect"), "{out}");
         assert!(out.contains("  1  "), "{out}");
@@ -1723,7 +1738,7 @@ mod tests {
     fn admission_confirms_a_well_formed_task() {
         let p = plan();
         let t = p.task(&TaskId::new("cache")).unwrap();
-        let defects = admission::check_task(t, &p);
+        let defects = admission::check_task(t, &p, &[]);
         let out = admission(&task_heading(t), &defects, None);
         assert!(out.contains("admitted"), "{out}");
         assert!(out.contains("cargo test cache"), "{out}");
@@ -1736,7 +1751,7 @@ mod tests {
         p.add_project(Project::new("x", "an objective sentence", "api"))
             .unwrap();
         let t = Task::new("t", "x", "");
-        let defects = admission::check_task(&t, &p);
+        let defects = admission::check_task(&t, &p, &[]);
         let waived = Admission::decide(defects.clone(), "operator", vec![]);
         let out = admission(&task_heading(&t), &defects, Some(&waived));
         assert!(out.contains("defect"), "{out}");

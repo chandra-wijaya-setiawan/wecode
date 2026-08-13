@@ -72,7 +72,18 @@ pub(crate) fn prepare(
         )
         .into());
     }
-    let defects = admission::check_task(task, plan);
+    let project = plan
+        .project(&task.project)
+        .ok_or_else(|| format!("no such project: {}", task.project))?;
+    // Loaded before the admission re-check, which needs the playbook's design gate:
+    // dispatch is the last door, and it must refuse what `task add` would.
+    let pb = playbook_of(company, project)?;
+    let gate = pb
+        .as_ref()
+        .map(wecode_org::Playbook::design_required_kinds)
+        .unwrap_or_default();
+
+    let defects = admission::check_task(task, plan, &gate);
     if !defects.is_empty() {
         return Err(format!(
             "{}\n  a draft cannot be worked on",
@@ -88,11 +99,6 @@ pub(crate) fn prepare(
         }
         return Err(msg.into());
     }
-
-    let project = plan
-        .project(&task.project)
-        .ok_or_else(|| format!("no such project: {}", task.project))?;
-    let pb = playbook_of(company, project)?;
 
     // The worktree belongs to the main task, so a subtask joins its parent's tree
     // rather than opening a second checkout of the same work.

@@ -1858,6 +1858,99 @@ fn without_expand_a_templated_playbook_behaves_exactly_as_before() {
     assert!(!org.run(&["show", "retry-design"]).ok());
 }
 
+// ------------------------------------------------------------ design gate ------
+
+/// `TEMPLATED` with the gate turned on: a feature here is refused unless a design
+/// stands before it. The template is what makes satisfying the gate one flag.
+fn with_gate(name: &str) -> (Org, PathBuf) {
+    let (org, repo) = with_template(name);
+    org.playbook(
+        &repo,
+        &TEMPLATED.replace("[feature]\n", "[feature]\ndesign_required = true\n"),
+    );
+    (org, repo)
+}
+
+#[test]
+fn a_feature_with_no_design_behind_it_is_refused() {
+    let (org, _) = with_gate("gate-refuses");
+    org.run(EXPANDABLE)
+        .assert_ok("refusal is a verdict, not an error")
+        .assert_contains("requires a design")
+        .assert_contains("not saved");
+    assert!(!org.run(&["show", "retry"]).ok(), "nothing was created");
+
+    // The gate is visible where an orchestrator plans, not only where it fails.
+    org.run(&["playbook", "feature"])
+        .assert_ok("playbook feature")
+        .assert_contains("design    required");
+    org.run(&["playbook"])
+        .assert_ok("playbook")
+        .assert_contains("a design must stand before: feature");
+}
+
+#[test]
+fn a_feature_built_on_a_design_is_admitted_and_waits_for_its_signature() {
+    let (org, _) = with_gate("gate-after");
+    org.run(&[
+        "task",
+        "add",
+        "retry-plan",
+        "--project",
+        "caching",
+        "--kind",
+        "design",
+        "decide how a failed task is retried",
+        "--write",
+        "src/design/retry.md",
+        "--accept-cmd",
+        "true",
+    ])
+    .assert_ok("the design itself is not gated")
+    .assert_contains("admitted");
+
+    let mut argv = EXPANDABLE.to_vec();
+    argv.extend(["--after", "retry-plan"]);
+    org.run(&argv)
+        .assert_ok("task add --after design")
+        .assert_contains("admitted")
+        .assert_contains("saved task retry")
+        // The gate asks only that the design exist to wait on; the ordering — and a
+        // design's need for a signature — is what keeps the feature from running.
+        .assert_contains("retry-plan is not done");
+}
+
+#[test]
+fn expand_satisfies_the_gate_with_the_design_step_it_creates() {
+    let (org, _) = with_gate("gate-expand");
+    let mut argv = EXPANDABLE.to_vec();
+    argv.push("--expand");
+    org.run(&argv)
+        .assert_ok("task add --expand")
+        .assert_contains("saved task retry")
+        .assert_contains("expanded retry into 2 subtasks");
+
+    // And the main task keeps satisfying the gate afterwards: the design is its
+    // subtask now, in the plan where every later check finds it.
+    org.run(&["check", "retry"])
+        .assert_ok("check")
+        .assert_contains("admitted");
+    org.run(&["check", "retry-build"])
+        .assert_ok("check the build step")
+        .assert_contains("admitted");
+}
+
+#[test]
+fn force_admits_an_undesigned_feature_and_records_the_waiver() {
+    let (org, _) = with_gate("gate-forced");
+    let mut argv = EXPANDABLE.to_vec();
+    argv.push("--force");
+    org.run(&argv)
+        .assert_ok("task add --force")
+        .assert_contains("forced — defects recorded as waivers")
+        .assert_contains("saved task retry");
+}
+
 // ------------------------------------------------------------- worktrees ------
 
 #[test]

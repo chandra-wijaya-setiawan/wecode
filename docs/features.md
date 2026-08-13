@@ -9,10 +9,11 @@ The inventory, including what is weak. Anything not here is not built — see
 |---|---|
 | **Projects and tasks** | two levels, one repo per project |
 | **Two relations** | `parent` (is part of) and `depends_on` (comes after), checked separately |
-| **Six kinds** | feature, bug, refactor, chore, spike, docs |
+| **Seven kinds** | feature, bug, refactor, chore, spike, design, docs |
 | **Admission gate** | deterministic defect checks, each carrying a fixed question |
 | **Playbooks** | per-project guidance, in the project's own repo |
 | **Templated decomposition** | `--expand` emits the subtasks a playbook declares |
+| **Design gate** | `design_required` refuses a kind with no design task behind it |
 | **Archiving** | park a project: hidden *and* not scheduled |
 
 The **admission gate** is the part most worth knowing. A task is refused, with a
@@ -20,6 +21,15 @@ question, if its title names more than one outcome or uses a word like *faster*;
 has no executable acceptance; if it has no write scope (except a spike); if it has no
 budget; if its scope overlaps a task that could run at the same time; or if it would
 close a dependency cycle. `--force` admits it anyway and records the defects as waivers.
+
+The **design gate** is the admission check that keeps a feature from going from an idea
+to a merged branch with no human ever seeing a design. A playbook kind that sets
+`design_required` is refused unless a `design` task stands before it — a predecessor
+anywhere up its dependency chain, or a subtask inside it, which is the shape `--expand`
+creates. The relation is the entire check: a design finishes only through a recorded
+signature, and nothing dispatches while its predecessors are unfinished, so the ordering
+machinery is what holds the work back until someone signs. Whether the design is any
+good stays a human judgement; the gate does not pretend to check it.
 
 **Playbooks** are guidance for whoever decomposes work, read before creating tasks. Free
 prose for how to break work down, plus a few typed fields wecode acts on: whether the

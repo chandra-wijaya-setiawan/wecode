@@ -8,10 +8,24 @@
 
 use std::collections::BTreeMap;
 
-use wecode_core::{Plan, Project, ProjectId, ProjectStatus, Task, TaskId, TaskStatus, admission};
+use wecode_core::{
+    Plan, Project, ProjectId, ProjectStatus, Task, TaskId, TaskKind, TaskStatus, admission,
+};
 use wecode_store::AuditLine;
 
 use crate::render::kind_tag;
+
+/// Which kinds each project refuses without a design — its playbook's gate.
+///
+/// Resolved by the caller, because it takes each repo's playbook and the board
+/// computes from values alone. A project absent from the map gates nothing, so the
+/// board's defect counts agree with `wecode check` whether or not a playbook exists.
+pub(crate) type DesignGates = BTreeMap<ProjectId, Vec<TaskKind>>;
+
+/// The gate for one task's project. `&[]` when the project gates nothing.
+fn gate_of<'a>(gates: &'a DesignGates, t: &Task) -> &'a [TaskKind] {
+    gates.get(&t.project).map_or(&[], Vec::as_slice)
+}
 
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
@@ -162,9 +176,9 @@ pub(crate) fn project_vitals(
     }
 }
 
-pub(crate) fn task_vitals(plan: &Plan, t: &Task, l: &Ledger) -> Vitals {
+pub(crate) fn task_vitals(plan: &Plan, t: &Task, l: &Ledger, gates: &DesignGates) -> Vitals {
     let c = task_totals(plan, &t.id, l);
-    let defects = admission::check_task(t, plan).len();
+    let defects = admission::check_task(t, plan, gate_of(gates, t)).len();
     let prog = task_progress(plan, t);
     let over = t.budget.tokens.is_some_and(|b| c.spent > b);
     let stalled = c.spent > 0 && prog == 0.0 && t.status == TaskStatus::Running;
@@ -352,6 +366,7 @@ pub(crate) fn portfolio(
     plan: &Plan,
     audit: &[AuditLine],
     known_repos: &[String],
+    gates: &DesignGates,
     show_all: bool,
 ) -> String {
     if plan.is_empty() {
@@ -379,7 +394,7 @@ pub(crate) fn portfolio(
             out.push_str(&row(
                 &format!("  {} {}", kind_tag(t.kind), t.id),
                 &task_status(t),
-                &task_vitals(plan, t, &l),
+                &task_vitals(plan, t, &l, gates),
             ));
         }
     }
@@ -393,7 +408,13 @@ pub(crate) fn portfolio(
 }
 
 /// A focused view on either level: the subject, what is beneath it, its incidents.
-pub(crate) fn focus(plan: &Plan, audit: &[AuditLine], id: &str, known_repos: &[String]) -> String {
+pub(crate) fn focus(
+    plan: &Plan,
+    audit: &[AuditLine],
+    id: &str,
+    known_repos: &[String],
+    gates: &DesignGates,
+) -> String {
     let l = ledger_index(audit);
 
     if let Some(p) = plan.project(&ProjectId::new(id)) {
@@ -412,7 +433,7 @@ pub(crate) fn focus(plan: &Plan, audit: &[AuditLine], id: &str, known_repos: &[S
             out.push_str(&row(
                 &format!("  {} {}", kind_tag(t.kind), t.id),
                 &task_status(t),
-                &task_vitals(plan, t, &l),
+                &task_vitals(plan, t, &l, gates),
             ));
         }
         // Every incident in the project, including its tasks'. The project row
@@ -424,7 +445,7 @@ pub(crate) fn focus(plan: &Plan, audit: &[AuditLine], id: &str, known_repos: &[S
     }
 
     if let Some(t) = plan.task(&TaskId::new(id)) {
-        let v = task_vitals(plan, t, &l);
+        let v = task_vitals(plan, t, &l, gates);
         let mut out = title_bar("L2", id, "wecode board to go up");
         out.push_str(&format!("{DIM}│ {}{RESET}\n", t.title));
         out.push_str(&header_row());
@@ -439,7 +460,7 @@ pub(crate) fn focus(plan: &Plan, audit: &[AuditLine], id: &str, known_repos: &[S
             out.push_str(&row(
                 &format!("  {} {}", kind_tag(k.kind), k.id),
                 &task_status(k),
-                &task_vitals(plan, k, &l),
+                &task_vitals(plan, k, &l, gates),
             ));
         }
         out.push_str(&incidents(audit, |x| x.task == id));
@@ -489,6 +510,10 @@ mod tests {
 
     fn repos() -> Vec<String> {
         vec!["wecode".to_string()]
+    }
+
+    fn no_gates() -> DesignGates {
+        DesignGates::new()
     }
 
     /// A project with one well-formed task, so a defect in a test is one the test
@@ -546,12 +571,12 @@ mod tests {
 
     #[test]
     fn empty_plan_suggests_a_next_step() {
-        assert!(portfolio(&Plan::new(), &[], &repos(), false).contains("project add"));
+        assert!(portfolio(&Plan::new(), &[], &repos(), &no_gates(), false).contains("project add"));
     }
 
     #[test]
     fn portfolio_lists_projects_and_their_root_tasks() {
-        let out = portfolio(&plan(), &[], &repos(), false);
+        let out = portfolio(&plan(), &[], &repos(), &no_gates(), false);
         assert!(out.contains("caching"), "{out}");
         assert!(out.contains("feat t1"), "{out}");
         assert!(out.contains("L0 · PORTFOLIO"), "{out}");
@@ -560,9 +585,9 @@ mod tests {
     #[test]
     fn every_level_shows_the_same_five_columns() {
         for out in [
-            portfolio(&plan(), &[], &repos(), false),
-            focus(&plan(), &[], "caching", &repos()),
-            focus(&plan(), &[], "t1", &repos()),
+            portfolio(&plan(), &[], &repos(), &no_gates(), false),
+            focus(&plan(), &[], "caching", &repos(), &no_gates()),
+            focus(&plan(), &[], "t1", &repos(), &no_gates()),
         ] {
             for col in ["what", "health", "progress", "spend", "needs you"] {
                 assert!(out.contains(col), "missing `{col}` in:\n{out}");
@@ -576,7 +601,7 @@ mod tests {
         let p = plan();
         let l = ledger_index(&audit);
         assert_eq!(
-            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l).health,
+            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).health,
             Health::Red
         );
         assert_eq!(
@@ -598,7 +623,7 @@ mod tests {
         let p = plan();
         let l = ledger_index(&audit);
         assert_eq!(
-            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l).health,
+            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).health,
             Health::Amber
         );
     }
@@ -632,7 +657,7 @@ mod tests {
         assert_eq!(v.spent, 150);
         // ...and it does not leak onto the task.
         assert_eq!(
-            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l).spent,
+            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).spent,
             0
         );
     }
@@ -645,7 +670,7 @@ mod tests {
         let audit = vec![line("caching", "t1a", "spend", "700t/2s", "allow")];
         let l = ledger_index(&audit);
         assert_eq!(
-            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l).spent,
+            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).spent,
             700,
             "a parent task sees its subtask's spend"
         );
@@ -666,7 +691,7 @@ mod tests {
         let audit = vec![line("caching", "t1", "spend", "5000t/0s", "allow")];
         let p = plan();
         let l = ledger_index(&audit);
-        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l);
+        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates());
         assert_eq!(v.health, Health::Red);
         assert!(
             v.needs.iter().any(|n| n.contains("over budget")),
@@ -702,15 +727,31 @@ mod tests {
         p.update_task(a).unwrap();
 
         let l = ledger_index(&[]);
-        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l);
+        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates());
         assert_eq!(v.progress, 0.5, "one of two subtasks done");
+    }
+
+    #[test]
+    fn a_projects_design_gate_reaches_its_rows() {
+        // The board's defect count must agree with `wecode check`, or a feature the
+        // gate refuses would sit green on the cockpit.
+        let p = plan();
+        let gates: DesignGates = [(ProjectId::new("caching"), vec![TaskKind::Feature])].into();
+        let v = task_vitals(
+            &p,
+            p.task(&TaskId::new("t1")).unwrap(),
+            &ledger_index(&[]),
+            &gates,
+        );
+        assert_eq!(v.defects, 1, "{:?}", v.needs);
+        assert_eq!(v.health, Health::Amber);
     }
 
     #[test]
     fn a_draft_with_no_defects_reads_as_unassigned() {
         let p = plan();
         let l = ledger_index(&[]);
-        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l);
+        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates());
         assert_eq!(v.defects, 0, "control case must be defect-free");
         assert!(v.needs.iter().any(|n| n == "unassigned"), "{:?}", v.needs);
         assert_eq!(
@@ -751,7 +792,12 @@ mod tests {
         let mut t = p.task(&TaskId::new("t1")).unwrap().clone();
         t.status = TaskStatus::NeedsApproval;
         p.update_task(t).unwrap();
-        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &ledger_index(&[]));
+        let v = task_vitals(
+            &p,
+            p.task(&TaskId::new("t1")).unwrap(),
+            &ledger_index(&[]),
+            &no_gates(),
+        );
         assert!(
             v.needs.iter().any(|n| n == "needs-approval"),
             "{:?}",
@@ -767,14 +813,19 @@ mod tests {
         let mut p = plan();
         p.add_task(good_task("t2", "the second half", "crates/other/**").after("t1"))
             .unwrap();
-        let v = task_vitals(&p, p.task(&TaskId::new("t2")).unwrap(), &ledger_index(&[]));
+        let v = task_vitals(
+            &p,
+            p.task(&TaskId::new("t2")).unwrap(),
+            &ledger_index(&[]),
+            &no_gates(),
+        );
         assert_eq!(v.defects, 0, "{:?}", v.needs);
         assert_eq!(v.health, Health::Green);
     }
 
     #[test]
     fn focus_on_a_missing_id_says_so() {
-        assert!(focus(&plan(), &[], "nope", &repos()).contains("no project or task"));
+        assert!(focus(&plan(), &[], "nope", &repos(), &no_gates()).contains("no project or task"));
     }
 
     #[test]
@@ -783,7 +834,7 @@ mod tests {
         // dead end.
         let p = plan();
         let audit = vec![line("caching", "t1", "write", "x.pem", "alarm")];
-        let out = focus(&p, &audit, "caching", &repos());
+        let out = focus(&p, &audit, "caching", &repos(), &no_gates());
         assert!(out.contains("1 alarm"), "{out}");
         assert!(
             out.contains("x.pem"),
@@ -800,7 +851,7 @@ mod tests {
             line("caching", "t1", "write", "x.pem", "alarm"),
             line("caching", "t2", "write", "elsewhere.rs", "deny"),
         ];
-        let out = focus(&p, &audit, "t1", &repos());
+        let out = focus(&p, &audit, "t1", &repos(), &no_gates());
         assert!(out.contains("incidents"), "{out}");
         assert!(out.contains("x.pem"), "{out}");
         assert!(

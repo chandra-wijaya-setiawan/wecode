@@ -7,7 +7,7 @@
 use crate::id::TaskId;
 use crate::plan::Plan;
 use crate::project::Project;
-use crate::task::Task;
+use crate::task::{Task, TaskKind};
 
 /// Words that name a direction without naming a target. Their presence means we
 /// cannot tell when the work is done, so we ask.
@@ -70,6 +70,15 @@ pub enum Defect {
         glob: String,
     },
     BudgetMissing,
+    /// The project demands a design before work of this kind, and no task of the
+    /// `design` kind stands before this one or inside it.
+    ///
+    /// The relation is the whole check, on purpose. A design reaches `done` only
+    /// through a recorded signature, and a dispatcher runs nothing whose
+    /// predecessors are unfinished — so "depends on a design" at admission time *is*
+    /// "an approved design exists" by the time this task runs. Whether the design is
+    /// any good stays a human judgement; the gate does not pretend to it.
+    DesignMissing,
     /// A project with no tasks cannot progress.
     ProjectHasNoTasks,
     /// A dependency that will never be satisfied.
@@ -121,6 +130,10 @@ impl Defect {
                  Narrow one, or make this depend on it."
             ),
             Self::BudgetMissing => "What is the budget — tokens, wall time, or both?".into(),
+            Self::DesignMissing => "This project requires a design before work of this kind. \
+                 Which design is it built on? Depend on a design task (--after <id>), \
+                 or create the pair with --expand."
+                .into(),
             Self::ProjectHasNoTasks => {
                 "This project has no tasks. Break it down before starting it.".into()
             }
@@ -219,8 +232,13 @@ pub fn check_project(p: &Project, plan: &Plan, known_repos: &[String]) -> Vec<De
 }
 
 /// Checks a task against its project and the tasks it could run alongside.
+///
+/// `needs_design` is the kinds this project refuses without a design behind them —
+/// from its playbook, since core reads no files. An empty list skips the check, the
+/// way an empty `known_repos` does: a project that has not asked for the gate does
+/// not get it by omission.
 #[must_use]
-pub fn check_task(t: &Task, plan: &Plan) -> Vec<Defect> {
+pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defect> {
     let mut out = Vec::new();
     check_statement(&t.title, &mut out);
 
@@ -256,6 +274,14 @@ pub fn check_task(t: &Task, plan: &Plan) -> Vec<Defect> {
     // old one retroactively defective reports the fault against the wrong task.
     if t.status.is_closed() {
         return out;
+    }
+
+    // The design gate. A closed task skips it above for the same reason it skips
+    // the overlap check: a playbook that turns the gate on must not retroactively
+    // fault work that already finished.
+    if needs_design.contains(&t.kind) && !waits_on_a_design(plan, t) && !contains_a_design(plan, t)
+    {
+        out.push(Defect::DesignMissing);
     }
 
     // Two further things stop concurrency: a dependency in either direction
@@ -316,6 +342,47 @@ fn waits_on(plan: &Plan, t: &Task, target: &TaskId) -> bool {
         }
     }
     false
+}
+
+/// Whether a `design` task stands anywhere before `t` in its dependency chain.
+///
+/// Only the kind is asked for, never the status. The dispatcher already refuses a
+/// task whose predecessors are unfinished, and a design finishes only through a
+/// recorded signature — so the ordering machinery, not this check, is what holds
+/// the work back until the design is approved. Asking for `done` here would refuse
+/// every expansion at the moment it is created, when its design is still a draft.
+///
+/// Transitive, because a chain of steps built on one design is the ordinary shape
+/// of an expansion, and only the first link names the design directly. Seeded from
+/// `t`'s own declared dependencies, like `waits_on`: the task being admitted is not
+/// in the plan yet.
+fn waits_on_a_design(plan: &Plan, t: &Task) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack: Vec<TaskId> = t.depends_on.clone();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(dep) = plan.task(&id) {
+            if dep.kind == TaskKind::Design {
+                return true;
+            }
+            stack.extend(dep.depends_on.iter().cloned());
+        }
+    }
+    false
+}
+
+/// Whether a `design` task sits anywhere beneath `t` — the other shape a design
+/// takes: the main task of an expansion *contains* its design step rather than
+/// waiting on it, and the steps that build are the ones ordered after it.
+///
+/// This is also the repair path. A dependency cannot be added to a task that
+/// exists, but a subtask can — so a feature caught by a gate turned on after its
+/// creation is satisfied by `task add <id>-design --parent <id> --kind design`.
+fn contains_a_design(plan: &Plan, t: &Task) -> bool {
+    plan.subtasks(&t.id)
+        .any(|s| s.kind == TaskKind::Design || contains_a_design(plan, s))
 }
 
 /// Whether one task is part of the other, at any depth.
@@ -437,9 +504,9 @@ mod tests {
         );
         let plan = seeded();
         assert!(
-            check_task(&good_task(), &plan).is_empty(),
+            check_task(&good_task(), &plan, &[]).is_empty(),
             "{:?}",
-            check_task(&good_task(), &plan)
+            check_task(&good_task(), &plan, &[])
         );
     }
 
@@ -460,7 +527,7 @@ mod tests {
         let mut t = good_task();
         t.title = "write the cache and rewrite the client".into();
         assert!(
-            check_task(&t, &seeded())
+            check_task(&t, &seeded(), &[])
                 .iter()
                 .any(|d| matches!(d, Defect::StatementCompound { .. }))
         );
@@ -490,7 +557,7 @@ mod tests {
         t.acceptance = vec![Measure::Judged {
             note: "looks right".into(),
         }];
-        assert!(check_task(&t, &seeded()).contains(&Defect::MeasureNotExecutable));
+        assert!(check_task(&t, &seeded(), &[]).contains(&Defect::MeasureNotExecutable));
     }
 
     #[test]
@@ -498,13 +565,13 @@ mod tests {
         let mut spike = good_task().of_kind(TaskKind::Spike);
         spike.scope = Scope::default();
         assert!(
-            !check_task(&spike, &seeded()).contains(&Defect::ScopeMissing),
+            !check_task(&spike, &seeded(), &[]).contains(&Defect::ScopeMissing),
             "a spike investigates; it need not write"
         );
 
         let mut feature = good_task();
         feature.scope = Scope::default();
-        assert!(check_task(&feature, &seeded()).contains(&Defect::ScopeMissing));
+        assert!(check_task(&feature, &seeded(), &[]).contains(&Defect::ScopeMissing));
     }
 
     #[test]
@@ -512,7 +579,7 @@ mod tests {
         for broad in ["**", "*", ".", "**/*"] {
             let t = good_task().scoped(Scope::write(&[broad]));
             assert!(
-                check_task(&t, &seeded())
+                check_task(&t, &seeded(), &[])
                     .iter()
                     .any(|d| matches!(d, Defect::ScopeTooBroad { .. })),
                 "{broad} should be too broad"
@@ -524,7 +591,8 @@ mod tests {
     fn a_missing_dependency_is_reported() {
         let t = good_task().after("ghost");
         assert!(
-            check_task(&t, &seeded()).contains(&Defect::DependencyMissing { on: "ghost".into() })
+            check_task(&t, &seeded(), &[])
+                .contains(&Defect::DependencyMissing { on: "ghost".into() })
         );
     }
 
@@ -538,7 +606,7 @@ mod tests {
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
         assert!(
-            check_task(&sibling, &plan)
+            check_task(&sibling, &plan, &[])
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "two tasks that can run at once must not share paths"
@@ -557,7 +625,7 @@ mod tests {
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
         assert!(
-            !check_task(&later, &plan)
+            !check_task(&later, &plan, &[])
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "a successor cannot collide with its predecessor"
@@ -586,7 +654,7 @@ mod tests {
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
         assert!(
-            !check_task(&third, &plan)
+            !check_task(&third, &plan, &[])
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "a task cannot collide with something it transitively waits on"
@@ -605,7 +673,7 @@ mod tests {
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
         assert!(
-            check_task(&loose, &plan)
+            check_task(&loose, &plan, &[])
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "two tasks with no ordering between them still compete"
@@ -624,7 +692,7 @@ mod tests {
             .scoped(Scope::write(&["crates/export/keys.rs"]))
             .budgeted(budget());
         assert!(
-            !check_task(&inner, &plan)
+            !check_task(&inner, &plan, &[])
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "a subtask works inside its parent, it does not compete with it"
@@ -642,7 +710,7 @@ mod tests {
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
         assert!(
-            check_task(&rival, &plan)
+            check_task(&rival, &plan, &[])
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "two concurrent siblings on the same paths is a real conflict"
@@ -665,9 +733,9 @@ mod tests {
         plan.add_task(newcomer).unwrap();
 
         assert!(
-            check_task(&done, &plan).is_empty(),
+            check_task(&done, &plan, &[]).is_empty(),
             "a finished task cannot conflict: {:?}",
-            check_task(&done, &plan)
+            check_task(&done, &plan, &[])
         );
     }
 
@@ -686,11 +754,11 @@ mod tests {
             .scoped(Scope::write(&["crates/other/**", ".wecode/run/**"]))
             .budgeted(budget());
         assert!(
-            !check_task(&other, &plan)
+            !check_task(&other, &plan, &[])
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "{:?}",
-            check_task(&other, &plan)
+            check_task(&other, &plan, &[])
         );
     }
 
@@ -706,17 +774,107 @@ mod tests {
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
         assert!(
-            !check_task(&fresh, &plan)
+            !check_task(&fresh, &plan, &[])
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. }))
         );
+    }
+
+    // -------------------------------------------------------- design gate ------
+
+    /// The kinds wecode's own playbook would gate: features only.
+    fn gated() -> Vec<TaskKind> {
+        vec![TaskKind::Feature]
+    }
+
+    fn design() -> Task {
+        Task::new("cache-design", "caching", "decide the cache key format")
+            .of_kind(TaskKind::Design)
+            .accepting(cmd())
+            .scoped(Scope::write(&["docs/wecode/cache/design.md"]))
+            .budgeted(budget())
+    }
+
+    #[test]
+    fn a_gated_feature_with_no_design_behind_it_is_refused() {
+        let d = check_task(&good_task(), &seeded(), &gated());
+        assert!(d.contains(&Defect::DesignMissing), "{d:?}");
+    }
+
+    #[test]
+    fn an_empty_gate_asks_for_nothing() {
+        // The same rule as `known_repos`: a project that has not asked for the
+        // gate does not get it by omission.
+        assert!(check_task(&good_task(), &seeded(), &[]).is_empty());
+    }
+
+    #[test]
+    fn a_dependency_on_a_design_satisfies_the_gate_before_the_design_is_done() {
+        // The design is still a draft — that is the moment `--expand` admits the
+        // build step. The ordering machinery holds the work back until the design
+        // is signed; the gate only asks that the design exist to wait on.
+        let mut plan = seeded();
+        plan.add_task(design()).unwrap();
+        let t = good_task().after("cache-design");
+        assert!(
+            !check_task(&t, &plan, &gated()).contains(&Defect::DesignMissing),
+            "{:?}",
+            check_task(&t, &plan, &gated())
+        );
+    }
+
+    #[test]
+    fn the_design_may_stand_anywhere_up_the_chain() {
+        // Only the first step of an expansion names the design directly; the ones
+        // after it are built on it just the same.
+        let mut plan = seeded();
+        plan.add_task(design()).unwrap();
+        plan.add_task(good_task().after("cache-design")).unwrap();
+        let third = Task::new("cache-metrics", "caching", "record the cache hit rate")
+            .after("cache-layer")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/metrics/**"]))
+            .budgeted(budget());
+        assert!(!check_task(&third, &plan, &gated()).contains(&Defect::DesignMissing));
+    }
+
+    #[test]
+    fn a_design_subtask_satisfies_the_gate_for_its_container() {
+        // The main task of an expansion holds its design as a child, not a
+        // predecessor — the steps that build are the ones ordered after it.
+        let mut plan = seeded();
+        plan.add_task(good_task()).unwrap();
+        plan.add_task(design().under("cache-layer")).unwrap();
+        let container = plan.task(&"cache-layer".into()).unwrap();
+        assert!(
+            !check_task(container, &plan, &gated()).contains(&Defect::DesignMissing),
+            "{:?}",
+            check_task(container, &plan, &gated())
+        );
+    }
+
+    #[test]
+    fn an_ungated_kind_needs_no_design() {
+        let t = good_task().of_kind(TaskKind::Chore);
+        assert!(!check_task(&t, &seeded(), &gated()).contains(&Defect::DesignMissing));
+    }
+
+    #[test]
+    fn a_finished_feature_is_not_faulted_by_a_gate_turned_on_later() {
+        // The flag arrives in a playbook commit; work done before it is history,
+        // and there is no way to add a dependency to an existing task anyway.
+        let mut done = good_task();
+        done.status = TaskStatus::Done;
+        let mut plan = seeded();
+        plan.add_task(done.clone()).unwrap();
+        assert!(check_task(&done, &plan, &gated()).is_empty());
     }
 
     #[test]
     fn waivers_admit_but_are_recorded() {
         let mut t = good_task();
         t.budget = Budget::default();
-        let defects = check_task(&t, &seeded());
+        let defects = check_task(&t, &seeded(), &[]);
         let waiver = Waiver {
             defect: Defect::BudgetMissing,
             by: "Chandra".into(),
