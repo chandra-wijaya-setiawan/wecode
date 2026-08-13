@@ -8,7 +8,7 @@ use wecode_store::{AuditQuery, Store};
 use crate::args::Args;
 use crate::commands::ctx::*;
 use crate::render;
-use crate::{git, teardown, work};
+use crate::{git, record, teardown, work};
 
 pub(crate) fn parse_action(a: &Args) -> Result<Action, String> {
     let verb = a.cmd(2);
@@ -281,7 +281,11 @@ pub(crate) fn merge_task(a: &Args) -> Res {
     let plan = store.load_plan()?;
     let swept = teardown::after_landing(&store, &plan, &repo, &work::org_name(ws.root()), &owner)?;
 
-    Ok(render::merged(
+    // The report is built first and committed second, because the file *is* the report:
+    // rendering a second version for the repository would give the same merge two
+    // accounts that could disagree. What the terminal shows is the committed text plus
+    // one line saying where it went — the only fact that postdates the file.
+    let report = render::merged(
         &task,
         &plan,
         &target,
@@ -289,7 +293,16 @@ pub(crate) fn merge_task(a: &Args) -> Res {
         &merged,
         needs_signature,
         &swept,
-    ))
+    );
+    let kept = record::keep(
+        &repo,
+        &scratch,
+        &target,
+        &id,
+        &branch,
+        &render::report_file(&id, &target, &report),
+    );
+    Ok(report + &render::record_line(&kept))
 }
 
 /// Undoes a merge that should not have happened.

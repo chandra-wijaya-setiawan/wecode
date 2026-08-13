@@ -286,3 +286,17 @@ cannot.
 Both are written however the run ended. A run killed on its wall limit spent what it
 spent, and a cost recorded only for clean exits would hide exactly the expensive
 failures.
+
+## What a merge left behind is not in here
+
+There is no `merges` table and there is not going to be one. Which merge commit landed a
+task is read out of git — the merge message names the task, and a second copy in the
+database could disagree with the branch. The report that summarises the whole task is
+committed to the repository as `docs/wecode/<task>/report.md`, for a reason this file
+cannot fix: the database is the company's, and the company is not the repository. Whoever
+opens the repo six months from now is not opening `wecode.db`.
+
+So the two halves of a landed task's record sit where each is readable. The ledger holds
+the events — the approval, the spend, the decisions — and answers *what happened, in
+order*. The repository holds one generated document per task and answers *what this task
+did*, to a reader who has only the code.

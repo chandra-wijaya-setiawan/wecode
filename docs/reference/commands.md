@@ -73,6 +73,7 @@ WORK
   wecode verify <task>                 judge it: diff against scope, then acceptance
   wecode merge <task>                  land it on the integration branch, and report
         the worktree comes down once nothing still works in it; the branch stays
+        the report is committed to docs/wecode/<task>/report.md, on the target
   wecode rollback <task>               revert that merge; the report says when to
   wecode worktree                      list them, grouped by repository
   wecode worktree remove <task|path>   take one down (--force if dirty)
@@ -131,6 +132,14 @@ anything about:
 | `— orphan (<task>)` | wecode made it; that task is no longer in the plan | `wecode worktree remove <path>` |
 | `— merge scratch` | the checkout a merge borrows | nothing, unless wecode died mid-merge; then the same |
 | `— not ours` | another tool's worktree in the same repository | nothing. It is not wecode's to touch |
+
+**`wecode merge`** commits its own report. The text the terminal prints also lands at
+`docs/wecode/<task>/report.md` on the integration branch, beside that task's `design.md`,
+as a separate commit on top of the merge. Verbatim, because the file is evidence and a
+re-rendered version could disagree with what you were shown. The `record` line at the
+bottom of `provenance` says where it went — or, if the commit failed, that it did not go
+anywhere; the merge stands either way, since by then there is nothing to undo. `rollback`
+does not delete it.
 
 **`wecode worktree remove`** takes either a task id or a path. A path is how the two middle
 rows are reached: neither has a task to look up in the plan, which is precisely what makes

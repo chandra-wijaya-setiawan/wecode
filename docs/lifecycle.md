@@ -138,9 +138,18 @@ A project can therefore be stricter than the company, never laxer. Where a signa
 required it must be a recorded one — `wecode approve merge --task <id>` — because a
 signature a command-line flag can stand in for is not a signature.
 
+The report is **kept, not printed**. It lands at `docs/wecode/<task>/report.md` on the
+integration branch, in the same directory as that task's `design.md`, as a second commit
+on top of the merge — the report quotes the merge sha, and no commit can contain its own
+name. The file holds the report verbatim, because it is evidence rather than a retelling
+of one; the terminal shows the same text plus a `record` line saying where it went, which
+is the one fact the file cannot state about itself. If that commit fails the merge still
+stands and the report says the record is missing, since by then there is nothing to undo.
+
 `rollback` reverts the merge. It is a new commit rather than a rewrite, so it is safe
 whether or not the branch has been shared — but git still counts the branch as merged
-afterwards, so restoring the work means reverting the revert, not merging again.
+afterwards, so restoring the work means reverting the revert, not merging again. The
+record stays where it is: the merge did happen, and that is what it says.
 
 ## The loop
 

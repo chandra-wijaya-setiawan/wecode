@@ -3723,6 +3723,89 @@ fn a_merge_can_be_rolled_back_and_says_how_to_restore_it() {
     assert!(!String::from_utf8_lossy(&on_dev.stdout).contains("landed"));
 }
 
+/// Trimmed stdout of a read-only git command, for asserting on what actually landed.
+fn git_out(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn the_merge_report_is_committed_where_the_task_record_lives() {
+    // The gap: `merge` built the one document that says what a task did — files, line
+    // counts, acceptance, provenance, what became of the tree — and printed it to a
+    // terminal that scrolls. A week on, the only surviving trace of a landed task was a
+    // merge commit.
+    let (org, repo) = mergeable("merge-record", "auto");
+    landed_task(&org, "t");
+
+    org.run(&["merge", "t"])
+        .assert_ok("merge")
+        .assert_contains("record     docs/wecode/t/report.md @");
+
+    // Beside the design the gate looks for, so one task's record is one directory.
+    let file = git_out(&repo, &["show", "dev:docs/wecode/t/report.md"]);
+    assert!(file.starts_with("# t → dev"), "{file}");
+    assert!(file.contains("Generated, never authored"), "{file}");
+    // The file *is* the report, not a second telling of it: re-rendering would give one
+    // merge two accounts that could disagree.
+    assert!(file.contains("MERGED  t → dev"), "{file}");
+    assert!(file.contains("src/app.txt"), "{file}");
+    assert!(file.contains("undo       wecode rollback t"), "{file}");
+    assert!(file.contains("worktree   removed"), "{file}");
+    // The one line it cannot carry is the one saying where it went. Nothing records its
+    // own landing.
+    assert!(!file.contains("record     docs"), "{file}");
+
+    // A commit of its own, on top of the merge, because the report names the merge sha
+    // and no commit can contain its own name. Not a merge commit either — `rollback`
+    // finds the merge by grepping `--merges`, and a second match would break it.
+    let log = git_out(&repo, &["log", "dev", "--format=%s", "-n", "2"]);
+    let mut lines = log.lines();
+    assert_eq!(lines.next(), Some("t: merge record"), "{log}");
+    assert!(
+        lines.next().expect("the merge").contains("t: append"),
+        "{log}"
+    );
+    // `rollback` finds the merge by grepping `--merges`, so a record that was itself a
+    // merge commit would be a second match sitting in front of the real one.
+    let parents = git_out(&repo, &["rev-list", "--parents", "-n", "1", "dev"]);
+    assert_eq!(
+        parents.split_whitespace().count(),
+        2,
+        "one parent: {parents}"
+    );
+}
+
+#[test]
+fn rolling_back_a_merge_leaves_its_record_standing() {
+    // A revert is a new commit rather than a rewrite, and the record is honest for the
+    // same reason: the merge did happen. Deleting the report would leave the branch
+    // carrying a merge and a revert that nothing accounts for.
+    let (org, repo) = mergeable("merge-record-rollback", "auto");
+    landed_task(&org, "t");
+    org.run(&["merge", "t"]).assert_ok("merge");
+
+    org.run(&["rollback", "t"])
+        .assert_ok("rollback")
+        .assert_contains("Its record stays too, at docs/wecode/t/report.md");
+
+    let file = git_out(&repo, &["show", "dev:docs/wecode/t/report.md"]);
+    assert!(file.contains("MERGED  t → dev"), "{file}");
+    // And the work itself is gone, which is what a rollback is.
+    let dev = git_out(&repo, &["ls-tree", "-r", "--name-only", "dev"]);
+    assert!(dev.contains("docs/wecode/t/report.md"), "{dev}");
+}
+
 /// Whether the repo has a branch by that name.
 fn has_branch(repo: &Path, branch: &str) -> bool {
     Command::new("git")

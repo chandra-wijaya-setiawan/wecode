@@ -4,6 +4,7 @@ mod args;
 mod board;
 mod commands;
 mod git;
+mod record;
 mod render;
 mod scheduler;
 mod spawn;
@@ -94,6 +95,7 @@ WORK
   wecode verify <task>                 judge it: diff against scope, then acceptance
   wecode merge <task>                  land it on the integration branch, and report
         the worktree comes down once nothing still works in it; the branch stays
+        the report is committed to docs/wecode/<task>/report.md, on the target
   wecode rollback <task>               revert that merge; the report says when to
   wecode worktree                      list them, grouped by repository
   wecode worktree remove <task|path>   take one down (--force if dirty)

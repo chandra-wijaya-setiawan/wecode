@@ -13,6 +13,7 @@ use wecode_org::Playbook;
 use wecode_org::{Company, Post};
 use wecode_store::{AuditLine, SessionInfo};
 
+use crate::record::Recorded;
 use crate::teardown::{Swept, Torn};
 
 #[must_use]
@@ -1211,6 +1212,46 @@ pub(crate) fn merged(
     out
 }
 
+/// The merge report as the file that gets committed.
+///
+/// The report goes in verbatim, inside a fence. It is deliberately *not* re-rendered
+/// into markdown sections: this file is evidence, and evidence is the thing that was
+/// produced, not a second telling of it. One generator means the file and the terminal
+/// can never drift, and an operator comparing what they saw against what landed is
+/// comparing identical text.
+///
+/// The heading and the two sentences above the fence are all that is added, and they
+/// exist to answer the question a reader of a committed file asks first: who wrote this,
+/// and may I believe it?
+#[must_use]
+pub(crate) fn report_file(task: &TaskId, target: &str, report: &str) -> String {
+    format!(
+        "# {task} → {target}\n\n\
+         Written by wecode when the merge landed, from git and its own record of the\n\
+         run. Generated, never authored: an agent's account of its own work is\n\
+         inadmissible, and a file it could have written would be too.\n\n\
+         ```text\n{}\n```\n",
+        report.trim_end()
+    )
+}
+
+/// The one line a merge says about where its own record went.
+///
+/// In `provenance` and last, because it is the only fact in the report that postdates
+/// the report — it cannot be anywhere but the end. That is also why the committed file
+/// does not contain this line: nothing can record its own landing.
+#[must_use]
+pub(crate) fn record_line(r: &Recorded) -> String {
+    match r {
+        Recorded::Kept { path, sha } => format!("  record     {path} @ {sha}\n"),
+        // Named rather than swallowed. The merge is fine; the note about it is missing,
+        // and only this line will ever say so.
+        Recorded::Lost { path, why } => {
+            format!("  record     not written to {path}\n             {why}\n")
+        }
+    }
+}
+
 /// The one line a merge says about the tree its work came out of.
 ///
 /// In the summary rather than a section of its own, because it is a consequence of the
@@ -1277,7 +1318,13 @@ pub(crate) fn rolled_back(task: &Task, target: &str, merge: &str, revert: &str) 
     out.push_str("  status     needs-approval — verified, no longer landed\n\n");
     // Said plainly, because "rolled back" could be read as "erased".
     out.push_str("  The merge stays in history: a revert is a new commit, not a rewrite,\n");
-    out.push_str("  so this is safe whether or not the branch has been shared.\n\n");
+    out.push_str("  so this is safe whether or not the branch has been shared.\n");
+    // And so does its record, for the same reason. A rollback that deleted the report
+    // would leave the branch carrying a merge and a revert that nothing accounts for.
+    out.push_str(&format!(
+        "  Its record stays too, at {} — the merge did happen.\n\n",
+        crate::record::path_for(&task.id)
+    ));
     // The trap, said before it is sprung.
     out.push_str("  git still counts the branch as merged, so `wecode merge` will not\n");
     out.push_str(&format!(
@@ -2303,6 +2350,41 @@ api — /repos/api
             },
         });
         assert_eq!(gone, "  worktree   removed /run/cws/feat\n");
+    }
+
+    #[test]
+    fn the_committed_report_is_the_printed_one_word_for_word() {
+        // The reason for a fence instead of markdown sections: the file is evidence, so
+        // it has to be the text that was produced rather than a second telling of it.
+        // A re-rendered version could differ from what the operator saw, and then the
+        // repository and the terminal disagree about one merge.
+        let report = "MERGED  t → dev\n\nsummary\n  1 file, +2 −0\n";
+        let file = report_file(&TaskId::new("t"), "dev", report);
+        assert!(file.starts_with("# t → dev\n"), "{file}");
+        assert!(file.contains(report.trim_end()), "{file}");
+        assert!(file.contains("Generated, never authored"), "{file}");
+        assert!(file.ends_with("```\n"), "{file}");
+    }
+
+    #[test]
+    fn a_record_that_did_not_land_says_so_rather_than_nothing() {
+        // The merge succeeded either way, so this line is the only thing that will ever
+        // tell an operator the note about it is missing.
+        let kept = record_line(&Recorded::Kept {
+            path: "docs/wecode/t/report.md".into(),
+            sha: "abc1234".into(),
+        });
+        assert_eq!(kept, "  record     docs/wecode/t/report.md @ abc1234\n");
+
+        let lost = record_line(&Recorded::Lost {
+            path: "docs/wecode/t/report.md".into(),
+            why: "git worktree add failed: no space left on device".into(),
+        });
+        assert!(
+            lost.contains("not written to docs/wecode/t/report.md"),
+            "{lost}"
+        );
+        assert!(lost.contains("no space left on device"), "{lost}");
     }
 
     #[test]
