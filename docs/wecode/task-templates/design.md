@@ -104,6 +104,37 @@ and merge approval already reads the ledger this way.
 A conventional path is what makes this cheap. `test -f docs/wecode/{{task}}/design.md`
 is a real acceptance command, so nobody has to name a path by hand for the gate to work.
 
+## Reaching the agent that needs it
+
+Amendment. The gate above makes a design a *dependency*; it does not make the design
+*visible*, and a dependency nobody reads is a delay rather than a control.
+
+`task-expand` was dispatched with a signed design sitting in this directory specifying
+exactly what to build, and nothing in its envelope pointed at it. The stopgap is a line
+of playbook guidance saying where designs live. The fix is smaller than it sounds.
+
+Nothing new is stored. A design task's path is already in the database twice — as its
+acceptance command and as its write scope — and the document itself belongs in git,
+where it can be diffed and reviewed, for the same reason `company.toml` is not in
+`wecode.db`. A third copy in a column would be a derived value free to drift from the
+two that produced it.
+
+What changes is one function. `render::predecessor_artifacts` walks `depends_on` and
+builds, for each done predecessor, an artifact holding its commit and a capped diff.
+For a design predecessor that is the wrong artifact: the value is the document, not the
+patch that created it. So a predecessor of kind `design` contributes its document, in
+full and uncapped, as its artifact.
+
+Three things already line up to make that small:
+
+- the handoff travels `depends_on`, which is the edge the gate adds anyway
+- `a2a::Artifact` is already the shape for "something a predecessor produced"
+- the diff cap exists to stop an unbounded patch crowding out the instruction; a design
+  is the instruction, so the cap does not apply to it
+
+This is part of `design-gate` rather than a task of its own. A gate that enforces a
+dependency the dependent cannot read has enforced paperwork.
+
 ## What is deliberately excluded
 
 **merge** is not a subtask. It is a lifecycle transition with a charter gate, a project
