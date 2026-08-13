@@ -8,6 +8,8 @@
 # `.wecode/run/` is the worker-writable area and is gitignored; this file is not.
 
 [project]
+merge_to = "master"
+merge    = "approved"   # the charter protects master anyway
 language = "rust"
 # The integration branch. Task branches are cut from it.
 # Unset for now: this repo works on master directly, and naming a branch that does
