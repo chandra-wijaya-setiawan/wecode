@@ -4,7 +4,7 @@ One file per workspace, `wecode.db`. Everything machine-written lives here; ever
 hand-edited lives in `company.toml` (see [config.md](config.md)), because a binary blob
 cannot be diffed, reviewed or opened in an editor.
 
-Currently **schema version 4**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`.
+Currently **schema version 5**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`.
 
 ## Shape
 
@@ -17,6 +17,7 @@ projects ──┬── project_measures
 
 sessions       who is connected
 audit_log      every decision and observation
+worktrees      the checkouts wecode made, and which are still standing
 ```
 
 `tasks.parent_id` is a self-reference: at most one parent, hence a column.
@@ -30,6 +31,10 @@ That is the one real cost of keeping config in a file, and it is a deliberate tr
 
 `audit_log` deliberately has **no** foreign keys either: a ledger row survives the
 deletion of the task it describes. Everything under `projects` cascades away.
+
+`worktrees.task_id` is unreferenced for the same reason. Deleting a task does not delete
+the directory, and a row that cascaded away would turn one of wecode's own checkouts back
+into a stranger — which is the exact confusion the table exists to end.
 
 ## Two properties worth knowing
 
@@ -52,6 +57,11 @@ gap in the chain is refused rather than half-applied.
 Each step stays frozen at the shape it produced. The 2→3 step still creates
 `task_executions` without `spent_tokens` and the 3→4 step adds the column, because
 every file that already ran the older step would otherwise never be given it.
+
+Nothing is backfilled. The 4→5 step creates `worktrees` empty, even for a workspace with
+checkouts already on disk: wecode made them and cannot prove when, and inventing a
+creation date would put a fact in the database that nobody observed. They are recorded
+the next time `wecode start` prepares them.
 
 ## Full DDL
 
@@ -190,7 +200,56 @@ CREATE TABLE task_executions (
 ) STRICT;
 
 CREATE INDEX executions_by_task ON task_executions(task_id);
+
+-- The worktrees wecode made, so a directory git hands back can be told apart from one
+-- another tool created. Keyed on the path because that is what git reports and what a
+-- listing has to match against.
+--
+-- No foreign key on `task_id`, and that is the point rather than an oversight. The row
+-- has to outlive the task: a tree whose task was deleted is still a directory wecode
+-- put on disk, and a row that cascaded away would turn it back into the stranger this
+-- table exists to distinguish it from. `task_executions.session_id` stands unreferenced
+-- for the same shape of reason.
+--
+-- `removed` is a tombstone rather than a delete: *we made one here and tore it down*
+-- and *there was never one here* are different facts, and the second must not be able
+-- to impersonate the first. So the uniqueness is a partial index — one live row per
+-- path, any number of dead ones — and a path can therefore be used a second time
+-- without erasing what stood there before.
+CREATE TABLE worktrees (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    path    TEXT NOT NULL,
+    repo    TEXT NOT NULL,      -- a [[repos]] name; the repo is the unit, not the project
+    branch  TEXT NOT NULL,
+    task_id TEXT NOT NULL,      -- the main task; subtasks share the tree and own none
+    created INTEGER NOT NULL,
+    removed INTEGER             -- NULL while it stands
+) STRICT;
+
+CREATE UNIQUE INDEX worktrees_live    ON worktrees(path) WHERE removed IS NULL;
+CREATE INDEX        worktrees_by_task ON worktrees(task_id);
 ```
+
+## Which worktrees are ours
+
+`worktrees` answers one question the rest of the schema cannot: git reports a directory —
+did wecode put it there?
+
+Nothing derived can answer it. The path of a checkout is a pure function of the owning
+task, so wecode can always compute where a tree *would* be. It cannot compute whether the
+tree it finds is one it made, and another tool keeping worktrees in the same repository is
+then indistinguishable from a tree of ours whose task is gone. One is a stranger, the
+other is an orphan, and treating them alike is how `wecode worktree` came to print 27 rows
+for 4 real checkouts.
+
+`task_executions.worktree` is not the same fact. That says which tree an attempt ran in,
+and only `wecode run` opens an execution row — a tree made by `wecode start` would leave
+no trace at all. What went unrecorded was an event, not an association, so it needed a
+table rather than a column.
+
+Rows are written in `prepare`, which both `start` and `run` go through, and closed by
+`wecode worktree remove`. The scratch checkout a merge borrows for the integration branch
+is not recorded: it is created and torn down inside one command, and belongs to no task.
 
 ## What a run cost, in two places
 
