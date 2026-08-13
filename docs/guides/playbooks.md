@@ -32,6 +32,16 @@ Only a few fields are typed, because wecode itself acts on them:
 
 Everything in `guidance` is carried to the reader and never parsed.
 
+One typed field is also checked against the machine: an `accept` line whose program is
+neither an `sh` builtin nor on `PATH` refuses the whole playbook at load, everywhere it
+is read — `playbook`, `task add`, `start`, `merge`. Left in, the mistake surfaces as
+exit 127 at verification, once per task and only after each budget is spent; caught at
+load it costs one edit to one file. This is why the check is at load and not at parse:
+the same file is legal on a machine that has the toolchain. The check reads only a
+line's first word, past any `VAR=value` prefixes, and stays silent wherever reading
+the word would take a shell — quoting, substitution, a path into the worktree — so it
+refuses only what could never run, and guesses at nothing.
+
 ## Writing the decomposition down
 
 A kind may declare its breakdown, so it is created rather than retyped:

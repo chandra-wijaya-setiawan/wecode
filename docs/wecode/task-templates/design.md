@@ -171,9 +171,11 @@ should be removed rather than kept for appearances.
 
 **Template drift.** A playbook's `accept` commands can name a binary the machine does
 not have; that is how the wemail tasks broke. Templating multiplies the blast radius,
-since one wrong default now lands in four tasks instead of one. This wants
-`wecode playbook check`, resolving each command before any task is created. `verify.rs`
-already distinguishes exit 127 from a genuine failure, so the mechanism exists.
+since one wrong default now lands in four tasks instead of one. This wanted
+`wecode playbook check`; what landed is stricter — the playbook is refused at load,
+every command resolved before any task is created, so there is no separate check to
+forget to run. `verify.rs` already distinguished exit 127 from a genuine failure, so
+the mechanism existed; it just fired after the budget was spent.
 
 **Ceremony on small work.** Four tasks for a two-line change is absurd. `--expand` is
 opt-in, and the un-expanded path stays exactly as it is today.

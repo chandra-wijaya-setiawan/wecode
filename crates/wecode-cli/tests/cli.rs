@@ -1605,6 +1605,67 @@ fn a_kind_the_playbook_omits_gets_no_defaults() {
     .assert_lacks("(from playbook)");
 }
 
+#[test]
+fn a_playbook_naming_a_program_the_machine_lacks_is_refused() {
+    // Verification would find this as exit 127, after the budget is spent. The
+    // playbook is refused at load instead, so the mistake costs an edit, not a task.
+    let org = Org::new("pb-no-such-program", "solo");
+    let repo = org.repo();
+    org.playbook(
+        &repo,
+        "[bug]\nworktree = true\nassign_to = \"impl\"\n\
+         accept = [\"definitely-not-a-real-binary-xyz --check\"]\n\
+         tokens = 1000\nwall_secs = 60\n",
+    );
+    org.run(&[
+        "project",
+        "add",
+        "caching",
+        "add response caching to the export endpoint",
+        "--repo",
+        "app",
+        "--measure-cmd",
+        "true",
+        "--tokens",
+        "1000",
+        "--wall",
+        "60",
+    ])
+    .assert_ok("add project");
+
+    // Reading it refuses and names the program and the kind...
+    let read = org.run(&["playbook", "bug"]);
+    assert!(!read.ok(), "a broken playbook must not render");
+    read.assert_contains("definitely-not-a-real-binary-xyz")
+        .assert_contains("[bug]")
+        .assert_contains("not on this machine");
+
+    // ...and so does creating work against it — even with explicit acceptance,
+    // because the file is wrong for this machine and the fix is one edit to it.
+    let add = org.run(&[
+        "task",
+        "add",
+        "fix-it",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "src/**",
+        "--accept-cmd",
+        "true",
+        "--to",
+        "impl",
+        "--tokens",
+        "50",
+        "--wall",
+        "5",
+    ]);
+    assert!(!add.ok(), "task add must refuse a broken playbook");
+    add.assert_contains("definitely-not-a-real-binary-xyz");
+}
+
 // --------------------------------------------------------------- expand ------
 
 /// A playbook that templates a feature. The scopes stay under `src/` so the solo

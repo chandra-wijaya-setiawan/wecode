@@ -133,6 +133,10 @@ write  = ["src/**"]
 One section per task kind. A kind with no section gets no defaults and no worktree. Only
 the typed fields are acted on; `guidance` is carried, never parsed.
 
+An `accept` line whose program is not on this machine — an `sh` builtin, or a file on
+`PATH` — refuses the playbook wherever it is loaded. Verification would report the same
+program as "command not found" only after the work is done.
+
 See [../guides/playbooks.md](../guides/playbooks.md) for what to write in it.
 
 ### Subtasks
