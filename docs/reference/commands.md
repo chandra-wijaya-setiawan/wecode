@@ -35,13 +35,14 @@ PLAN
   wecode project list
 
   wecode task add <id> --project <p> "<title>"
-        --kind <feature|bug|refactor|chore|spike|docs>   default: feature
+        --kind <feature|bug|refactor|chore|spike|design|docs>   default: feature
         --parent <task>          is part of that task
         --after <task>           must come after it (repeatable)
         --accept-cmd "<cmd>"     executable acceptance (repeatable)
         --accept-metric <name>:<cmp>:<target>
         --write <glob>  --read <glob>   scope (repeatable)
         --tokens <n>  --wall <secs>     --to <post>
+        --expand                 also emit the subtasks the playbook declares
         --force                  save despite defects, recorded as waivers
   wecode task rm <id>                  erase a task that never ran
   wecode task scope <id> --write <glob> [--read <glob>]
@@ -91,6 +92,16 @@ discovered — is a line in your `~/.claude/CLAUDE.md`: *if I say "use wecode", 
 
 **`wecode playbook <kind>`** is what an orchestrator reads before decomposing a request
 into tasks. See [../guides/playbooks.md](../guides/playbooks.md).
+
+**`wecode task add --expand`** emits the subtasks that kind's playbook declares, with
+`{{task}}` substituted, instead of typing each one out. It runs once, at planning time,
+and produces ordinary tasks: they face the same admission gate, and can be edited,
+dropped or added to before anything is dispatched. Nothing consults the template again.
+
+It is all or nothing — if one subtask would be refused, none are created, because a
+half-built expansion leaves the rest waiting on tasks that do not exist. The main task
+is unaffected either way; it was admitted on its own merits. A kind whose playbook
+declares no `subtasks` refuses the flag rather than silently doing nothing.
 
 **`wecode guard <post> <verb> <target>`** asks the Broker a question and does nothing.
 Use it to check whether a seat can reach the work before assigning it there.

@@ -116,12 +116,44 @@ guidance  = """
 Prose, read by whoever decomposes a request into tasks. Say how work is split here,
 what the seams are, and what a task of this kind must not do.
 """
+subtasks  = ["design", "build"]   # what `task add --expand` emits, in this order
+
+[feature.design]                  # one block per name in `subtasks`
+kind   = "design"                 # defaults to the kind being expanded
+title  = "decide how {{task}} should work"
+write  = ["docs/wecode/{{task}}/design.md"]
+accept = ["test -f docs/wecode/{{task}}/design.md"]
+
+[feature.build]
+after  = ["design"]               # an earlier sibling's name, not a task id
+write  = ["src/**"]
 ```
 
 One section per task kind. A kind with no section gets no defaults and no worktree. Only
 the typed fields are acted on; `guidance` is carried, never parsed.
 
 See [../guides/playbooks.md](../guides/playbooks.md) for what to write in it.
+
+### Subtasks
+
+`subtasks` is the decomposition `wecode task add <id> ... --expand` emits, and its order
+is the order tasks are created in. Every name needs a block; a block the list does not
+name is refused, as is an `after` that names anything but an earlier sibling — all three
+are typos, and a typo found at planning time costs nothing.
+
+A block states only what makes that step different. `kind`, `title`, `after`, `write`,
+`read`, `accept`, `assign_to`, `tokens` and `wall_secs` are the fields; anything left
+out falls through to the playbook for the step's **own** kind, exactly as a hand-written
+task of that kind would. So a `design` step wants a `[design]` section to draw its
+budget from — without one the step has none, and the gate refuses the expansion and says
+so.
+
+`{{task}}` is the main task's id and `{{title}}` its title. They are the only two: a
+template that could reach further into the plan would be a small language, and this is a
+scaffold that runs once.
+
+Emitted tasks are children of the main task and depend on the siblings their `after`
+names. Those are separate relations — being part of a task does not mean waiting for it.
 
 Like `company.toml`, a playbook is **hand-edited and deliberately in no role's write
 scope**. A task that tried to change one would be refused at assignment, which is the

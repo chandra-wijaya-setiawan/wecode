@@ -55,13 +55,14 @@ PLAN
   wecode project list
 
   wecode task add <id> --project <p> \"<title>\"
-        --kind <feature|bug|refactor|chore|spike|docs>   default: feature
+        --kind <feature|bug|refactor|chore|spike|design|docs>   default: feature
         --parent <task>          is part of that task
         --after <task>           must come after it (repeatable)
         --accept-cmd \"<cmd>\"     executable acceptance (repeatable)
         --accept-metric <name>:<cmp>:<target>
         --write <glob>  --read <glob>   scope (repeatable)
         --tokens <n>  --wall <secs>     --to <post>
+        --expand                 also emit the subtasks the playbook declares
         --force                  save despite defects, recorded as waivers
   wecode task rm <id>                  erase a task that never ran
   wecode task scope <id> --write <glob> [--read <glob>]
