@@ -147,6 +147,24 @@ explicitly not required to implement anything.
 Time-box it. A spike that turns into an implementation should have been a feature.
 """
 
+[design]
+worktree  = false
+assign_to = "impl"
+tokens    = 40000
+wall_secs = 1800
+# No default acceptance: it wants the task id in the path, and nothing substitutes one
+# until `--expand` lands. Pass --accept-cmd "test -f docs/wecode/<task>/design.md".
+guidance  = """
+Proposes a change and writes no code. The deliverable is docs/wecode/<task>/design.md,
+and it is the only kind that is not finished when it passes — it goes to needs-approval
+and waits for a signature, because whether a design is right is exactly the part no
+command can check.
+
+Say what the change decides, what it costs, and what it makes harder. A design that
+only lists benefits has not been thought about. Name anything in the tree that states
+the opposite today, so reversing a decision is deliberate rather than accidental.
+"""
+
 [docs]
 worktree  = false
 assign_to = "impl"
