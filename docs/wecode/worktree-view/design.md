@@ -94,3 +94,8 @@ Naming them is still the right move: `git worktree remove <path>` clears either,
 you can see and must remove by hand beats one you cannot see. Making the command take a path
 is `worktree-teardown`'s, not this task's — it changes what removal *is* allowed to do, and
 that wants its own thinking about uncommitted work in a tree with no task to warn about.
+
+> **Since built.** `worktree-teardown` took that on: `wecode worktree remove` now accepts a
+> path as well as a task id, so both middle rows are reachable. `— not ours` still is not, and
+> deliberately — the removal is refused for a directory no repository in the plan lists as a
+> worktree. See `docs/wecode/worktree-teardown/design.md`.

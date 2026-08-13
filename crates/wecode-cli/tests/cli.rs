@@ -2395,6 +2395,55 @@ fn a_worktree_deleted_by_hand_stops_being_reported_as_standing() {
 }
 
 #[test]
+fn a_worktree_whose_task_is_gone_can_be_removed_by_its_path() {
+    // The gap `worktree-view` left: an orphan is named by the listing and unreachable by
+    // a command that takes a task id, because *having no task* is what makes it an
+    // orphan. Seeing a tree you cannot remove is worse than not seeing it.
+    let (org, _) = with_bug("wt-rm-path");
+    let path = started_at(org.run(&["start", "fix-it"]).assert_ok("start"));
+    org.run(&["task", "rm", "fix-it"]).assert_ok("remove task");
+    org.run(&["worktree"]).assert_contains("— orphan (fix-it)");
+
+    org.run(&["worktree", "remove", &path])
+        .assert_ok("remove by path")
+        .assert_contains("removed")
+        // The branch comes from the registry, since a path does not imply one.
+        .assert_contains("branch wecode/fix-it kept");
+    org.run(&["worktree"]).assert_contains("no worktrees");
+    assert!(
+        org.recorded()[0].removed.is_some(),
+        "the row is closed, not deleted"
+    );
+}
+
+#[test]
+fn a_path_no_repository_claims_is_not_removed_by_wecode() {
+    // `git worktree remove` is a command against a repository. A directory none of the
+    // plan's repos lists as a worktree has no repository to run it against, and guessing
+    // one would run a removal against the wrong repo.
+    let (org, _) = with_bug("wt-rm-stray");
+    let stray = org.path("just-a-directory");
+    std::fs::create_dir_all(&stray).unwrap();
+
+    let r = org.run(&["worktree", "remove", stray.to_str().unwrap()]);
+    assert!(!r.ok(), "should refuse");
+    r.assert_contains("no repository this workspace knows");
+    assert!(stray.is_dir(), "and it is still there");
+}
+
+#[test]
+fn a_mistyped_path_is_not_slugified_into_a_task_id() {
+    // A task id is a kebab-case slug, so a `/` cannot occur in one. Before the two were
+    // told apart by shape, `/tmp/nope` became the task `tmp-nope` and the refusal named
+    // the wrong problem.
+    let (org, _) = with_bug("wt-rm-typo");
+    let r = org.run(&["worktree", "remove", "/tmp/no-such-tree"]);
+    r.assert_ok("an absent path is a report, not an error")
+        .assert_contains("no worktree at /tmp/no-such-tree")
+        .assert_lacks("no such task");
+}
+
+#[test]
 fn removing_a_worktree_refuses_to_discard_uncommitted_work() {
     let (org, _) = with_playbook("wt-dirty");
     org.run(&[
@@ -3672,6 +3721,154 @@ fn a_merge_can_be_rolled_back_and_says_how_to_restore_it() {
         .output()
         .unwrap();
     assert!(!String::from_utf8_lossy(&on_dev.stdout).contains("landed"));
+}
+
+/// Whether the repo has a branch by that name.
+fn has_branch(repo: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .output()
+        .expect("git runs")
+        .status
+        .success()
+}
+
+/// The one worktree the workspace has standing, by path.
+fn standing(org: &Org) -> PathBuf {
+    let live: Vec<PathBuf> = org
+        .recorded()
+        .into_iter()
+        .filter(|w| w.removed.is_none())
+        .map(|w| PathBuf::from(w.path))
+        .collect();
+    assert_eq!(
+        live.len(),
+        1,
+        "expected exactly one standing tree: {live:?}"
+    );
+    live.into_iter().next().unwrap()
+}
+
+#[test]
+fn landing_the_work_takes_its_worktree_down_and_keeps_the_branch() {
+    // The gap: a tree was created and never removed. Once the merge lands, every commit
+    // in it is reachable from the integration branch, so the directory is a copy rather
+    // than the only copy — and four of them were still standing on the workspace that
+    // found this.
+    let (org, repo) = mergeable("merge-teardown", "auto");
+    landed_task(&org, "t");
+    let wt = standing(&org);
+    assert!(wt.is_dir(), "the run left a tree at {wt:?}");
+
+    org.run(&["merge", "t"])
+        .assert_ok("merge")
+        .assert_contains("worktree   removed");
+
+    assert!(!wt.exists(), "{wt:?} should be gone");
+    assert!(
+        org.recorded()[0].removed.is_some(),
+        "and the registry should say so rather than going on claiming it"
+    );
+    // The branch stays. Its commits are already on `dev`, so it is redundant — but
+    // keeping it is what makes `wecode start` able to cut the tree again.
+    assert!(has_branch(&repo, "wecode/t"), "the branch was deleted");
+    org.run(&["worktree"]).assert_contains("no worktrees");
+}
+
+#[test]
+fn a_tree_a_subtask_still_works_in_survives_the_merge() {
+    // The branch belongs to the *main* task, so merging lands the whole tree's work
+    // while its subtasks still have somewhere to be. Removing it here would take the
+    // directory out from under them.
+    let (org, _) = mergeable("merge-teardown-busy", "auto");
+    landed_task(&org, "t");
+    let wt = standing(&org);
+    org.run(&[
+        "task",
+        "add",
+        "t-doc",
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "--parent",
+        "t",
+        "write down what the marker means",
+        "--write",
+        "docs/**",
+        "--accept-cmd",
+        "true",
+        "--tokens",
+        "100",
+        "--wall",
+        "30",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("subtask");
+
+    org.run(&["merge", "t"])
+        .assert_ok("merge")
+        .assert_contains("worktree   kept")
+        .assert_contains("t-doc still working");
+    assert!(wt.is_dir(), "{wt:?} should still be there");
+
+    // And once the subtask closes, the next thing that lands takes the tree with it.
+    org.run(&["status", "t-doc", "dropped"]).assert_ok("close");
+    org.run(&["worktree", "remove", "t"])
+        .assert_ok("remove")
+        .assert_contains("removed");
+    assert!(!wt.exists());
+}
+
+#[test]
+fn uncommitted_work_keeps_the_tree_standing_through_a_merge() {
+    // Teardown nobody asked for does not get to decide that uncommitted work was
+    // worthless. The merge took what was committed; anything else stays where it is.
+    let (org, _) = mergeable("merge-teardown-dirty", "auto");
+    landed_task(&org, "t");
+    let wt = standing(&org);
+    std::fs::write(wt.join("scratch.txt"), "half an idea\n").unwrap();
+
+    org.run(&["merge", "t"])
+        .assert_ok("merge")
+        .assert_contains("worktree   kept")
+        .assert_contains("uncommitted");
+    assert!(wt.join("scratch.txt").exists(), "the work is still there");
+
+    // The operator still decides, and has to say so.
+    let r = org.run(&["worktree", "remove", "t"]);
+    assert!(!r.ok(), "should refuse");
+    r.assert_contains("scratch.txt");
+    org.run(&["worktree", "remove", "t", "--force"])
+        .assert_ok("forced")
+        .assert_contains("discarded");
+}
+
+#[test]
+fn a_rolled_back_merge_can_have_its_tree_cut_again() {
+    // What makes teardown safe: the branch is kept, so reopening the work is one
+    // command and it comes back at the tip the merge landed.
+    let (org, _) = mergeable("merge-teardown-redo", "auto");
+    landed_task(&org, "t");
+    let wt = standing(&org);
+    org.run(&["merge", "t"]).assert_ok("merge");
+    assert!(!wt.exists());
+
+    org.run(&["rollback", "t"]).assert_ok("rollback");
+    org.run(&["start", "t"]).assert_ok("start again");
+    assert!(wt.is_dir(), "the tree is back at {wt:?}");
+    assert!(
+        wt.join("src/app.txt").exists(),
+        "and it holds the work, not an empty checkout"
+    );
 }
 
 #[test]

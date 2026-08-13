@@ -188,9 +188,14 @@ questions about occupancy rather than about paths.
 2. the path layout and slot reuse, which the registry makes safe
 3. ~~`worktree-view` reads the registry instead of guessing~~ — **built**, see
    `docs/wecode/worktree-view/design.md`
-4. `worktree-teardown` marks `removed` rather than only calling git
+4. ~~`worktree-teardown` marks `removed` rather than only calling git~~ — **built**, see
+   `docs/wecode/worktree-teardown/design.md`
 
-Step 4 is a separate task and already depends on this one.
+Step 4 turned out to be the smaller half of its own task. Marking `removed` came with the
+registry in step 1, because the write and the read had to land together. What was actually
+missing was the *moment* a tree should come down — landing, which is now where `merge` takes
+it — and a way to name the two trees the listing had started reporting and no command could
+reach. Only step 2 is left.
 
 ### What step 1 left for the others
 

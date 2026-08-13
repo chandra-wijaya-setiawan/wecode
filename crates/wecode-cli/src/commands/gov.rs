@@ -8,7 +8,7 @@ use wecode_store::{AuditQuery, Store};
 use crate::args::Args;
 use crate::commands::ctx::*;
 use crate::render;
-use crate::{git, work};
+use crate::{git, teardown, work};
 
 pub(crate) fn parse_action(a: &Args) -> Result<Action, String> {
     let verb = a.cmd(2);
@@ -203,8 +203,13 @@ pub(crate) fn merge_task(a: &Args) -> Res {
             )
         })?;
 
-    let owner = work::owner(&plan, &id).ok_or("task is not in the plan")?;
-    let branch = work::branch_for(&owner.id);
+    // Cloned rather than held: the plan is reloaded after the merge lands, and a
+    // borrow of the old one would outlive it.
+    let owner = work::owner(&plan, &id)
+        .ok_or("task is not in the plan")?
+        .id
+        .clone();
+    let branch = work::branch_for(&owner);
     if !git::branch_exists(&repo, &branch) {
         return Err(format!("no branch `{branch}` — this task produced nothing to merge").into());
     }
@@ -269,6 +274,13 @@ pub(crate) fn merge_task(a: &Args) -> Res {
     )?;
 
     store.set_task_status(&id, TaskStatus::Done)?;
+
+    // Reloaded, because the tree may only come down once nothing still needs it — and
+    // the task that just landed is the commonest occupant. The in-memory plan predates
+    // the transition above and would report this very task as still working there.
+    let plan = store.load_plan()?;
+    let swept = teardown::after_landing(&store, &plan, &repo, &work::org_name(ws.root()), &owner)?;
+
     Ok(render::merged(
         &task,
         &plan,
@@ -276,6 +288,7 @@ pub(crate) fn merge_task(a: &Args) -> Res {
         &branch,
         &merged,
         needs_signature,
+        &swept,
     ))
 }
 
