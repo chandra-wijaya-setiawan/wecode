@@ -87,6 +87,12 @@ merge approval to a reviewer who writes no code.
 budget and the defect checks. Both are on the board because a task can be entirely
 healthy and simply not started, and a board showing only one cannot say which.
 
+Health is not a *column*, though — it is the colour of the needs-you cell. Every cause
+of amber or red writes an entry there, so a health column only ever repeated its
+neighbour; and a progress bar restated the status column on every leaf row. Both were
+dropped once the board grew real rows: a column that never changes what you do next is
+a column the eye learns to skip, and then the board is wider than what it says.
+
 **Archived** is a third property, and deliberately not a status: it parks a project,
 hiding it *and* stopping its work being scheduled. Hiding without stopping would leave
 the board advertising work nothing will ever pick up.

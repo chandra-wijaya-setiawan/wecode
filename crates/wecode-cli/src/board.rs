@@ -1,7 +1,11 @@
-//! The cockpit: a full-screen board with the same five columns at every level.
+//! The cockpit: a full-screen board with the same four columns at every level —
+//! what · status · spend · needs-you.
 //!
 //! Health is **computed**, never reported by an agent: it comes from status,
-//! admission defects, the audit ledger and declared budgets.
+//! admission defects, the audit ledger and declared budgets. It is not a column,
+//! because every cause of amber or red already writes a needs-you entry — it is
+//! the colour of that cell. A health column beside it only ever repeated it, and
+//! a progress bar on a leaf task only ever restated its status.
 //!
 //! Two levels of work means two levels of board — the portfolio lists projects
 //! with their root tasks, and a focus view descends into either.
@@ -30,7 +34,6 @@ fn gate_of<'a>(gates: &'a DesignGates, t: &Task) -> &'a [TaskKind] {
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
-const GREEN: &str = "\x1b[32m";
 const AMBER: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 
@@ -41,21 +44,10 @@ pub(crate) enum Health {
     Red,
 }
 
-impl Health {
-    fn dot(self) -> String {
-        match self {
-            Self::Green => format!("{GREEN}●{RESET}green"),
-            Self::Amber => format!("{AMBER}●{RESET}amber"),
-            Self::Red => format!("{RED}●{RESET}red  "),
-        }
-    }
-}
-
 /// Everything the board knows about one project or task, all of it derived.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Vitals {
     pub(crate) health: Health,
-    pub(crate) progress: f32,
     pub(crate) spent: u64,
     pub(crate) budget: Option<u64>,
     pub(crate) alarms: usize,
@@ -152,7 +144,7 @@ pub(crate) fn project_vitals(
     let stalled = c.spent > 0 && prog == 0.0 && p.status == ProjectStatus::Active;
 
     let mut needs = Vec::new();
-    push_common(&mut needs, c.alarms, defects, over, stalled);
+    push_common(&mut needs, c.alarms, defects, over, stalled, c.denials);
     let waiting = plan
         .tasks_of(&p.id)
         .filter(|t| t.status.needs_a_human())
@@ -166,7 +158,6 @@ pub(crate) fn project_vitals(
 
     Vitals {
         health: health_of(c.alarms, over, defects, stalled, c.denials, waiting),
-        progress: prog,
         spent: c.spent,
         budget: p.budget.tokens,
         alarms: c.alarms,
@@ -184,7 +175,7 @@ pub(crate) fn task_vitals(plan: &Plan, t: &Task, l: &Ledger, gates: &DesignGates
     let stalled = c.spent > 0 && prog == 0.0 && t.status == TaskStatus::Running;
 
     let mut needs = Vec::new();
-    push_common(&mut needs, c.alarms, defects, over, stalled);
+    push_common(&mut needs, c.alarms, defects, over, stalled, c.denials);
     let awaiting = usize::from(t.status.needs_a_human());
     if t.status.needs_a_human() {
         needs.push(t.status.as_str().to_string());
@@ -200,7 +191,6 @@ pub(crate) fn task_vitals(plan: &Plan, t: &Task, l: &Ledger, gates: &DesignGates
 
     Vitals {
         health: health_of(c.alarms, over, defects, stalled, c.denials, awaiting),
-        progress: prog,
         spent: c.spent,
         budget: t.budget.tokens,
         alarms: c.alarms,
@@ -210,7 +200,14 @@ pub(crate) fn task_vitals(plan: &Plan, t: &Task, l: &Ledger, gates: &DesignGates
     }
 }
 
-fn push_common(needs: &mut Vec<String>, alarms: usize, defects: usize, over: bool, stalled: bool) {
+fn push_common(
+    needs: &mut Vec<String>,
+    alarms: usize,
+    defects: usize,
+    over: bool,
+    stalled: bool,
+    denials: usize,
+) {
     if alarms > 0 {
         needs.push(format!("{alarms} alarm"));
     }
@@ -222,6 +219,11 @@ fn push_common(needs: &mut Vec<String>, alarms: usize, defects: usize, over: boo
     }
     if stalled {
         needs.push("stalled".to_string());
+    }
+    // A denial used to be visible only as an amber dot in the health column. Now
+    // that health is the colour of this cell, the cell has to carry the words.
+    if denials > 0 {
+        needs.push(format!("{denials} denied"));
     }
 }
 
@@ -262,28 +264,6 @@ fn leaf_statuses(plan: &Plan, t: &Task) -> Vec<TaskStatus> {
     kids.iter().flat_map(|k| leaf_statuses(plan, k)).collect()
 }
 
-/// A progress bar `cells` wide, followed by the percentage.
-///
-/// Decided per cell rather than by converting a float to a count: a cell lights up
-/// once the fraction covers its midpoint, which is what rounding meant. Out-of-range
-/// input needs no clamp — `cells` comparisons cannot fill one more.
-pub(crate) fn bar_of(fraction: f32, cells: u8) -> String {
-    let covered = fraction * f32::from(cells);
-    let mut s = String::new();
-    for i in 0..cells {
-        s.push(if f32::from(i) + 0.5 <= covered {
-            '█'
-        } else {
-            '▁'
-        });
-    }
-    format!("{s} {:>3.0}%", fraction * 100.0)
-}
-
-fn bar(fraction: f32) -> String {
-    bar_of(fraction, 6)
-}
-
 fn spend_cell(spent: u64, budget: Option<u64>) -> String {
     let k = |n: u64| {
         if n >= 1000 {
@@ -309,26 +289,29 @@ fn title_bar(level: &str, subject: &str, hint: &str) -> String {
 
 fn header_row() -> String {
     format!(
-        "{DIM}│ {:<26} {:<11} {:<12} {:<11} {:<12} {}{RESET}\n",
-        "what", "status", "health", "progress", "spend", "needs you"
+        "{DIM}│ {:<26} {:<11} {:<12} {}{RESET}\n",
+        "what", "status", "spend", "needs you"
     )
 }
 
 /// The declared state alongside the computed one. Both, always: a task can be
-/// entirely healthy and not started, and a board that shows only health cannot say
-/// which.
+/// entirely healthy and not started, and a board that shows only the faults cannot
+/// say which. The needs-you cell wears the computed health as its colour.
 fn row(label: &str, status: &str, v: &Vitals) -> String {
     let needs = if v.needs.is_empty() {
         format!("{DIM}—{RESET}")
     } else {
-        v.needs.join(", ")
+        let words = v.needs.join(", ");
+        match v.health {
+            Health::Red => format!("{RED}{words}{RESET}"),
+            Health::Amber => format!("{AMBER}{words}{RESET}"),
+            Health::Green => words,
+        }
     };
     format!(
-        "│ {:<26} {:<11} {:<12} {:<11} {:<12} {}\n",
+        "│ {:<26} {:<11} {:<12} {}\n",
         truncate(label, 26),
         status,
-        v.health.dot(),
-        bar(v.progress),
         spend_cell(v.spent, v.budget),
         needs
     )
@@ -583,14 +566,19 @@ mod tests {
     }
 
     #[test]
-    fn every_level_shows_the_same_five_columns() {
+    fn every_level_shows_the_same_four_columns() {
         for out in [
             portfolio(&plan(), &[], &repos(), &no_gates(), false),
             focus(&plan(), &[], "caching", &repos(), &no_gates()),
             focus(&plan(), &[], "t1", &repos(), &no_gates()),
         ] {
-            for col in ["what", "health", "progress", "spend", "needs you"] {
+            for col in ["what", "status", "spend", "needs you"] {
                 assert!(out.contains(col), "missing `{col}` in:\n{out}");
+            }
+            // The columns that said nothing: health repeated the needs-you cell,
+            // and a leaf's progress bar restated its status.
+            for gone in ["health", "progress"] {
+                assert!(!out.contains(gone), "`{gone}` should be gone from:\n{out}");
             }
         }
     }
@@ -618,14 +606,14 @@ mod tests {
     }
 
     #[test]
-    fn a_denial_is_amber_not_red() {
+    fn a_denial_is_amber_not_red_and_names_itself() {
         let audit = vec![line("caching", "t1", "write", "other.rs", "deny")];
         let p = plan();
         let l = ledger_index(&audit);
-        assert_eq!(
-            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).health,
-            Health::Amber
-        );
+        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates());
+        assert_eq!(v.health, Health::Amber);
+        // Health is only a colour now, so the denial must appear in words too.
+        assert!(v.needs.iter().any(|n| n == "1 denied"), "{:?}", v.needs);
     }
 
     #[test]
@@ -726,9 +714,11 @@ mod tests {
         a.status = TaskStatus::Done;
         p.update_task(a).unwrap();
 
-        let l = ledger_index(&[]);
-        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates());
-        assert_eq!(v.progress, 0.5, "one of two subtasks done");
+        assert_eq!(
+            task_progress(&p, p.task(&TaskId::new("t1")).unwrap()),
+            0.5,
+            "one of two subtasks done"
+        );
     }
 
     #[test]

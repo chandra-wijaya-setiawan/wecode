@@ -1,9 +1,10 @@
 //! The cockpit: a live, navigable dashboard.
 //!
-//! Same five columns at every zoom level — what · health · progress · spend ·
-//! needs-you — which works because a project and a task answer the same five
-//! questions. Health is computed from ground truth (see [`crate::board`]), never
-//! reported by an agent.
+//! Same four columns at every zoom level — what · status · spend · needs-you —
+//! which works because a project and a task answer the same four questions.
+//! Health is computed from ground truth (see [`crate::board`]), never reported
+//! by an agent; it is the colour of the needs-you cell rather than a column,
+//! because every cause of amber or red already writes an entry there.
 //!
 //! Reloads from the store on a tick, so it tracks state as it changes rather than
 //! showing a snapshot.
@@ -395,19 +396,6 @@ fn status_style(row: &RowItem) -> Style {
     }
 }
 
-fn health_span(h: Health) -> Span<'static> {
-    match h {
-        Health::Green => Span::styled("● green", Style::new().fg(Color::Green)),
-        Health::Amber => Span::styled("● amber", Style::new().fg(Color::Yellow)),
-        Health::Red => Span::styled("● red", Style::new().fg(Color::Red)),
-    }
-}
-
-fn bar(fraction: f32) -> String {
-    // Wider than the board's, because the cockpit has the room for it.
-    crate::board::bar_of(fraction, 8)
-}
-
 fn spend_text(v: &Vitals) -> String {
     let k = |n: u64| {
         if n >= 1000 {
@@ -462,15 +450,8 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn table(f: &mut Frame, area: Rect, app: &mut App) {
-    let header = Row::new(vec![
-        "what",
-        "status",
-        "health",
-        "progress",
-        "spend",
-        "needs you",
-    ])
-    .style(Style::new().fg(Color::DarkGray));
+    let header = Row::new(vec!["what", "status", "spend", "needs you"])
+        .style(Style::new().fg(Color::DarkGray));
 
     let rows: Vec<Row> = app
         .rows
@@ -501,8 +482,6 @@ fn table(f: &mut Frame, area: Rect, app: &mut App) {
             Row::new(vec![
                 what,
                 Line::from(Span::styled(r.status.clone(), status_style(r))),
-                Line::from(health_span(r.vitals.health)),
-                Line::from(bar(r.vitals.progress)),
                 Line::from(spend_text(&r.vitals)),
                 Line::from(needs),
             ])
@@ -512,8 +491,6 @@ fn table(f: &mut Frame, area: Rect, app: &mut App) {
     let widths = [
         Constraint::Min(30),
         Constraint::Length(11),
-        Constraint::Length(9),
-        Constraint::Length(13),
         Constraint::Length(12),
         Constraint::Min(14),
     ];
@@ -687,11 +664,12 @@ fn help(f: &mut Frame, area: Rect) {
         Line::from("r            reload now".to_string()),
         Line::from("q            quit".to_string()),
         Line::from(""),
-        Line::from("status is declared; health is computed:".fg(Color::DarkGray)),
+        Line::from("status is declared:".fg(Color::DarkGray)),
         Line::from("  · draft  ⋯ waiting  ○ ready  > running".fg(Color::DarkGray)),
         Line::from("  ? verifying  ! approval  ✓ done  x failed".fg(Color::DarkGray)),
-        Line::from("red = alarm or over budget".fg(Color::DarkGray)),
-        Line::from("amber = defects, denials, stalled, waiting on you".fg(Color::DarkGray)),
+        Line::from("needs-you is computed, and coloured by it:".fg(Color::DarkGray)),
+        Line::from("  red = alarm or over budget".fg(Color::DarkGray)),
+        Line::from("  amber = defects, denials, stalled, waiting on you".fg(Color::DarkGray)),
     ];
     f.render_widget(Clear, popup);
     f.render_widget(
@@ -825,8 +803,11 @@ mod tests {
     #[test]
     fn the_portfolio_frame_shows_every_column() {
         let out = render(&mut app("portfolio"), 118, 24);
-        for col in ["what", "status", "health", "progress", "spend", "needs you"] {
+        for col in ["what", "status", "spend", "needs you"] {
             assert!(out.contains(col), "missing `{col}` in:\n{out}");
+        }
+        for gone in ["health", "progress"] {
+            assert!(!out.contains(gone), "`{gone}` should be gone from:\n{out}");
         }
         assert!(out.contains("L0 PORTFOLIO"), "{out}");
         assert!(out.contains("feat layer"), "{out}");
@@ -861,9 +842,9 @@ mod tests {
     }
 
     #[test]
-    fn declared_status_is_shown_next_to_computed_health() {
+    fn declared_status_is_on_every_row() {
         // The gap this closes: a draft, a waiting and a ready task were all rendered
-        // as green/0%, indistinguishable.
+        // identically, indistinguishable.
         let mut a = app("status");
         let out = render(&mut a, 118, 24);
         assert!(out.contains("· draft"), "a fresh task is a draft:\n{out}");
@@ -1050,19 +1031,9 @@ mod tests {
     }
 
     #[test]
-    fn bar_is_fixed_width_and_monotonic() {
-        assert_eq!(bar(0.0).chars().count(), bar(1.0).chars().count());
-        let zero = bar(0.0).chars().filter(|c| *c == '█').count();
-        let half = bar(0.5).chars().filter(|c| *c == '█').count();
-        let full = bar(1.0).chars().filter(|c| *c == '█').count();
-        assert!(zero < half && half < full, "{zero} {half} {full}");
-    }
-
-    #[test]
     fn spend_abbreviates_thousands_and_shows_the_cap() {
         let v = Vitals {
             health: Health::Green,
-            progress: 0.0,
             spent: 1500,
             budget: Some(200_000),
             alarms: 0,

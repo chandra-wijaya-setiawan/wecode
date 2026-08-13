@@ -85,8 +85,9 @@ marked done because someone was satisfied.
 
 A task's **status** is a stored fact someone chose. Its **health** — green, amber, red —
 is derived from the ledger, the budget and the admission checks, and is never reported
-by an agent. Both appear on the board, side by side, because a task can be entirely
-healthy and simply not started.
+by an agent. Both appear on the board, because a task can be entirely healthy and simply
+not started: status is a column, and health is the colour of the needs-you cell, whose
+entries are the reasons a row is amber or red.
 
 Archiving is a third, separate property: it parks a project, hiding it *and* stopping
 its work being scheduled. See [lifecycle.md](lifecycle.md).
