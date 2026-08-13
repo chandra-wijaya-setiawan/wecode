@@ -12,6 +12,12 @@
 //! It lives in the repo rather than the workspace because it describes that code: a
 //! Rust project and a TypeScript one differ, and changing the test command should
 //! change the guidance in the same commit.
+//!
+//! Loading is the one machine-dependent step. An `accept` line whose program is not
+//! on this machine refuses the playbook at [`Playbook::at`] — not in [`Playbook::parse`],
+//! because the same file is legal on a machine that has the toolchain. Found at load
+//! the mistake costs one edit; left in, verification discovers it as exit 127, once
+//! per task and only after each budget is spent.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -64,6 +70,12 @@ pub enum PlaybookError {
         after: String,
         earlier: String,
     },
+    /// An `accept` line whose program this machine does not have.
+    CommandNotFound {
+        at: String,
+        cmd: String,
+        program: String,
+    },
     AlreadyExists(PathBuf),
 }
 
@@ -96,6 +108,11 @@ impl fmt::Display for PlaybookError {
                 } else {
                     earlier
                 }
+            ),
+            Self::CommandNotFound { at, cmd, program } => write!(
+                f,
+                "{at} accept: `{program}` is not on this machine — `{cmd}` would only \
+                 ever come back \"command not found\", after the work is done"
             ),
             Self::AlreadyExists(p) => write!(f, "{} already exists", p.display()),
         }
@@ -429,6 +446,46 @@ impl KindPlaybook {
     }
 }
 
+// ------------------------------------------------------------- machine ------
+
+/// What `sh` runs without consulting `PATH`. Only the names `program_of` can read
+/// are listed — `[` and `:` never get that far.
+const SH_BUILTINS: &[&str] = &[
+    "cd", "command", "echo", "eval", "exec", "exit", "export", "false", "printf", "read",
+    "set", "shift", "test", "true", "type", "umask", "unset", "wait",
+];
+
+/// The program an acceptance line would run: its first word, past any `VAR=value`
+/// prefixes. `None` when reading it would take a shell — quoting, substitution, a
+/// path into the worktree — and a word this cannot read is left to verification
+/// rather than guessed at. First word only, deliberately: resolving what follows
+/// `&&` or `|` is the same rabbit hole.
+fn program_of(line: &str) -> Option<&str> {
+    let word = line.split_whitespace().find(|w| !w.contains('='))?;
+    word.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
+        .then_some(word)
+}
+
+/// Whether `sh -c` could start `program` here: a builtin, or a file on `PATH`.
+fn machine_has(program: &str) -> bool {
+    SH_BUILTINS.contains(&program)
+        || std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
+        })
+}
+
+fn known_program(at: &str, cmd: &str) -> Result<(), PlaybookError> {
+    match program_of(cmd) {
+        Some(p) if !machine_has(p) => Err(PlaybookError::CommandNotFound {
+            at: at.to_string(),
+            cmd: cmd.to_string(),
+            program: p.to_string(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub struct Playbook {
     pub project: ProjectSettings,
@@ -481,13 +538,39 @@ impl Playbook {
 
     /// Reads the playbook from a repository. A repo without one is `Ok(None)`, not an
     /// error — playbooks are opt-in and every project worked before they existed.
+    ///
+    /// This is where the machine check runs: acceptance will execute here, so here
+    /// is where an absent program is a fact rather than a maybe.
     pub fn at(repo: &Path) -> Result<Option<Self>, PlaybookError> {
         let path = repo.join(PLAYBOOK_PATH);
         match fs::read_to_string(&path) {
-            Ok(text) => Ok(Some(Self::parse(&text)?)),
+            Ok(text) => {
+                let pb = Self::parse(&text)?;
+                pb.programs_exist()?;
+                Ok(Some(pb))
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(PlaybookError::Io(e)),
         }
+    }
+
+    /// Refuses an `accept` line whose program this machine does not have — the
+    /// kinds' own defaults and every subtask template's, where one wrong command
+    /// lands in every expansion. Verification already distinguishes exit 127 from a
+    /// failure, but by then the budget is spent; this finds the same fact while the
+    /// fix is still one edit to one file.
+    fn programs_exist(&self) -> Result<(), PlaybookError> {
+        for (kind, k) in self.kinds() {
+            for cmd in &k.accept {
+                known_program(&format!("[{}]", kind.as_str()), cmd)?;
+            }
+            for s in &k.subtasks {
+                for cmd in &s.accept {
+                    known_program(&format!("[{}.{}]", kind.as_str(), s.name), cmd)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -993,6 +1076,85 @@ write  = ["README.md"]
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ---------------------------------------------------- machine check ------
+
+    /// A repo with this text planted as its playbook, for the load-time checks.
+    fn planted(name: &str, text: &str) -> PathBuf {
+        let repo = temp(name);
+        let path = repo.join(PLAYBOOK_PATH);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+        repo
+    }
+
+    const NO_SUCH: &str = "definitely-not-a-real-binary-xyz";
+
+    #[test]
+    fn parse_never_consults_the_machine() {
+        // The purity pin: the same file must still parse on a machine without the
+        // toolchain, so the machine check belongs to loading, not parsing.
+        let p = Playbook::parse(&format!("[bug]\naccept = [\"{NO_SUCH} --check\"]\n")).unwrap();
+        assert_eq!(p.for_kind(TaskKind::Bug).unwrap().accept.len(), 1);
+    }
+
+    #[test]
+    fn an_accept_program_the_machine_lacks_refuses_the_playbook_at_load() {
+        let repo = planted(
+            "no-such-program",
+            &format!("[bug]\naccept = [\"{NO_SUCH} --check\"]\n"),
+        );
+        let msg = Playbook::at(&repo).unwrap_err().to_string();
+        assert!(msg.contains(NO_SUCH), "{msg}");
+        assert!(msg.contains("[bug]"), "should say which kind: {msg}");
+        assert!(msg.contains("not on this machine"), "{msg}");
+    }
+
+    #[test]
+    fn a_subtask_accept_is_checked_too() {
+        // Template drift multiplies one wrong default into every expansion, which
+        // is where the check pays most.
+        let repo = planted(
+            "no-such-in-step",
+            &format!("[feature]\nsubtasks = [\"build\"]\n\n[feature.build]\naccept = [\"{NO_SUCH}\"]\n"),
+        );
+        let msg = Playbook::at(&repo).unwrap_err().to_string();
+        assert!(msg.contains(NO_SUCH), "{msg}");
+        assert!(msg.contains("[feature.build]"), "{msg}");
+    }
+
+    #[test]
+    fn an_env_prefix_does_not_hide_the_program() {
+        let repo = planted(
+            "env-prefix",
+            &format!("[bug]\naccept = [\"RUST_LOG=debug {NO_SUCH}\"]\n"),
+        );
+        let msg = Playbook::at(&repo).unwrap_err().to_string();
+        assert!(msg.contains(NO_SUCH), "{msg}");
+    }
+
+    #[test]
+    fn a_builtin_and_a_real_program_both_load() {
+        // `test` may be a builtin with no file behind it; `sh` is on any machine
+        // these tests run on. Neither is a refusal.
+        let repo = planted(
+            "programs-exist",
+            "[bug]\naccept = [\"test -f README.md\", \"sh -c 'exit 0'\"]\n",
+        );
+        assert!(Playbook::at(&repo).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_line_the_check_cannot_read_is_left_to_verification() {
+        // A path into the worktree or a substitution takes a shell (and a worktree)
+        // to resolve. Refusing on a guess would refuse working playbooks, so the
+        // check stays silent wherever it cannot be sure.
+        let repo = planted(
+            "unreadable-lines",
+            "[bug]\naccept = [\"./scripts/check.sh --all\", \"\\\"$CHECK\\\" --all\"]\n",
+        );
+        assert!(Playbook::at(&repo).unwrap().is_some());
     }
 
     #[test]
