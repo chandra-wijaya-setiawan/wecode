@@ -15,6 +15,12 @@ language = "rust"
 # Unset for now: this repo works on master directly, and naming a branch that does
 # not exist would fail at `wecode start`.
 
+# Decisions already taken live in docs/wecode/<task>/design.md. Read the one matching
+# your task id before writing anything, and check docs/wecode/ for a design that names
+# what you are about to build — implementing against a decision that was already made
+# and signed is cheaper than re-deriving it, and re-deriving it differently is worse
+# than either.
+
 # Traps that have cost a task each, in this repo:
 #
 #   A task that adds or changes a CLI command also changes docs/reference/commands.md
