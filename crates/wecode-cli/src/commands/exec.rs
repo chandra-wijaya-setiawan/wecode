@@ -56,9 +56,12 @@ pub(crate) struct Prepared {
 ///
 /// One function because they must not drift: a task prepared by hand and a task
 /// prepared for an agent have to land in the same directory, on the same branch,
-/// with the same instructions.
+/// with the same instructions. Recording the worktree is here for that reason too —
+/// hung on the caller instead, one of the two would eventually forget, and a tree
+/// wecode made but did not write down is exactly the thing this closes.
 pub(crate) fn prepare(
     ws: &Workspace,
+    store: &Store,
     company: &Company,
     plan: &Plan,
     task: &Task,
@@ -143,6 +146,11 @@ pub(crate) fn prepare(
             git::worktree_add(&repo, &path, &branch, base.as_deref())?;
             notes.push_str(&format!("  worktree {}\n", path.display()));
         }
+        // Written down after git agreed, and on the reset path as well as the fresh
+        // one. A tree standing from before the registry existed is one wecode made and
+        // cannot prove; recording it the next time it is prepared is how a workspace
+        // that predates this catches up, without backfilling a date nobody observed.
+        store.record_worktree(&path.to_string_lossy(), &project.repo, &branch, &owner.id)?;
         notes.push_str(&format!("  branch   {branch}\n"));
         if owner.id != id {
             notes.push_str(&format!("  shared with {} (its main task)\n", owner.id));
@@ -187,7 +195,7 @@ pub(crate) fn start(a: &Args) -> Res {
     // The envelope carries what earlier attempts did, so a retry can see its own
     // failure rather than starting blind.
     let runs = store.executions(&id)?;
-    let prepared = prepare(&ws, &company, &plan, &task, &runs)?;
+    let prepared = prepare(&ws, &store, &company, &plan, &task, &runs)?;
 
     // Starting is staffing: it changes who is expected to act.
     let who = actor(a, &store, &company)?;
@@ -385,7 +393,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
     // The envelope carries what earlier attempts did, so a retry can see its own
     // failure rather than starting blind.
     let runs = store.executions(&id)?;
-    let prepared = prepare(&ws, &company, &plan, &task, &runs)?;
+    let prepared = prepare(&ws, &store, &company, &plan, &task, &runs)?;
 
     let who = actor(a, &store, &company)?;
     let supervisor = Session::new(
@@ -711,8 +719,15 @@ pub(crate) fn worktree_remove(a: &Args) -> Res {
         .into());
     }
     let path = work::worktree_for(&work::org_name(ws.root()), &id);
+    let dir = path.to_string_lossy().into_owned();
     if !path.exists() {
-        return Ok(format!("  no worktree at {}\n", path.display()));
+        // Gone by some other hand. The registry must not go on saying it stands —
+        // a row claiming a directory that is provably absent is worse than no row.
+        let mut out = format!("  no worktree at {}\n", path.display());
+        if store.forget_worktree(&dir)? {
+            out.push_str("  it was ours — recorded as gone\n");
+        }
+        return Ok(out);
     }
     let repo = repo_path(&company, project)?;
 
@@ -733,6 +748,9 @@ pub(crate) fn worktree_remove(a: &Args) -> Res {
     }
 
     git::worktree_remove(&repo, &path)?;
+    // After git, not before: a removal that failed must leave the registry saying the
+    // tree is still there, because it is.
+    store.forget_worktree(&dir)?;
     let mut out = format!("  removed {}\n", path.display());
     if !dirty.is_empty() {
         out.push_str(&format!(

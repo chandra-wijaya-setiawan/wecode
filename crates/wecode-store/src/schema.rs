@@ -14,8 +14,8 @@ use rusqlite::Connection;
 /// Bumped whenever the schema changes. Stored in `user_version`.
 ///
 /// 2 adds `projects.archived`. 3 adds `task_executions`. 4 adds
-/// `task_executions.spent_tokens`, once something wrote it.
-pub const VERSION: i64 = 4;
+/// `task_executions.spent_tokens`, once something wrote it. 5 adds `worktrees`.
+pub const VERSION: i64 = 5;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -150,6 +150,34 @@ CREATE TABLE task_executions (
 ) STRICT;
 
 CREATE INDEX executions_by_task ON task_executions(task_id);
+
+-- The worktrees wecode made, so a directory git hands back can be told apart from one
+-- another tool created. Keyed on the path because that is what git reports and what a
+-- listing has to match against.
+--
+-- No foreign key on `task_id`, and that is the point rather than an oversight. The row
+-- has to outlive the task: a tree whose task was deleted is still a directory wecode
+-- put on disk, and a row that cascaded away would turn it back into the stranger this
+-- table exists to distinguish it from. `task_executions.session_id` stands unreferenced
+-- for the same shape of reason.
+--
+-- `removed` is a tombstone rather than a delete: *we made one here and tore it down*
+-- and *there was never one here* are different facts, and the second must not be able
+-- to impersonate the first. So the uniqueness is a partial index — one live row per
+-- path, any number of dead ones — and a path can therefore be used a second time
+-- without erasing what stood there before.
+CREATE TABLE worktrees (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    path    TEXT NOT NULL,
+    repo    TEXT NOT NULL,      -- a [[repos]] name; the repo is the unit, not the project
+    branch  TEXT NOT NULL,
+    task_id TEXT NOT NULL,      -- the main task; subtasks share the tree and own none
+    created INTEGER NOT NULL,
+    removed INTEGER             -- NULL while it stands
+) STRICT;
+
+CREATE UNIQUE INDEX worktrees_live    ON worktrees(path) WHERE removed IS NULL;
+CREATE INDEX        worktrees_by_task ON worktrees(task_id);
 ";
 
 /// The `task_executions` table, as an upgrade for a database that predates it.
@@ -174,6 +202,30 @@ CREATE TABLE task_executions (
 ) STRICT;
 
 CREATE INDEX executions_by_task ON task_executions(task_id);
+";
+
+/// The `worktrees` table, as an upgrade for a database that predates it.
+///
+/// Frozen at the shape version 4 had, like `ADD_EXECUTIONS` above and for the same
+/// reason. A later column belongs in a later step, not in an edit to this one.
+///
+/// Nothing backfills. A workspace upgrading here has worktrees on disk that wecode made
+/// and did not write down, and inventing rows for them would put a creation date in the
+/// database that nobody observed. They read as unrecognised until they are made again,
+/// which `wecode start` does on the next attempt.
+const ADD_WORKTREES: &str = "
+CREATE TABLE worktrees (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    path    TEXT NOT NULL,
+    repo    TEXT NOT NULL,
+    branch  TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    removed INTEGER
+) STRICT;
+
+CREATE UNIQUE INDEX worktrees_live    ON worktrees(path) WHERE removed IS NULL;
+CREATE INDEX        worktrees_by_task ON worktrees(task_id);
 ";
 
 /// What `migrate` should do about a file at `current`.
@@ -226,6 +278,7 @@ const UPGRADES: &[(i64, &str)] = &[
         3,
         "ALTER TABLE task_executions ADD COLUMN spent_tokens INTEGER",
     ),
+    (4, ADD_WORKTREES),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -345,6 +398,55 @@ mod tests {
             })
             .expect("task_executions.spent_tokens exists after 3→4");
         assert_eq!(spent, 0);
+        let trees: i64 = c
+            .query_row("SELECT count(*) FROM worktrees", [], |r| r.get(0))
+            .expect("worktrees exists after 4→5");
+        assert_eq!(trees, 0);
+    }
+
+    #[test]
+    fn a_database_that_predates_the_registry_gains_it_and_keeps_its_work() {
+        // The upgrade a workspace in use actually takes. Nothing is backfilled: the
+        // trees already on disk were never recorded, and inventing rows for them would
+        // put a creation date in the database that nobody observed.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("DROP TABLE worktrees").unwrap();
+        c.execute_batch(
+            "INSERT INTO projects (id, repo, objective, status)
+             VALUES ('p','wecode','an objective','active');
+             INSERT INTO tasks (id, project_id, kind, title, status)
+             VALUES ('t','p','feature','x','running');",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 4i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let trees: i64 = c
+            .query_row("SELECT count(*) FROM worktrees", [], |r| r.get(0))
+            .expect("the registry exists");
+        assert_eq!(trees, 0, "a running task's tree is not invented for it");
+        let title: String = c
+            .query_row("SELECT title FROM tasks WHERE id = 't'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(title, "x", "the plan survived");
+    }
+
+    #[test]
+    fn a_path_holds_one_live_tree_and_any_number_of_dead_ones() {
+        // The partial index is what lets a directory be used again without the
+        // tombstone for its last occupant standing in the way.
+        let c = db();
+        let insert = "INSERT INTO worktrees (path, repo, branch, task_id, created, removed)
+                      VALUES ('/wt/1','wecode','wecode/t','t',0,?1)";
+        c.execute(insert, [Some(10)]).unwrap();
+        c.execute(insert, [Some(20)]).unwrap();
+        c.execute(insert, [None::<i64>]).unwrap();
+        assert!(
+            c.execute(insert, [None::<i64>]).is_err(),
+            "two trees standing at one path is not a state the schema should allow"
+        );
     }
 
     #[test]
@@ -353,8 +455,12 @@ mod tests {
         // token count and must read as unmetered rather than as free.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("ALTER TABLE task_executions DROP COLUMN spent_tokens")
-            .unwrap();
+        // Back to the shape version 3 really had: no spend column, no worktrees.
+        c.execute_batch(
+            "ALTER TABLE task_executions DROP COLUMN spent_tokens;
+             DROP TABLE worktrees;",
+        )
+        .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
              VALUES ('p','wecode','an objective','active');

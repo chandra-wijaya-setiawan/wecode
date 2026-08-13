@@ -10,6 +10,7 @@ mod int;
 pub mod plan;
 pub mod schema;
 pub mod session;
+pub mod worktree;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,7 @@ use rusqlite::Connection;
 pub use audit::{AuditLine, AuditQuery};
 pub use execution::Execution;
 pub use session::SessionInfo;
+pub use worktree::Worktree;
 
 #[derive(Debug)]
 pub enum StoreError {

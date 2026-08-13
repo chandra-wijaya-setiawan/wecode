@@ -186,6 +186,18 @@ impl Org {
         self.dir.join(rel)
     }
 
+    /// Every worktree the workspace has recorded, tombstones included.
+    ///
+    /// Read out of the database the binary wrote, because no command prints it yet —
+    /// making it visible is `worktree-view`'s job, and it depends on this. Until then
+    /// opening the file is the only way to prove the writes actually happen.
+    fn recorded(&self) -> Vec<wecode_store::Worktree> {
+        wecode_store::Store::open(self.dir.join("wecode.db"))
+            .expect("the workspace database")
+            .worktrees()
+            .expect("the registry")
+    }
+
     /// Builds the project and tasks used by several tests.
     ///
     /// `bench` depends on `cache-tests` so the dependency relation is exercised
@@ -2174,6 +2186,147 @@ fn a_subtask_shares_its_main_tasks_worktree() {
     let r = org.run(&["worktree", "remove", "fix-it-test"]);
     assert!(!r.ok());
     r.assert_contains("shares").assert_contains("fix-it");
+}
+
+/// A project and one bug task in it, ready to start.
+fn with_bug(name: &str) -> (Org, PathBuf) {
+    let (org, repo) = with_playbook(name);
+    org.run(&[
+        "task",
+        "add",
+        "fix-it",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        "src/**",
+    ])
+    .assert_ok("task add");
+    (org, repo)
+}
+
+/// The worktree path `start` printed, which is where the work really went.
+fn started_at(r: &Run) -> String {
+    r.stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("worktree "))
+        .expect("start prints the worktree path")
+        .trim()
+        .trim_end_matches(" (reset)")
+        .to_string()
+}
+
+#[test]
+fn start_writes_down_the_worktree_it_made() {
+    // `start` creates a tree and opens no execution row, so before this the only
+    // record of it was the directory itself.
+    let (org, _) = with_bug("wt-recorded");
+    let path = started_at(org.run(&["start", "fix-it"]).assert_ok("start"));
+
+    let all = org.recorded();
+    assert_eq!(all.len(), 1, "{all:?}");
+    let wt = &all[0];
+    assert_eq!(wt.path, path);
+    assert_eq!(wt.task, "fix-it");
+    assert_eq!(wt.branch, "wecode/fix-it");
+    assert_eq!(wt.repo, "app", "the repo it was cut from, not the project");
+    assert!(wt.removed.is_none(), "it is standing");
+}
+
+#[test]
+fn a_worktree_wecode_did_not_make_is_not_claimed_as_its_own() {
+    // The fault that started this: another tool keeping worktrees in the same
+    // repository was printed as one of ours that had lost its task.
+    let (org, repo) = with_bug("wt-stranger");
+    org.run(&["start", "fix-it"]).assert_ok("start");
+
+    let theirs = org.path("not-ours");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "add", "-b", "theirs", theirs.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "a stranger's worktree should be addable"
+    );
+
+    let ours: Vec<String> = org.recorded().into_iter().map(|w| w.path).collect();
+    assert_eq!(ours.len(), 1, "only wecode's own is recorded: {ours:?}");
+    assert!(!ours[0].contains("not-ours"));
+}
+
+#[test]
+fn starting_the_same_task_again_records_the_tree_once() {
+    // The retry path resets the directory rather than creating it. A row per attempt
+    // would make the registry a run log, which `task_executions` already is.
+    let (org, _) = with_bug("wt-again");
+    org.run(&["start", "fix-it"]).assert_ok("first start");
+    let first = org.recorded();
+    org.run(&["start", "fix-it"])
+        .assert_ok("second start")
+        .assert_contains("(reset)");
+
+    assert_eq!(org.recorded(), first, "nothing added, nothing restated");
+}
+
+#[test]
+fn a_subtask_records_no_worktree_of_its_own() {
+    // It shares its parent's tree, so it owns nothing to record.
+    let (org, _) = with_bug("wt-sub-record");
+    org.run(&[
+        "task",
+        "add",
+        "fix-it-test",
+        "--project",
+        "caching",
+        "--kind",
+        "bug",
+        "--parent",
+        "fix-it",
+        "no test covers eviction of a stale entry",
+        "--write",
+        "src/**",
+    ])
+    .assert_ok("subtask");
+
+    org.run(&["start", "fix-it-test"])
+        .assert_ok("start subtask");
+    let all = org.recorded();
+    assert_eq!(all.len(), 1, "one tree, one row: {all:?}");
+    assert_eq!(all[0].task, "fix-it", "recorded against its owner");
+}
+
+#[test]
+fn removing_a_worktree_records_that_it_is_gone_without_forgetting_it_existed() {
+    let (org, _) = with_bug("wt-tombstone");
+    let path = started_at(org.run(&["start", "fix-it"]).assert_ok("start"));
+    org.run(&["worktree", "remove", "fix-it"])
+        .assert_ok("remove");
+
+    let all = org.recorded();
+    assert_eq!(all.len(), 1, "the row stays: {all:?}");
+    assert_eq!(all[0].path, path);
+    assert!(
+        all[0].removed.is_some(),
+        "we made one here and tore it down — not: there was never one"
+    );
+}
+
+#[test]
+fn a_worktree_deleted_by_hand_stops_being_reported_as_standing() {
+    // A row claiming a directory that is provably absent is worse than no row.
+    let (org, _) = with_bug("wt-handdel");
+    let path = started_at(org.run(&["start", "fix-it"]).assert_ok("start"));
+    std::fs::remove_dir_all(&path).unwrap();
+
+    org.run(&["worktree", "remove", "fix-it"])
+        .assert_ok("remove a tree that is already gone")
+        .assert_contains("recorded as gone");
+    assert!(org.recorded()[0].removed.is_some());
 }
 
 #[test]

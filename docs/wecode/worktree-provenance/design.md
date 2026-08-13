@@ -1,6 +1,6 @@
 # Worktree provenance, and where worktrees live
 
-Status: **proposed** — awaiting approval.
+Status: **step 1 built**; steps 2–4 still proposed.
 
 Notes for `worktree-provenance`. They are here rather than on the task because a task
 has a title and no description field, and the title cannot hold this: the admission gate
@@ -56,6 +56,28 @@ Keyed on path because that is what git hands us and what we must match against.
 `removed` is a tombstone rather than a deletion, for the reason the audit log is never
 rewritten: *"we made one and tore it down"* and *"there was never one"* are different
 facts, and the second must not be able to impersonate the first.
+
+#### Two departures, made while building it
+
+Both are cases where the sketch above contradicts its own reasoning, so the reasoning
+won. `docs/reference/schema.md` carries the DDL as built.
+
+**The cascade had to go.** `ON DELETE CASCADE` reproduces exactly the flaw this section
+rejects `tasks.worktree_path` for: it cannot answer for a path whose task is gone,
+because it deletes itself along with the task. Deleting a task does not delete the
+directory, so the row must outlive it — otherwise `wecode task rm` silently converts one
+of our own checkouts back into a stranger. And that is reachable today: `wecode start`
+opens no execution row, and `task rm` refuses only tasks that *ran*, so a task with a
+worktree and no run can be deleted outright. `task_id` is therefore plain `TEXT`,
+unreferenced, the way `task_executions.session_id` already is.
+
+**The path could not be the primary key.** A tombstone and a re-creation at the same path
+cannot both exist under it, and a re-creation is not hypothetical — it is the ordinary
+retry path (`start`, `worktree remove`, `start` again), before slot reuse makes it
+routine. So the key is a rowid and the uniqueness is a partial index, `path WHERE removed
+IS NULL`: one live row per path, any number of dead ones. Every property the sketch
+wanted from keying on path — one standing tree per directory, matched by what git
+reports — is kept.
 
 `task_executions.worktree` stays. It answers *which tree did this attempt run in*, which
 is not the same question as *which trees exist and who made them*.
@@ -162,9 +184,30 @@ questions about occupancy rather than about paths.
 
 ## Order
 
-1. the registry, written on create and on remove
+1. ~~the registry, written on create and on remove~~ — **built**
 2. the path layout and slot reuse, which the registry makes safe
 3. `worktree-view` reads the registry instead of guessing
 4. `worktree-teardown` marks `removed` rather than only calling git
 
 Steps 3 and 4 are separate tasks and already depend on this one.
+
+### What step 1 left for the others
+
+The registry is written and read but **nothing prints it**. `wecode worktree` still
+matches git's paths against computed ones, so it still calls a stranger an orphan. That
+is step 3, unchanged and now unblocked: `Store::worktrees` lists every row it needs and
+`worktree_at` answers for one path.
+
+Two writes are still missing, and neither belongs to step 1:
+
+- The scratch checkout `merge_into` borrows for the integration branch is created and
+  removed inside one command, so it is unrecorded. It leaks only if wecode dies mid-merge,
+  and it has no task to hang a `NOT NULL task_id` on. Step 3 can recognise it by name —
+  it is always `<run root>/<org>/.merge` — or step 2 can give it a slot like any other.
+- A worktree already on disk when a workspace upgrades is not backfilled, because its
+  creation date was never observed. It is recorded the next time `start` prepares it, and
+  reads as unrecognised until then.
+
+The occupancy rules at the end of *Siblings share a tree* are not implemented either. The
+registry now holds what they need — a live row names the task whose descendants share the
+tree — but making dispatch consult it is a change to admission, not to the store.
