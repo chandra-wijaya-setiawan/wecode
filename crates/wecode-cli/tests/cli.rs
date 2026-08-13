@@ -2233,6 +2233,112 @@ fn the_agent_is_launched_where_the_task_says_and_the_launch_is_recorded() {
         .assert_contains("exit 0");
 }
 
+/// An agent that does its work and then reports what it cost, the way a coding CLI
+/// speaking `claude-stream-json` does.
+fn reporting_agent(work: &str, input: u64, output: u64) -> String {
+    format!(
+        "{work}; echo '{{\"type\":\"result\",\"usage\":\
+         {{\"input_tokens\":{input},\"output_tokens\":{output}}}}}'"
+    )
+}
+
+#[test]
+fn what_the_agent_reported_spending_reaches_the_row_it_was_spent_on() {
+    // The spend column was a zero on every board until something wrote to it. The
+    // whole path: the agent's own output, the ledger, the task row, the attempt.
+    let (org, _) = with_agent("run-spend", &reporting_agent("echo done >> a.txt", 60, 30));
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("spent    90 tokens");
+
+    // On the board, against the budget the task declared — 100 tokens.
+    org.run(&["board", "caching"])
+        .assert_ok("board")
+        .assert_contains("90/100");
+
+    // In the ledger, attributed to the task and marked as the agent's own account of
+    // itself rather than as something wecode measured.
+    org.run(&["audit", "--task", "t"])
+        .assert_ok("audit")
+        .assert_contains("spend")
+        .assert_contains("90t/")
+        .assert_contains("harness");
+
+    // And against the attempt, so a task with several tries can say which was
+    // expensive.
+    org.run(&["show", "t"]).assert_contains("90t");
+}
+
+#[test]
+fn an_agent_that_reports_nothing_leaves_the_column_empty_rather_than_zero() {
+    // The stub speaks no protocol wecode can read, so there is no number. Printing
+    // one would be a claim nobody made, and the budget would be checked against it.
+    let (org, _) = with_agent("run-unmetered", "echo done >> a.txt");
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        text.replace(
+            "protocol = \"claude-stream-json\"",
+            "protocol = \"invented\"",
+        ),
+    )
+    .unwrap();
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("unmetered");
+
+    // The wall clock is still ours to record, and it is still recorded — as
+    // something wecode observed, unlike a token count.
+    org.run(&["audit", "--task", "t"])
+        .assert_contains("spend")
+        .assert_contains("supervisor")
+        .assert_lacks("harness");
+}
+
+#[test]
+fn an_overspending_agent_turns_its_row_red_after_the_fact() {
+    // Enforcement of a token budget is post-hoc by necessity: the tokens are gone
+    // before wecode hears about them. What the board can do is stop calling the run
+    // healthy, which it could not do while nothing counted.
+    let (org, _) = with_agent(
+        "run-overspend",
+        &reporting_agent("echo done >> a.txt", 4000, 1000),
+    );
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+    org.run(&["run", "t"]).assert_ok("run");
+
+    org.run(&["board", "caching"])
+        .assert_ok("board")
+        .assert_contains("over budget")
+        .assert_contains("red");
+}
+
+#[test]
+fn a_run_killed_on_its_limit_still_reports_what_it_burned() {
+    // The case a spend recorded only on success would hide, and the expensive one:
+    // an agent that ran away with the budget and had to be killed.
+    let (org, _) = with_agent(
+        "run-killed",
+        "echo '{\"type\":\"assistant\",\"message\":{\"usage\":\
+         {\"input_tokens\":40,\"output_tokens\":10}}}'; sleep 60",
+    );
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(&conf, text.replace("idle_secs = 300", "idle_secs = 1")).unwrap();
+    a_task(&org, "t", "a.txt", "true");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("no output")
+        .assert_contains("spent    50 tokens");
+    org.run(&["board", "caching"]).assert_contains("50/100");
+}
+
 #[test]
 fn an_unassigned_task_cannot_be_run() {
     // There is no post to name an agent, so there is nothing to launch. The fixture

@@ -827,7 +827,7 @@ pub(crate) fn executions(runs: &[wecode_store::Execution]) -> String {
     let mut out = format!("\nruns ({})\n", runs.len());
     for r in runs {
         out.push_str(&format!(
-            "  #{}  {:<10} {:<18} {}\n",
+            "  #{}  {:<10} {:<18} {:<10} {}\n",
             r.attempt,
             r.status.as_str(),
             match r.wall_secs {
@@ -838,6 +838,12 @@ pub(crate) fn executions(runs: &[wecode_store::Execution]) -> String {
                     Some(p) => format!("unfinished, pid {p}"),
                     None => "unfinished".to_string(),
                 },
+            },
+            // Per attempt rather than only in total: a task that cost too much
+            // usually cost it on one try, and the total cannot say which.
+            match r.spent_tokens {
+                Some(n) => format!("{n}t"),
+                None => "—".to_string(),
             },
             r.detail
         ));
@@ -987,7 +993,7 @@ pub(crate) fn ran(
     o: &crate::spawn::Outcome,
 ) -> String {
     let mut out = format!(
-        "{} {}  {}\n  post     {} ({})\n  in       {}\n  took     {:.0}s\n  {}\n",
+        "{} {}  {}\n  post     {} ({})\n  in       {}\n  took     {:.0}s\n  spent    {}\n  {}\n",
         kind_tag(task.kind),
         task.id,
         task.title,
@@ -995,6 +1001,12 @@ pub(crate) fn ran(
         post.agent,
         cwd.display(),
         o.took.as_secs_f64(),
+        match o.spent {
+            Some(n) => format!("{n} tokens, as the agent reported them"),
+            // Not "0": the agent's protocol says nothing wecode can read a count
+            // out of, and a budget cannot be checked against a number nobody has.
+            None => "unmetered — this agent reports no token usage".to_string(),
+        },
         if o.ended.ok() {
             format!("✓ {}", o.ended.describe())
         } else {
@@ -1384,12 +1396,20 @@ pub(crate) fn decision(post: &str, occupant: &str, action: &Action, d: &Decision
 }
 
 /// The audit ledger.
+///
+/// `source` is a column rather than a footnote because it is what makes a row
+/// admissible or not: `broker` decided it, `supervisor` measured it, `harness` is the
+/// agent's account of itself. A spend row is the first one where that distinction is
+/// load-bearing — nothing sits between an agent and its model to count tokens, so the
+/// number is reported, and a reader must be able to see that without knowing which
+/// actions happen to be measurable.
 #[must_use]
 pub(crate) fn audit(lines: &[AuditLine]) -> String {
     if lines.is_empty() {
         return "no matching audit records\n".to_string();
     }
-    let mut out = String::from("seq  post        agent         verdict   action  target\n");
+    let mut out =
+        String::from("seq  post        agent         verdict   source      action  target\n");
     for l in lines {
         let mark = match l.outcome.as_str() {
             "allow" => "✓ allow",
@@ -1398,8 +1418,8 @@ pub(crate) fn audit(lines: &[AuditLine]) -> String {
             _ => "✗ deny",
         };
         out.push_str(&format!(
-            "{:<4} {:<11} {:<13} {:<9} {:<7} {}\n",
-            l.seq, l.post, l.agent, mark, l.action, l.target
+            "{:<4} {:<11} {:<13} {:<9} {:<11} {:<7} {}\n",
+            l.seq, l.post, l.agent, mark, l.source, l.action, l.target
         ));
         if !l.detail.is_empty() && l.outcome != "allow" {
             out.push_str(&format!("     └─ {}\n", l.detail));
@@ -1729,6 +1749,32 @@ mod tests {
         let out = audit(&lines);
         assert!(out.contains("allow"), "{out}");
         assert!(!out.contains("└─"), "{out}");
+    }
+
+    #[test]
+    fn audit_says_where_each_record_came_from() {
+        // The distinction the spend column rests on: 1540 tokens is the agent's own
+        // account of itself, and a reader has to be able to see that it was not
+        // measured. Nothing sits between an agent and its model to measure it.
+        let mut b = Broker::new(Charter::with(vec![]));
+        let s = Session::new("s", "impl", "claude-code", Effective::of(vec![engineer()]))
+            .on(Some("export".into()), Some("cache".into()));
+        b.observe(
+            &s,
+            Action::Spend {
+                tokens: 1540,
+                wall_secs: 42,
+            },
+            Decision::Allow,
+            wecode_gov::Source::Harness,
+        );
+        let store = wecode_store::Store::in_memory().unwrap();
+        store.append_records(b.ledger()).unwrap();
+
+        let out = audit(&store.audit(&wecode_store::AuditQuery::default()).unwrap());
+        assert!(out.contains("source"), "the column is headed: {out}");
+        assert!(out.contains("harness"), "{out}");
+        assert!(out.contains("1540t/42s"), "{out}");
     }
 
     #[test]

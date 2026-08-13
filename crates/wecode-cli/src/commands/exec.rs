@@ -444,6 +444,27 @@ pub(crate) fn run_task(a: &Args) -> Res {
         },
         wecode_gov::Source::Supervisor,
     );
+    // What it cost, however it ended: a run killed on its wall limit burned the
+    // tokens it burned, and a spend recorded only for clean exits would make the
+    // expensive failures the invisible ones.
+    //
+    // Observed, not authorised — the money is already gone, and a Broker asked to
+    // permit it afterwards would be theatre. The provenance is the weaker of the two
+    // halves: the clock is ours, but there is nothing between the agent and the model
+    // for wecode to count tokens at, so a run that reported one is the harness
+    // speaking about itself and the ledger says so.
+    broker.observe(
+        &supervisor,
+        Action::Spend {
+            tokens: outcome.spent.unwrap_or(0),
+            wall_secs: outcome.took.as_secs(),
+        },
+        wecode_gov::Decision::Allow,
+        match outcome.spent {
+            Some(_) => wecode_gov::Source::Harness,
+            None => wecode_gov::Source::Supervisor,
+        },
+    );
     store.append_records(broker.ledger())?;
 
     let mut out = render::ran(&task, &post, &prepared.cwd, &outcome);
@@ -470,6 +491,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
             // Why it was rejected, not how the process exited. A retry reading
             // "exit 0" learns nothing; the failing check is the whole message.
             &why.unwrap_or_else(|| outcome.ended.describe()),
+            outcome.spent,
         )?;
         out.push_str(&verdict);
         out.push_str(&commit_attempt(&store, &id, &prepared.cwd, &outcome)?);
@@ -484,6 +506,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
                 spawn::Ended::Exited(_) => wecode_core::ExecutionStatus::Failed,
             },
             &outcome.ended.describe(),
+            outcome.spent,
         )?;
         out.push_str("\n  not verified — the agent did not finish cleanly\n");
         out.push_str(&commit_attempt(&store, &id, &prepared.cwd, &outcome)?);

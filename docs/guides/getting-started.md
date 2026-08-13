@@ -95,6 +95,16 @@ wecode ready                  # what a dispatcher could pick up now
 wecode audit --denied         # what was refused, and why
 ```
 
+The **spend** cell fills in once a task has actually run — `90/50000`, tokens against
+the budget you declared. Over budget turns the row red, after the fact: the tokens are
+gone before anyone hears about them, and the wall limit is the control that stops a run
+mid-flight.
+
+A cell still reading `0` after a run means the agent reported no token count, not that
+it was free. `wecode show <task>` has the per-attempt column and says which, and
+[config.md](../reference/config.md) lists the `protocol` values wecode can read a count
+out of.
+
 ## 8. Let it run itself
 
 ```bash

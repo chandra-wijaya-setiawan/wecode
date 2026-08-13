@@ -13,8 +13,9 @@ use rusqlite::Connection;
 
 /// Bumped whenever the schema changes. Stored in `user_version`.
 ///
-/// 2 adds `projects.archived`. 3 adds `task_executions`.
-pub const VERSION: i64 = 3;
+/// 2 adds `projects.archived`. 3 adds `task_executions`. 4 adds
+/// `task_executions.spent_tokens`, once something wrote it.
+pub const VERSION: i64 = 4;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -121,24 +122,30 @@ CREATE INDEX audit_by_outcome ON audit_log(outcome);
 
 -- One run of one task. The execution is the entity; `attempt` is which try it is.
 --
--- Deferred until something wrote it, which is why `spent_tokens` is absent: nothing
--- counts tokens yet, and a column that is always NULL is a guess wearing a schema.
 -- `pid` is written at spawn and left behind if wecode dies, so a row still saying
 -- `working` is exactly the recovery information wanted.
 --
+-- `spent_tokens` was held back until something counted them, and is nullable because
+-- the two cases are different facts: NULL is an agent whose output wecode cannot read
+-- a count out of, 0 is a run that reported burning nothing. Collapsing them would
+-- make every unmetered agent look free. `wall_secs` beside it is measured here;
+-- `spent_tokens` is the agent's own report, and the ledger row for the same run
+-- carries that provenance.
+--
 -- No foreign key on session_id: the ledger and its executions outlive sessions.
 CREATE TABLE task_executions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    session_id  TEXT NOT NULL,
-    attempt     INTEGER NOT NULL,
-    status      TEXT NOT NULL,          -- A2A's eight states
-    worktree    TEXT,
-    pid         INTEGER,
-    started     INTEGER NOT NULL,
-    ended       INTEGER,
-    wall_secs   INTEGER,
-    detail      TEXT NOT NULL DEFAULT '',
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    session_id   TEXT NOT NULL,
+    attempt      INTEGER NOT NULL,
+    status       TEXT NOT NULL,         -- A2A's eight states
+    worktree     TEXT,
+    pid          INTEGER,
+    started      INTEGER NOT NULL,
+    ended        INTEGER,
+    wall_secs    INTEGER,               -- measured by wecode
+    spent_tokens INTEGER,               -- reported by the agent; NULL if unmetered
+    detail       TEXT NOT NULL DEFAULT '',
     UNIQUE (task_id, attempt)
 ) STRICT;
 
@@ -146,6 +153,10 @@ CREATE INDEX executions_by_task ON task_executions(task_id);
 ";
 
 /// The `task_executions` table, as an upgrade for a database that predates it.
+///
+/// Frozen at the shape version 3 had. A file arriving from version 2 runs this and
+/// then the 3→4 step, which is the whole point of chaining them — editing this to
+/// include a later column would leave every file that already ran it behind.
 const ADD_EXECUTIONS: &str = "
 CREATE TABLE task_executions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -211,6 +222,10 @@ const UPGRADES: &[(i64, &str)] = &[
         "ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
     ),
     (2, ADD_EXECUTIONS),
+    (
+        3,
+        "ALTER TABLE task_executions ADD COLUMN spent_tokens INTEGER",
+    ),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -324,6 +339,39 @@ mod tests {
             .query_row("SELECT count(*) FROM task_executions", [], |r| r.get(0))
             .expect("task_executions exists after 2→3");
         assert_eq!(runs, 0);
+        let spent: i64 = c
+            .query_row("SELECT count(spent_tokens) FROM task_executions", [], |r| {
+                r.get(0)
+            })
+            .expect("task_executions.spent_tokens exists after 3→4");
+        assert_eq!(spent, 0);
+    }
+
+    #[test]
+    fn a_database_that_predates_spend_gains_the_column_without_losing_its_runs() {
+        // The upgrade an existing workspace actually takes. Its old attempts have no
+        // token count and must read as unmetered rather than as free.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("ALTER TABLE task_executions DROP COLUMN spent_tokens")
+            .unwrap();
+        c.execute_batch(
+            "INSERT INTO projects (id, repo, objective, status)
+             VALUES ('p','wecode','an objective','active');
+             INSERT INTO tasks (id, project_id, kind, title, status)
+             VALUES ('t','p','feature','x','draft');
+             INSERT INTO task_executions (task_id, session_id, attempt, status, started)
+             VALUES ('t','s',1,'completed',0);",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 3i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let spent: Option<i64> = c
+            .query_row("SELECT spent_tokens FROM task_executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(spent, None, "an attempt from before the count is unmetered");
     }
 
     #[test]

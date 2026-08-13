@@ -31,6 +31,14 @@ A consequence worth naming: for a CLI agent that cannot speak A2A, wecode fills 
 agent's side of the record from what it observed. That is strictly *more* trustworthy
 than an agent-reported one, because the agent cannot author it.
 
+**Spend is the exception that proves the rule.** A diff can be read and an exit code can
+be caught, but nothing sits between an agent and its model, so a token count can only
+come from the harness that spent them. Rather than drop the number or launder it, the
+spend record carries the weaker provenance of its two halves: the wall clock is
+`supervisor`, the token count is `harness`, and a record containing both is filed as
+`harness`. That is why `wecode audit` shows the source as a column — a figure the board
+turns red over has to say where it came from.
+
 ## Two levels, and two relations
 
 Four levels — vision, goal, project, task — cost a level of tree for two things that
@@ -119,8 +127,14 @@ first.
 
 `task_executions` sat specified-but-absent for weeks, because nothing wrote it and every
 column would have been a guess about code that did not exist. When it landed, it landed
-without `spent_tokens`: nothing counts tokens, and a column that is always NULL is a
+without `spent_tokens`: nothing counted tokens, and a column that is always NULL is a
 guess wearing a schema.
+
+`spent_tokens` arrived later, on the same rule read forwards — something counts them
+now, so the column is a fact rather than a placeholder. It is nullable, and that is the
+whole design: NULL means the agent's protocol reports nothing wecode can read, `0` means
+it reported spending nothing. A `NOT NULL DEFAULT 0` would have made every unmetered
+agent look free, which is the failure the empty column was avoiding in the first place.
 
 The same rule applies to unreachable code. A helper written for the next task is removed
 and re-added when that task arrives — twice now, deliberately, because "it will be used
