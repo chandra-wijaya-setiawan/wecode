@@ -27,8 +27,53 @@ Only a few fields are typed, because wecode itself acts on them:
 | `accept` | fills acceptance when you omit `--accept-cmd` |
 | `tokens`, `wall_secs` | fill the budget |
 | `merge_to`, `merge` | where work lands, and whether it needs a signature |
+| `subtasks` | what `task add --expand` emits |
 
 Everything in `guidance` is carried to the reader and never parsed.
+
+## Writing the decomposition down
+
+A kind may declare its breakdown, so it is created rather than retyped:
+
+```toml
+[feature]
+subtasks = ["design", "build", "docs"]
+
+[feature.design]
+kind   = "design"
+write  = ["docs/wecode/{{task}}/design.md"]
+accept = ["test -f docs/wecode/{{task}}/design.md"]
+
+[feature.build]
+after  = ["design"]
+write  = ["src/**"]
+
+[feature.docs]
+after  = ["build"]
+kind   = "docs"
+write  = ["README.md", "docs/**"]
+```
+
+`wecode task add <id> --project <p> "<title>" --expand` then emits three chained tasks
+with `{{task}}` substituted. Without `--expand`, behaviour is exactly as before.
+
+**This is not a workflow engine.** The template runs once, at planning time, and its
+output is ordinary tasks — they face the same admission gate as hand-written ones, and
+can be edited, dropped or added to before anything is dispatched. Nothing at run time
+consults it. A scaffold that produces tasks is not a pipeline that runs them.
+
+Two rules worth knowing before you write one:
+
+- **A block states only what differs.** `accept`, `assign_to` and the budget fall
+  through to the playbook for the step's *own* kind. A `design` step therefore wants a
+  `[design]` section; without one it has no budget and the gate refuses the expansion.
+- **It is all or nothing.** One refused subtask means none are created — a half-built
+  expansion leaves the rest waiting on tasks that do not exist. The main task is
+  unaffected; it was admitted on its own merits.
+
+Ceremony on small work is the real risk. Three tasks for a two-line change is absurd,
+which is why `--expand` is opt-in and per kind: `bug` should get no design step here —
+it gets a reproduction, which its guidance already demands and which is a better gate.
 
 ## Writing a good one
 

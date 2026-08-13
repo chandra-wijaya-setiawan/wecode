@@ -402,6 +402,18 @@ pub(crate) fn playbook_all(project: &Project, pb: &Playbook) -> String {
             }
         ));
     }
+    let templated: Vec<&str> = pb
+        .kinds()
+        .iter()
+        .filter(|(_, k)| !k.subtasks.is_empty())
+        .map(|(kind, _)| kind.as_str())
+        .collect();
+    if !templated.is_empty() {
+        out.push_str(&format!(
+            "\n  --expand emits subtasks for: {}\n",
+            templated.join(", ")
+        ));
+    }
     out.push_str("\n  wecode playbook <kind>  for the guidance itself\n");
     out
 }
@@ -435,12 +447,84 @@ pub(crate) fn playbook_kind(project: &Project, pb: &Playbook, kind: TaskKind) ->
     for cmd in &k.accept {
         out.push_str(&format!("  accept    {cmd}\n"));
     }
+    // What `--expand` would emit. Shown before the prose because it is the part the
+    // reader can act on without writing anything: a decomposition already decided.
+    if !k.subtasks.is_empty() {
+        out.push_str(&format!(
+            "  expand    {}\n",
+            k.subtasks
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" → ")
+        ));
+        let width = k.subtasks.iter().map(|s| s.name.len()).max().unwrap_or(0);
+        for s in &k.subtasks {
+            out.push_str(&format!(
+                "              {:<width$}  {:<5}  {}",
+                s.name,
+                kind_tag(s.kind.unwrap_or(kind)),
+                if s.write.is_empty() {
+                    "—".to_string()
+                } else {
+                    s.write.join(", ")
+                }
+            ));
+            if !s.after.is_empty() {
+                out.push_str(&format!("  after {}", s.after.join(", ")));
+            }
+            out.push('\n');
+        }
+    }
     if !k.guidance.is_empty() {
         out.push_str("  ---\n");
         for line in k.guidance.lines() {
             out.push_str(&format!("  {line}\n"));
         }
     }
+    out
+}
+
+/// What `--expand` created, one line per subtask.
+///
+/// The whole point is that these are ordinary tasks, so the columns are the ones that
+/// decide whether each is workable: what it is, what it may write, who has it, and
+/// what it waits for.
+#[must_use]
+pub(crate) fn expansion(main: &Task, tasks: &[Task]) -> String {
+    let mut out = format!(
+        "\n  expanded {} into {} subtask{}\n\n",
+        main.id,
+        tasks.len(),
+        if tasks.len() == 1 { "" } else { "s" }
+    );
+    let width = tasks.iter().map(|t| t.id.as_str().len()).max().unwrap_or(0);
+    for t in tasks {
+        out.push_str(&format!(
+            "    {} {:<width$}  {:<5}  {:<32}  {}",
+            t.status.mark(),
+            t.id.as_str(),
+            kind_tag(t.kind),
+            if t.scope.write.is_empty() {
+                "—".to_string()
+            } else {
+                t.scope.write.join(", ")
+            },
+            t.assignee.as_deref().unwrap_or("—"),
+        ));
+        if !t.depends_on.is_empty() {
+            out.push_str(&format!(
+                "  after {}",
+                t.depends_on
+                    .iter()
+                    .map(TaskId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        out.push('\n');
+    }
+    out.push_str("\n  They are ordinary tasks: edit, drop or add to them before dispatching.\n");
     out
 }
 

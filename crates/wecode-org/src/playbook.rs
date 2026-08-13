@@ -45,6 +45,25 @@ pub enum PlaybookError {
         value: String,
         known: String,
     },
+    /// A key inside a kind block that is neither one of its fields nor a subtask it
+    /// declares. This is what recovers the strictness `deny_unknown_fields` used to
+    /// give the block, which `flatten` made unavailable.
+    UnknownField {
+        at: String,
+        key: String,
+        known: String,
+    },
+    /// `subtasks` names one that has no block of its own.
+    SubtaskUndeclared {
+        at: String,
+        name: String,
+    },
+    /// A subtask ordered after something that is not an earlier sibling.
+    SubtaskAfterUnknown {
+        at: String,
+        after: String,
+        earlier: String,
+    },
     AlreadyExists(PathBuf),
 }
 
@@ -59,6 +78,25 @@ impl fmt::Display for PlaybookError {
             Self::BadValue { at, value, known } => {
                 write!(f, "{at}: `{value}` is not one of {known}")
             }
+            Self::UnknownField { at, key, known } => write!(
+                f,
+                "{at}: `{key}` is not a field, and no subtask of that name is declared \
+                 — fields are: {known}"
+            ),
+            Self::SubtaskUndeclared { at, name } => write!(
+                f,
+                "{at}: subtasks names `{name}`, but there is no [{}.{name}] block",
+                at.trim_matches(['[', ']'])
+            ),
+            Self::SubtaskAfterUnknown { at, after, earlier } => write!(
+                f,
+                "{at}: after = `{after}` is not an earlier subtask — earlier are: {}",
+                if earlier.is_empty() {
+                    "none, this is the first"
+                } else {
+                    earlier
+                }
+            ),
             Self::AlreadyExists(p) => write!(f, "{} already exists", p.display()),
         }
     }
@@ -103,8 +141,11 @@ struct ProjectBlock {
     merge: Option<String>,
 }
 
+/// The fields a kind block has. Named here because the strict check is done by hand
+/// against this list — see `KindBlock::steps`.
+const KIND_FIELDS: &str = "worktree, assign_to, accept, tokens, wall_secs, guidance, subtasks";
+
 #[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
 struct KindBlock {
     #[serde(default)]
     worktree: bool,
@@ -118,6 +159,40 @@ struct KindBlock {
     wall_secs: Option<u64>,
     #[serde(default)]
     guidance: String,
+    /// The subtasks `--expand` emits, in the order they are declared. Order lives in
+    /// this list rather than in the blocks because a table has no order.
+    #[serde(default)]
+    subtasks: Vec<String>,
+    /// The `[feature.design]` sub-tables, plus anything else that did not match a
+    /// field. `deny_unknown_fields` cannot be combined with `flatten`, so the check
+    /// it used to give is done by name in `parse`: a key here that `subtasks` does
+    /// not declare is refused, which catches a misspelled `worktre` as well as a
+    /// stray block, and says more about it than serde would have.
+    #[serde(flatten)]
+    steps: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
+struct SubtaskBlock {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    after: Vec<String>,
+    #[serde(default)]
+    write: Vec<String>,
+    #[serde(default)]
+    read: Vec<String>,
+    #[serde(default)]
+    accept: Vec<String>,
+    #[serde(default)]
+    assign_to: Option<String>,
+    #[serde(default)]
+    tokens: Option<u64>,
+    #[serde(default)]
+    wall_secs: Option<u64>,
 }
 
 // ---------------------------------------------------------------- domain ------
@@ -185,6 +260,165 @@ pub struct KindPlaybook {
     pub wall_secs: Option<u64>,
     /// Prose, read by whoever decomposes the work. wecode only carries it.
     pub guidance: String,
+    /// The decomposition `--expand` emits, in declared order. Empty means this
+    /// project does not template work of this kind, and `--expand` has nothing to do.
+    pub subtasks: Vec<SubtaskTemplate>,
+}
+
+/// One subtask a kind declares, before it is resolved against a main task.
+///
+/// Everything left unset falls through to the playbook for the subtask's *own* kind,
+/// exactly as a hand-written task of that kind would. So a template states what makes
+/// this step different, and nothing else.
+#[derive(Clone, PartialEq, Eq, Default, Debug)]
+pub struct SubtaskTemplate {
+    /// The suffix: the emitted task is `<main task id>-<name>`.
+    pub name: String,
+    /// Defaults to the kind being expanded — a template names it only when the step
+    /// is a different sort of work, as a `design` step of a `feature` is.
+    pub kind: Option<TaskKind>,
+    /// May use the placeholders. Without one the title is derived from the main
+    /// task's, which has already cleared the gate.
+    pub title: Option<String>,
+    /// Sibling names, resolved to task ids at expansion. Siblings only: a template
+    /// cannot know the ids of tasks outside the expansion it belongs to.
+    pub after: Vec<String>,
+    pub write: Vec<String>,
+    pub read: Vec<String>,
+    pub accept: Vec<String>,
+    pub assign_to: Option<String>,
+    pub tokens: Option<u64>,
+    pub wall_secs: Option<u64>,
+}
+
+/// A subtask template resolved against one main task: ids, not names, and every
+/// placeholder filled.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Subtask {
+    pub id: String,
+    pub kind: TaskKind,
+    pub title: String,
+    /// Task ids, already prefixed.
+    pub after: Vec<String>,
+    pub write: Vec<String>,
+    pub read: Vec<String>,
+    pub accept: Vec<String>,
+    pub assign_to: Option<String>,
+    pub tokens: Option<u64>,
+    pub wall_secs: Option<u64>,
+}
+
+/// Reads a kind's sub-tables into templates, in the order `subtasks` declares.
+///
+/// Three things are settled here rather than left to fail later, because all three
+/// are typos and a typo found at planning time costs nothing:
+///
+/// - a key that is neither a field nor a declared subtask
+/// - a declared subtask with no block
+/// - an `after` that names no sibling
+fn parse_subtasks(key: &str, block: &KindBlock) -> Result<Vec<SubtaskTemplate>, PlaybookError> {
+    let at = format!("[{key}]");
+    for name in block.steps.keys() {
+        if !block.subtasks.contains(name) {
+            return Err(PlaybookError::UnknownField {
+                at: at.clone(),
+                key: name.clone(),
+                known: KIND_FIELDS.to_string(),
+            });
+        }
+    }
+
+    let mut out = Vec::with_capacity(block.subtasks.len());
+    for name in &block.subtasks {
+        let value = block
+            .steps
+            .get(name)
+            .ok_or_else(|| PlaybookError::SubtaskUndeclared {
+                at: at.clone(),
+                name: name.clone(),
+            })?;
+        let s: SubtaskBlock = value.clone().try_into()?;
+
+        // Earlier, not merely a sibling: the emitted tasks are created in this order,
+        // so a step ordered after a later one names a task that does not exist yet.
+        for a in &s.after {
+            if !out.iter().any(|e: &SubtaskTemplate| &e.name == a) {
+                return Err(PlaybookError::SubtaskAfterUnknown {
+                    at: format!("[{key}.{name}]"),
+                    after: a.clone(),
+                    earlier: out
+                        .iter()
+                        .map(|e: &SubtaskTemplate| e.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                });
+            }
+        }
+        let kind = match &s.kind {
+            None => None,
+            Some(k) => Some(TaskKind::parse(k).ok_or_else(|| {
+                PlaybookError::BadValue {
+                    at: format!("[{key}.{name}] kind"),
+                    value: k.clone(),
+                    known: TaskKind::all()
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                }
+            })?),
+        };
+        out.push(SubtaskTemplate {
+            name: name.clone(),
+            kind,
+            title: s.title,
+            after: s.after,
+            write: s.write,
+            read: s.read,
+            accept: s.accept,
+            assign_to: s.assign_to,
+            tokens: s.tokens,
+            wall_secs: s.wall_secs,
+        });
+    }
+    Ok(out)
+}
+
+/// The placeholders a template may use: the main task's id and its title.
+///
+/// Deliberately two. A template that could reach further into the plan would be a
+/// small language, and this is a scaffold that runs once.
+fn fill(text: &str, task: &str, title: &str) -> String {
+    text.replace("{{task}}", task).replace("{{title}}", title)
+}
+
+impl KindPlaybook {
+    /// What `--expand` would emit for a main task, in declared order.
+    ///
+    /// Pure. It produces values and schedules nothing — the tasks it describes still
+    /// face the admission gate, and may be edited or dropped before anything runs.
+    /// `parent_kind` is the kind being expanded, used for a step that names none.
+    #[must_use]
+    pub fn expand(&self, parent_kind: TaskKind, task: &str, title: &str) -> Vec<Subtask> {
+        self.subtasks
+            .iter()
+            .map(|s| Subtask {
+                id: format!("{task}-{}", s.name),
+                kind: s.kind.unwrap_or(parent_kind),
+                title: s
+                    .title
+                    .as_ref()
+                    .map_or_else(|| format!("{}: {title}", s.name), |t| fill(t, task, title)),
+                after: s.after.iter().map(|a| format!("{task}-{a}")).collect(),
+                write: s.write.iter().map(|g| fill(g, task, title)).collect(),
+                read: s.read.iter().map(|g| fill(g, task, title)).collect(),
+                accept: s.accept.iter().map(|c| fill(c, task, title)).collect(),
+                assign_to: s.assign_to.clone(),
+                tokens: s.tokens,
+                wall_secs: s.wall_secs,
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Default, Debug)]
@@ -205,6 +439,7 @@ impl Playbook {
                     .map(|k| k.as_str().to_string())
                     .collect(),
             })?;
+            let subtasks = parse_subtasks(&key, &block)?;
             kinds.insert(
                 kind,
                 KindPlaybook {
@@ -214,6 +449,7 @@ impl Playbook {
                     tokens: block.tokens,
                     wall_secs: block.wall_secs,
                     guidance: block.guidance.trim().to_string(),
+                    subtasks,
                 },
             );
         }
@@ -316,6 +552,29 @@ guidance  = """
 TODO: how should a feature be broken down here?
 Acceptance must be an executable command, never a description.
 """
+# The decomposition `wecode task add <id> ... --expand` emits. Uncomment to use it;
+# without `subtasks` there is nothing to expand and the flag is refused.
+#
+# Order is this list. Every name needs a block, and each block states only what
+# makes that step different — kind, accept, budget and assignee otherwise fall
+# through to the playbook for the step's own kind, as a hand-written task would.
+# `{{{{task}}}}` is the main task's id and `{{{{title}}}}` its title.
+#
+# subtasks = ["design", "build", "docs"]
+#
+# [feature.design]
+# kind   = "design"                 # not finished when it passes: it waits for a signature
+# write  = ["docs/wecode/{{{{task}}}}/design.md"]
+# accept = ["test -f docs/wecode/{{{{task}}}}/design.md"]
+#
+# [feature.build]
+# after  = ["design"]               # sibling names, not task ids
+# write  = ["src/**"]
+#
+# [feature.docs]
+# after  = ["build"]
+# kind   = "docs"
+# write  = ["README.md", "docs/**"]
 
 [bug]
 worktree  = true
@@ -487,6 +746,210 @@ guidance = "Single task, no subtasks."
         let p = Playbook::parse("").unwrap();
         assert!(p.is_empty());
         assert!(p.project.merge_to.is_none());
+    }
+
+    // ----------------------------------------------------------- subtasks ------
+
+    const TEMPLATED: &str = r#"
+[feature]
+worktree  = true
+assign_to = "impl"
+accept    = ["cargo test --workspace"]
+tokens    = 120000
+wall_secs = 5400
+subtasks  = ["design", "build", "docs"]
+
+[feature.design]
+kind   = "design"
+title  = "decide how {{task}} should work"
+write  = ["docs/wecode/{{task}}/design.md"]
+accept = ["test -f docs/wecode/{{task}}/design.md"]
+
+[feature.build]
+after  = ["design"]
+write  = ["src/**"]
+
+[feature.docs]
+after  = ["build"]
+kind   = "docs"
+write  = ["README.md"]
+"#;
+
+    #[test]
+    fn a_template_expands_in_declared_order_with_the_placeholders_filled() {
+        let p = Playbook::parse(TEMPLATED).unwrap();
+        let k = p.for_kind(TaskKind::Feature).unwrap();
+        let out = k.expand(TaskKind::Feature, "retry", "retry a failed task once");
+
+        let ids: Vec<&str> = out.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["retry-design", "retry-build", "retry-docs"]);
+
+        let design = &out[0];
+        assert_eq!(design.kind, TaskKind::Design);
+        assert_eq!(design.title, "decide how retry should work");
+        assert_eq!(
+            design.write,
+            vec!["docs/wecode/retry/design.md".to_string()]
+        );
+        assert_eq!(
+            design.accept,
+            vec!["test -f docs/wecode/retry/design.md".to_string()]
+        );
+        // A sibling name becomes a task id — a template cannot know ids itself.
+        assert_eq!(out[1].after, vec!["retry-design".to_string()]);
+        assert_eq!(out[2].after, vec!["retry-build".to_string()]);
+    }
+
+    #[test]
+    fn a_step_that_names_no_kind_is_the_kind_being_expanded() {
+        let p = Playbook::parse(TEMPLATED).unwrap();
+        let out = p.for_kind(TaskKind::Feature).unwrap().expand(
+            TaskKind::Feature,
+            "retry",
+            "retry a failed task once",
+        );
+        assert_eq!(out[1].kind, TaskKind::Feature);
+        assert_eq!(out[2].kind, TaskKind::Docs);
+    }
+
+    #[test]
+    fn a_step_without_a_title_derives_one_from_the_main_task() {
+        // The main task's title has already cleared the gate, so a prefix of it is
+        // the cheapest title that will too. Inventing prose here would not.
+        let p = Playbook::parse(TEMPLATED).unwrap();
+        let out = p.for_kind(TaskKind::Feature).unwrap().expand(
+            TaskKind::Feature,
+            "retry",
+            "retry a failed task once",
+        );
+        assert_eq!(out[1].title, "build: retry a failed task once");
+    }
+
+    #[test]
+    fn a_template_states_only_what_differs() {
+        // Everything unset is left unset here, so `task add` can fill it from the
+        // playbook for the step's own kind — the same path a hand-written task takes.
+        let p = Playbook::parse(TEMPLATED).unwrap();
+        let out = p.for_kind(TaskKind::Feature).unwrap().expand(
+            TaskKind::Feature,
+            "retry",
+            "retry a failed task once",
+        );
+        assert!(out[1].accept.is_empty());
+        assert!(out[1].assign_to.is_none());
+        assert_eq!(out[1].tokens, None);
+    }
+
+    #[test]
+    fn a_kind_with_no_subtasks_expands_to_nothing() {
+        let p = Playbook::parse(SAMPLE).unwrap();
+        let k = p.for_kind(TaskKind::Bug).unwrap();
+        assert!(k.subtasks.is_empty());
+        assert!(k.expand(TaskKind::Bug, "fix-it", "a title").is_empty());
+    }
+
+    #[test]
+    fn a_declared_subtask_with_no_block_is_refused() {
+        let err = Playbook::parse("[feature]\nsubtasks = [\"design\"]\n").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("design"), "{msg}");
+        assert!(msg.contains("feature.design"), "{msg}");
+    }
+
+    #[test]
+    fn a_block_the_list_does_not_declare_is_refused() {
+        // Order lives in `subtasks`, so a block missing from it would silently never
+        // be emitted — the same class of bug as a misspelled field.
+        let err = Playbook::parse(
+            "[feature]\nsubtasks = [\"build\"]\n\n[feature.build]\n\n[feature.tests]\nwrite = [\"tests/**\"]\n",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("tests"), "{msg}");
+    }
+
+    #[test]
+    fn an_after_that_names_no_sibling_is_refused() {
+        let err = Playbook::parse(
+            "[feature]\nsubtasks = [\"build\"]\n\n[feature.build]\nafter = [\"desgin\"]\n",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("desgin"), "{msg}");
+        assert!(msg.contains("feature.build"), "{msg}");
+    }
+
+    #[test]
+    fn an_after_that_points_forward_is_refused() {
+        // The tasks are created in the declared order, so ordering a step after a
+        // later one names a task that does not exist yet — `NoSuchTask`, halfway
+        // through creating an expansion, rather than a question about the playbook.
+        let err = Playbook::parse(
+            "[feature]\nsubtasks = [\"build\", \"design\"]\n\n[feature.build]\nafter = [\"design\"]\n\n[feature.design]\n",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("earlier"), "{msg}");
+    }
+
+    #[test]
+    fn a_step_kind_that_is_not_a_kind_is_refused() {
+        let err = Playbook::parse(
+            "[feature]\nsubtasks = [\"build\"]\n\n[feature.build]\nkind = \"buld\"\n",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("buld"), "{msg}");
+        assert!(msg.contains("refactor"), "should list the kinds: {msg}");
+    }
+
+    #[test]
+    fn a_misspelled_field_inside_a_step_is_refused() {
+        let err = Playbook::parse(
+            "[feature]\nsubtasks = [\"build\"]\n\n[feature.build]\nwrites = [\"src/**\"]\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("writes"), "{err}");
+    }
+
+    #[test]
+    fn the_starter_ships_the_template_commented_out() {
+        // Uncommenting it must work: the example sits after `guidance`, so the
+        // sub-tables it introduces do not swallow the fields above them.
+        let text = starter("rust");
+        let lines: Vec<&str> = text.lines().collect();
+        let from = lines
+            .iter()
+            .position(|l| l.starts_with("# subtasks"))
+            .expect("the starter offers a subtasks example");
+        let to = from
+            + lines[from..]
+                .iter()
+                .position(|l| l.starts_with("[bug]"))
+                .expect("the example ends before the next kind");
+        let live: String = lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                if (from..to).contains(&i) {
+                    l.strip_prefix("# ").unwrap_or(l.trim_start_matches('#'))
+                } else {
+                    l
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let p = Playbook::parse(&live).expect("the commented example is valid TOML");
+        let k = p.for_kind(TaskKind::Feature).unwrap();
+        assert_eq!(k.subtasks.len(), 3);
+        assert!(
+            !k.guidance.is_empty(),
+            "uncommenting must not move guidance into a sub-table"
+        );
+        assert_eq!(
+            k.expand(TaskKind::Feature, "retry", "a title")[0].write,
+            vec!["docs/wecode/retry/design.md".to_string()]
+        );
     }
 
     fn temp(name: &str) -> PathBuf {

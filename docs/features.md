@@ -12,6 +12,7 @@ The inventory, including what is weak. Anything not here is not built — see
 | **Six kinds** | feature, bug, refactor, chore, spike, docs |
 | **Admission gate** | deterministic defect checks, each carrying a fixed question |
 | **Playbooks** | per-project guidance, in the project's own repo |
+| **Templated decomposition** | `--expand` emits the subtasks a playbook declares |
 | **Archiving** | park a project: hidden *and* not scheduled |
 
 The **admission gate** is the part most worth knowing. A task is refused, with a
@@ -24,6 +25,15 @@ close a dependency cycle. `--force` admits it anyway and records the defects as 
 prose for how to break work down, plus a few typed fields wecode acts on: whether the
 kind needs a worktree, the default acceptance commands, assignee and budget, and the
 merge policy. They live in the repo because they describe that code.
+
+A kind may also declare its **decomposition**, which `wecode task add --expand` emits as
+ordinary tasks — chained, scoped, and with `{{task}}` substituted — instead of one
+`task add` per step with every scope and acceptance command retyped. That retyping was
+where the planning errors came from, and every one of them was catchable before any
+agent ran. The template runs once, at planning time, and nothing consults it afterwards:
+its output faces the same admission gate as hand-written tasks and can be edited or
+dropped before dispatch. It is all or nothing, because a half-built expansion leaves the
+later steps waiting on tasks that were never created.
 
 ## Governance
 
