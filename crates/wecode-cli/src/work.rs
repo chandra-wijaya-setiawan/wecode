@@ -51,6 +51,21 @@ pub(crate) fn worktree_for(org: &str, owner: &TaskId) -> PathBuf {
     run_root().join(org).join(owner.as_str())
 }
 
+/// The checkout a merge borrows to build the integration branch in, so the operator's
+/// own working copy is never moved under them.
+///
+/// Named here rather than at the call site because two commands need it for opposite
+/// reasons: merging creates it, and the listing has to recognise it — a name spelled
+/// twice is one the two could spell differently.
+///
+/// It sits in the same directory as the task worktrees and is therefore only *probably*
+/// unambiguous: nothing forbids a task called `.merge`. A reader of this path settles
+/// that by asking about tasks first.
+#[must_use]
+pub(crate) fn merge_scratch(org: &str) -> PathBuf {
+    run_root().join(org).join(".merge")
+}
+
 /// The workspace's short name, used to keep one operator's companies apart under the
 /// run root. The directory name, since that is what `--org <name>` resolves against.
 #[must_use]

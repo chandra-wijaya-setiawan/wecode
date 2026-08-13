@@ -186,27 +186,35 @@ questions about occupancy rather than about paths.
 
 1. ~~the registry, written on create and on remove~~ — **built**
 2. the path layout and slot reuse, which the registry makes safe
-3. `worktree-view` reads the registry instead of guessing
+3. ~~`worktree-view` reads the registry instead of guessing~~ — **built**, see
+   `docs/wecode/worktree-view/design.md`
 4. `worktree-teardown` marks `removed` rather than only calling git
 
-Steps 3 and 4 are separate tasks and already depend on this one.
+Step 4 is a separate task and already depends on this one.
 
 ### What step 1 left for the others
 
-The registry is written and read but **nothing prints it**. `wecode worktree` still
-matches git's paths against computed ones, so it still calls a stranger an orphan. That
-is step 3, unchanged and now unblocked: `Store::worktrees` lists every row it needs and
-`worktree_at` answers for one path.
+Step 3 is now done: `wecode worktree` groups by repo and reads the registry, so a
+stranger prints as `— not ours` and only a tree of ours with no task prints as an orphan.
+It reached one conclusion this section did not expect — see *Four tenants* in that
+design. The un-backfilled checkout below reads as its **task's**, not as unrecognised,
+because for a task still in the plan the computed path is exact. The derivation is
+useless only for the direction this document rejected it for: a path with no task.
 
-Two writes are still missing, and neither belongs to step 1:
+One write is still missing, and it does not belong to step 1:
 
 - The scratch checkout `merge_into` borrows for the integration branch is created and
   removed inside one command, so it is unrecorded. It leaks only if wecode dies mid-merge,
-  and it has no task to hang a `NOT NULL task_id` on. Step 3 can recognise it by name —
-  it is always `<run root>/<org>/.merge` — or step 2 can give it a slot like any other.
+  and it has no task to hang a `NOT NULL task_id` on. Step 3 recognises it by name — it is
+  always `<run root>/<org>/.merge`, now spelled once in `work::merge_scratch` — which stops
+  the listing mislabelling it. Step 2 can give it a slot like any other and record it.
+
+And one gap that is now cosmetic rather than misleading:
+
 - A worktree already on disk when a workspace upgrades is not backfilled, because its
-  creation date was never observed. It is recorded the next time `start` prepares it, and
-  reads as unrecognised until then.
+  creation date was never observed. It is recorded the next time `start` prepares it. Until
+  then the registry cannot say *when* wecode made it, but the listing can still say *whose*
+  it is.
 
 The occupancy rules at the end of *Siblings share a tree* are not implemented either. The
 registry now holds what they need — a live row names the task whose descendants share the

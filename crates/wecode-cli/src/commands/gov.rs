@@ -259,9 +259,7 @@ pub(crate) fn merge_task(a: &Args) -> Res {
         }
     }
 
-    let scratch = work::run_root()
-        .join(work::org_name(ws.root()))
-        .join(".merge");
+    let scratch = work::merge_scratch(&work::org_name(ws.root()));
     let merged = git::merge_into(
         &repo,
         &scratch,
@@ -318,9 +316,7 @@ pub(crate) fn rollback_task(a: &Args) -> Res {
         "rolling back a merge",
     )?;
 
-    let scratch = work::run_root()
-        .join(work::org_name(ws.root()))
-        .join(".merge");
+    let scratch = work::merge_scratch(&work::org_name(ws.root()));
     let revert = git::revert_merge(&repo, &scratch, &target, &merge)?;
 
     // Back to needs-approval, not failed: the work still passed its acceptance. What

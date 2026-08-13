@@ -114,6 +114,32 @@ worked by an agent cannot land somewhere different.
 **`wecode verify`** can be run on its own, and is the same code path `run` uses. It reads
 the *uncommitted* diff, so run it before committing by hand.
 
+**`wecode worktree`** lists checkouts grouped by the **repository** they were cut from,
+because that is what a worktree belongs to — several projects sharing one repo share one
+set of trees, and each tree is listed under it once. Archived projects are included: a
+checkout you cannot see is one you cannot clean up.
+
+The first column says who is in the tree, and only the first kind is safe to assume
+anything about:
+
+| column | means | what to do |
+| --- | --- | --- |
+| a task id | a task in the plan works here | `wecode worktree remove <task>` when it is finished with |
+| `— orphan (<task>)` | wecode made it; that task is no longer in the plan | `git worktree remove <path>` — see below |
+| `— merge scratch` | the checkout a merge borrows | nothing, unless wecode died mid-merge; then the same |
+| `— not ours` | another tool's worktree in the same repository | nothing. It is not wecode's to touch |
+
+`wecode worktree remove` takes a **task**, so it cannot reach the two middle rows: it looks
+the task up in the plan first, and for those there is none to find. Both are removable with
+git directly, and the listing gives you the path to do it with. Teaching the command to take
+a path is `worktree-teardown`.
+
+`— not ours` exists because the alternative was worse: before the `worktrees` registry,
+anything wecode could not place was called an orphan, which reads as *we made this and
+lost track of it* — an invitation to delete somebody else's work. A tree wecode created
+before the registry existed reads as a task row anyway, since its path is still the one
+wecode computes for that task.
+
 **`--all`** widens a narrowed default: `tree --all` and `board --all` include archived
 projects. Put it last — the argument parser takes the next token as a flag's value, so
 `board --all migration` loses the positional.
