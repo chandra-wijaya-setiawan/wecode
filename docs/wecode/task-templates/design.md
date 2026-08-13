@@ -135,6 +135,24 @@ Three things already line up to make that small:
 This is part of `design-gate` rather than a task of its own. A gate that enforces a
 dependency the dependent cannot read has enforced paperwork.
 
+## A step is not a landing
+
+Second amendment, from running the first expansion end to end.
+
+`build` passed and stopped at `needs-approval`, blocking `test` behind it. The rule
+that put it there — work in a worktree waits for a merge signature — is right for a
+*feature* and wrong for a *step of one*: the subtasks of an expansion share the
+parent's branch, which cannot merge until the last of them is done. A signature per
+step would be four approvals for one landing, three of them about nothing.
+
+So: a subtask (a task with a parent) that passes verification goes to `done`, not
+`needs-approval`. The merge gate applies once, where the merge is — the parent's
+branch, when its last subtask finishes. The `design` kind keeps its signature: that
+gate is about the proposal, not the landing, and fires before anything is built.
+
+The operator resolved this by hand once (`status <build> done`); the rule above is
+what `design-gate`'s implementer should encode.
+
 ## What is deliberately excluded
 
 **merge** is not a subtask. It is a lifecycle transition with a charter gate, a project
