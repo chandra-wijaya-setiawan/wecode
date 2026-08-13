@@ -804,7 +804,24 @@ pub(crate) fn set_status(a: &Args) -> Res {
 
     let was = t.status;
     store.set_task_status(&id, status)?;
-    Ok(format!("  {id}  {} → {}\n", was.as_str(), status.as_str()))
+    let mut out = format!("  {id}  {} → {}\n", was.as_str(), status.as_str());
+    // The moment of the act is when the operator can still reconsider. A failed or
+    // dropped task will never finish on its own, so every open dependent behind it
+    // is stranded right now — said here, rather than left for the board to notice.
+    if status.is_dead_end() {
+        let stranded: Vec<&str> = plan
+            .tasks()
+            .filter(|d| !d.status.is_closed() && d.depends_on.contains(&id))
+            .map(|d| d.id.as_str())
+            .collect();
+        if !stranded.is_empty() {
+            out.push_str(&format!(
+                "  now stuck behind it: {} — reopen {id}, or re-point them\n",
+                stranded.join(", ")
+            ));
+        }
+    }
+    Ok(out)
 }
 
 /// Files a project away, or brings it back.

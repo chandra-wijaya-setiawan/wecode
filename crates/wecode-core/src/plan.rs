@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::common::TaskStatus;
 use crate::id::{ProjectId, TaskId};
 use crate::project::Project;
 use crate::task::Task;
@@ -57,8 +58,15 @@ impl std::error::Error for PlanError {}
 /// Why a task is not startable yet.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Blocker {
-    /// A predecessor that is not finished.
+    /// A predecessor that is not finished, but still on its way — a tick will
+    /// release the dependent once the work completes.
     Waiting(TaskId),
+    /// A predecessor that will never finish by itself — failed with its retries
+    /// exhausted, or dropped. It looks like `Waiting` on the board and is not:
+    /// no tick releases the dependent, so the work cannot advance without a
+    /// person reopening or re-pointing the predecessor. Carries the status so a
+    /// renderer can say which kind of dead end it is.
+    Stuck(TaskId, TaskStatus),
     /// A predecessor that does not exist.
     ///
     /// Unreachable through this API — `add_task` and `update_task` both refuse an
@@ -281,6 +289,9 @@ impl Plan {
             .iter()
             .filter_map(|d| match self.tasks.get(d) {
                 None => Some(Blocker::Missing(d.clone())),
+                Some(dep) if dep.status.is_dead_end() => {
+                    Some(Blocker::Stuck(d.clone(), dep.status))
+                }
                 Some(dep) if !dep.status.is_done() => Some(Blocker::Waiting(d.clone())),
                 Some(_) => None,
             })
@@ -504,6 +515,36 @@ mod tests {
 
         assert!(p.is_ready(&"second".into()));
         assert!(p.blockers(&"second".into()).is_empty());
+    }
+
+    #[test]
+    fn a_dead_end_prerequisite_is_reported_as_stuck_not_waiting() {
+        // Both block the dependent; the difference is what happens next. A tick
+        // releases a `Waiting` blocker by itself; a `Stuck` one waits for a person,
+        // and calling the two by one name is how dead chains sat green forever.
+        let mut p = plan();
+        p.add_task(task("first")).unwrap();
+        p.add_task(task("second").after("first")).unwrap();
+
+        for status in [TaskStatus::Failed, TaskStatus::Dropped] {
+            let mut first = p.task(&"first".into()).unwrap().clone();
+            first.status = status;
+            p.update_task(first).unwrap();
+            assert_eq!(
+                p.blockers(&"second".into()),
+                vec![Blocker::Stuck("first".into(), status)]
+            );
+            assert!(!p.is_ready(&"second".into()), "stuck still blocks");
+        }
+
+        // The moment the dead end is reopened, the blocker is merely waiting again.
+        let mut first = p.task(&"first".into()).unwrap().clone();
+        first.status = TaskStatus::Waiting;
+        p.update_task(first).unwrap();
+        assert_eq!(
+            p.blockers(&"second".into()),
+            vec![Blocker::Waiting("first".into())]
+        );
     }
 
     #[test]

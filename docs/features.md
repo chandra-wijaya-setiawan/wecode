@@ -125,6 +125,17 @@ every cause of amber or red writes an entry there, so a column beside it only ev
 repeated it. Status is declared and sits apart, because a task can be perfectly
 healthy and not started.
 
+**Work that cannot advance on its own is flagged, not just work that is loud.** A task
+whose prerequisite `failed` or was `dropped` looks exactly like one whose prerequisite
+is still running — both say *waiting* — but no tick will ever release the first. The
+board marks it amber with `stuck on <id>`, the project row carries a `N stuck` count so
+a stranded subtask is visible before descending, `ready` counts stuck work apart from
+work that time will resolve, and `wecode status <t> failed|dropped` names the dependents
+the act just stranded. Deliberately narrow: a prerequisite at `needs-approval` or
+`needs-input` is a signature or an answer away from done — work queuing behind an
+unsigned design is the design gate working, not a dead end — and reopening the failed
+task (`wecode status <t> waiting`) takes the flag down by itself.
+
 `brief` is derived rather than written down on purpose: a stored "you are the
 orchestrator" prompt drifts from the grants the moment a role changes, and then promises
 authority the Broker will refuse.

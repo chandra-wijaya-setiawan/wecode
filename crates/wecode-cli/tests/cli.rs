@@ -1078,6 +1078,40 @@ fn assigning_a_dependent_task_says_what_it_waits_on() {
 }
 
 #[test]
+fn dropping_a_prerequisite_flags_the_chain_it_strands() {
+    // bench waits on cache-tests. Drop the prerequisite and bench can never
+    // advance on its own — no tick promotes it, no agent is dispatched to it.
+    // Every surface has to say so, or the chain sits green until someone digs.
+    let org = Org::new("stuck-chain", "software-company");
+    org.seed();
+    org.run(&["assign", "bench", "--to", "test"])
+        .assert_ok("assign");
+
+    // Flagged at the moment of the act, when reconsidering is still cheap.
+    org.run(&["status", "cache-tests", "dropped"])
+        .assert_ok("drop")
+        .assert_contains("now stuck behind it: bench");
+
+    org.run(&["board"])
+        .assert_ok("board")
+        .assert_contains("stuck on cache-tests (dropped)")
+        .assert_contains("1 stuck");
+    org.run(&["ready"])
+        .assert_ok("ready")
+        .assert_contains("stuck on failed or dropped work");
+    org.run(&["show", "bench"])
+        .assert_ok("show")
+        .assert_contains("will not finish on its own");
+
+    // Reopening the prerequisite is exactly how the operator resolves it, so the
+    // flag must come down by itself.
+    org.run(&["status", "cache-tests", "waiting"])
+        .assert_ok("reopen");
+    org.run(&["ready"]).assert_ok("ready").assert_lacks("stuck");
+    org.run(&["board"]).assert_ok("board").assert_lacks("stuck");
+}
+
+#[test]
 fn a_defective_task_cannot_be_dispatched() {
     let org = Org::new("assign-draft", "software-company");
     org.seed();
