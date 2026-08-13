@@ -72,8 +72,11 @@ WORK
   wecode run <task>                    spawn its agent, supervise it, then verify
   wecode verify <task>                 judge it: diff against scope, then acceptance
   wecode merge <task>                  land it on the integration branch, and report
+        the worktree comes down once nothing still works in it; the branch stays
   wecode rollback <task>               revert that merge; the report says when to
-  wecode worktree [remove <task>]      list them, or remove one (--force if dirty)
+  wecode worktree                      list them, grouped by repository
+  wecode worktree remove <task|path>   take one down (--force if dirty)
+        a path reaches the trees no task can: an orphan's, and the merge scratch
   wecode approve <merge|admission|design|budget|measure> [<what>] --as <post>
         approve design --task <id>   signs a design off: needs-approval → done
   wecode guard <post> <verb> <target>  authorise an action; records the decision
@@ -124,15 +127,24 @@ anything about:
 
 | column | means | what to do |
 | --- | --- | --- |
-| a task id | a task in the plan works here | `wecode worktree remove <task>` when it is finished with |
-| `— orphan (<task>)` | wecode made it; that task is no longer in the plan | `git worktree remove <path>` — see below |
+| a task id | a task in the plan works here | usually nothing — `merge` takes it down |
+| `— orphan (<task>)` | wecode made it; that task is no longer in the plan | `wecode worktree remove <path>` |
 | `— merge scratch` | the checkout a merge borrows | nothing, unless wecode died mid-merge; then the same |
 | `— not ours` | another tool's worktree in the same repository | nothing. It is not wecode's to touch |
 
-`wecode worktree remove` takes a **task**, so it cannot reach the two middle rows: it looks
-the task up in the plan first, and for those there is none to find. Both are removable with
-git directly, and the listing gives you the path to do it with. Teaching the command to take
-a path is `worktree-teardown`.
+**`wecode worktree remove`** takes either a task id or a path. A path is how the two middle
+rows are reached: neither has a task to look up in the plan, which is precisely what makes
+them an orphan and a scratch. The two are told apart by shape — a task id is a kebab-case
+slug, so anything with a `/` in it is a path.
+
+Removing by path will not touch a directory no repository in the plan lists as a worktree,
+so `— not ours` stays out of reach through this command whichever way you name it.
+
+Most trees never need the command at all. A worktree comes down on its own when
+`wecode merge` lands the work, provided nothing sharing it is still open and nothing in it
+is uncommitted; the report's `worktree` line says which of those happened. The branch is
+kept in every case — its commits are already on the integration branch, and `wecode start`
+cuts the tree again from it if the work reopens.
 
 `— not ours` exists because the alternative was worse: before the `worktrees` registry,
 anything wecode could not place was called an orphan, which reads as *we made this and

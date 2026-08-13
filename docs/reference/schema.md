@@ -247,11 +247,17 @@ and only `wecode run` opens an execution row — a tree made by `wecode start` w
 no trace at all. What went unrecorded was an event, not an association, so it needed a
 table rather than a column.
 
-Rows are written in `prepare`, which both `start` and `run` go through, and closed by
-`wecode worktree remove`. The scratch checkout a merge borrows for the integration branch
-is not recorded: it is created and torn down inside one command, and belongs to no task.
-`wecode worktree` recognises it by its path instead — it is always `<run root>/<org>/.merge`
-— so the one case where it outlives a command reads as ours rather than as a stranger's.
+Rows are written in `prepare`, which both `start` and `run` go through, and closed when the
+tree comes down — by `wecode worktree remove`, or by `wecode merge` once the work has landed
+and nothing sharing the tree is still open. Closed **after** git agrees, so a removal that
+failed leaves the row saying the tree stands, because it does. An absent directory closes its
+row anyway: a row claiming a directory that is provably gone is worse than no row.
+
+The scratch checkout a merge borrows for the integration branch is not recorded: it is created
+and torn down inside one command, and belongs to no task. `wecode worktree` recognises it by
+its path instead — it is always `<run root>/<org>/.merge` — so the one case where it outlives a
+command reads as ours rather than as a stranger's, and `wecode worktree remove <path>` clears
+it without needing a row.
 
 Reading the table is `wecode worktree`'s job, and it asks the plan before the registry: a
 path that is still the one wecode would compute for a live task is that task's, recorded or

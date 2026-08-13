@@ -94,6 +94,12 @@ and two predecessors that both changed code want a merge task between them.
 Whether a kind gets a worktree at all is the playbook's call. Docs usually do not need
 one; prose does not conflict the way code does.
 
+A tree comes down when the work **lands**, not when it passes: `merge` removes it, because
+that is the moment every commit in it is also on the integration branch. It stays if a task
+sharing it is still open, or if it holds uncommitted work the merge did not take — the merge
+report says which. The branch is kept either way, so `wecode start` cuts the tree again from
+it if the work reopens, and the worst a removal costs is a rebuild.
+
 ## The handoff
 
 What the next agent is told is **assembled by wecode from what it observed**, never

@@ -13,6 +13,8 @@ use wecode_org::Playbook;
 use wecode_org::{Company, Post};
 use wecode_store::{AuditLine, SessionInfo};
 
+use crate::teardown::{Swept, Torn};
+
 #[must_use]
 pub(crate) fn kind_tag(kind: TaskKind) -> &'static str {
     match kind {
@@ -805,6 +807,55 @@ fn worktree_tally(repos: &[RepoTrees], total: usize) -> String {
     format!("{}\n", parts.join(" · "))
 }
 
+/// What became of a worktree that was asked to come down.
+///
+/// One formatter for all three outcomes, and the caller decides which of them is an
+/// error. The refusal and the report have to be written together or they drift: it was
+/// the refusal that had to name the files, and the report that had to name the branch.
+#[must_use]
+pub(crate) fn torn(path: &std::path::Path, branch: Option<&str>, t: &Torn) -> String {
+    let mut out = String::new();
+    match t {
+        Torn::Removed { discarded } => {
+            out.push_str(&format!("  removed {}\n", path.display()));
+            if !discarded.is_empty() {
+                out.push_str(&format!(
+                    "  discarded {} uncommitted change(s)\n",
+                    discarded.len()
+                ));
+            }
+            // Said every time. The tree going and the branch staying is exactly the part
+            // an operator would otherwise assume the other way round.
+            if let Some(b) = branch {
+                out.push_str(&format!(
+                    "  branch {b} kept — its commits are safe there, and `wecode start` cuts the tree again\n"
+                ));
+            }
+        }
+        Torn::Absent { was_ours } => {
+            out.push_str(&format!("  no worktree at {}\n", path.display()));
+            if *was_ours {
+                out.push_str("  it was ours — recorded as gone\n");
+            }
+        }
+        Torn::Dirty { files } => {
+            // Unindented and first, because this one is printed as an error and the
+            // reason has to lead.
+            out.push_str(&format!(
+                "{} has {} uncommitted change{} — removing the worktree would lose them:\n",
+                path.display(),
+                files.len(),
+                if files.len() == 1 { "" } else { "s" }
+            ));
+            for f in files.iter().take(10) {
+                out.push_str(&format!("    {f}\n"));
+            }
+            out.push_str("  pass --force to discard them");
+        }
+    }
+    out
+}
+
 /// Enough of a diff to work from; not so much that it crowds out the instruction.
 const DIFF_CAP: usize = 4000;
 
@@ -1081,6 +1132,7 @@ pub(crate) fn merged(
     branch: &str,
     m: &crate::git::Merged,
     signed: bool,
+    swept: &Swept,
 ) -> String {
     let short = |sha: &str| sha.chars().take(9).collect::<String>();
     let unblocked: Vec<&Task> = plan
@@ -1111,6 +1163,7 @@ pub(crate) fn merged(
                 .join(", ")
         ));
     }
+    out.push_str(&teardown_line(swept));
     out.push_str(&format!(
         "  undo       wecode rollback {}   (was {})\n",
         task.id,
@@ -1156,6 +1209,37 @@ pub(crate) fn merged(
         short(&m.was)
     ));
     out
+}
+
+/// The one line a merge says about the tree its work came out of.
+///
+/// In the summary rather than a section of its own, because it is a consequence of the
+/// merge and not a topic: an operator scanning the report needs to know whether the
+/// directory they had open is still there, and that is one line's worth.
+///
+/// Nothing at all when there was no tree. A merge under a playbook that asks for no
+/// worktree would otherwise carry a line about something that never existed.
+fn teardown_line(swept: &Swept) -> String {
+    match swept {
+        Swept::Nothing => String::new(),
+        // Who, not just that. The next thing an operator does about a kept tree depends
+        // entirely on which task is still in it.
+        Swept::Busy { path, by } => format!(
+            "  worktree   kept — {} still working in {path}\n",
+            by.join(", ")
+        ),
+        Swept::Tried { path, torn } => match torn {
+            Torn::Removed { .. } => format!("  worktree   removed {path}\n"),
+            Torn::Absent { .. } => format!("  worktree   already gone — {path}\n"),
+            // Never discarded on this path: teardown nobody asked for does not get to
+            // decide that uncommitted work was worthless.
+            Torn::Dirty { files } => format!(
+                "  worktree   kept — {} uncommitted change{} the merge did not take, in {path}\n",
+                files.len(),
+                if files.len() == 1 { "" } else { "s" }
+            ),
+        },
+    }
 }
 
 /// Files grouped by their first two path segments, largest first.
@@ -2115,6 +2199,110 @@ api — /repos/api
   3 trees in 1 repo · 1 in use · 1 ours to clean up · 1 not ours
 "
         );
+    }
+
+    #[test]
+    fn a_removed_tree_says_the_branch_survived_it() {
+        // The part an operator would otherwise assume the other way round, and the
+        // reason teardown is safe to do without asking.
+        let out = torn(
+            std::path::Path::new("/run/cws/cache"),
+            Some("wecode/cache"),
+            &Torn::Removed {
+                discarded: Vec::new(),
+            },
+        );
+        assert!(out.contains("removed /run/cws/cache"), "{out}");
+        assert!(out.contains("branch wecode/cache kept"), "{out}");
+        assert!(!out.contains("discarded"), "nothing was discarded: {out}");
+    }
+
+    #[test]
+    fn discarding_uncommitted_work_is_never_silent() {
+        // `--force` was typed, so this is not a refusal — but destroying work without
+        // saying so is the one thing teardown must not do, even when told to.
+        let out = torn(
+            std::path::Path::new("/run/cws/cache"),
+            None,
+            &Torn::Removed {
+                discarded: vec!["a.rs".into(), "b.rs".into()],
+            },
+        );
+        assert!(out.contains("discarded 2 uncommitted change(s)"), "{out}");
+        // No branch was known — a path names none — so none is claimed.
+        assert!(!out.contains("branch"), "{out}");
+    }
+
+    #[test]
+    fn a_refused_removal_names_the_files_and_the_way_past_it() {
+        let out = torn(
+            std::path::Path::new("/run/cws/cache"),
+            Some("wecode/cache"),
+            &Torn::Dirty {
+                files: vec!["half-done.rs".into()],
+            },
+        );
+        // Singular, and the reason leads: this one is printed as an error.
+        assert!(
+            out.starts_with("/run/cws/cache has 1 uncommitted change —"),
+            "{out}"
+        );
+        assert!(out.contains("half-done.rs"), "{out}");
+        assert!(out.ends_with("pass --force to discard them"), "{out}");
+    }
+
+    #[test]
+    fn an_absent_tree_reports_whether_the_registry_was_corrected() {
+        let ours = torn(
+            std::path::Path::new("/run/cws/cache"),
+            None,
+            &Torn::Absent { was_ours: true },
+        );
+        assert!(ours.contains("no worktree at /run/cws/cache"), "{ours}");
+        assert!(ours.contains("recorded as gone"), "{ours}");
+
+        let theirs = torn(
+            std::path::Path::new("/elsewhere/theirs"),
+            None,
+            &Torn::Absent { was_ours: false },
+        );
+        assert!(!theirs.contains("recorded as gone"), "{theirs}");
+    }
+
+    #[test]
+    fn a_merge_says_what_became_of_the_tree_and_why() {
+        // Each of the three refusals reads differently on purpose: what the operator
+        // does next depends entirely on which one it was.
+        assert_eq!(
+            teardown_line(&Swept::Nothing),
+            "",
+            "a playbook that asks for no worktree gets no line about one"
+        );
+        let busy = teardown_line(&Swept::Busy {
+            path: "/run/cws/feat".into(),
+            by: vec!["impl".into(), "docs".into()],
+        });
+        assert!(busy.contains("kept — impl, docs still working"), "{busy}");
+        assert!(busy.contains("/run/cws/feat"), "{busy}");
+
+        let dirty = teardown_line(&Swept::Tried {
+            path: "/run/cws/feat".into(),
+            torn: Torn::Dirty {
+                files: vec!["scratch.txt".into()],
+            },
+        });
+        assert!(
+            dirty.contains("1 uncommitted change the merge did not take"),
+            "{dirty}"
+        );
+
+        let gone = teardown_line(&Swept::Tried {
+            path: "/run/cws/feat".into(),
+            torn: Torn::Removed {
+                discarded: Vec::new(),
+            },
+        });
+        assert_eq!(gone, "  worktree   removed /run/cws/feat\n");
     }
 
     #[test]

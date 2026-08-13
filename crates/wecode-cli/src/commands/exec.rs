@@ -13,7 +13,7 @@ use wecode_store::Store;
 
 use crate::args::Args;
 use crate::commands::ctx::*;
-use crate::{git, render, scheduler, spawn, verify, work};
+use crate::{git, render, scheduler, spawn, teardown, verify, work};
 
 /// Begins work on a task: prepares the worktree its playbook asks for, marks it
 /// running, and prints the envelope for whoever does the work.
@@ -786,68 +786,115 @@ fn tenant_of(
     render::Tenant::Stranger
 }
 
+/// Which worktree a removal was aimed at: where it is, which repository it belongs to,
+/// and the branch standing in it.
+///
+/// `repo` is optional because a directory that is already gone needs none — closing its
+/// registry row is a write to our own database, not a git operation.
+struct Aimed {
+    repo: Option<PathBuf>,
+    path: PathBuf,
+    branch: Option<String>,
+}
+
+/// Whether a name on the command line is a worktree path rather than a task id.
+///
+/// A task id is a kebab-case slug — `TaskId::new` strips everything else — so a separator
+/// or a leading `~` cannot occur in one. Told apart by shape rather than by trying the
+/// plan first, because a mistyped path used to be slugified into a plausible id and
+/// refused as *no such task*, which named the wrong problem entirely.
+fn is_path(named: &str) -> bool {
+    named.contains('/') || named.contains(std::path::MAIN_SEPARATOR) || named.starts_with('~')
+}
+
+/// The repository that lists `path` as one of its worktrees, if one in the plan does.
+///
+/// Asked of git rather than derived from the path, because a path names no project: the
+/// trees a removal must now reach — an orphan's, the merge scratch — are exactly the ones
+/// with no task to look a repo up through.
+///
+/// Compared after canonicalisation on both sides. git prints the path it resolved when the
+/// tree was added, and the operator is as likely to have typed a symlinked spelling of it.
+fn repo_listing(
+    company: &Company,
+    plan: &Plan,
+    path: &std::path::Path,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let wanted = real(path);
+    for (_, repo) in repos_in_play(company, plan)? {
+        if !git::is_repo(&repo) {
+            continue;
+        }
+        if git::worktree_list(&repo)?
+            .iter()
+            .any(|p| real(std::path::Path::new(p)) == wanted)
+        {
+            return Ok(Some(repo));
+        }
+    }
+    Ok(None)
+}
+
+/// Removes a worktree, named either by the task that owns it or by its path.
+///
+/// A path is accepted because the listing can now name trees a task id cannot reach: an
+/// orphan's task is gone from the plan — that is what makes it an orphan — and the merge
+/// scratch never had one. Seeing a tree you cannot remove is a worse place to be than not
+/// seeing it, and `worktree-view` left it there deliberately for this task to settle.
 pub(crate) fn worktree_remove(a: &Args) -> Res {
     let (ws, store, company) = open_full(a)?;
-    let id = TaskId::new(require(a.cmd(2), "task id")?);
+    let named = require(a.cmd(2), "task id or worktree path")?;
     let plan = store.load_plan()?;
-    let task = plan
-        .task(&id)
-        .ok_or_else(|| format!("no such task: {id}"))?;
-    let project = plan
-        .project(&task.project)
-        .ok_or_else(|| format!("no such project: {}", task.project))?;
 
-    let owner = work::owner(&plan, &id).expect("task is in the plan");
-    if owner.id != id {
-        return Err(format!(
-            "{id} shares {}'s worktree — remove that one instead",
-            owner.id
-        )
-        .into());
-    }
-    let path = work::worktree_for(&work::org_name(ws.root()), &id);
-    let dir = path.to_string_lossy().into_owned();
-    if !path.exists() {
-        // Gone by some other hand. The registry must not go on saying it stands —
-        // a row claiming a directory that is provably absent is worse than no row.
-        let mut out = format!("  no worktree at {}\n", path.display());
-        if store.forget_worktree(&dir)? {
-            out.push_str("  it was ours — recorded as gone\n");
+    let aim = if is_path(named) {
+        // Resolved before anything is done with it. `git -C <repo> worktree remove` takes
+        // the directory relative to the *repository*, so a relative path typed at a shell
+        // would name a different place than the one the operator is looking at.
+        // Unresolvable means it does not exist, which is a reportable outcome rather than
+        // an error, so the spelling as given carries through to the message.
+        let path = wecode_org::workspace::expand_home(named);
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        // The branch from the registry, since a path does not imply one. `None` for a
+        // stranger's tree or the merge scratch, and the report then says nothing about a
+        // branch rather than guessing at a name.
+        let branch = store
+            .worktree_at(&path.to_string_lossy())?
+            .map(|w| w.branch);
+        Aimed {
+            repo: repo_listing(&company, &plan, &path)?,
+            path,
+            branch,
         }
-        return Ok(out);
-    }
-    let repo = repo_path(&company, project)?;
-
-    // Uncommitted work in a worktree is unrecoverable once the tree is gone, and
-    // nothing has committed it yet — wecode does that, after checks pass.
-    let dirty = git::changed_files(&path).unwrap_or_default();
-    if !dirty.is_empty() && !a.has("force") {
-        let mut msg = format!(
-            "{id} has {} uncommitted change{} — removing the worktree would lose them:\n",
-            dirty.len(),
-            if dirty.len() == 1 { "" } else { "s" }
-        );
-        for f in dirty.iter().take(10) {
-            msg.push_str(&format!("    {f}\n"));
+    } else {
+        let id = TaskId::new(named);
+        let task = plan
+            .task(&id)
+            .ok_or_else(|| format!("no such task: {id}"))?;
+        let project = plan
+            .project(&task.project)
+            .ok_or_else(|| format!("no such project: {}", task.project))?;
+        let owner = work::owner(&plan, &id).expect("task is in the plan");
+        if owner.id != id {
+            return Err(format!(
+                "{id} shares {}'s worktree — remove that one instead",
+                owner.id
+            )
+            .into());
         }
-        msg.push_str("  pass --force to discard them");
-        return Err(msg.into());
-    }
+        Aimed {
+            repo: Some(repo_path(&company, project)?),
+            path: work::worktree_for(&work::org_name(ws.root()), &id),
+            branch: Some(work::branch_for(&id)),
+        }
+    };
 
-    git::worktree_remove(&repo, &path)?;
-    // After git, not before: a removal that failed must leave the registry saying the
-    // tree is still there, because it is.
-    store.forget_worktree(&dir)?;
-    let mut out = format!("  removed {}\n", path.display());
-    if !dirty.is_empty() {
-        out.push_str(&format!(
-            "  discarded {} uncommitted change(s)\n",
-            dirty.len()
-        ));
+    let torn = teardown::take_down(&store, aim.repo.as_deref(), &aim.path, a.has("force"))?;
+    let report = render::torn(&aim.path, aim.branch.as_deref(), &torn);
+    match torn {
+        // A refusal, not a report. The exit code is what stops a script carrying on as
+        // though the tree were gone.
+        teardown::Torn::Dirty { .. } => Err(report.into()),
+        _ => Ok(report),
     }
-    out.push_str(&format!(
-        "  branch {} kept — delete it once merged\n",
-        work::branch_for(&id)
-    ));
-    Ok(out)
 }

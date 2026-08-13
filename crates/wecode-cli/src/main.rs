@@ -7,6 +7,7 @@ mod git;
 mod render;
 mod scheduler;
 mod spawn;
+mod teardown;
 mod tui;
 mod usage;
 mod verify;
@@ -92,8 +93,11 @@ WORK
   wecode run <task>                    spawn its agent, supervise it, then verify
   wecode verify <task>                 judge it: diff against scope, then acceptance
   wecode merge <task>                  land it on the integration branch, and report
+        the worktree comes down once nothing still works in it; the branch stays
   wecode rollback <task>               revert that merge; the report says when to
-  wecode worktree [remove <task>]      list them, or remove one (--force if dirty)
+  wecode worktree                      list them, grouped by repository
+  wecode worktree remove <task|path>   take one down (--force if dirty)
+        a path reaches the trees no task can: an orphan's, and the merge scratch
   wecode approve <merge|admission|design|budget|measure> [<what>] --as <post>
         approve design --task <id>   signs a design off: needs-approval → done
   wecode guard <post> <verb> <target>  authorise an action; records the decision
