@@ -137,6 +137,29 @@ than discovered:
   rewritten to encode this one — the worktree is inside the workspace and under
   `worktrees/`, and `company.toml` is not reachable without leaving that subtree.
 
+## Siblings share a tree, and nothing says so
+
+Found running the wemail expansions. A worktree belongs to the **main** task, so the
+four subtasks of one feature resolve to one owner and one checkout. Dispatch two of
+them at once — `test` and `docs` are unordered siblings with disjoint scopes, so
+admission sees no conflict — and two agents write the same directory at the same time.
+
+The overlap check cannot catch it, and correctly so: it asks whether two tasks claim
+the same *paths*, and these do not. The collision is over the *tree*, which is a
+different resource and currently modelled nowhere. The operator avoided it eight times
+today by dispatching one subtask at a time and remembering why.
+
+The registry answers it. A worktree row already names its `task_id`; the tasks sharing
+that tree are that task's descendants, so "is this tree busy" becomes a lookup rather
+than a thing the dispatcher has to know. Two rules follow:
+
+- a task whose owning tree has a `running` occupant is not dispatchable
+- an expanded parent is never dispatchable while it has open subtasks — it is a
+  container, and running it would have an agent redo work its children own
+
+Both belong with the registry rather than with the scope check, because both are
+questions about occupancy rather than about paths.
+
 ## Order
 
 1. the registry, written on create and on remove
