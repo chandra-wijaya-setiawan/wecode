@@ -451,8 +451,8 @@ impl KindPlaybook {
 /// What `sh` runs without consulting `PATH`. Only the names `program_of` can read
 /// are listed — `[` and `:` never get that far.
 const SH_BUILTINS: &[&str] = &[
-    "cd", "command", "echo", "eval", "exec", "exit", "export", "false", "printf", "read",
-    "set", "shift", "test", "true", "type", "umask", "unset", "wait",
+    "cd", "command", "echo", "eval", "exec", "exit", "export", "false", "printf", "read", "set",
+    "shift", "test", "true", "type", "umask", "unset", "wait",
 ];
 
 /// The program an acceptance line would run: its first word, past any `VAR=value`
@@ -470,9 +470,8 @@ fn program_of(line: &str) -> Option<&str> {
 /// Whether `sh -c` could start `program` here: a builtin, or a file on `PATH`.
 fn machine_has(program: &str) -> bool {
     SH_BUILTINS.contains(&program)
-        || std::env::var_os("PATH").is_some_and(|path| {
-            std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
-        })
+        || std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
 }
 
 fn known_program(at: &str, cmd: &str) -> Result<(), PlaybookError> {
@@ -1117,7 +1116,9 @@ write  = ["README.md"]
         // is where the check pays most.
         let repo = planted(
             "no-such-in-step",
-            &format!("[feature]\nsubtasks = [\"build\"]\n\n[feature.build]\naccept = [\"{NO_SUCH}\"]\n"),
+            &format!(
+                "[feature]\nsubtasks = [\"build\"]\n\n[feature.build]\naccept = [\"{NO_SUCH}\"]\n"
+            ),
         );
         let msg = Playbook::at(&repo).unwrap_err().to_string();
         assert!(msg.contains(NO_SUCH), "{msg}");

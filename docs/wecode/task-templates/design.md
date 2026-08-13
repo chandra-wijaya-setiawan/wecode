@@ -80,6 +80,10 @@ That split is load-bearing. An agent's account of its own work is inadmissible â
 `report.md` is generated, never authored. It is the merge report that already exists,
 persisted instead of printed to a terminal and lost.
 
+The `report.md` half is **built**, ahead of the rest of this document and independent of
+it: `wecode merge` commits it whether or not the task was ever expanded from a template.
+See [../merge-record/design.md](../merge-record/design.md).
+
 Project documentation is a **different thing** and does not live here. The `docs`
 subtask updates `README.md` and `docs/` â€” what the project is, not what wecode did.
 

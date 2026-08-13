@@ -275,6 +275,66 @@ pub(crate) fn merge_into(
     outcome
 }
 
+/// Writes one generated file onto `target` and commits it, returning the new sha.
+///
+/// A commit of its own, rather than something folded into the merge. The file this
+/// carries names the merge commit's sha, and no commit can contain its own name — so
+/// the record necessarily lands *after* the thing it records.
+///
+/// Only that one path is staged. `commit_all` sweeps a whole tree, which is right for
+/// an agent's attempt and wrong here: the target may be the operator's own checkout,
+/// and a stray untracked file of theirs is not part of this record.
+///
+/// `Ok(None)` when the file was already byte-for-byte this, so git found nothing to
+/// commit. The caller decides whether that is a failure; here it is just an outcome.
+pub(crate) fn commit_file(
+    repo: &Path,
+    scratch: &Path,
+    target: &str,
+    rel: &str,
+    contents: &str,
+    message: &str,
+) -> Result<Option<String>, GitError> {
+    let (dir, borrowed) = tree_for(repo, scratch, target)?;
+    let outcome = (|| -> Result<Option<String>, GitError> {
+        let dir = dir.as_path();
+        let path = dir.join(rel);
+        // Reported as a git failure because that is the only failure this module has,
+        // and the caller only ever prints the sentence. `Unavailable` would be a lie:
+        // git started fine, the disk did not cooperate.
+        let io = |e: std::io::Error| GitError::Failed {
+            argv: format!("write {rel} on {target}"),
+            stderr: e.to_string(),
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(io)?;
+        }
+        std::fs::write(&path, contents).map_err(io)?;
+        git(dir, &["add", "--", rel])?;
+        if git(dir, &["diff", "--cached", "--name-only"])?.is_empty() {
+            return Ok(None);
+        }
+        git(
+            dir,
+            &[
+                "-c",
+                "user.name=wecode",
+                "-c",
+                "user.email=wecode@localhost",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        )?;
+        Ok(Some(git(dir, &["rev-parse", "--short", "HEAD"])?))
+    })();
+    if !borrowed {
+        let _ = worktree_remove(repo, scratch);
+    }
+    outcome
+}
+
 /// A directory with `target` checked out, and whether it belongs to the operator.
 fn tree_for(repo: &Path, scratch: &Path, target: &str) -> Result<(PathBuf, bool), GitError> {
     if let Some(theirs) = checked_out_at(repo, target) {

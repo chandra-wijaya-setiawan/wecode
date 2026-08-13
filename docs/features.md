@@ -69,7 +69,7 @@ which is how you check a scope before assigning work to a seat that cannot reach
 | **Commits** | every attempt, pass or fail, authored by wecode |
 | **Spend** | tokens read out of the agent's own output, per attempt and on the ledger |
 | **Handoff** | assembled from git and the execution record, never from the agent |
-| **Merge** | `--no-ff`, configurable policy, with a report |
+| **Merge** | `--no-ff`, configurable policy, with a report that is committed |
 | **Rollback** | revert, not reset |
 | **Scheduler** | a tick that promotes, a loop that dispatches |
 | **A2A** | the instruction *is* an A2A task; the prompt is one rendering of it |
@@ -88,6 +88,18 @@ blob on argv as part of its instruction.
 
 **Nothing reads `.wecode/result.json`.** The diff is ground truth and an agent's account
 of its own work is inadmissible, so the file is written and ignored.
+
+**The merge report is committed, not printed and lost.** It goes to
+`docs/wecode/<task>/report.md` on the integration branch — the same directory the design
+gate looks in — as its own commit on top of the merge, because the report names the merge
+sha and no commit can contain its own name. The file is the report *verbatim*: it is
+evidence, so it has to be the text that was produced rather than a second telling of it,
+and one generator means the repository and the terminal can never disagree about one
+merge. Generated, never authored, for the same reason `result.json` is ignored. The only
+line the terminal adds is where the file went, which the file cannot say about itself. A
+record that fails to land is a line in the report rather than an error — the merge has
+already happened by then, and there is nothing left to undo. `rollback` leaves the file
+standing and says so: a revert is a new commit precisely because the merge did happen.
 
 **Spend is the one number that is reported rather than observed**, and it is marked as
 such. wecode does not sit between an agent and its model, so the only party that knows
