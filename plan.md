@@ -11,6 +11,28 @@ attention budget of five.
 assembled beside the model rather than from it. Rendering the prompt out of a `Message`
 makes the text form one rendering among possible others.
 
+## Playbooks that know their language
+
+`wecode playbook init --language rust` writes the same TODO template whatever you pass
+it — the language lands in one field and changes nothing else. So every new repo starts
+with acceptance commands nobody has run, which is how wemail acquired `python -m pytest`
+on a machine that has no `python`.
+
+Three steps, and the order matters because each needs the one before it:
+
+- **Check what a playbook names.** `verify` already tells exit 127 apart from a real
+  failure. Nothing applies that at planning time, so a playbook can promise a toolchain
+  the machine does not have and only say so once a task has been dispatched against it.
+- **Share the build cache.** A worktree isolates source, which is the point, and build
+  state, which is not: one in-flight Rust task measured 890 MB of `target/`, none of it
+  shared with the 2.5 GB next door, recompiled from zero on every attempt. Python paid
+  37 MB, and only because `~/.cache/uv` sits outside the worktree. The lever —
+  `CARGO_TARGET_DIR`, `UV_PROJECT_ENVIRONMENT` — cannot be pulled today: an agent
+  template can *allow* an environment variable through but not *set* one.
+- **Write starters that know a toolchain.** Real accept commands, the scope globs a
+  build actually dirties (`uv.lock` cost a task), and the cache settings above. What an
+  orchestrator needs at `project add` time, rather than a file full of TODO.
+
 ## Next
 
 **Retry.** The envelope already carries the previous attempt and the reason it was
