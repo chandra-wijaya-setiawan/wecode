@@ -73,6 +73,9 @@ struct App {
     store: Store,
     company: Company,
     known_repos: Vec<String>,
+    /// Which kinds each project refuses without a design, from its playbook. Read
+    /// with the plan, so a row's defect count agrees with `wecode check`.
+    gates: board::DesignGates,
     plan: Plan,
     audit: Vec<AuditLine>,
     /// `None` is the portfolio; `Some` is a focused project or task.
@@ -90,8 +93,10 @@ struct App {
 
 impl App {
     fn new(store: Store, company: Company) -> Result<Self, Box<dyn std::error::Error>> {
+        let plan = store.load_plan()?;
         let mut app = Self {
-            plan: store.load_plan()?,
+            gates: crate::commands::ctx::design_gates(&company, &plan),
+            plan,
             audit: store.audit(&AuditQuery::default())?,
             known_repos: company.repos.iter().map(|r| r.name.clone()).collect(),
             store,
@@ -117,6 +122,7 @@ impl App {
             self.store.audit(&AuditQuery::default()),
         ) {
             (Ok(p), Ok(a)) => {
+                self.gates = crate::commands::ctx::design_gates(&self.company, &p);
                 self.plan = p;
                 self.audit = a;
                 self.rebuild();
@@ -145,7 +151,14 @@ impl App {
                     rows.push(project_row(&self.plan, p, &l, &self.known_repos));
                     let roots = sorted(self.plan.roots_of(&p.id));
                     for (i, t) in roots.iter().enumerate() {
-                        rows.push(task_row(&self.plan, t, &l, 1, last(i, roots.len())));
+                        rows.push(task_row(
+                            &self.plan,
+                            t,
+                            &l,
+                            &self.gates,
+                            1,
+                            last(i, roots.len()),
+                        ));
                     }
                 }
             }
@@ -154,23 +167,51 @@ impl App {
                     rows.push(project_row(&self.plan, p, &l, &self.known_repos));
                     let roots = sorted(self.plan.roots_of(&id));
                     for (i, t) in roots.iter().enumerate() {
-                        rows.push(task_row(&self.plan, t, &l, 1, last(i, roots.len())));
+                        rows.push(task_row(
+                            &self.plan,
+                            t,
+                            &l,
+                            &self.gates,
+                            1,
+                            last(i, roots.len()),
+                        ));
                         let kids = sorted(self.plan.subtasks(&t.id));
                         for (j, k) in kids.iter().enumerate() {
-                            rows.push(task_row(&self.plan, k, &l, 2, last(j, kids.len())));
+                            rows.push(task_row(
+                                &self.plan,
+                                k,
+                                &l,
+                                &self.gates,
+                                2,
+                                last(j, kids.len()),
+                            ));
                         }
                     }
                 }
             }
             Some(Subject::Task(id)) => {
                 if let Some(t) = self.plan.task(&id) {
-                    rows.push(task_row(&self.plan, t, &l, 0, true));
+                    rows.push(task_row(&self.plan, t, &l, &self.gates, 0, true));
                     let kids = sorted(self.plan.subtasks(&id));
                     for (i, k) in kids.iter().enumerate() {
-                        rows.push(task_row(&self.plan, k, &l, 1, last(i, kids.len())));
+                        rows.push(task_row(
+                            &self.plan,
+                            k,
+                            &l,
+                            &self.gates,
+                            1,
+                            last(i, kids.len()),
+                        ));
                         let grand = sorted(self.plan.subtasks(&k.id));
                         for (j, g) in grand.iter().enumerate() {
-                            rows.push(task_row(&self.plan, g, &l, 2, last(j, grand.len())));
+                            rows.push(task_row(
+                                &self.plan,
+                                g,
+                                &l,
+                                &self.gates,
+                                2,
+                                last(j, grand.len()),
+                            ));
                         }
                     }
                 }
@@ -296,7 +337,14 @@ fn project_row(plan: &Plan, p: &Project, l: &Ledger, known_repos: &[String]) -> 
     }
 }
 
-fn task_row(plan: &Plan, t: &Task, l: &Ledger, depth: usize, is_last: bool) -> RowItem {
+fn task_row(
+    plan: &Plan,
+    t: &Task,
+    l: &Ledger,
+    gates: &board::DesignGates,
+    depth: usize,
+    is_last: bool,
+) -> RowItem {
     let connector = if depth == 0 {
         String::new()
     } else {
@@ -310,7 +358,7 @@ fn task_row(plan: &Plan, t: &Task, l: &Ledger, depth: usize, is_last: bool) -> R
         subject: Subject::Task(t.id.clone()),
         label: format!("{connector}{} {}", crate::render::kind_tag(t.kind), t.id),
         status: format!("{} {}", t.status.mark(), status_word(t.status)),
-        vitals: board::task_vitals(plan, t, l),
+        vitals: board::task_vitals(plan, t, l, gates),
     }
 }
 

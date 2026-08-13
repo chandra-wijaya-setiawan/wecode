@@ -108,6 +108,7 @@ merge = "approved"                # approved | auto — the charter still outran
 
 [feature]
 worktree  = true
+design_required = true            # refuse a feature with no design task behind it
 assign_to = "impl"
 accept    = ["cargo test --workspace"]
 tokens    = 120000
@@ -151,6 +152,12 @@ so.
 `{{task}}` is the main task's id and `{{title}}` its title. They are the only two: a
 template that could reach further into the plan would be a small language, and this is a
 scaffold that runs once.
+
+`design_required` refuses a task of that kind at admission unless a `design` task
+stands before it — a predecessor up its dependency chain, or a subtask inside it, which
+is what `--expand` creates when the template declares a `design` step. See the
+[playbooks guide](../guides/playbooks.md#the-design-gate) for why the dependency is the
+entire check.
 
 Emitted tasks are children of the main task and depend on the siblings their `after`
 names. Those are separate relations — being part of a task does not mean waiting for it.

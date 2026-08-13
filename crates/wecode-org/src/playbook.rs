@@ -143,12 +143,15 @@ struct ProjectBlock {
 
 /// The fields a kind block has. Named here because the strict check is done by hand
 /// against this list — see `KindBlock::steps`.
-const KIND_FIELDS: &str = "worktree, assign_to, accept, tokens, wall_secs, guidance, subtasks";
+const KIND_FIELDS: &str =
+    "worktree, design_required, assign_to, accept, tokens, wall_secs, guidance, subtasks";
 
 #[derive(Deserialize, Default, Debug)]
 struct KindBlock {
     #[serde(default)]
     worktree: bool,
+    #[serde(default)]
+    design_required: bool,
     #[serde(default)]
     assign_to: Option<String>,
     #[serde(default)]
@@ -249,6 +252,11 @@ pub struct KindPlaybook {
     /// Whether work of this kind gets its own git worktree. A docs change usually
     /// does not need one.
     pub worktree: bool,
+    /// Whether the admission gate refuses work of this kind unless a `design` task
+    /// stands before it. The dependency is the enforcement: a design finishes only
+    /// through a recorded signature, so ordering alone keeps the work from running
+    /// until someone has signed.
+    pub design_required: bool,
     /// The post to assign to when the operator does not say.
     pub assign_to: Option<String>,
     /// Default acceptance commands, so the project's test command is written once
@@ -444,6 +452,7 @@ impl Playbook {
                 kind,
                 KindPlaybook {
                     worktree: block.worktree,
+                    design_required: block.design_required,
                     assign_to: block.assign_to,
                     accept: block.accept,
                     tokens: block.tokens,
@@ -484,6 +493,18 @@ impl Playbook {
     #[must_use]
     pub fn for_kind(&self, kind: TaskKind) -> Option<&KindPlaybook> {
         self.kinds.get(&kind)
+    }
+
+    /// The kinds this project refuses without a design behind them — what the
+    /// admission gate takes. Computed here so every gate site asks the playbook
+    /// the same question.
+    #[must_use]
+    pub fn design_required_kinds(&self) -> Vec<TaskKind> {
+        self.kinds
+            .iter()
+            .filter(|(_, k)| k.design_required)
+            .map(|(kind, _)| *kind)
+            .collect()
     }
 
     /// Kinds this project has written guidance for, in lifecycle order.
@@ -544,6 +565,9 @@ language = "{language}"
 
 [feature]
 worktree  = true
+# Refuse a feature at admission unless a `design` task stands before it. A design
+# waits for a signature once it passes, so nothing is built until a person signs.
+# design_required = true
 assign_to = "impl"
 tokens    = 120000
 wall_secs = 5400
@@ -708,6 +732,17 @@ guidance = "Single task, no subtasks."
     fn worktree_defaults_to_false_so_nothing_touches_git_unasked() {
         let p = Playbook::parse("[chore]\nguidance = \"x\"\n").unwrap();
         assert!(!p.for_kind(TaskKind::Chore).unwrap().worktree);
+    }
+
+    #[test]
+    fn a_design_gate_is_off_unless_a_kind_asks_for_it() {
+        let p = Playbook::parse(SAMPLE).unwrap();
+        assert!(!p.for_kind(TaskKind::Bug).unwrap().design_required);
+        assert!(p.design_required_kinds().is_empty());
+
+        let p = Playbook::parse("[feature]\ndesign_required = true\n\n[bug]\n").unwrap();
+        assert!(p.for_kind(TaskKind::Feature).unwrap().design_required);
+        assert_eq!(p.design_required_kinds(), vec![TaskKind::Feature]);
     }
 
     #[test]

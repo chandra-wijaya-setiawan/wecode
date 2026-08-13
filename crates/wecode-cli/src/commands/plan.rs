@@ -295,7 +295,19 @@ pub(crate) fn task_add(a: &Args) -> Res {
         },
         "defining a task",
     )?;
-    let defects = admission::check_task(&t, &plan);
+    let gate = pb
+        .as_ref()
+        .map(Playbook::design_required_kinds)
+        .unwrap_or_default();
+    let mut defects = admission::check_task(&t, &plan, &gate);
+    // The main task of an expansion carries its design as a subtask, and at this
+    // moment the subtask exists only as a declared step. Judging the main task
+    // without crediting the design about to be created would refuse the one flow
+    // the gate is meant to steer people into. Every later check finds the child
+    // in the plan.
+    if steps.iter().any(|s| s.kind == TaskKind::Design) {
+        defects.retain(|d| *d != wecode_core::Defect::DesignMissing);
+    }
     let verdict = Admission::decide(defects.clone(), "operator", Vec::new());
     let mut out = render::admission(&render::task_heading(&t), &defects, Some(&verdict));
     for line in &from_playbook {
@@ -442,9 +454,13 @@ fn expand(
     for t in &tasks {
         probe.add_task(t.clone())?;
     }
+    // The design gate holds for generated steps as for hand-written tasks — a
+    // template that skips the design step its own gate demands should be refused
+    // here, not discovered at dispatch.
+    let gate = pb.map(Playbook::design_required_kinds).unwrap_or_default();
     let defects: Vec<(&Task, Vec<wecode_core::Defect>)> = tasks
         .iter()
-        .map(|t| (t, admission::check_task(t, probe)))
+        .map(|t| (t, admission::check_task(t, probe, &gate)))
         .filter(|(_, d)| !d.is_empty())
         .collect();
 
@@ -628,7 +644,11 @@ pub(crate) fn task_scope(a: &Args) -> Res {
     // collides with a sibling is a real conflict, not a formality.
     let mut probe = plan.clone();
     probe.update_task(task.clone())?;
-    let defects = admission::check_task(&task, &probe);
+    let gate = plan
+        .project(&task.project)
+        .map(|p| design_gate(&company, p))
+        .unwrap_or_default();
+    let defects = admission::check_task(&task, &probe, &gate);
     let blocking: Vec<_> = defects
         .iter()
         .filter(|d| matches!(d, wecode_core::Defect::ScopeOverlaps { .. }))
@@ -689,7 +709,11 @@ pub(crate) fn check(a: &Args) -> Res {
         ));
     }
     if let Some(t) = plan.task(&TaskId::new(id)) {
-        let defects = admission::check_task(t, &plan);
+        let gate = plan
+            .project(&t.project)
+            .map(|p| design_gate(&company, p))
+            .unwrap_or_default();
+        let defects = admission::check_task(t, &plan, &gate);
         return Ok(render::admission(&render::task_heading(t), &defects, None));
     }
     Err(format!("no project or task `{id}`").into())
@@ -858,7 +882,11 @@ pub(crate) fn assign(a: &Args) -> Res {
         .task(&id)
         .ok_or_else(|| format!("no such task: {id}"))?;
 
-    let defects = admission::check_task(task, &plan);
+    let gate = plan
+        .project(&task.project)
+        .map(|p| design_gate(&company, p))
+        .unwrap_or_default();
+    let defects = admission::check_task(task, &plan, &gate);
     if !defects.is_empty() {
         let mut out = render::admission(&render::task_heading(task), &defects, None);
         out.push_str("\n  not assigned — a draft cannot be dispatched\n");

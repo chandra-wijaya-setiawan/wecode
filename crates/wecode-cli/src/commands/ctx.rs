@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use wecode_core::{Plan, ProjectId, Task, TaskId};
+use wecode_core::{Plan, ProjectId, Task, TaskId, TaskKind};
 use wecode_gov::{Action, Broker, Effective, Grant, Session, glob};
 use wecode_org::{Company, Playbook, Post, Workspace, workspace};
 use wecode_store::Store;
@@ -82,6 +82,30 @@ pub(crate) fn playbook_of(
     project: &wecode_core::Project,
 ) -> Result<Option<Playbook>, Box<dyn std::error::Error>> {
     Ok(Playbook::at(&repo_path(company, project)?)?)
+}
+
+/// The kinds a project's playbook refuses without a design — what `check_task`
+/// takes. Resolved through one function so every admission site gates the same way.
+///
+/// A project whose playbook cannot be read gates nothing rather than failing: an
+/// unregistered repo is already reported as its own defect, and a playbook that does
+/// not parse fails loudly on every path that creates tasks. Neither should take the
+/// board or a read-only verdict down with it.
+pub(crate) fn design_gate(company: &Company, project: &wecode_core::Project) -> Vec<TaskKind> {
+    playbook_of(company, project)
+        .ok()
+        .flatten()
+        .map(|pb| pb.design_required_kinds())
+        .unwrap_or_default()
+}
+
+/// The gate for every project at once — what the board and the cockpit consult per
+/// row. Archived projects included: their rows are still drawn on request.
+pub(crate) fn design_gates(company: &Company, plan: &Plan) -> crate::board::DesignGates {
+    plan.all_projects()
+        .map(|p| (p.id.clone(), design_gate(company, p)))
+        .filter(|(_, kinds)| !kinds.is_empty())
+        .collect()
 }
 
 pub(crate) fn require<'a>(value: &'a str, what: &str) -> Result<&'a str, String> {
