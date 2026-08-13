@@ -2650,6 +2650,28 @@ fn work_outside_the_declared_scope_fails_a_run_that_exited_cleanly() {
 }
 
 #[test]
+fn a_failed_check_is_recorded_as_a_failure_not_a_denial() {
+    // The scope violation above is a denial: authority was breached. A red check is
+    // not — the supervisor ran it itself, and the work failed it. Filing the second
+    // as "command not permitted" filled the governance channel with test runs, and
+    // the board said "denied" about a task that was merely wrong.
+    let (org, _) = with_agent("run-fail-check", "echo wrong >> a.txt");
+    a_task(&org, "t", "a.txt", "grep -q right a.txt");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("failed");
+
+    // The check and its exit are on the record, as something we ran and observed...
+    org.run(&["audit", "--task", "t"])
+        .assert_contains("grep -q right a.txt")
+        .assert_contains("exit 1, wanted 0");
+    // ...and not as a denial: nothing was refused.
+    org.run(&["audit", "--denied", "--task", "t"])
+        .assert_lacks("grep -q right");
+}
+
+#[test]
 fn an_agent_that_hangs_is_killed_on_its_idle_limit() {
     let (org, _) = with_agent("run-idle", "sleep 60");
     let conf = org.path("company.toml");

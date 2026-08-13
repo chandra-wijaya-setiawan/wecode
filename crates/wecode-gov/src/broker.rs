@@ -466,6 +466,13 @@ impl Broker {
     }
 
     /// Records something we observed rather than decided.
+    ///
+    /// The decision passed in states what the observation means for *authority*, not
+    /// how the work went. A diff outside scope is a denial the supervisor saw. A
+    /// command that ran and exited wrong is an [`Decision::Allow`] whose target
+    /// carries the exit code — running it was permitted, and failing is a verdict on
+    /// the work, which the task's status already holds. Filing failures as denials
+    /// would turn the denial channel into a list of red tests.
     pub fn observe(
         &mut self,
         session: &Session,
@@ -895,6 +902,26 @@ mod tests {
         );
         assert_eq!(b.denials().count(), 1);
         assert_eq!(b.ledger()[0].source, Source::Supervisor);
+    }
+
+    #[test]
+    fn an_observed_failure_is_not_a_denial() {
+        // The counterpart to the violation above. An acceptance command that ran and
+        // exited wrong breached no authority — the supervisor ran it itself. It
+        // reaches the ledger allowed, with the exit code on the line, so the denial
+        // channel stays about authority rather than filling with red tests.
+        let mut b = Broker::new(Charter::default());
+        let s = confined();
+        b.observe(
+            &s,
+            Action::Run {
+                argv: vec!["cargo test — exit 101, wanted 0".into()],
+            },
+            Decision::Allow,
+            Source::Supervisor,
+        );
+        assert_eq!(b.denials().count(), 0);
+        assert_eq!(b.ledger().len(), 1, "the failure is still on the record");
     }
 
     #[test]

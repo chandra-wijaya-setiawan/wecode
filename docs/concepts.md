@@ -106,3 +106,10 @@ it came from:
 That marking is the load-bearing part. A harness's account of its own work is useful for
 debugging and inadmissible as evidence, and recording which is which at write time stops
 the two being confused later.
+
+A **denial** and a **failure** are different things, and the ledger keeps them apart. A
+denial means authority refused an action — a write outside scope, a command no grant
+permits. An acceptance check that exits wrong is not that: the supervisor ran it itself,
+so it lands as an *allowed* `run` whose target carries the exit code, and the verdict
+goes on the task, which turns `failed`. `wecode audit --denied` is therefore purely the
+governance channel — a real denial is never buried under red tests.

@@ -428,7 +428,11 @@ pub(crate) fn run_task(a: &Args) -> Res {
     let limits = spawn::Limits::from(&template);
     let outcome = spawn::run(&template, &prepared.envelope, &tools, &prepared.cwd, limits)?;
 
-    // The exit is a fact we observed, not a claim the agent made.
+    // The exit is a fact we observed, not a claim the agent made. `Allow` even when
+    // it exited badly: launching the agent was wecode's own permitted act, and the
+    // exit code rides on the line. A denial is authority refusing an action, and a
+    // crash is not one — recorded as "denied", it sent the operator into the
+    // governance channel after a permissions problem that did not exist.
     let mut broker = Broker::new(company.charter.clone());
     broker.observe(
         &supervisor,
@@ -437,17 +441,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
             // nothing about what was run, and the substituted prompt would bury it.
             argv: vec![format!("{launch} — {}", outcome.ended.describe())],
         },
-        if outcome.ended.ok() {
-            wecode_gov::Decision::Allow
-        } else {
-            wecode_gov::Decision::Deny {
-                reason: wecode_gov::DenyReason::CommandNotPermitted {
-                    argv: outcome.ended.describe(),
-                },
-                mode: wecode_gov::ControlMode::Sanctioned,
-                alarm: false,
-            }
-        },
+        wecode_gov::Decision::Allow,
         wecode_gov::Source::Supervisor,
     );
     // What it cost, however it ended: a run killed on its wall limit burned the
@@ -618,23 +612,20 @@ fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error
             wecode_gov::Source::Supervisor,
         );
     }
+    // Every check lands as an `Allow` with its exit code on the line: running it was
+    // the supervisor's own permitted act, and the exit is the observation. The
+    // verdict a red check earns goes on the *task* — `failed`, below — never on the
+    // ledger. Recording it as a denied command put failing work in the governance
+    // channel: the board said "denied" about work that was merely wrong, and a real
+    // denial had to be picked out from among the red tests. A denial is authority
+    // refusing an action, and nothing here was refused.
     for c in &v.checks {
         broker.observe(
             &session,
             Action::Run {
-                argv: vec![c.cmd.clone()],
+                argv: vec![format!("{} — {}", c.cmd, c.describe())],
             },
-            if c.passed() {
-                wecode_gov::Decision::Allow
-            } else {
-                wecode_gov::Decision::Deny {
-                    reason: wecode_gov::DenyReason::CommandNotPermitted {
-                        argv: format!("{} — {}", c.cmd, c.describe()),
-                    },
-                    mode: wecode_gov::ControlMode::Sanctioned,
-                    alarm: false,
-                }
-            },
+            wecode_gov::Decision::Allow,
             wecode_gov::Source::Supervisor,
         );
     }
