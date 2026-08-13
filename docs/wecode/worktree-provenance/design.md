@@ -71,10 +71,27 @@ is an **event**, not an association.
 ## Where worktrees live
 
 Today: `~/.wecode/run/<org>/<task>`, one directory per main task, created on first run
-and never removed.
+and never removed. `run/` and `workspaces/` are siblings.
 
-Proposed: `~/.wecode/<org>/<project>-<repo>/<slot>` — grouped by project and repo, with
-numbered slots rather than task names.
+Proposed: **inside the workspace**, grouped by project and repo, with numbered slots
+rather than task names.
+
+```
+~/.wecode/
+  current
+  workspaces/
+    cws/
+      company.toml
+      wecode.db
+      worktrees/
+        cockpit-wecode/1
+        wemail-ingest-wemail/1
+```
+
+`run/` disappears and everything belonging to an org lives under one directory. A
+first draft put these at `~/.wecode/<org>/`, which would collide with `workspaces/` and
+`run/` for an org unlucky enough to be named either; nesting under the workspace makes
+the question moot, because `<org>` is already namespaced there.
 
 The grouping is the smaller half of the benefit. The larger half is that **a slot can be
 reused**, and reuse is what makes the build cache survive.
@@ -100,9 +117,25 @@ Slot allocation becomes real work: pick the lowest free slot, and a crash must n
 one. The registry answers that too — a slot is free when its row has a `removed`
 timestamp or no row at all.
 
-One collision to avoid: `~/.wecode/<org>/` sits beside `~/.wecode/workspaces/` and
-`~/.wecode/run/`, so an org named `workspaces` or `run` would land on top of them.
-Reject those two names at `init`, or keep a fixed parent directory.
+It changes what a workspace directory *is*. Today `workspaces/cws/` is 2.9 MB of
+hand-edited, backup-worthy state — the sort of thing you copy without thinking. With
+worktrees inside, one active Rust task turns it into ~900 MB of regenerable build output
+wrapped around a 217 KB database, and any backup or sync needs an exclude rule to stay
+sensible. The `worktrees/` subdirectory is there so that rule is a single line, and so
+the split between precious and regenerable stays visible at a glance.
+
+Two things in the tree state the opposite today and must be changed deliberately rather
+than discovered:
+
+- `work::run_root`'s doc comment argues worktrees sit *beside* the workspace, not inside
+  it, for glob hygiene — while conceding in the same breath that it is *"hygiene, not a
+  boundary"*, since the Broker is what actually refuses a write. That reasoning does not
+  survive contact with the benefit above, but the comment should be corrected, not left
+  contradicting the code.
+- `the_worktree_path_sits_under_the_run_root_not_the_workspace` asserts the path contains
+  no `workspaces` component. It encodes the old decision faithfully and has to be
+  rewritten to encode this one — the worktree is inside the workspace and under
+  `worktrees/`, and `company.toml` is not reachable without leaving that subtree.
 
 ## Order
 
