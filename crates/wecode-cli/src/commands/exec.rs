@@ -675,28 +675,115 @@ fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error
     Ok((render::verdict(&task, &dir, &v, next), reason))
 }
 
+/// Every repository some project in the plan is built from, each named once.
+///
+/// The unit of a worktree is the repository, not the project: `git worktree list` answers
+/// per repo, so asking once per project printed every tree once per project sharing it —
+/// 27 rows for 4 trees, on the workspace that found this. Two projects on one repo are one
+/// question with one answer.
+///
+/// `all_projects`, because archiving must not make a checkout unreachable: a worktree you
+/// cannot see is one you cannot clean up.
+///
+/// Keyed on the canonical path so two `[[repos]]` entries spelling one directory two ways
+/// still collapse; named by the first `[[repos]]` name that reached it, since a repo has
+/// one identity in the config even when the config disagrees with itself.
+fn repos_in_play(
+    company: &Company,
+    plan: &Plan,
+) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut repos = Vec::new();
+    for p in plan.all_projects() {
+        let path = repo_path(company, p)?;
+        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if seen.insert(key) {
+            repos.push((p.repo.clone(), path));
+        }
+    }
+    Ok(repos)
+}
+
 pub(crate) fn worktree_list(a: &Args) -> Res {
     let (ws, store, company) = open_full(a)?;
     let plan = store.load_plan()?;
     let org = work::org_name(ws.root());
+    // Only the trees still standing. A tombstone says a directory used to be ours, which
+    // is a fact about the past — git is being asked what is there now.
+    let ours: Vec<wecode_store::Worktree> = store
+        .worktrees()?
+        .into_iter()
+        .filter(|w| w.removed.is_none())
+        .collect();
+    let merge = work::merge_scratch(&org).to_string_lossy().into_owned();
 
-    let mut rows = Vec::new();
-    // `all_projects`: archiving must not make a checkout unreachable. A worktree you
-    // cannot see is one you cannot clean up.
-    for p in plan.all_projects() {
-        let repo = repo_path(&company, p)?;
+    let mut groups = Vec::new();
+    for (repo_name, repo) in repos_in_play(&company, &plan)? {
         if !git::is_repo(&repo) {
             continue;
         }
-        for path in git::worktree_list(&repo)? {
-            let owned = plan
-                .tasks_of(&p.id)
-                .find(|t| work::worktree_for(&org, &t.id).to_string_lossy() == path)
-                .map(|t| (t.id.to_string(), t.status));
-            rows.push((path, p.id.to_string(), owned));
-        }
+        let rows = git::worktree_list(&repo)?
+            .into_iter()
+            .map(|path| render::WorktreeRow {
+                tenant: tenant_of(&plan, &org, &ours, &merge, &path),
+                path,
+            })
+            .collect();
+        groups.push(render::RepoTrees {
+            repo: repo_name,
+            path: repo.to_string_lossy().into_owned(),
+            rows,
+        });
     }
-    Ok(render::worktrees(&rows))
+    Ok(render::worktrees(&groups))
+}
+
+/// Who the tree at `path` belongs to.
+///
+/// Asked in this order on purpose. A task in the plan comes first, because that is the
+/// answer an operator can act on and it settles the ambiguous cases — a task whose id
+/// happens to be `.merge`, or a registry row for a task that turns out to still exist.
+///
+/// The registry is what makes the last arm honest. Before it, anything wecode could not
+/// place was called an orphan, which reads as *we made this and lost track of it* —
+/// and for another tool's worktree in the same repository that is a lie inviting the
+/// operator to delete somebody else's work.
+fn tenant_of(
+    plan: &Plan,
+    org: &str,
+    ours: &[wecode_store::Worktree],
+    merge: &str,
+    path: &str,
+) -> render::Tenant {
+    // Across the whole plan, not one project's tasks: the tree is found via the repo now,
+    // and the path names its owning task without saying which project that task is in.
+    // Matching a computed path also covers a tree made before the registry existed.
+    let owner = plan
+        .tasks()
+        .find(|t| work::worktree_for(org, &t.id).to_string_lossy() == path)
+        .or_else(|| {
+            ours.iter()
+                .find(|w| w.path == path)
+                .and_then(|w| plan.task(&TaskId::new(&w.task)))
+        });
+    if let Some(t) = owner {
+        return render::Tenant::Task {
+            id: t.id.to_string(),
+            project: t.project.to_string(),
+            status: t.status,
+        };
+    }
+    if let Some(w) = ours.iter().find(|w| w.path == path) {
+        // Ours, and the task it was made for is gone from the plan. The registry outlives
+        // the task deliberately, which is what lets this say whose tree it was.
+        return render::Tenant::Orphan {
+            task: w.task.clone(),
+        };
+    }
+    if path == merge {
+        return render::Tenant::Merge;
+    }
+    render::Tenant::Stranger
 }
 
 pub(crate) fn worktree_remove(a: &Args) -> Res {

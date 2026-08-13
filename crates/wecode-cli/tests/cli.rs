@@ -2257,6 +2257,71 @@ fn a_worktree_wecode_did_not_make_is_not_claimed_as_its_own() {
     let ours: Vec<String> = org.recorded().into_iter().map(|w| w.path).collect();
     assert_eq!(ours.len(), 1, "only wecode's own is recorded: {ours:?}");
     assert!(!ours[0].contains("not-ours"));
+
+    // And the listing says which is which, rather than calling both an orphan.
+    org.run(&["worktree"])
+        .assert_ok("worktree")
+        .assert_contains("— not ours")
+        .assert_contains("1 in use")
+        .assert_contains("1 not ours")
+        .assert_lacks("orphan");
+}
+
+#[test]
+fn a_tree_is_listed_once_however_many_projects_share_its_repo() {
+    // The fault: `git worktree list` answers per repository, so asking once per project
+    // printed every tree once per project sharing it. Four trees came out as 27 rows.
+    let (org, _) = with_bug("wt-shared-repo");
+    org.run(&[
+        "project",
+        "add",
+        "exports",
+        "cut the export endpoint's p99 latency in half",
+        "--repo",
+        "app",
+        "--measure-cmd",
+        "true",
+        "--tokens",
+        "1000",
+        "--wall",
+        "60",
+    ])
+    .assert_ok("a second project on the same repo");
+
+    let path = started_at(org.run(&["start", "fix-it"]).assert_ok("start"));
+    let listed = org.run(&["worktree"]).assert_ok("worktree").stdout.clone();
+
+    assert_eq!(
+        listed.lines().filter(|l| l.contains(&path)).count(),
+        1,
+        "one tree, one row:\n{listed}"
+    );
+    // Grouped by repo, and the tally is what makes a repeat visible at a glance.
+    assert!(
+        listed.contains("1 tree in 1 repo"),
+        "the tally counts trees, not project-tree pairs:\n{listed}"
+    );
+    // The project shown is the one whose task works here — not whichever shares the repo.
+    assert!(
+        listed.contains("caching") && !listed.contains("exports"),
+        "attributed to the owning task's project:\n{listed}"
+    );
+}
+
+#[test]
+fn a_tree_whose_task_is_gone_is_ours_rather_than_a_stranger() {
+    // `start` opens no execution row, so a started task can still be removed outright —
+    // and the directory does not go with it. Before the registry this came back as an
+    // orphan by accident; now it is one on the record, and names who it was for.
+    let (org, _) = with_bug("wt-orphan");
+    org.run(&["start", "fix-it"]).assert_ok("start");
+    org.run(&["task", "rm", "fix-it"])
+        .assert_ok("remove a task that only started");
+
+    org.run(&["worktree"])
+        .assert_ok("worktree")
+        .assert_contains("— orphan (fix-it)")
+        .assert_contains("1 ours to clean up");
 }
 
 #[test]

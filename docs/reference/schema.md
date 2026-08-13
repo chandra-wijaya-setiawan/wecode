@@ -250,6 +250,14 @@ table rather than a column.
 Rows are written in `prepare`, which both `start` and `run` go through, and closed by
 `wecode worktree remove`. The scratch checkout a merge borrows for the integration branch
 is not recorded: it is created and torn down inside one command, and belongs to no task.
+`wecode worktree` recognises it by its path instead — it is always `<run root>/<org>/.merge`
+— so the one case where it outlives a command reads as ours rather than as a stranger's.
+
+Reading the table is `wecode worktree`'s job, and it asks the plan before the registry: a
+path that is still the one wecode would compute for a live task is that task's, recorded or
+not. That is what keeps a checkout made before the 4→5 upgrade from reading as a stranger,
+and it is sound in the one direction a derivation can answer. The registry is what answers
+the other — a path with no task at all.
 
 ## What a run cost, in two places
 

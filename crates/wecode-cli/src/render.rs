@@ -693,29 +693,116 @@ pub(crate) fn brief(
     out
 }
 
-/// One row of `wecode worktree`: the path, its project, and the task that owns it
-/// when one does.
-pub(crate) type WorktreeRow = (String, String, Option<(String, TaskStatus)>);
+/// Who a listed worktree belongs to.
+///
+/// Four answers rather than two, because *ours with a task*, *ours with none*, and
+/// *not ours at all* are different situations calling for different action, and the
+/// previous two-way split called all three an orphan.
+pub(crate) enum Tenant {
+    /// A task in the plan works here.
+    Task {
+        id: String,
+        project: String,
+        status: TaskStatus,
+    },
+    /// wecode made it, and the task it was made for is no longer in the plan. This is
+    /// the only real orphan: ours to clean up, with nothing left to ask.
+    Orphan { task: String },
+    /// The checkout a merge borrows for the integration branch. Created and removed
+    /// inside one command, so seeing it means wecode died mid-merge.
+    Merge,
+    /// Another tool's worktree in the same repository. Not ours to touch — and saying
+    /// so is the whole point, because a stranger reported as an orphan invites the
+    /// operator to delete somebody else's work.
+    Stranger,
+}
 
-/// The registered worktrees, and which task each belongs to.
+impl Tenant {
+    /// The `task` and `status` cells. Both are `—` for a tree with no task, rather
+    /// than borrowing a status the tree does not have.
+    fn cells(&self) -> (String, &str, &str) {
+        match self {
+            Self::Task {
+                id,
+                project,
+                status,
+            } => (id.clone(), project.as_str(), status.as_str()),
+            Self::Orphan { task } => (format!("— orphan ({task})"), "—", "—"),
+            Self::Merge => ("— merge scratch".to_string(), "—", "—"),
+            Self::Stranger => ("— not ours".to_string(), "—", "—"),
+        }
+    }
+}
+
+/// One row of `wecode worktree`: where the tree is, and who is in it.
+pub(crate) struct WorktreeRow {
+    pub path: String,
+    pub tenant: Tenant,
+}
+
+/// The worktrees of one repository. The repo is the unit a worktree belongs to, so it
+/// is the unit the listing is grouped by — several projects sharing a repository share
+/// this one set of trees, and each tree appears under it once.
+pub(crate) struct RepoTrees {
+    /// The `[[repos]]` name.
+    pub repo: String,
+    /// Where the main checkout is, so the group names a place and not just a label.
+    pub path: String,
+    pub rows: Vec<WorktreeRow>,
+}
+
+/// Every worktree wecode can see, grouped by the repository it was cut from.
 #[must_use]
-pub(crate) fn worktrees(rows: &[WorktreeRow]) -> String {
-    if rows.is_empty() {
+pub(crate) fn worktrees(repos: &[RepoTrees]) -> String {
+    let total: usize = repos.iter().map(|r| r.rows.len()).sum();
+    if total == 0 {
         return "no worktrees\n".to_string();
     }
     let mut out = format!(
-        "{:<18} {:<12} {:<11} {}\n",
+        "  {:<20} {:<12} {:<10} {}\n",
         "task", "project", "status", "path"
     );
-    for (path, project, owned) in rows {
-        let (task, status) = match owned {
-            Some((t, s)) => (t.clone(), s.as_str().to_string()),
-            // A tree with no matching task: left behind, or made by hand.
-            None => ("— orphan".to_string(), "—".to_string()),
-        };
-        out.push_str(&format!("{task:<18} {project:<12} {status:<11} {path}\n"));
+    for r in repos.iter().filter(|r| !r.rows.is_empty()) {
+        out.push_str(&format!("{} — {}\n", r.repo, r.path));
+        for row in &r.rows {
+            let (task, project, status) = row.tenant.cells();
+            out.push_str(&format!(
+                "  {task:<20} {project:<12} {status:<10} {}\n",
+                row.path
+            ));
+        }
     }
+    out.push_str(&worktree_tally(repos, total));
     out
+}
+
+/// One line saying what the rows add up to. The fault that prompted this printed 27
+/// rows for 4 trees of ours, and a count is what makes that visible at a glance.
+fn worktree_tally(repos: &[RepoTrees], total: usize) -> String {
+    let n_repos = repos.iter().filter(|r| !r.rows.is_empty()).count();
+    let mut counts = (0, 0, 0);
+    for row in repos.iter().flat_map(|r| &r.rows) {
+        match row.tenant {
+            Tenant::Task { .. } => counts.0 += 1,
+            Tenant::Orphan { .. } | Tenant::Merge => counts.1 += 1,
+            Tenant::Stranger => counts.2 += 1,
+        }
+    }
+    let mut parts = vec![format!(
+        "\n  {total} tree{} in {n_repos} repo{}",
+        if total == 1 { "" } else { "s" },
+        if n_repos == 1 { "" } else { "s" }
+    )];
+    if counts.0 > 0 {
+        parts.push(format!("{} in use", counts.0));
+    }
+    if counts.1 > 0 {
+        parts.push(format!("{} ours to clean up", counts.1));
+    }
+    if counts.2 > 0 {
+        parts.push(format!("{} not ours", counts.2));
+    }
+    format!("{}\n", parts.join(" · "))
 }
 
 /// Enough of a diff to work from; not so much that it crowds out the instruction.
@@ -1984,5 +2071,81 @@ mod tests {
         let coder = available_commands(&engineer());
         let names: Vec<&str> = coder.iter().map(|(c, _)| *c).collect();
         assert!(!names.contains(&"project add"), "{names:?}");
+    }
+
+    #[test]
+    fn a_worktree_listing_separates_ours_from_a_strangers() {
+        // The distinction the whole view exists for. `orphan` and `not ours` used to
+        // print identically, and one of them invites deleting somebody else's work.
+        let out = worktrees(&[RepoTrees {
+            repo: "api".into(),
+            path: "/repos/api".into(),
+            rows: vec![
+                WorktreeRow {
+                    path: "/run/cws/cache".into(),
+                    tenant: Tenant::Task {
+                        id: "cache".into(),
+                        project: "export".into(),
+                        status: TaskStatus::Running,
+                    },
+                },
+                WorktreeRow {
+                    path: "/run/cws/vanished".into(),
+                    tenant: Tenant::Orphan {
+                        task: "vanished".into(),
+                    },
+                },
+                WorktreeRow {
+                    path: "/elsewhere/theirs".into(),
+                    tenant: Tenant::Stranger,
+                },
+            ],
+        }]);
+
+        // Asserted whole, because the columns are the point: a reader scans down the
+        // first one to see what is theirs to touch.
+        assert_eq!(
+            out,
+            "  task                 project      status     path
+api — /repos/api
+  cache                export       running    /run/cws/cache
+  — orphan (vanished)  —            —          /run/cws/vanished
+  — not ours           —            —          /elsewhere/theirs
+
+  3 trees in 1 repo · 1 in use · 1 ours to clean up · 1 not ours
+"
+        );
+    }
+
+    #[test]
+    fn a_repo_with_no_worktrees_is_not_printed_as_an_empty_heading() {
+        // Every project's repo is asked, and most have no trees. A heading per repo
+        // would bury the few rows that matter.
+        let out = worktrees(&[
+            RepoTrees {
+                repo: "api".into(),
+                path: "/repos/api".into(),
+                rows: vec![WorktreeRow {
+                    path: "/run/cws/cache".into(),
+                    tenant: Tenant::Merge,
+                }],
+            },
+            RepoTrees {
+                repo: "web".into(),
+                path: "/repos/web".into(),
+                rows: vec![],
+            },
+        ]);
+        assert!(!out.contains("web"), "{out}");
+        assert!(out.contains("1 tree in 1 repo"), "{out}");
+
+        assert_eq!(
+            worktrees(&[RepoTrees {
+                repo: "web".into(),
+                path: "/repos/web".into(),
+                rows: vec![],
+            }]),
+            "no worktrees\n"
+        );
     }
 }
