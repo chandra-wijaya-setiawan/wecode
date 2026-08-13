@@ -114,13 +114,16 @@ the run ended — a killed agent still burned what it burned.
 
 | | |
 |---|---|
-| **`wecode up`** | a live cockpit: what, status, health, progress, spend, needs-you |
+| **`wecode up`** | a live cockpit: what, status, spend, needs-you |
 | **`wecode board`** | the same view as a one-shot snapshot |
 | **`wecode brief`** | orients an agent, derived from its grant rather than stored |
 | **`wecode tree` / `ready`** | the plan, and what is startable |
 
 Health is **computed** from the ledger, the budget and the defect checks — never
-reported. Status sits beside it because a task can be perfectly healthy and not started.
+reported. It is the colour of the needs-you cell rather than a column of its own:
+every cause of amber or red writes an entry there, so a column beside it only ever
+repeated it. Status is declared and sits apart, because a task can be perfectly
+healthy and not started.
 
 `brief` is derived rather than written down on purpose: a stored "you are the
 orchestrator" prompt drifts from the grants the moment a role changes, and then promises

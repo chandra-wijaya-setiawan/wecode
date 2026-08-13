@@ -1308,15 +1308,18 @@ fn an_unattributed_record_does_not_reach_the_board() {
 // ---------------------------------------------------------------- board --------
 
 #[test]
-fn the_board_shows_five_columns_at_every_level() {
+fn the_board_shows_four_columns_at_every_level() {
     let org = Org::new("board", "software-company");
     org.seed();
     for args in [vec!["board"], vec!["board", "caching"]] {
         let r = org.run(&args);
         r.assert_ok("board");
-        for col in ["what", "health", "progress", "spend", "needs you"] {
+        for col in ["what", "status", "spend", "needs you"] {
             r.assert_contains(col);
         }
+        // The columns that said nothing: health repeated the needs-you cell, and
+        // a leaf's progress bar restated its status.
+        r.assert_lacks("health").assert_lacks("progress");
     }
 }
 
@@ -2682,7 +2685,8 @@ fn an_agent_that_reports_nothing_leaves_the_column_empty_rather_than_zero() {
 fn an_overspending_agent_turns_its_row_red_after_the_fact() {
     // Enforcement of a token budget is post-hoc by necessity: the tokens are gone
     // before wecode hears about them. What the board can do is stop calling the run
-    // healthy, which it could not do while nothing counted.
+    // healthy, which it could not do while nothing counted. Health is the colour
+    // of the needs-you cell, so red is the ANSI code around the words.
     let (org, _) = with_agent(
         "run-overspend",
         &reporting_agent("echo done >> a.txt", 4000, 1000),
@@ -2692,8 +2696,7 @@ fn an_overspending_agent_turns_its_row_red_after_the_fact() {
 
     org.run(&["board", "caching"])
         .assert_ok("board")
-        .assert_contains("over budget")
-        .assert_contains("red");
+        .assert_contains("\u{1b}[31mover budget");
 }
 
 #[test]
