@@ -119,6 +119,10 @@ pub(crate) fn require<'a>(value: &'a str, what: &str) -> Result<&'a str, String>
 pub(crate) fn blocker_note(b: &wecode_core::Blocker) -> String {
     match b {
         wecode_core::Blocker::Waiting(id) => format!("{id} is not done"),
+        wecode_core::Blocker::Stuck(id, status) => format!(
+            "{id}, which is {} and will not finish on its own",
+            status.as_str()
+        ),
         wecode_core::Blocker::Missing(id) => format!("{id} does not exist"),
     }
 }

@@ -152,12 +152,21 @@ pub(crate) fn project_vitals(
     if waiting > 0 {
         needs.push(format!("{waiting} to answer"));
     }
+    // Counted at the project level because the portfolio draws root rows only: a
+    // subtask stuck deep in the tree would otherwise be invisible until descent.
+    let stuck = plan
+        .tasks_of(&p.id)
+        .filter(|t| !t.status.is_closed() && is_stuck(plan, t))
+        .count();
+    if stuck > 0 {
+        needs.push(format!("{stuck} stuck"));
+    }
     if plan.tasks_of(&p.id).next().is_none() {
         needs.push("no tasks".to_string());
     }
 
     Vitals {
-        health: health_of(c.alarms, over, defects, stalled, c.denials, waiting),
+        health: health_of(c.alarms, over, defects, stalled, c.denials, waiting + stuck),
         spent: c.spent,
         budget: p.budget.tokens,
         alarms: c.alarms,
@@ -176,16 +185,26 @@ pub(crate) fn task_vitals(plan: &Plan, t: &Task, l: &Ledger, gates: &DesignGates
 
     let mut needs = Vec::new();
     push_common(&mut needs, c.alarms, defects, over, stalled, c.denials);
-    let awaiting = usize::from(t.status.needs_a_human());
+    let mut awaiting = usize::from(t.status.needs_a_human());
     if t.status.needs_a_human() {
         needs.push(t.status.as_str().to_string());
     }
     if t.status == TaskStatus::Draft && defects == 0 && t.assignee.is_none() {
         needs.push("unassigned".to_string());
     }
+    // A dead-end prerequisite is a question for a person as surely as a failed
+    // task is — no tick will release this row, so a green "waiting" would lie.
     for b in plan.blockers(&t.id) {
-        if let wecode_core::Blocker::Missing(m) = b {
-            needs.push(format!("{m} missing"));
+        match b {
+            wecode_core::Blocker::Stuck(id, status) => {
+                needs.push(format!("stuck on {id} ({})", status.as_str()));
+                awaiting += 1;
+            }
+            wecode_core::Blocker::Missing(m) => {
+                needs.push(format!("{m} missing"));
+                awaiting += 1;
+            }
+            wecode_core::Blocker::Waiting(_) => {}
         }
     }
 
@@ -198,6 +217,14 @@ pub(crate) fn task_vitals(plan: &Plan, t: &Task, l: &Ledger, gates: &DesignGates
         defects,
         needs,
     }
+}
+
+/// Whether a task is blocked by something no tick will ever release — a failed,
+/// dropped or missing prerequisite. Such work cannot advance on its own.
+fn is_stuck(plan: &Plan, t: &Task) -> bool {
+    plan.blockers(&t.id)
+        .iter()
+        .any(|b| !matches!(b, wecode_core::Blocker::Waiting(_)))
 }
 
 fn push_common(
@@ -811,6 +838,59 @@ mod tests {
         );
         assert_eq!(v.defects, 0, "{:?}", v.needs);
         assert_eq!(v.health, Health::Green);
+    }
+
+    #[test]
+    fn a_dead_end_prerequisite_turns_its_dependent_amber_and_names_it() {
+        // The contrast with the waiting case above: a dropped prerequisite will
+        // never finish, so its dependent cannot advance on its own. Left green, a
+        // dead chain looks exactly like one that time will fix.
+        let mut p = plan();
+        p.add_task(good_task("t2", "the second half", "crates/other/**").after("t1"))
+            .unwrap();
+        let mut t1 = p.task(&TaskId::new("t1")).unwrap().clone();
+        t1.status = TaskStatus::Dropped;
+        p.update_task(t1).unwrap();
+
+        let v = task_vitals(
+            &p,
+            p.task(&TaskId::new("t2")).unwrap(),
+            &ledger_index(&[]),
+            &no_gates(),
+        );
+        assert_eq!(v.health, Health::Amber);
+        assert!(
+            v.needs.iter().any(|n| n == "stuck on t1 (dropped)"),
+            "{:?}",
+            v.needs
+        );
+    }
+
+    #[test]
+    fn stuck_work_is_counted_on_its_projects_row() {
+        // The portfolio draws root rows only, so a stuck subtask must surface as a
+        // count on the project or it is invisible until someone descends.
+        let mut p = plan();
+        p.add_task(good_task("t1a", "the dead half", "crates/cache/a/**").under("t1"))
+            .unwrap();
+        p.add_task(
+            good_task("t1b", "the stranded half", "crates/cache/b/**")
+                .under("t1")
+                .after("t1a"),
+        )
+        .unwrap();
+        let mut dead = p.task(&TaskId::new("t1a")).unwrap().clone();
+        dead.status = TaskStatus::Failed;
+        p.update_task(dead).unwrap();
+
+        let v = project_vitals(
+            &p,
+            p.project(&ProjectId::new("caching")).unwrap(),
+            &ledger_index(&[]),
+            &repos(),
+        );
+        assert!(v.needs.iter().any(|n| n == "1 stuck"), "{:?}", v.needs);
+        assert_eq!(v.health, Health::Amber);
     }
 
     #[test]

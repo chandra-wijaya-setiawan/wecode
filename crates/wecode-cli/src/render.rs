@@ -127,18 +127,45 @@ fn render_task(plan: &Plan, t: &Task, depth: usize, out: &mut String) {
 pub(crate) fn ready(p: &Plan) -> String {
     let mut tasks: Vec<&Task> = p.ready_tasks().collect();
     tasks.sort_by(|a, b| a.id.cmp(&b.id));
+    // A schedulable task whose prerequisite failed or was dropped is not merely
+    // waiting: no tick will ever release it. Saying "waiting on prerequisites"
+    // about it promises a resolution that will never come, so the two are counted
+    // apart. Archived projects are skipped, matching `ready_tasks` — parked work
+    // is not stuck, it is parked.
+    let stuck = p
+        .tasks()
+        .filter(|t| t.status.is_schedulable())
+        .filter(|t| p.project(&t.project).is_some_and(|pr| !pr.archived))
+        .filter(|t| {
+            p.blockers(&t.id)
+                .iter()
+                .any(|b| !matches!(b, Blocker::Waiting(_)))
+        })
+        .count();
+    let stuck_note = |out: &mut String| {
+        if stuck > 0 {
+            out.push_str(&format!(
+                "  {stuck} stuck on failed or dropped work — it cannot advance without you; wecode tree\n"
+            ));
+        }
+    };
     if tasks.is_empty() {
         let waiting = p
             .tasks()
             .filter(|t| t.status == TaskStatus::Waiting)
             .count();
         if waiting > 0 {
-            return format!(
-                "nothing ready — {waiting} task{} waiting on prerequisites\n  wecode tree  to see what on\n",
+            let mut out = format!(
+                "nothing ready — {waiting} task{} waiting on prerequisites\n",
                 if waiting == 1 { "" } else { "s" }
             );
+            stuck_note(&mut out);
+            out.push_str("  wecode tree  to see what on\n");
+            return out;
         }
-        return "nothing ready\n".to_string();
+        let mut out = "nothing ready\n".to_string();
+        stuck_note(&mut out);
+        return out;
     }
     let mut out = format!(
         "{:<18} {:<12} {:<10} {}\n",
@@ -153,6 +180,7 @@ pub(crate) fn ready(p: &Plan) -> String {
             t.title
         ));
     }
+    stuck_note(&mut out);
     out
 }
 
@@ -301,6 +329,10 @@ pub(crate) fn task_detail(plan: &Plan, id: &TaskId) -> String {
 fn blocker_line(b: &Blocker) -> String {
     match b {
         Blocker::Waiting(id) => format!("{id} is not done"),
+        Blocker::Stuck(id, status) => format!(
+            "{id} is {} — it will not finish on its own; reopen or re-point it",
+            status.as_str()
+        ),
         Blocker::Missing(id) => format!("{id} does not exist — dependency can never be satisfied"),
     }
 }
@@ -1718,6 +1750,66 @@ mod tests {
         p.update_task(a).unwrap();
         let out = ready(&p);
         assert!(out.contains("waiting on prerequisites"), "{out}");
+        // Merely waiting: the prerequisite is running, so time resolves this.
+        assert!(!out.contains("stuck"), "{out}");
+    }
+
+    #[test]
+    fn ready_tells_apart_waiting_that_will_resolve_from_waiting_that_will_not() {
+        // "Waiting on prerequisites" promises a resolution. When the prerequisite
+        // failed, that promise is false — the queue will stay empty until a person
+        // acts, and the message has to say so.
+        let mut p = Plan::new();
+        p.add_project(Project::new("x", "an objective sentence", "api"))
+            .unwrap();
+        p.add_task(Task::new("a", "x", "first")).unwrap();
+        p.add_task(Task::new("b", "x", "second").after("a"))
+            .unwrap();
+        let mut b = p.task(&TaskId::new("b")).unwrap().clone();
+        b.status = TaskStatus::Waiting;
+        p.update_task(b).unwrap();
+        let mut a = p.task(&TaskId::new("a")).unwrap().clone();
+        a.status = TaskStatus::Failed;
+        p.update_task(a).unwrap();
+
+        let out = ready(&p);
+        assert!(out.contains("stuck on failed or dropped work"), "{out}");
+        assert!(out.contains("cannot advance without you"), "{out}");
+    }
+
+    #[test]
+    fn ready_does_not_call_parked_work_stuck() {
+        // Archiving parks a project deliberately; its chains are not a cry for help.
+        let mut p = Plan::new();
+        p.add_project(Project::new("x", "an objective sentence", "api"))
+            .unwrap();
+        p.add_task(Task::new("a", "x", "first")).unwrap();
+        p.add_task(Task::new("b", "x", "second").after("a"))
+            .unwrap();
+        let mut b = p.task(&TaskId::new("b")).unwrap().clone();
+        b.status = TaskStatus::Waiting;
+        p.update_task(b).unwrap();
+        let mut a = p.task(&TaskId::new("a")).unwrap().clone();
+        a.status = TaskStatus::Dropped;
+        p.update_task(a).unwrap();
+        let mut proj = p.project(&ProjectId::new("x")).unwrap().clone();
+        proj.archived = true;
+        p.update_project(proj).unwrap();
+
+        assert!(!ready(&p).contains("stuck"), "{}", ready(&p));
+    }
+
+    #[test]
+    fn task_detail_says_when_a_prerequisite_will_never_finish() {
+        let mut p = plan();
+        let mut cache = p.task(&TaskId::new("cache")).unwrap().clone();
+        cache.status = TaskStatus::Failed;
+        p.update_task(cache).unwrap();
+
+        let out = task_detail(&p, &TaskId::new("bench"));
+        assert!(out.contains("blocked by"), "{out}");
+        assert!(out.contains("will not finish on its own"), "{out}");
+        assert!(out.contains("reopen or re-point"), "{out}");
     }
 
     #[test]

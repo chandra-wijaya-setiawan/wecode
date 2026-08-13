@@ -257,6 +257,21 @@ impl TaskStatus {
         matches!(self, Self::NeedsApproval | Self::NeedsInput | Self::Failed)
     }
 
+    /// Whether, as a prerequisite, this status is a dead end: nothing in the
+    /// normal course of events will make it `Done`, so work waiting on it cannot
+    /// advance on its own.
+    ///
+    /// Deliberately narrower than `needs_a_human`. `NeedsApproval` and
+    /// `NeedsInput` are a signature or an answer away from finishing — the design
+    /// gate *relies* on work queuing behind an unsigned design — and `Draft` is
+    /// planning still in progress. `Failed` has exhausted its attempts and
+    /// `Dropped` is closed for good; only those two leave a dependent with
+    /// nothing to wait for.
+    #[must_use]
+    pub fn is_dead_end(self) -> bool {
+        matches!(self, Self::Failed | Self::Dropped)
+    }
+
     /// Every status, in lifecycle order. Exists so an error message can list them
     /// without a second hand-maintained copy drifting out of sync.
     #[must_use]
@@ -405,6 +420,27 @@ mod tests {
         }
         for s in [TaskStatus::Waiting, TaskStatus::Ready, TaskStatus::Running] {
             assert!(!s.needs_a_human(), "{s:?} resolves without a person");
+        }
+    }
+
+    #[test]
+    fn only_failed_and_dropped_are_dead_ends_for_a_dependent() {
+        for s in [TaskStatus::Failed, TaskStatus::Dropped] {
+            assert!(s.is_dead_end(), "{s:?} will never finish unaided");
+        }
+        // A signature or an answer away from done is the flow working, not a
+        // dead end — flagging those would turn every design gate amber.
+        for s in [
+            TaskStatus::Draft,
+            TaskStatus::Waiting,
+            TaskStatus::Ready,
+            TaskStatus::Running,
+            TaskStatus::Verifying,
+            TaskStatus::NeedsApproval,
+            TaskStatus::NeedsInput,
+            TaskStatus::Done,
+        ] {
+            assert!(!s.is_dead_end(), "{s:?} still has a way to finish");
         }
     }
 }

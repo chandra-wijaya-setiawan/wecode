@@ -579,6 +579,9 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
                     .iter()
                     .map(|b| match b {
                         wecode_core::Blocker::Waiting(w) => w.to_string(),
+                        wecode_core::Blocker::Stuck(w, s) => {
+                            format!("{w} ({} — needs you)", s.as_str())
+                        }
                         wecode_core::Blocker::Missing(m) => format!("{m} (missing)"),
                     })
                     .collect();
