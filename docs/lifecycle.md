@@ -44,7 +44,8 @@ undone.
 
 A task is planned work. An **execution** is one attempt at it, and they are separate so
 a retry does not erase what happened last time. Each execution records its worktree, its
-attempt number, when it started and ended, and how it finished.
+attempt number, when it started and ended, how it finished, and what it cost — a task
+that overran its budget on its third try can say so, which a per-task total cannot.
 
 Executions carry the [A2A](design/decisions.md#a2a) lifecycle — `submitted`, `working`,
 `completed`, `failed`, `canceled`, `rejected`, and the rest — where `rejected` is the
@@ -59,16 +60,21 @@ one that matters: the agent finished cleanly and *we declined what it produced*.
    anything starts.
 4. Mark the task `running` and open an execution row, so a crash leaves a trace.
 5. **Spawn** — environment built from an allowlist, not inherited; working directory
-   pinned to the worktree; a new process group; wall and idle timers.
-6. **Judge**, in trust order:
+   pinned to the worktree; a new process group; wall and idle timers. Output is metered
+   as it streams, so what the agent says it spent survives the buffer cap.
+6. **Record what it cost** — the wall clock wecode timed, and the token count the agent
+   reported, marked as reported. This happens however the run ended: a killed agent
+   still spent what it spent, and a cost recorded only for clean exits would hide the
+   expensive failures.
+7. **Judge**, in trust order:
    - `git diff` of the worktree — **ground truth**
    - every changed path checked against the declared scope
    - the acceptance commands, run by wecode — **authoritative**
    - `.wecode/run/result.json` — the agent's own claim, currently not read
-7. **Commit** whatever the attempt produced, pass or fail.
-8. Close the execution row with why, not just how it exited.
+8. **Commit** whatever the attempt produced, pass or fail.
+9. Close the execution row with why, not just how it exited, and with its spend.
 
-Step 7 is after step 6 deliberately: `verify` reads the *uncommitted* diff, so committing
+Step 8 is after step 7 deliberately: `verify` reads the *uncommitted* diff, so committing
 first would leave it nothing to check.
 
 Committing a **failure** is the point rather than the cost. The failed diff is what a

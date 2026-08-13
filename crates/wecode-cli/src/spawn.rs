@@ -13,6 +13,9 @@
 //!   leaves them orphaned and still running.
 //! - **Idle, not just wall.** An agent that has stopped producing output has usually
 //!   stopped working, and the wall limit is far too generous to catch it.
+//! - **Metered as it streams.** The output buffer is capped, and the line stating what
+//!   the run cost is the last one — so spend is counted on the way past rather than
+//!   read back out of a buffer that may have dropped it.
 //!
 //! No `unsafe`, which the workspace forbids: `process_group` is safe, and signalling
 //! shells out to `kill` the way the rest of the tree shells out to `git`.
@@ -27,6 +30,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wecode_org::AgentTemplate;
+
+use crate::usage::Meter;
 
 /// How much of an agent's output to keep. Past this it is drained and discarded —
 /// the pipe must keep moving or the child blocks on a full buffer.
@@ -83,6 +88,11 @@ pub(crate) struct Outcome {
     pub(crate) took: Duration,
     /// True when output was discarded past the cap.
     pub(crate) truncated: bool,
+    /// Tokens the agent's own output reported, and `None` when it reported none.
+    ///
+    /// A report, not a measurement — see [`crate::usage`] for why nothing else could
+    /// know this, and why the two cases are kept apart rather than both being zero.
+    pub(crate) spent: Option<u64>,
 }
 
 /// The argv this template will actually run, with `{{prompt}}` filled in.
@@ -160,14 +170,17 @@ pub(crate) fn run(
 
     let buf = Arc::new(Mutex::new(String::new()));
     let truncated = Arc::new(Mutex::new(false));
+    // Shared by both streams: a harness free to write its usage report to either one
+    // should be counted the same way whichever it picks.
+    let meter = Arc::new(Mutex::new(Meter::for_protocol(&t.protocol)));
     let (tick_tx, tick_rx) = channel::<()>();
 
     let mut readers = Vec::new();
     if let Some(o) = child.stdout.take() {
-        readers.push(reader(o, &buf, &truncated, tick_tx.clone()));
+        readers.push(reader(o, &buf, &truncated, &meter, tick_tx.clone()));
     }
     if let Some(e) = child.stderr.take() {
-        readers.push(reader(e, &buf, &truncated, tick_tx.clone()));
+        readers.push(reader(e, &buf, &truncated, &meter, tick_tx.clone()));
     }
     drop(tick_tx);
 
@@ -187,6 +200,10 @@ pub(crate) fn run(
         output: buf.lock().map(|b| b.clone()).unwrap_or_default(),
         took: started.elapsed(),
         truncated: *truncated.lock().unwrap_or_else(|e| e.into_inner()),
+        // The readers have joined, so nothing else holds this lock. A poisoned one
+        // means a reader panicked mid-line, and the count it had reached is still
+        // the best evidence there is.
+        spent: meter.lock().unwrap_or_else(|e| e.into_inner()).tokens(),
     })
 }
 
@@ -196,14 +213,22 @@ fn reader<R: Read + Send + 'static>(
     stream: R,
     buf: &Arc<Mutex<String>>,
     truncated: &Arc<Mutex<bool>>,
+    meter: &Arc<Mutex<Meter>>,
     tick: std::sync::mpsc::Sender<()>,
 ) -> thread::JoinHandle<()> {
     let buf = Arc::clone(buf);
     let truncated = Arc::clone(truncated);
+    let meter = Arc::clone(meter);
     thread::spawn(move || {
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
             // Ping first: a line that overflows the cap is still evidence of life.
             let _ = tick.send(());
+            // Metered before the cap is consulted, and deliberately: the line that
+            // states what the run cost is the last one, which is precisely the line
+            // a full buffer discards.
+            if let Ok(mut m) = meter.lock() {
+                m.line(&line);
+            }
             if let Ok(mut b) = buf.lock() {
                 if b.len() + line.len() < OUTPUT_CAP {
                     b.push_str(&line);
@@ -499,6 +524,77 @@ mod tests {
         assert!(o.output.len() <= OUTPUT_CAP, "{}", o.output.len());
         // The point of draining past the cap: the child still gets to finish.
         assert_eq!(o.ended, Ended::Exited(0));
+    }
+
+    /// The same stand-in, speaking a protocol whose usage lines wecode can read.
+    fn metered_agent(script: &str) -> AgentTemplate {
+        let mut t = agent(script, None, None);
+        t.protocol = "claude-stream-json".to_string();
+        t
+    }
+
+    #[test]
+    fn what_the_agent_reported_spending_comes_back_with_its_exit() {
+        let t = metered_agent(
+            r#"echo '{"type":"result","usage":{"input_tokens":1200,"output_tokens":340}}'"#,
+        );
+        let o = run(&t, "", "", &cwd(), Limits::default()).unwrap();
+        assert_eq!(o.spent, Some(1540));
+    }
+
+    #[test]
+    fn an_agent_whose_protocol_says_nothing_is_unmetered_rather_than_free() {
+        // Same output, template protocol left empty. Zero would be a claim; `None`
+        // is the truth, and the board renders them differently.
+        let t = agent(
+            r#"echo '{"type":"result","usage":{"input_tokens":1200,"output_tokens":340}}'"#,
+            None,
+            None,
+        );
+        assert_eq!(
+            run(&t, "", "", &cwd(), Limits::default()).unwrap().spent,
+            None
+        );
+    }
+
+    #[test]
+    fn a_run_that_overflows_the_output_cap_still_accounts_for_itself() {
+        // The reason metering happens in the reader: the total arrives on the last
+        // line, and the last line of a flood is the one the cap throws away.
+        let t = metered_agent(
+            "i=0; while [ $i -lt 40000 ]; do echo aaaaaaaaaaaaaaaaaaaa; i=$((i+1)); done; \
+             echo '{\"type\":\"result\",\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}'",
+        );
+        let o = run(&t, "", "", &cwd(), Limits::default()).unwrap();
+        assert!(o.truncated, "the cap should have been hit");
+        assert!(
+            !o.output.contains("input_tokens"),
+            "the reporting line was dropped from the buffer, as intended"
+        );
+        assert_eq!(o.spent, Some(10), "and counted anyway");
+    }
+
+    #[test]
+    fn a_killed_run_keeps_the_spend_it_had_already_reported() {
+        // Overrunning does not refund anything. The tokens were burned before the
+        // wall limit was reached, and the board has to show them.
+        let t = metered_agent(
+            "echo '{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":50,\
+             \"output_tokens\":25}}}'; sleep 30",
+        );
+        let o = run(
+            &t,
+            "",
+            "",
+            &cwd(),
+            Limits {
+                wall: Some(Duration::from_millis(300)),
+                idle: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(o.ended, Ended::Wall);
+        assert_eq!(o.spent, Some(75));
     }
 
     #[test]

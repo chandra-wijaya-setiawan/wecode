@@ -8,6 +8,7 @@ mod render;
 mod scheduler;
 mod spawn;
 mod tui;
+mod usage;
 mod verify;
 mod work;
 

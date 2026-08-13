@@ -66,6 +66,7 @@ ttl = "8h"                        # idle timeout, not age
 
 [agents.claude-code]              # how to actually launch it
 command = "claude"
+protocol = "claude-stream-json"   # how to read its output; see below
 args = ["-p", "{{prompt}}", "--output-format", "stream-json", "--verbose"]
 env_allowlist = ["ANTHROPIC_API_KEY", "PATH", "HOME", "LANG"]
 wall_secs = 1800
@@ -79,6 +80,20 @@ The **env allowlist is the whole environment** a spawned agent gets — nothing 
 inherited. Absent a container, that is the only network control there is.
 
 `{{prompt}}` in `args` is where the rendered envelope goes.
+
+`protocol` names the shape of the agent's output, and is what lets wecode read a token
+count out of it. One value is understood today:
+
+| | |
+|---|---|
+| `claude-stream-json` | one JSON object per line; usage on the `assistant` and `result` lines |
+| anything else | **unmetered** — the run's spend column stays blank |
+
+It must match what `args` actually asks for: declaring `claude-stream-json` without
+`--output-format stream-json` produces prose, and prose reports nothing. Unmetered is
+not an error — the run still happens, is still timed, and still lands its wall spend on
+the ledger. It only means the token half of the spend column has nothing to show, which
+is the truth and not a zero.
 
 ## .wecode/playbook.toml
 

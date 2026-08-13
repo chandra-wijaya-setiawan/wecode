@@ -4,7 +4,7 @@ One file per workspace, `wecode.db`. Everything machine-written lives here; ever
 hand-edited lives in `company.toml` (see [config.md](config.md)), because a binary blob
 cannot be diffed, reviewed or opened in an editor.
 
-Currently **schema version 3**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`.
+Currently **schema version 4**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`.
 
 ## Shape
 
@@ -48,6 +48,10 @@ Refusing matters. Before that arm existed, a database between versions matched n
 branch and was left un-migrated *while reporting success* — the caller then queried
 columns the file did not have. Upgrades are an ordered list applied in sequence, and a
 gap in the chain is refused rather than half-applied.
+
+Each step stays frozen at the shape it produced. The 2→3 step still creates
+`task_executions` without `spent_tokens` and the 3→4 step adds the column, because
+every file that already ran the older step would otherwise never be given it.
 
 ## Full DDL
 
@@ -158,26 +162,54 @@ CREATE INDEX audit_by_outcome ON audit_log(outcome);
 
 -- One run of one task. The execution is the entity; `attempt` is which try it is.
 --
--- Deferred until something wrote it, which is why `spent_tokens` is absent: nothing
--- counts tokens yet, and a column that is always NULL is a guess wearing a schema.
 -- `pid` is written at spawn and left behind if wecode dies, so a row still saying
 -- `working` is exactly the recovery information wanted.
 --
+-- `spent_tokens` was held back until something counted them, and is nullable because
+-- the two cases are different facts: NULL is an agent whose output wecode cannot read
+-- a count out of, 0 is a run that reported burning nothing. Collapsing them would
+-- make every unmetered agent look free. `wall_secs` beside it is measured here;
+-- `spent_tokens` is the agent's own report, and the ledger row for the same run
+-- carries that provenance.
+--
 -- No foreign key on session_id: the ledger and its executions outlive sessions.
 CREATE TABLE task_executions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    session_id  TEXT NOT NULL,
-    attempt     INTEGER NOT NULL,
-    status      TEXT NOT NULL,          -- A2A's eight states
-    worktree    TEXT,
-    pid         INTEGER,
-    started     INTEGER NOT NULL,
-    ended       INTEGER,
-    wall_secs   INTEGER,
-    detail      TEXT NOT NULL DEFAULT '',
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    session_id   TEXT NOT NULL,
+    attempt      INTEGER NOT NULL,
+    status       TEXT NOT NULL,         -- A2A's eight states
+    worktree     TEXT,
+    pid          INTEGER,
+    started      INTEGER NOT NULL,
+    ended        INTEGER,
+    wall_secs    INTEGER,               -- measured by wecode
+    spent_tokens INTEGER,               -- reported by the agent; NULL if unmetered
+    detail       TEXT NOT NULL DEFAULT '',
     UNIQUE (task_id, attempt)
 ) STRICT;
 
 CREATE INDEX executions_by_task ON task_executions(task_id);
 ```
+
+## What a run cost, in two places
+
+A finished run writes its cost twice, and the difference is the point.
+
+`task_executions.spent_tokens` is the count for that attempt, so a task that took three
+tries can say which one was expensive. The ledger gets an `Action::Spend` row for the
+same run — `<tokens>t/<secs>s` in `target` — because that is what the board rolls up,
+and because a spend needs a `source` beside it. The clock is wecode's own, so a run that
+reported no tokens is filed as `supervisor`; a run that reported some is filed as
+`harness`, because nothing sits between an agent and its model for wecode to count at.
+A record is only as admissible as its weakest half.
+
+`Action::Spend` has no room for an absent count, so a `supervisor`-sourced spend row
+reads `0t/45s`: the seconds are the fact it carries, and the zero means there was no
+token count to record rather than that none were spent. `task_executions.spent_tokens`
+is where that difference is kept, because a nullable column can hold it and a `u64`
+cannot.
+
+Both are written however the run ended. A run killed on its wall limit spent what it
+spent, and a cost recorded only for clean exits would hide exactly the expensive
+failures.
