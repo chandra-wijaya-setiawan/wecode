@@ -120,6 +120,7 @@ which is how you check a scope before assigning work to a seat that cannot reach
 | **Worktrees** | one per main task, outside the repo and the workspace |
 | **Shared build cache** | directories a project's worktrees share, so a task is not a cold build |
 | **Spawning** | environment from an allowlist, new process group, wall and idle timeouts |
+| **Budgets that bite** | the wall and the token figure a task declared stop the run, not just describe it |
 | **Intelligence** | a seat declares how clever its occupant is, 1–10, and the model is derived |
 | **Verification** | the branch's diff against the declared scope, then the acceptance commands |
 | **Commits** | every attempt, pass or fail, authored by wecode |
@@ -256,6 +257,27 @@ reported beside the spend on the `wecode run` line — `spent 163400 tokens, as 
 reported them (+4812000 re-read from cache, not budgeted)` — where a long conversation's
 cost is visible without a budget having to be denominated in it.
 
+**A budget is a limit, not a label.** Both figures a task declares now reach the process
+it was written for. The wall is the *tighter* of the task's and the harness template's:
+the template is the backstop under every run this harness makes, and a task must not
+declare its way past it — a chore given sixty seconds no longer runs to the harness's
+half hour. The token figure is checked against the meter while the output is still
+streaming, so a run that has reported spending past its budget is killed where it stands
+and the line reads `killed — token budget`. That is a bound, not an interception: the
+count arrives a turn at a time and the tokens of the turn that crossed the line are
+already gone, so a task budgeted at 1000 stops shortly after 1000 rather than at 1000 —
+and, before this, at nothing at all. The residual overrun still lands on the board in
+red, which is the part that was always true and used to be the only part.
+
+The `wecode run` line names what held the run, and whose figure it was: `limit    wall
+600s (this task's budget), idle 300s, 9000 tokens (this task's budget)`. A task's wall
+and a harness's wall are two declarations in two files with two owners, and "give it
+longer" means editing a different one depending on which of them bit. Idle stays the
+harness's alone — a budget says how long the work may take, not how long it may go quiet
+in the middle of it — and so does the whole of an unmetered run: an agent whose protocol
+wecode cannot read reports no count, and a budget checked against a number nobody has
+would be a kill nobody could account for.
+
 ## Watching
 
 | | |
@@ -387,10 +409,12 @@ check runs afterwards on the diff. That is *why* a write outside scope is sancti
 recorded as a signal — rather than prevented. Per-write enforcement needs a sandbox, and
 claiming it without one would be false.
 
-A **token budget is post-hoc for the same reason**, and more so: the count only arrives
-when the agent reports it, which is after the tokens are gone. Exceeding one turns the
-row red and never refunds anything. What does stop a runaway mid-flight is the wall and
-idle limit, because time is the one thing wecode measures itself.
+A **token budget is bounded rather than intercepted**, which is the weaker claim and the
+honest one. The count is the agent's report and arrives a turn at a time, so no limit can
+refuse the tokens that cross it — but it can refuse the next turn, and the supervisor
+does. The overrun that survives is one turn wide instead of unbounded, it still turns the
+row red, and nothing is ever refunded. A wall is the stronger half of the same budget,
+because time is the one thing wecode measures itself.
 
 ## The operator is not governed
 

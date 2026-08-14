@@ -506,7 +506,8 @@ pub(crate) fn forbidden_by_charter(company: &Company, line: &str) -> Option<Stri
     })
 }
 
-/// The clock one run is held to: the harness's limits, tightened by the task's own wall.
+/// What one run is held to: the harness's limits, tightened by the budget its task
+/// declared — both halves of it.
 ///
 /// A task states a wall. `--wall` writes it, a playbook's default for the kind fills it
 /// in, the admission gate refuses a task that declares no budget at all, and `wecode
@@ -516,16 +517,20 @@ pub(crate) fn forbidden_by_charter(company: &Company, line: &str) -> Option<Stri
 /// thirty minutes, and the number on the task was decoration — read by the operator,
 /// answered by nobody.
 ///
-/// Which is the half of a budget that could have been enforced. Tokens cannot: the count
-/// only exists once the agent reports it, which is after the money is gone, so that half
-/// is post-hoc by nature and the board is where it lands. Time is the one thing wecode
-/// measures itself, on its own clock, while the run is still going — a wall is the only
-/// part of a task's budget that can stop a runaway rather than describe one afterwards.
-///
-/// The **tighter** of the two, not the task's outright. The template's wall is the
+/// The **tighter** of the two walls, not the task's outright. The template's wall is the
 /// harness's own stop, the backstop under every task whatever its plan says, and a task
 /// must not widen its way past it by declaring a longer one. Either may be absent, and
 /// then the other is the whole answer.
+///
+/// The token half was decoration for one turn longer, and for a better reason: a token
+/// count is the agent's own report and arrives after the tokens are gone, so no limit
+/// can refuse the spend that crosses it. What it can do is refuse the *next* one. The
+/// meter is filled while the output streams past — see [`crate::usage`] — so the
+/// supervisor already holds a running figure, and a task budgeted at 1000 tokens now
+/// stops shortly after 1000 instead of running to whatever the agent felt like. The
+/// overrun is still real and still lands on the board in red; what changes is its size.
+/// There is no template figure to take the tighter of: a budget is per-task by nature,
+/// and a machine-wide token cap would be too small for the large tasks or no cap at all.
 ///
 /// Idle stays the template's. A budget says how long the work may take, not how long the
 /// harness may go quiet in the middle of it — different questions, and only the agent's
@@ -535,6 +540,7 @@ fn limits_for(template: &AgentTemplate, task: &Task) -> spawn::Limits {
     if let Some(declared) = task.budget.wall_secs.map(Duration::from_secs) {
         limits.wall = Some(limits.wall.map_or(declared, |cap| cap.min(declared)));
     }
+    limits.tokens = task.budget.tokens;
     limits
 }
 
@@ -706,9 +712,12 @@ pub(crate) fn run_task(a: &Args) -> Res {
         store.finish_execution(
             exec,
             match outcome.ended {
-                spawn::Ended::Wall | spawn::Ended::Idle | spawn::Ended::Signalled => {
-                    wecode_core::ExecutionStatus::Canceled
-                }
+                // Stopped from outside, whichever limit did it: the agent did not decide
+                // to end, so none of these is a failure it reported.
+                spawn::Ended::Wall
+                | spawn::Ended::Idle
+                | spawn::Ended::Tokens
+                | spawn::Ended::Signalled => wecode_core::ExecutionStatus::Canceled,
                 spawn::Ended::Exited(_) => wecode_core::ExecutionStatus::Failed,
             },
             &outcome.ended.describe(),
@@ -1175,6 +1184,26 @@ mod tests {
         // under every run this harness makes, and a budget is not a way to lift it.
         let l = limits_for(&harness(Some(600), None), &budgeted(Some(5400)));
         assert_eq!(l.wall, Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn a_task_is_held_to_the_tokens_it_was_budgeted() {
+        // The other half of the same defect: the figure the admission gate demanded and
+        // the board coloured rows against never reached the run it was written for.
+        let l = limits_for(&harness(Some(1800), Some(300)), &budgeted(Some(60)));
+        assert_eq!(l.tokens, Some(1000));
+    }
+
+    #[test]
+    fn a_budget_with_no_token_figure_caps_no_spend() {
+        // Nothing invented from the harness's clocks: a template declares no budget,
+        // and a task that names only a wall is asking to be held to a wall.
+        let t =
+            Task::new("t", "caching", "append a marker comment to the source").budgeted(Budget {
+                tokens: None,
+                wall_secs: Some(60),
+            });
+        assert_eq!(limits_for(&harness(Some(1800), Some(300)), &t).tokens, None);
     }
 
     #[test]

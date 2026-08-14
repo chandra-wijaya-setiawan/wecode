@@ -1742,6 +1742,10 @@ fn replay(o: &crate::spawn::Outcome) -> String {
 /// two declarations in two files with two owners, and "give it longer" means editing a
 /// different one depending on which of them bit. Silent when the run was held to nothing
 /// at all, which is what an unlimited configuration deserves to look like.
+///
+/// The token cap is named on the same line and for the same reason. It reads beside the
+/// spend two lines down, so "killed — token budget" can be checked against the figure
+/// that killed it without opening the plan.
 fn held_to(task: &Task, post: &Post, l: crate::spawn::Limits) -> String {
     let mut parts = Vec::new();
     if let Some(wall) = l.wall {
@@ -1757,6 +1761,11 @@ fn held_to(task: &Task, post: &Post, l: crate::spawn::Limits) -> String {
     }
     if let Some(idle) = l.idle {
         parts.push(format!("idle {}s", idle.as_secs()));
+    }
+    // No source named: a token cap has only one, the task, since no template declares
+    // one to be confused with.
+    if let Some(tokens) = l.tokens {
+        parts.push(format!("{tokens} tokens (this task's budget)"));
     }
     if parts.is_empty() {
         return String::new();
@@ -3006,6 +3015,10 @@ mod tests {
     }
 
     fn ran_under(wall: Option<u64>, idle: Option<u64>) -> String {
+        held(wall, idle, None)
+    }
+
+    fn held(wall: Option<u64>, idle: Option<u64>, tokens: Option<u64>) -> String {
         let plan = plan();
         let task = plan.task(&TaskId::new("cache")).unwrap();
         ran(
@@ -3016,6 +3029,7 @@ mod tests {
             crate::spawn::Limits {
                 wall: wall.map(std::time::Duration::from_secs),
                 idle: idle.map(std::time::Duration::from_secs),
+                tokens,
             },
             &outcome(),
         )
@@ -3037,6 +3051,25 @@ mod tests {
         let out = ran_under(Some(1800), Some(300));
         assert!(
             out.contains("limit    wall 1800s (the claude-code template)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_token_cap_a_run_was_stopped_by_is_on_the_same_line() {
+        // `cache` is budgeted at 9000 tokens, and that figure now ends runs rather than
+        // only colouring rows afterwards. Printed beside the spend, so "killed — token
+        // budget" can be read against the number that did it.
+        let out = held(Some(600), Some(300), Some(9000));
+        assert!(
+            out.contains("limit    wall 600s (this task's budget), idle 300s, 9000 tokens"),
+            "{out}"
+        );
+
+        // A cap and nothing else still prints, without a stray separator.
+        let out = held(None, None, Some(9000));
+        assert!(
+            out.contains("limit    9000 tokens (this task's budget)\n"),
             "{out}"
         );
     }

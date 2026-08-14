@@ -2,9 +2,10 @@
 //!
 //! Everything preventable is decided before the process starts — the environment it
 //! gets, the directory it runs in, the command line itself. Once it is running the
-//! only controls left are time and a signal, so those are what this module provides.
+//! controls left are the clock, what the agent says it has spent, and a signal — so
+//! those are what this module provides.
 //!
-//! Three details are load-bearing:
+//! Four details are load-bearing:
 //!
 //! - **The environment is built, not inherited.** A coding CLI inherits every secret
 //!   in the shell otherwise. Absent a container this is the only network control
@@ -16,6 +17,9 @@
 //! - **Metered as it streams.** The output buffer is capped, and the line stating what
 //!   the run cost is the last one — so spend is counted on the way past rather than
 //!   read back out of a buffer that may have dropped it.
+//! - **The meter is a limit, not just a gauge.** A count read while the run is still
+//!   going is a count something can act on, and the supervisor stops a run that has
+//!   spent past the budget its task declared.
 //!
 //! No `unsafe`, which the workspace forbids: `process_group` is safe, and signalling
 //! shells out to `kill` the way the rest of the tree shells out to `git`.
@@ -47,6 +51,8 @@ pub(crate) enum Ended {
     Wall,
     /// Killed after producing no output for too long.
     Idle,
+    /// Killed for reporting more spend than its budget allowed.
+    Tokens,
     /// Exited on a signal rather than normally.
     Signalled,
 }
@@ -62,6 +68,7 @@ impl Ended {
             Self::Exited(c) => format!("exit {c}"),
             Self::Wall => "killed — wall limit".to_string(),
             Self::Idle => "killed — no output".to_string(),
+            Self::Tokens => "killed — token budget".to_string(),
             Self::Signalled => "killed by a signal".to_string(),
         }
     }
@@ -71,6 +78,10 @@ impl Ended {
 pub(crate) struct Limits {
     pub(crate) wall: Option<Duration>,
     pub(crate) idle: Option<Duration>,
+    /// Tokens the run may add before it is stopped, in the unit [`crate::usage`]
+    /// counts in. A budget figure, so it comes from the task rather than from the
+    /// harness template, which declares clocks and no spend.
+    pub(crate) tokens: Option<u64>,
 }
 
 impl Limits {
@@ -78,6 +89,10 @@ impl Limits {
         Self {
             wall: t.wall_secs.map(Duration::from_secs),
             idle: t.idle_secs.map(Duration::from_secs),
+            // A template says how long a run of this harness may take, never how much
+            // it may spend: the budget is a per-task figure, and a machine-wide one
+            // would be either too small for the large tasks or no limit at all.
+            tokens: None,
         }
     }
 }
@@ -217,7 +232,7 @@ pub(crate) fn run(
     }
     drop(tick_tx);
 
-    let ended = supervise(&mut child, pid, started, limits, &tick_rx);
+    let ended = supervise(&mut child, pid, started, limits, &tick_rx, &meter);
 
     // However it ended, nothing the agent spawned outlives it. A backgrounded child
     // holds the pipe open, and the reader joins below would then block on a process
@@ -279,12 +294,20 @@ fn reader<R: Read + Send + 'static>(
 }
 
 /// Polls until the child finishes or overruns.
+///
+/// `meter` is the same one the readers are filling, read here rather than after the
+/// fact: a spend figure that only exists once the process is gone can describe an
+/// overrun but cannot stop one. The count arrives a turn at a time, so this stops a
+/// run shortly *after* it crosses its budget rather than at the token that crosses it
+/// — which is the difference between a task that spends 1.1× what it was given and one
+/// that spends ten times it.
 fn supervise(
     child: &mut Child,
     pid: u32,
     started: Instant,
     limits: Limits,
     tick: &Receiver<()>,
+    meter: &Arc<Mutex<Meter>>,
 ) -> Ended {
     let mut last_output = Instant::now();
     loop {
@@ -315,7 +338,32 @@ fn supervise(
             kill_group(pid, child);
             return Ended::Idle;
         }
+        // After `try_wait`, and that ordering is the decision: a run whose last line was
+        // its own total has already finished, and reporting it as killed would turn
+        // every overspend into a cancellation. What is left to stop here is a run still
+        // going after it has spent past its budget.
+        if limits.tokens.is_some_and(|cap| spent_past(meter, cap)) {
+            kill_group(pid, child);
+            return Ended::Tokens;
+        }
         thread::sleep(POLL);
+    }
+}
+
+/// Whether the run has reported spending more than `cap`.
+///
+/// False whenever there is no number: an agent whose protocol nothing here can read
+/// reports nothing, and a budget checked against a count nobody has would kill every
+/// run under an unmetered harness or none of them, depending on which way the guess
+/// went. Silence is not evidence of an overrun.
+///
+/// A blocked lock is a reader mid-line, and waiting for it here would stall the
+/// supervisor's whole loop — including the clock. The count is polled ten times a
+/// second, so a contended read simply asks again.
+fn spent_past(meter: &Arc<Mutex<Meter>>, cap: u64) -> bool {
+    match meter.try_lock() {
+        Ok(m) => m.tokens().is_some_and(|spent| spent > cap),
+        Err(_) => false,
     }
 }
 
@@ -559,6 +607,7 @@ mod tests {
             Limits {
                 wall: Some(Duration::from_millis(300)),
                 idle: None,
+                tokens: None,
             },
         )
         .unwrap();
@@ -585,6 +634,7 @@ mod tests {
             Limits {
                 wall: Some(Duration::from_secs(60)),
                 idle: Some(Duration::from_millis(300)),
+                tokens: None,
             },
         )
         .unwrap();
@@ -610,6 +660,7 @@ mod tests {
             Limits {
                 wall: Some(Duration::from_secs(30)),
                 idle: Some(Duration::from_millis(400)),
+                tokens: None,
             },
         )
         .unwrap();
@@ -631,6 +682,7 @@ mod tests {
             Limits {
                 wall: Some(Duration::from_secs(5)),
                 idle: Some(Duration::from_millis(500)),
+                tokens: None,
             },
         )
         .unwrap();
@@ -723,6 +775,7 @@ mod tests {
             Limits {
                 wall: Some(Duration::from_millis(300)),
                 idle: None,
+                tokens: None,
             },
         )
         .unwrap();
@@ -736,5 +789,92 @@ mod tests {
         let l = Limits::from(&t);
         assert_eq!(l.wall, Some(Duration::from_secs(120)));
         assert_eq!(l.idle, Some(Duration::from_secs(30)));
+        // And the spend does not: a template is a harness, and a budget is a task's.
+        assert_eq!(l.tokens, None);
+    }
+
+    #[test]
+    fn an_agent_that_spends_past_its_budget_is_stopped_where_it_is() {
+        // The whole defect. A turn at a time is the finest grain a token count comes
+        // in — nothing sits between the agent and the model — so the run is stopped
+        // just after it crosses 100 rather than at the token that crossed it. What it
+        // is not is a run that keeps going for another twenty turns.
+        let t = metered_agent(
+            "i=0; while [ $i -lt 20 ]; do echo '{\"type\":\"assistant\",\"message\":\
+             {\"usage\":{\"input_tokens\":30,\"output_tokens\":10}}}'; sleep 0.2; \
+             i=$((i+1)); done",
+        );
+        let o = run(
+            &t,
+            "",
+            "",
+            None,
+            &cwd(),
+            &[],
+            Limits {
+                wall: Some(Duration::from_secs(30)),
+                idle: None,
+                tokens: Some(100),
+            },
+        )
+        .unwrap();
+        assert_eq!(o.ended, Ended::Tokens);
+        assert_eq!(o.ended.describe(), "killed — token budget");
+        // A few turns, not twenty: stopped on the first count seen past the cap, and
+        // the tokens already burned are still reported. Bounded rather than exact
+        // because how many turns land inside one 100ms poll is the machine's business.
+        let spent = o.spent.expect("the turns it did report");
+        assert!((120..=400).contains(&spent), "{spent}");
+    }
+
+    #[test]
+    fn a_run_that_stays_inside_its_budget_is_left_alone() {
+        let t = metered_agent(
+            r#"echo '{"type":"result","usage":{"input_tokens":60,"output_tokens":30}}'"#,
+        );
+        let o = run(
+            &t,
+            "",
+            "",
+            None,
+            &cwd(),
+            &[],
+            Limits {
+                wall: None,
+                idle: None,
+                tokens: Some(100),
+            },
+        )
+        .unwrap();
+        assert_eq!(o.ended, Ended::Exited(0));
+        assert_eq!(o.spent, Some(90));
+    }
+
+    #[test]
+    fn an_unmetered_agent_is_not_killed_for_a_count_nobody_has() {
+        // Silence is not evidence of an overrun. This agent reports usage in a format
+        // nothing here reads, and a budget guessed at from that is a kill nobody
+        // could account for.
+        let t = agent(
+            r#"echo '{"type":"result","usage":{"input_tokens":9000}}'; sleep 0.5"#,
+            None,
+            None,
+        );
+        let o = run(
+            &t,
+            "",
+            "",
+            None,
+            &cwd(),
+            &[],
+            Limits {
+                wall: Some(Duration::from_secs(30)),
+                idle: None,
+                tokens: Some(10),
+            },
+        )
+        .unwrap();
+        assert_eq!(o.ended, Ended::Exited(0));
+        assert_eq!(o.spent, None);
     }
 }
