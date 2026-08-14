@@ -35,6 +35,10 @@ digest_interval_mins = 20
 command = "notify-send 'wecode' \"$WECODE_TASK: $WECODE_WAITING_FOR\""
 timeout = "10s"                   # killed at this; see below
 
+[telegram]                        # and how the answer gets back; see below
+fetch = "curl -sS -m 20 \"https://api.telegram.org/bot$TG_TOKEN/getUpdates?offset=$WECODE_TELEGRAM_OFFSET\""
+timeout = "30s"
+
 [invariants]                      # outrank every grant below
 never_touch = [".github/**", "infra/**", "**/*.pem", "**/.env"]
 never_run = ["git push --force*", "rm -rf /*"]
@@ -68,6 +72,7 @@ agent = "claude-code"
 [[users]]                         # a person against a seat
 name = "Chandra"
 post = "chief"
+telegram = "48210934"             # the account this person may sign from; see below
 
 [session]
 ttl = "8h"                        # idle timeout, not age
@@ -144,6 +149,77 @@ Four things it deliberately does not do:
 A `[notify]` block with an empty `command`, or a zero `timeout`, is refused at load. Both
 read as configured and behave as absent, which is the one failure mode a notification
 must not have. `wecode company show` prints the hook, or says there is none.
+
+### Signing from a reply
+
+The notify hook is half a loop: it says a task has stopped for you, and the signature
+still needed a terminal. `[telegram] fetch` is the way back — reply `approve` under the
+message, and the next pass of `wecode loop` signs it.
+
+```toml
+[telegram]
+fetch = "curl -sS -m 20 \"https://api.telegram.org/bot$TG_TOKEN/getUpdates?offset=$WECODE_TELEGRAM_OFFSET&timeout=0\""
+timeout = "30s"                   # killed at this, like the notify hook
+
+[[users]]
+name = "Chandra"
+post = "chief"
+telegram = "48210934"             # numeric account id, not @username
+```
+
+**wecode holds no bot token and speaks no HTTP.** `fetch` is your command line; whatever
+it prints on stdout is parsed as a `getUpdates` response. The offset to ask from arrives
+as `WECODE_TELEGRAM_OFFSET` — one past the last update wecode has read — along with
+`WECODE_ORG` and `WECODE_COMPANY`. Your token stays in your own shell, and anything that
+can produce that JSON works: a different chat tool with a shim, or `cat replies.json`
+while you are trying it out.
+
+What a reply does:
+
+| the reply says | what happens |
+|---|---|
+| `approve` / `yes` / `ok` / `lgtm` | signs what that task is waiting for |
+| `approve merge` | signs that kind, whatever the task is waiting for |
+| `approve cache-tests` | signs that task, rather than the one the message names |
+| `no` / `reject` / `hold` | nothing is signed; the task stays where it is |
+| anything else | chat; left alone |
+
+The task is the one named in the message being replied to — the notification wecode
+sent — unless the reply names one itself. A text naming two known tasks is refused
+rather than resolved.
+
+A bare yes signs what the task is actually waiting for: `merge` at `needs-approval`,
+`design` for a design task there, `admission` for one the dispatch gate is holding. A
+task with nothing outstanding is refused rather than given a default.
+
+Four properties worth knowing:
+
+- **The account is an identity, not an authority.** It resolves to the `[[users]]` entry
+  that names it, or to nobody — there is no fallback seat, so a stranger who finds your
+  bot signs nothing. What that person may then sign is their post's `approve` list,
+  checked by the Broker at the moment of signing and recorded either way. Two users
+  giving the same id is refused at load.
+- **A message is acted on once.** The highest update read is kept in `wecode.db`, and
+  updates at or below it are skipped even if the fetch hands them back — a `getUpdates`
+  retried after a network error must not sign twice.
+- **A bad reply is reported, not raised.** One message naming no task does not stop the
+  ones behind it, and a fetch that fails is `⚠ telegram: …` in the loop's output rather
+  than the end of the loop.
+- **It is not above the charter.** A `fetch` matching `never_run` is refused by name.
+
+`wecode loop` reads the channel every pass when `fetch` is set — after promotion, before
+dispatch, so a signature releases work on the pass that finds it. `wecode telegram`
+reads it once by hand; `wecode telegram --dry-run` says what the waiting messages would
+sign and moves neither a signature nor the cursor.
+
+An empty `fetch` or a zero `timeout` is refused at load, for the reason `[notify]`'s are.
+`wecode company show` prints the fetch and who may sign by reply, or says there is none.
+
+Two things to be clear-eyed about. A bot token in a shell command is a credential in
+`company.toml`'s neighbourhood — keep it in an environment variable, as above, and treat
+anyone who has it as able to read every notification you send. And a chat account is
+authentication of a kind wecode did not perform: what it proves is that Telegram
+believes that account sent the message.
 
 ## .wecode/playbook.toml
 

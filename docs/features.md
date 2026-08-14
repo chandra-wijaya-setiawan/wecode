@@ -195,6 +195,7 @@ the run ended — a killed agent still burned what it burned.
 | **`wecode brief`** | orients an agent, derived from its grant rather than stored |
 | **`wecode tree` / `ready`** | the plan, and what is startable |
 | **Notify hook** | a command wecode runs when a task starts waiting on a person |
+| **`wecode telegram`** | signs what the replies to those notifications approved |
 
 **The notify hook is the only thing here that does not wait to be looked at.** Every
 view above answers a question the operator thought to ask; a task that stopped at 02:14
@@ -217,6 +218,28 @@ less finished for a notification going astray. It is killed at `[notify] timeout
 `wecode loop` runs for days. And it is checked against `never_run` like any other
 command wecode executes — an invariant outranks every grant, and a config is not an
 exception.
+
+**And the answer comes back the same way.** A notification that reaches a phone at 02:14
+still left the signature on a terminal, so the queue stood still until morning anyway —
+the push moved the knowing and not the doing. With `[telegram] fetch` set, replying
+`approve` under that message signs it: `wecode loop` reads the channel every pass, after
+promotion and before dispatch, so the work starts on the pass that finds the reply.
+
+wecode holds no bot token and speaks no HTTP. `fetch` is the operator's own command line
+— a `curl` of `getUpdates`, told how far wecode has read through
+`WECODE_TELEGRAM_OFFSET` — and what it prints is what gets parsed. The reply's account
+is an *identity*: it resolves to the `[[users]]` entry naming it or to nobody at all, and
+what that person may sign is their post's `approve` list, checked by the Broker and
+recorded either way. A stranger who finds the bot signs nothing. What is signed is one
+ledger record, indistinguishable from a typed one — which is the point, because every
+gate that reads it should be.
+
+A bare `approve` signs what the task is waiting for — `merge`, `design`, or the
+`admission` the dispatch gate wants — and a task with nothing outstanding is refused
+rather than given a default. `no` signs nothing and leaves the task in front of a person,
+which is what withholding a signature already means. Anything else is chat and is left
+alone. Every message is acted on once: the update read is kept in `wecode.db`, so a
+`getUpdates` retried after a network error cannot sign twice.
 
 Health is **computed** from the ledger, the budget and the defect checks — never
 reported. It is the colour of the needs-you cell rather than a column of its own:
@@ -281,6 +304,21 @@ The dispatch gate joins them at the one point it can: a signature earlier than t
 amendment does not count, so widening signed work asks for the signature again. That
 covers the window *before* a run and says nothing about the one after it, which is where
 `verify` still needs to look.
+
+## A reply is answered in the loop's output, not in the channel
+
+wecode reads replies and never writes one. A `no` is acknowledged, a message naming no
+task is reported, a refused signature is explained — all of it in `wecode loop`'s output,
+which is on the machine the operator was not at when they replied. The channel goes
+quiet, which reads exactly like a reply that was never processed.
+
+Fixing it means keeping the chat to answer in, which is state this deliberately does not
+hold: the outgoing side is `[notify] command`, an arbitrary line that may not be a chat
+tool at all. Until then, `wecode telegram` run by hand says what happened to everything
+already read — and the board still says what is waiting, which is the fact that matters.
+
+Nothing narrows *which* chat a reply may come from, either. The account is the check, so
+a message to the bot from anywhere counts if that account is a `[[users]]` entry.
 
 ## No retry, and no crash recovery
 

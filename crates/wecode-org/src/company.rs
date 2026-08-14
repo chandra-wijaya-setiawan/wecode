@@ -41,6 +41,15 @@ pub enum OrgError {
     ChiefMayNotExecute {
         detail: &'static str,
     },
+    /// Two people claim the same chat account.
+    ///
+    /// A reply carries an account, not a name, so this is not a cosmetic clash: the
+    /// account would resolve to whichever user the file happens to list first, and a
+    /// signature would be attributed to a person who did not give it.
+    TelegramClash {
+        id: String,
+        users: (String, String),
+    },
 }
 
 impl fmt::Display for OrgError {
@@ -66,6 +75,11 @@ impl fmt::Display for OrgError {
             Self::ChiefMayNotExecute { detail } => write!(
                 f,
                 "the chief post may not {detail} — it assigns, it does not execute"
+            ),
+            Self::TelegramClash { id, users: (a, b) } => write!(
+                f,
+                "users `{a}` and `{b}` both give telegram = \"{id}\" — \
+                 a reply from it could be signed as either"
             ),
         }
     }
@@ -94,6 +108,8 @@ struct Wire {
     session: SessionBlock,
     #[serde(default)]
     notify: NotifyBlock,
+    #[serde(default)]
+    telegram: TelegramBlock,
     #[serde(default)]
     repos: Vec<Repo>,
     #[serde(default)]
@@ -214,6 +230,32 @@ impl Default for NotifyBlock {
     }
 }
 
+/// The command that hands back replies, and how long it may take.
+///
+/// `fetch` is an `Option` for the reason `[notify] command` is: a block that reads as
+/// configured and does nothing is worse than no block, so writing it empty is refused.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct TelegramBlock {
+    fetch: Option<String>,
+    #[serde(default = "thirty_seconds")]
+    timeout: String,
+}
+
+fn thirty_seconds() -> String {
+    "30s".to_string()
+}
+
+// Hand-written for the same reason `NotifyBlock`'s is.
+impl Default for TelegramBlock {
+    fn default() -> Self {
+        Self {
+            fetch: None,
+            timeout: thirty_seconds(),
+        }
+    }
+}
+
 /// A role as written in the file. Converted to a [`Grant`].
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
@@ -275,6 +317,15 @@ fn unstaffed() -> String {
 pub struct User {
     pub name: String,
     pub post: String,
+    /// The numeric Telegram account this person replies from, if they do.
+    ///
+    /// Written as a string because it is an identifier rather than a quantity —
+    /// nothing adds to it, and Telegram's chat ids are already wider than a signed
+    /// 32-bit integer. Its authority is entirely the post's: naming an account here
+    /// says *this account is this person*, and everything they may then sign is
+    /// decided by the role, checked by the Broker, at the moment they sign it.
+    #[serde(default)]
+    pub telegram: Option<String>,
 }
 
 /// How to invoke one coding CLI. Consumed by the execution layer.
@@ -324,6 +375,26 @@ pub struct Notify {
     pub timeout: Duration,
 }
 
+/// How replies get back from the chat the notification went out to.
+///
+/// The other half of [`Notify`]. That one pushes *a task has stopped for you* to
+/// wherever the operator is; without this, the way back was still a terminal, and a
+/// signature nobody is near to give is a queue standing still.
+///
+/// wecode holds no network client and no bot token. `fetch` is a command the operator
+/// writes — a `curl` of the Bot API's `getUpdates`, usually — and what it prints on
+/// stdout is what wecode reads. The offset to ask from arrives in its environment as
+/// `WECODE_TELEGRAM_OFFSET`, so the secret stays in the operator's shell and wecode
+/// stays a program that runs commands.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Telegram {
+    /// `None` — the default — means replies are not read at all.
+    pub fetch: Option<String>,
+    /// How long the fetch may take before it is killed. `wecode loop` runs this every
+    /// pass; a poll that hangs must not take the loop with it.
+    pub timeout: Duration,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Company {
     pub name: String,
@@ -332,6 +403,7 @@ pub struct Company {
     pub vision: String,
     pub attention: Attention,
     pub notify: Notify,
+    pub telegram: Telegram,
     pub charter: Charter,
     pub repos: Vec<Repo>,
     pub roles: BTreeMap<String, Grant>,
@@ -358,6 +430,18 @@ impl Company {
     #[must_use]
     pub fn user(&self, name: &str) -> Option<&User> {
         self.users.iter().find(|u| u.name == name)
+    }
+
+    /// Whose Telegram account this is, if it is anyone's.
+    ///
+    /// The whole of the identity check on a reply. An account nobody claims resolves
+    /// to nothing and therefore signs nothing — there is no fallback seat, because a
+    /// default seat for strangers is the one thing this must never have.
+    #[must_use]
+    pub fn user_by_telegram(&self, id: &str) -> Option<&User> {
+        self.users
+            .iter()
+            .find(|u| u.telegram.as_deref() == Some(id))
     }
 
     /// The people in a seat. Empty means the seat is agent-only.
@@ -412,6 +496,7 @@ impl Company {
                 digest_interval_mins: w.attention.digest_interval_mins,
             },
             notify: notify_of(&w.notify)?,
+            telegram: telegram_of(&w.telegram)?,
             charter: charter_of(&w.invariants),
             session_ttl: parse_duration(&w.session.ttl).ok_or_else(|| OrgError::BadValue {
                 at: "[session] ttl".into(),
@@ -452,11 +537,24 @@ impl Company {
                 });
             }
         }
+        let mut chat: BTreeMap<&str, &str> = BTreeMap::new();
         for user in &self.users {
             if self.post(&user.post).is_none() {
                 return Err(OrgError::UnknownPost {
                     user: user.name.clone(),
                     post: user.post.clone(),
+                });
+            }
+            // Refused at load, where every other incoherence in this file is. A reply
+            // carries an account and no name, so a shared one is not a duplicate
+            // entry — it is a signature attributable to two people, resolved by which
+            // of them was typed first.
+            if let Some(id) = user.telegram.as_deref()
+                && let Some(first) = chat.insert(id, &user.name)
+            {
+                return Err(OrgError::TelegramClash {
+                    id: id.to_string(),
+                    users: (first.to_string(), user.name.clone()),
                 });
             }
         }
@@ -504,6 +602,28 @@ fn notify_of(b: &NotifyBlock) -> Result<Notify, OrgError> {
             value: b.timeout.clone(),
         })?;
     Ok(Notify { command, timeout })
+}
+
+/// The reply channel as configured, refused the two ways it can read as on and behave
+/// as off. Exactly [`notify_of`]'s argument, at the other end of the same round trip.
+fn telegram_of(b: &TelegramBlock) -> Result<Telegram, OrgError> {
+    let fetch = match b.fetch.as_deref().map(str::trim) {
+        None => None,
+        Some("") => {
+            return Err(OrgError::BadValue {
+                at: "[telegram] fetch".into(),
+                value: b.fetch.clone().unwrap_or_default(),
+            });
+        }
+        Some(cmd) => Some(cmd.to_string()),
+    };
+    let timeout = parse_duration(&b.timeout)
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| OrgError::BadValue {
+            at: "[telegram] timeout".into(),
+            value: b.timeout.clone(),
+        })?;
+    Ok(Telegram { fetch, timeout })
 }
 
 fn charter_of(b: &InvariantBlock) -> Charter {
@@ -722,6 +842,74 @@ agent = "claude-code"
                 }
                 other => panic!("expected BadValue, got {other}"),
             }
+        }
+    }
+
+    #[test]
+    fn no_telegram_block_reads_no_replies() {
+        // The default has to be silence in this direction too: a workspace that has
+        // never heard of the setting must not run anything to see whether somebody
+        // approved something in a chat it does not know about.
+        let c = Company::parse(MINIMAL).unwrap();
+        assert_eq!(c.telegram.fetch, None);
+        assert_eq!(c.telegram.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_fetch_command_is_taken_with_its_own_timeout() {
+        let text = format!("{MINIMAL}\n[telegram]\nfetch = \"curl -s x\"\ntimeout = \"5s\"\n");
+        let c = Company::parse(&text).unwrap();
+        assert_eq!(c.telegram.fetch.as_deref(), Some("curl -s x"));
+        assert_eq!(c.telegram.timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_blank_fetch_or_an_impossible_timeout_is_refused_at_load() {
+        // Same two shapes as `[notify]`, refused in the same place: a block that says
+        // replies will be read, and a value that means none ever are.
+        for (block, at) in [
+            ("fetch = \"\"", "[telegram] fetch"),
+            ("fetch = \"true\"\ntimeout = \"0s\"", "[telegram] timeout"),
+            ("fetch = \"true\"\ntimeout = \"soon\"", "[telegram] timeout"),
+        ] {
+            let text = format!("{MINIMAL}\n[telegram]\n{block}\n");
+            match Company::parse(&text).unwrap_err() {
+                OrgError::BadValue { at: got, .. } => assert!(got.contains(at), "{got}"),
+                other => panic!("expected BadValue for {block}, got {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_user_may_name_the_account_they_reply_from() {
+        let text =
+            format!("{MINIMAL}\n[[users]]\nname = \"you\"\npost = \"impl\"\ntelegram = \"481\"\n");
+        let c = Company::parse(&text).unwrap();
+        assert_eq!(
+            c.user_by_telegram("481").map(|u| u.name.as_str()),
+            Some("you")
+        );
+        // No fallback seat. An account nobody claims is nobody, which is what keeps a
+        // stranger's message from being a signature.
+        assert!(c.user_by_telegram("482").is_none());
+        assert!(c.user("you").unwrap().telegram.is_some());
+    }
+
+    #[test]
+    fn two_people_may_not_share_one_account() {
+        // A reply carries an account and no name. Shared, it would be signed as
+        // whichever user appears first in the file — a signature attributed to
+        // someone who did not give it.
+        let text = format!(
+            "{MINIMAL}\n[[users]]\nname = \"you\"\npost = \"impl\"\ntelegram = \"481\"\n\
+             [[users]]\nname = \"them\"\npost = \"impl\"\ntelegram = \"481\"\n"
+        );
+        match Company::parse(&text).unwrap_err() {
+            OrgError::TelegramClash { id, users } => {
+                assert_eq!(id, "481");
+                assert_eq!(users, ("you".to_string(), "them".to_string()));
+            }
+            other => panic!("expected TelegramClash, got {other}"),
         }
     }
 

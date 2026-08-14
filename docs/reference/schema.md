@@ -4,7 +4,7 @@ One file per workspace, `wecode.db`. Everything machine-written lives here; ever
 hand-edited lives in `company.toml` (see [config.md](config.md)), because a binary blob
 cannot be diffed, reviewed or opened in an editor.
 
-Currently **schema version 5**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`.
+Currently **schema version 6**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`.
 
 ## Shape
 
@@ -18,6 +18,7 @@ projects ──┬── project_measures
 sessions       who is connected
 audit_log      every decision and observation
 worktrees      the checkouts wecode made, and which are still standing
+inbox_cursor   how far each reply channel has been read
 ```
 
 `tasks.parent_id` is a self-reference: at most one parent, hence a column.
@@ -62,6 +63,11 @@ Nothing is backfilled. The 4→5 step creates `worktrees` empty, even for a work
 checkouts already on disk: wecode made them and cannot prove when, and inventing a
 creation date would put a fact in the database that nobody observed. They are recorded
 the next time `wecode start` prepares them.
+
+The 5→6 step creates `inbox_cursor` empty for the same reason, and there it is
+load-bearing: a guessed cursor is a claim about which chat replies have already been
+handled. Too low re-reads a month of conversation, too high swallows the reply that is
+waiting. Absent means "read nothing", which the fetch asks for as offset 0.
 
 ## Full DDL
 
@@ -229,6 +235,20 @@ CREATE TABLE worktrees (
 
 CREATE UNIQUE INDEX worktrees_live    ON worktrees(path) WHERE removed IS NULL;
 CREATE INDEX        worktrees_by_task ON worktrees(task_id);
+
+-- How far a reply channel has been read. One row per channel; `telegram` is the
+-- only one today.
+--
+-- Not derivable from the ledger, which is why it is a table. A signature records
+-- that a holder approved something; it cannot record that a particular *message*
+-- has been looked at, and a message that says `no` leaves no signature at all yet
+-- must still not be read a second time. `last_id` is the highest update the channel
+-- has handed over, whatever came of it.
+CREATE TABLE inbox_cursor (
+    channel TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL,
+    at      INTEGER NOT NULL
+) STRICT;
 ```
 
 ## Which worktrees are ours

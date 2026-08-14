@@ -1808,6 +1808,31 @@ pub(crate) fn company(c: &Company) -> String {
         )),
         None => out.push_str("notify:    nothing — no [notify] command; waits are silent\n"),
     }
+    // And the way back, on the same terms. "I replied and nothing happened" has two
+    // answers — nothing reads the channel, or nothing knows the account that replied —
+    // and both are here rather than in a log somewhere.
+    match &c.telegram.fetch {
+        Some(cmd) => {
+            out.push_str(&format!(
+                "replies:   {cmd} — read every pass of `wecode loop`, killed after {}s\n",
+                c.telegram.timeout.as_secs()
+            ));
+            let mut signers: Vec<&str> = c
+                .users
+                .iter()
+                .filter(|u| u.telegram.is_some())
+                .map(|u| u.name.as_str())
+                .collect();
+            signers.sort_unstable();
+            match signers.as_slice() {
+                [] => out.push_str(
+                    "           nobody may sign by reply — no [[users]] entry names a telegram id\n",
+                ),
+                names => out.push_str(&format!("           signed by: {}\n", names.join(", "))),
+            }
+        }
+        None => out.push_str("replies:   nothing — no [telegram] fetch; approvals are typed\n"),
+    }
 
     out.push_str("\ninvariants (outrank every grant above)\n");
     for inv in &c.charter.invariants {

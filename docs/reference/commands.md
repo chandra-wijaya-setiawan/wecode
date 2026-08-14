@@ -90,6 +90,9 @@ WORK
         approve design --task <id>      signs a design off: needs-approval → done
         approve admission --task <id>   signs a task for dispatch, where its playbook
                                         says dispatch = "approved"
+  wecode telegram [--dry-run]          sign what the replies in Telegram approved
+        needs [telegram] fetch and a telegram id on the user who replies; `loop`
+        reads the channel every pass on its own
   wecode guard <post> <verb> <target>  authorise an action; records the decision
         verbs: read write run merge spend        --tokens <n> for spend
         --task <id> / --project <id> attributes the record

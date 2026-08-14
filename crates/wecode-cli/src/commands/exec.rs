@@ -13,7 +13,9 @@ use wecode_store::Store;
 
 use crate::args::Args;
 use crate::commands::ctx::*;
-use crate::{cache, git, ledger, notify, render, scheduler, spawn, teardown, verify, work};
+use crate::{
+    cache, git, ledger, notify, render, scheduler, spawn, teardown, telegram, verify, work,
+};
 
 /// Begins work on a task: prepares the worktree its playbook asks for, marks it
 /// running, and prints the envelope for whoever does the work.
@@ -215,7 +217,7 @@ pub(crate) fn prepare(
 ///
 /// A project with no playbook, or one that says nothing, is ungated. The gate is a
 /// project's own decision, in the file that describes that project's work.
-fn unsigned(
+pub(crate) fn unsigned(
     store: &Store,
     pb: Option<&Playbook>,
     task: &Task,
@@ -399,11 +401,36 @@ pub(crate) fn serve(a: &Args) -> Res {
             println!("  {}  {} → {}", m.task, m.from.as_str(), m.to.as_str());
         }
 
-        let plan = if moves.is_empty() {
-            plan
-        } else {
-            store.load_plan()?
-        };
+        let mut stale = !moves.is_empty();
+
+        // Then the replies, and before anything is dispatched. What a bare `approve`
+        // means is read off the task, so this has to come after promotion — a task
+        // still recorded as `waiting` has nothing outstanding to sign for, and would be
+        // answered with a refusal one second before becoming the thing that was meant.
+        // Coming before dispatch is the other half: a signature that arrived on
+        // somebody's phone releases work on the pass that finds it, not the one after.
+        //
+        // Printed only when it did something, unlike the pauses below: this runs every
+        // pass whether or not anybody has replied, and a loop that says `nothing to
+        // sign` five seconds apart forever is a loop whose output nobody reads.
+        if company.telegram.fetch.is_some() {
+            match telegram::drain_channel(&ws, &store, &company, false) {
+                Ok(report) if report.trim() == "nothing to sign" => {}
+                Ok(report) => {
+                    print!("{report}");
+                    // Signing a design finishes it. Nothing else here changes a status,
+                    // but reloading on any report is cheaper than being wrong about
+                    // which ones do.
+                    stale = true;
+                }
+                // Reported and stepped over, like a notify hook that failed. A channel
+                // that cannot be reached is a reason to keep working unattended, not a
+                // reason to stop.
+                Err(e) => println!("  ⚠ telegram: {e}"),
+            }
+        }
+
+        let plan = if stale { store.load_plan()? } else { plan };
 
         // Nothing new while a person is holding something. More work in flight does
         // not help an unanswered question, and the attention budget is the point.

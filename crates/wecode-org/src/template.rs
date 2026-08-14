@@ -75,6 +75,14 @@ digest_interval_mins = 20
 # command = "notify-send 'wecode' \"$WECODE_TASK needs you: $WECODE_WAITING_FOR\""
 # timeout = "10s"           # killed at this; a hung notifier must not hold the loop
 
+# And the way back: reply `approve` under that message and the next pass of `wecode
+# loop` signs it. wecode holds no token — this is your command line, and what it
+# prints is read as a getUpdates response. WECODE_TELEGRAM_OFFSET is how far it has
+# already read. Give the user below a `telegram` id to say who may sign this way.
+# [telegram]
+# fetch = "curl -sS -m 20 \"https://api.telegram.org/bot$TG_TOKEN/getUpdates?offset=$WECODE_TELEGRAM_OFFSET\""
+# timeout = "30s"
+
 # Invariants outrank every grant below. A grant that would permit one of these is
 # itself the bug, so violations raise an alarm rather than a denial.
 [invariants]
@@ -162,6 +170,7 @@ agent = "claude-code"
 [[users]]
 name = "you"              # rename to yourself
 post = "chief"
+# telegram = "48210934"   # the account you reply from; what you may sign is the post's
 
 # --------------------------------------------------------------- agents --------
 
@@ -228,6 +237,12 @@ digest_interval_mins = 20
 # [notify]
 # command = "notify-send 'wecode' \"$WECODE_TASK needs you: $WECODE_WAITING_FOR\""
 
+# And the way back: reply `approve` under that message and `wecode loop` signs it.
+# This is your command line — wecode holds no token — and what it prints is read as a
+# getUpdates response. Say who may sign that way with `telegram` on a user below.
+# [telegram]
+# fetch = "curl -sS -m 20 \"https://api.telegram.org/bot$TG_TOKEN/getUpdates?offset=$WECODE_TELEGRAM_OFFSET\""
+
 [invariants]
 never_touch = [".github/**", "**/*.pem", "**/.env"]
 never_run = ["git push --force*", "npm publish*"]
@@ -275,6 +290,7 @@ agent = "claude-code"
 [[users]]
 name = "you"
 post = "chief"
+# telegram = "48210934"   # the account you reply from; what you may sign is the post's
 
 [agents.claude-code]
 command = "claude"

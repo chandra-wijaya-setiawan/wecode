@@ -12,6 +12,7 @@ mod render;
 mod scheduler;
 mod spawn;
 mod teardown;
+mod telegram;
 mod tui;
 mod usage;
 mod verify;
@@ -115,6 +116,9 @@ WORK
         approve design --task <id>      signs a design off: needs-approval → done
         approve admission --task <id>   signs a task for dispatch, where its playbook
                                         says dispatch = \"approved\"
+  wecode telegram [--dry-run]          sign what the replies in Telegram approved
+        needs [telegram] fetch and a telegram id on the user who replies; `loop`
+        reads the channel every pass on its own
   wecode guard <post> <verb> <target>  authorise an action; records the decision
         verbs: read write run merge spend        --tokens <n> for spend
         --task <id> / --project <id> attributes the record
@@ -189,6 +193,7 @@ fn run(a: &Args) -> Res {
         ("who", _) => who(a),
         ("whoami", _) => whoami(a),
         ("approve", _) => approve(a),
+        ("telegram", _) => inbox(a),
         ("guard", _) => guard(a),
         ("audit", _) => audit(a),
         ("", _) | ("help", _) | ("--help", _) => Ok(USAGE.to_string()),
