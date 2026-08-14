@@ -248,6 +248,9 @@ struct NotifyBlock {
     command: Option<String>,
     #[serde(default = "ten_seconds")]
     timeout: String,
+    /// How many changed paths the hook is handed. See [`Notify::max_files`].
+    #[serde(default = "twenty")]
+    max_files: u64,
 }
 
 fn ten_seconds() -> String {
@@ -262,6 +265,7 @@ impl Default for NotifyBlock {
         Self {
             command: None,
             timeout: ten_seconds(),
+            max_files: twenty(),
         }
     }
 }
@@ -561,6 +565,18 @@ pub struct Notify {
     /// How long the hook may take before it is killed. A notifier that hangs must
     /// not take the loop with it.
     pub timeout: Duration,
+    /// How many of the paths the task changed are named to the hook.
+    ///
+    /// A bound on the *names*, never on the count that goes beside them, so a hook
+    /// handed ten paths of forty can still say forty. Configurable because the channel
+    /// is the operator's — a desktop notification has a line where a chat message has a
+    /// screen and a log file has room for everything — and bounded by default because an
+    /// environment is not the place to put a thousand paths.
+    ///
+    /// `0` is legal and means the count alone. Unlike a blank `command` it is not a
+    /// setting that reads as configured and does nothing: the notification still fires
+    /// and still says how much changed.
+    pub max_files: u64,
 }
 
 /// How replies get back from the chat the notification went out to.
@@ -883,7 +899,11 @@ fn notify_of(b: &NotifyBlock) -> Result<Notify, OrgError> {
             at: "[notify] timeout".into(),
             value: b.timeout.clone(),
         })?;
-    Ok(Notify { command, timeout })
+    Ok(Notify {
+        command,
+        timeout,
+        max_files: b.max_files,
+    })
 }
 
 /// The reply channel as configured, refused the two ways it can read as on and behave
@@ -1088,6 +1108,7 @@ agent = "claude-code"
         let c = Company::parse(MINIMAL).unwrap();
         assert_eq!(c.notify.command, None);
         assert_eq!(c.notify.timeout, Duration::from_secs(10));
+        assert_eq!(c.notify.max_files, 20, "enough paths to read, not a report");
     }
 
     #[test]
@@ -1096,6 +1117,18 @@ agent = "claude-code"
         let c = Company::parse(&text).unwrap();
         assert_eq!(c.notify.command.as_deref(), Some("say hello"));
         assert_eq!(c.notify.timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn how_much_of_the_diff_the_hook_is_handed_is_the_operators_call() {
+        // The channel decides: one line on a desktop, a screen in a chat message. Zero
+        // is legal and is not the failure a blank `command` is — the notification still
+        // fires, and still says how many files changed.
+        for (written, want) in [("max_files = 3", 3), ("max_files = 0", 0)] {
+            let text = format!("{MINIMAL}\n[notify]\ncommand = \"true\"\n{written}\n");
+            let c = Company::parse(&text).unwrap();
+            assert_eq!(c.notify.max_files, want, "{written}");
+        }
     }
 
     #[test]

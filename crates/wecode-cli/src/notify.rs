@@ -11,7 +11,7 @@
 //! So `[notify] command` runs when a task starts waiting on a human, and the operator
 //! decides what "tell me" means: a desktop notification, a message, a line in a file.
 //!
-//! Three things are load-bearing:
+//! Four things are load-bearing:
 //!
 //! - **The edge, not the state.** It fires on the *transition* into waiting, so a task
 //!   that has been waiting a week fires once rather than every tick. The loop already
@@ -23,22 +23,47 @@
 //!   be worse than no supervisor.
 //! - **It is bounded.** The hook is killed at `[notify] timeout`. `wecode loop` runs
 //!   for days; a notifier blocked on a network call must not take it with it.
+//! - **A refusal is not a delivery** — see [`said`]. A hook is believed when it exits
+//!   `0` *and says nothing*; anything it printed is quoted back beside the wait. That
+//!   is the one report the operator cannot get any other way, because the board says a
+//!   task is waiting whether or not anything managed to say so.
 //!
 //! The task is passed in the environment rather than substituted into the command
 //! line. A title is arbitrary prose written by whoever planned the work — pasted into
 //! a shell line it is a quoting bug at best, and `wecode` is holding the shell.
+//!
+//! What the hook is told includes **what the task produced** — see [`Produced`]. A
+//! notification that only names the task answers "you are wanted" and not "for what":
+//! deciding whether to sign a diff meant opening a terminal to see the diff, which is
+//! the trip this exists to save. So the paths the attempt wrote go out with the
+//! message, read out of git rather than asked of the agent, for the reason the verdict
+//! is.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use wecode_core::{Task, TaskId, TaskStatus};
-use wecode_org::Company;
+use wecode_org::{Company, Workspace};
+use wecode_store::Store;
 
 /// How often to look at a running hook. Short: these finish in milliseconds, and the
 /// interval is dead time on every notification.
 const POLL: Duration = Duration::from_millis(20);
+
+/// How much of a hook's output is read back, in bytes. Only the first line of it is
+/// ever quoted, and nothing past this could be part of one. The rest stays where the
+/// hook wrote it and goes away with the file.
+const KEEP: u64 = 4096;
+
+/// How much of that line is printed. Long enough to carry `chat not found`, short
+/// enough that a hook cannot take the pass it fired on with it.
+const QUOTE: usize = 120;
 
 /// Why a task is waiting on a person.
 ///
@@ -133,6 +158,86 @@ fn number_env(task: &Task) -> String {
         .unwrap_or_default()
 }
 
+/// What a task has to show for itself: the tree the work is in, and the paths written
+/// in it.
+///
+/// Read out of git, never asked of the agent — the same rule the verdict is judged
+/// under, and for the same reason: a diff is ground truth where a self-report is a
+/// claim, and a notification carrying a claim would be one more thing to go and check.
+///
+/// It is the *uncommitted* diff, which is precisely the one `verify` judged: an attempt
+/// is committed only after the verdict, so the announcement and the verdict that
+/// triggered it describe the same work by construction. A hook wanting more than this —
+/// the diff itself, the attempts before this one — is handed the tree and can ask git
+/// anything.
+#[derive(Debug)]
+struct Produced {
+    /// The worktree the work happened in.
+    dir: PathBuf,
+    /// Every path changed in it, sorted, untracked files included.
+    files: Vec<String>,
+}
+
+impl Produced {
+    /// What this task has produced, and `None` when there is nothing that can be said:
+    /// no tree yet, no database to find out which tree, or a directory git will not
+    /// answer about.
+    ///
+    /// `None` and *changed nothing* reach the hook differently — empty against `0` —
+    /// because "has not started" and "started and wrote nothing" are different things
+    /// to be woken up for, and a notification that spelled the first as the second
+    /// would be reporting an empty diff nobody produced.
+    fn of(org: &Path, task: &Task) -> Option<Self> {
+        let dir = tree_of(org, task)?;
+        let files = crate::git::changed_files(&dir).ok()?;
+        Some(Self { dir, files })
+    }
+
+    /// How many paths there are, however few of them are listed.
+    fn count(&self) -> String {
+        self.files.len().to_string()
+    }
+
+    /// The paths, one per line, at most `max` of them.
+    ///
+    /// Truncated rather than elided, and never in a way that lies: the count beside it
+    /// is the whole number, so a hook handed ten paths of forty can say forty. The bound
+    /// is the operator's because the channel is — a desktop notification has a line, a
+    /// chat message has a screen — and it is a bound at all because an environment is
+    /// not the place to put a thousand paths.
+    fn listed(&self, max: u64) -> String {
+        let max = usize::try_from(max).unwrap_or(usize::MAX);
+        self.files
+            .iter()
+            .take(max)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// The tree this task's work is in, and `None` when there is not one.
+///
+/// A subtask works in its parent's tree, so *which* tree is a question about the plan
+/// rather than about the task in hand — which is why an announcement reads the
+/// workspace database. Read-only, and only when one is already there: [`Store::open`]
+/// creates and migrates, and a notification must not bring a workspace into being.
+///
+/// A task whose playbook said it needed no worktree is reported as nothing rather than
+/// as the repository, deliberately. The operator's own checkout holds the operator's
+/// own uncommitted work, and handing that over as *what the task produced* would be the
+/// notification inventing a diff.
+fn tree_of(org: &Path, task: &Task) -> Option<PathBuf> {
+    let db = Workspace::at(org).db_path();
+    if !db.is_file() {
+        return None;
+    }
+    let plan = Store::open(&db).ok()?.load_plan().ok()?;
+    let owner = crate::work::owner(&plan, &task.id)?;
+    let dir = crate::work::worktree_for(&crate::work::org_name(org), &owner.id);
+    dir.is_dir().then_some(dir)
+}
+
 /// Runs the hook. Returns what the caller should print: nothing when it ran or when
 /// none is configured, a warning when it did not. Never an error — see the module note.
 fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Waiting) -> String {
@@ -149,6 +254,12 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
             "`{command}` is forbidden by the charter: never_run {pattern}"
         ));
     }
+
+    // Asked for after the two refusals above, so a workspace with no hook — and a hook
+    // the charter forbids — pays nothing for it. Resolved here rather than passed in by
+    // the caller because there is no call site that already holds it: every other one is
+    // a status write, and a signature wait is not a status write at all.
+    let made = Produced::of(org, task);
 
     // Through `sh -c`, like acceptance: what an operator writes here is a shell line —
     // a pipe, a quoted argument, a `||` fallback — not an argv this could split.
@@ -178,24 +289,177 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
         // So a hook can call wecode back — `wecode show "$WECODE_TASK"` — from whatever
         // directory it happens to be started in.
         .env("WECODE_ORG", org)
-        // Discarded on purpose. The loop's output is the record of the work, and a
-        // notifier's chatter interleaved with it made both unreadable. What is worth
-        // reporting is whether the hook ran, which is below.
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        // What the task produced. Three variables and not one string, because a hook
+        // composes its own message: a desktop line wants the count, a chat message wants
+        // the names under it, and a script that wants the diff wants the directory.
+        //
+        // All three empty means there is nothing to say — see [`Produced::of`]. That is
+        // the normal case for `signature`, which is a wait for permission to *start*.
+        .env(
+            "WECODE_WORKTREE",
+            made.as_ref()
+                .map_or_else(OsString::new, |m| m.dir.clone().into_os_string()),
+        )
+        .env(
+            "WECODE_CHANGED_COUNT",
+            made.as_ref().map_or_else(String::new, Produced::count),
+        )
+        .env(
+            "WECODE_CHANGED_FILES",
+            made.as_ref()
+                .map_or_else(String::new, |m| m.listed(company.notify.max_files)),
+        )
         .stdin(Stdio::null());
 
-    match cmd.spawn() {
-        Err(e) => warn(&format!("could not run `{command}`: {e}")),
-        Ok(mut child) => match wait_for(&mut child, company.notify.timeout) {
-            Ok(Some(0)) => String::new(),
-            Ok(Some(code)) => warn(&format!("`{command}` exited {code}")),
-            Ok(None) => warn(&format!(
-                "`{command}` was killed after {}s",
-                company.notify.timeout.as_secs()
-            )),
-            Err(e) => warn(&format!("`{command}`: {e}")),
-        },
+    // Caught rather than inherited. Letting a notifier write straight into the loop's
+    // output interleaved chatter with the record of the work and made both unreadable;
+    // throwing it away instead lost the only thing that says a message was refused. So
+    // it is caught here and reported as one line, by [`said`].
+    //
+    // A hook whose output cannot be caught still runs, with its streams thrown away as
+    // they always were. The notification is the point and the quote is the extra, and a
+    // temp directory wecode cannot write to is not a reason to stop telling the operator
+    // their work has stopped.
+    let caught = Caught::new();
+    cmd.stdout(caught.as_ref().map_or_else(Stdio::null, Caught::writer))
+        .stderr(caught.as_ref().map_or_else(Stdio::null, Caught::writer));
+
+    let code = match cmd.spawn() {
+        Err(e) => return warn(&format!("could not run `{command}`: {e}")),
+        Ok(mut child) => wait_for(&mut child, company.notify.timeout),
+    };
+    let said = said(&caught.as_ref().map_or_else(String::new, Caught::read));
+
+    match code {
+        // The only silence: it exited well and had nothing to say. That is the shape of
+        // a notification that arrived — `notify-send` prints nothing, and neither does
+        // a `curl` that got its `200`.
+        Ok(Some(0)) if said.is_empty() => String::new(),
+        Ok(Some(0)) => warn(&format!("`{command}` said: {said}")),
+        Ok(Some(code)) => warn(&format!("`{command}` exited {code}{}", because(&said))),
+        // What a killed hook managed to say before the limit, for the same reason: a
+        // notifier that printed `resolving proxy…` and then hung has named the thing
+        // that hung it.
+        Ok(None) => warn(&format!(
+            "`{command}` was killed after {}s{}",
+            company.notify.timeout.as_secs(),
+            because(&said)
+        )),
+        Err(e) => warn(&format!("`{command}`: {e}")),
+    }
+}
+
+/// A file the hook's output is caught in while it runs, removed when this is dropped.
+///
+/// A file and not a pipe, deliberately. A pipe holds a fixed amount and then blocks
+/// whoever is writing into it, so a parent that waits for the hook before reading
+/// deadlocks the moment the hook is chatty — and the notification, killed at its
+/// timeout, would be reported as slow when it had already said everything it had to
+/// say. Draining the pipe as it fills instead means a reader thread, and then a
+/// deadline for *that* thread, because `sh` forks and a killed hook can leave a
+/// grandchild holding the write end open forever. A deadline on a read is a race: the
+/// same hook is quoted on an idle machine and reported silent on a loaded one, which
+/// is the exact failure — a refusal indistinguishable from a delivery — reintroduced
+/// as a flake.
+///
+/// A file has no capacity and needs no reader. The hook never blocks, wecode never
+/// waits, and what was written is there to be read the moment the hook is gone: one
+/// answer, the same every time.
+struct Caught(PathBuf);
+
+impl Caught {
+    /// A new one, or `None` if it cannot be made.
+    ///
+    /// Named for the process and a counter, not for the task. Two `wecode loop`s over
+    /// two workspaces share a temp directory, and one pass can announce several tasks —
+    /// a name either of them could pick twice is one notification reading another's
+    /// output back and quoting a refusal at the wrong wait.
+    fn new() -> Option<Self> {
+        static NTH: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "wecode-notify-{}-{}.out",
+            std::process::id(),
+            NTH.fetch_add(1, Ordering::Relaxed)
+        ));
+        File::create(&path).ok()?;
+        Some(Self(path))
+    }
+
+    /// A handle for the hook to write through, falling back to discarding the stream if
+    /// the file cannot be opened again.
+    ///
+    /// Appending, and one of these per stream: stdout and stderr are two descriptors
+    /// onto the one file, so what is quoted is what the hook said *first* rather than
+    /// which stream it happened to choose. A refusal is a refusal on either.
+    fn writer(&self) -> Stdio {
+        File::options()
+            .append(true)
+            .open(&self.0)
+            .map_or_else(|_| Stdio::null(), Stdio::from)
+    }
+
+    /// What the hook wrote, bounded, and empty when it wrote nothing or the file is
+    /// gone. Never an error: this is the extra, not the notification.
+    fn read(&self) -> String {
+        let mut buf = Vec::new();
+        if let Ok(file) = File::open(&self.0) {
+            let _ = file.take(KEEP).read_to_end(&mut buf);
+        }
+        // Lossy, because a hook's output is bytes and a notification is not the place
+        // to fail over one.
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+}
+
+impl Drop for Caught {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// What the hook said for itself, as one bounded line — empty when it said nothing.
+///
+/// **This is what tells a refused notification from a delivered one.** An exit status
+/// says whether the *command* ran, which is not the question: a channel refuses a
+/// message in its reply, and the command that carried it exits `0` having done exactly
+/// what it was asked. Telegram answers a wrong chat id with an HTTP 400 whose body
+/// `curl` prints on stdout, and `curl` is content — so wecode used to report a message
+/// that never arrived exactly as it reports one that did, which is silence. The
+/// operator then waits on a phone for a notification that was refused an hour ago,
+/// which is the failure this whole module exists to prevent.
+///
+/// wecode does not parse it and does not judge it. The hook may be a chat API, a
+/// desktop notifier, or `mail`, and their refusals have nothing in common but the fact
+/// of being *said*. So the rule is the weakest one that is always true: a hook that
+/// delivered has no reason to speak, and anything it did say is put in front of the
+/// operator to read.
+///
+/// The first line it managed, blank ones skipped: a `curl` that prints headers before a
+/// body still leads with the thing that went wrong, and a hook that opens with an empty
+/// line has said nothing yet.
+///
+/// One line, flattened and cut, because this prints inside `wecode loop`'s output: a
+/// hook that returns a page of proxy HTML must not bury the pass it fired on, and one
+/// that prints a `\n⏸ t needs you` must not be able to forge a line of wecode's.
+fn said(text: &str) -> String {
+    let Some(line) = text.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return String::new();
+    };
+    let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(QUOTE) {
+        Some((at, _)) => format!("{}…", &flat[..at]),
+        None => flat,
+    }
+}
+
+/// What the hook said, joined onto the report of how it exited, or nothing when it
+/// went quietly. A bare `exited 22` names the failure and not the reason; the reason
+/// was in the sentence `curl` wrote and wecode used to drop.
+fn because(said: &str) -> String {
+    if said.is_empty() {
+        String::new()
+    } else {
+        format!(" — {said}")
     }
 }
 
@@ -364,11 +628,120 @@ mod tests {
     }
 
     #[test]
+    fn a_task_with_no_tree_yet_is_announced_as_nothing_rather_than_as_zero() {
+        // The distinction the empty string carries: this task has not written anything
+        // *yet*, which is not the same claim as having written nothing. A hook that read
+        // `0` here would say an agent produced an empty diff when none has run.
+        let out = std::env::temp_dir().join("wecode-notify-nothing.txt");
+        let _ = std::fs::remove_file(&out);
+        let c = company(&format!(
+            "\n[notify]\ncommand = \"echo [$WECODE_CHANGED_COUNT] [$WECODE_WORKTREE] \
+             [$WECODE_CHANGED_FILES] > {}\"\n",
+            out.display()
+        ));
+        // `dir()` is a temp directory and no workspace, so there is no plan to ask which
+        // tree the work would be in.
+        assert!(on_signature_wait(&c, &dir(), &task()).is_empty(), "ran clean");
+        assert_eq!(
+            std::fs::read_to_string(&out)
+                .expect("the hook wrote its file")
+                .trim(),
+            "[] [] []"
+        );
+    }
+
+    #[test]
+    fn a_capped_list_of_paths_is_still_counted_in_full() {
+        // Why the count is its own variable: truncating the names is the operator's
+        // choice, and a message that said "2 files" of five would be the notification
+        // agreeing with its own bound instead of with the diff.
+        let made = Produced {
+            dir: dir(),
+            files: vec!["a.rs".into(), "b.rs".into(), "c.rs".into()],
+        };
+        assert_eq!(made.count(), "3");
+        assert_eq!(made.listed(2), "a.rs\nb.rs");
+        assert_eq!(made.listed(9), "a.rs\nb.rs\nc.rs");
+        assert_eq!(made.listed(0), "", "names off; the count still goes");
+        assert_eq!(made.listed(u64::MAX), "a.rs\nb.rs\nc.rs", "no overflow");
+    }
+
+    #[test]
     fn a_hook_that_fails_is_reported_and_nothing_else() {
         let c = company("\n[notify]\ncommand = \"exit 3\"\n");
         let out = on_status_change(&c, &dir(), &task(), TaskStatus::Running, TaskStatus::Failed);
         assert!(out.contains("⚠ notify"), "{out}");
         assert!(out.contains("exited 3"), "{out}");
+    }
+
+    #[test]
+    fn a_hook_that_exits_well_but_says_something_is_not_taken_for_a_delivery() {
+        // The rule, in the weakest form that is always true: a hook that delivered has
+        // no reason to speak. wecode does not parse what it said — a chat API, a
+        // desktop notifier and `mail` have nothing in common but the fact of *having
+        // said something* — it only puts it in front of the operator.
+        let c = company("\n[notify]\ncommand = \"echo Bad Request: chat not found\"\n");
+        let out = on_status_change(
+            &c,
+            &dir(),
+            &task(),
+            TaskStatus::Verifying,
+            TaskStatus::NeedsApproval,
+        );
+        assert!(out.contains("⚠ notify"), "{out}");
+        assert!(out.contains("said: Bad Request: chat not found"), "{out}");
+    }
+
+    #[test]
+    fn a_complaint_on_stderr_counts_the_same_as_a_refusal_on_stdout() {
+        // One file behind both, because the operator's question is "did it arrive" and
+        // neither stream is the authority on that. `notify-send` complains on stderr;
+        // `curl -s` prints the refusal it was handed on stdout.
+        let c = company("\n[notify]\ncommand = \"echo no notification daemon >&2\"\n");
+        let out = on_status_change(&c, &dir(), &task(), TaskStatus::Running, TaskStatus::Failed);
+        assert!(out.contains("said: no notification daemon"), "{out}");
+    }
+
+    #[test]
+    fn what_a_failing_hook_said_is_reported_beside_the_status_it_failed_with() {
+        // `exited 6` is the failure named without its reason, and the reason was in the
+        // line the hook wrote on the way out.
+        let c = company("\n[notify]\ncommand = \"echo could not resolve host >&2; exit 6\"\n");
+        let out = on_status_change(&c, &dir(), &task(), TaskStatus::Running, TaskStatus::Failed);
+        assert!(out.contains("exited 6 — could not resolve host"), "{out}");
+    }
+
+    #[test]
+    fn a_hook_that_says_more_than_a_pipe_holds_still_finishes() {
+        // Why the output goes to a file. This is several times what a pipe will hold,
+        // and a parent that waited for the hook while the hook blocked on a full pipe
+        // would report it killed at its timeout — a notifier that had already said
+        // everything it had to say, blamed for being slow.
+        let c = company("\n[notify]\ncommand = \"seq 1 40000\"\ntimeout = \"20s\"\n");
+        let began = Instant::now();
+        let out = on_status_change(&c, &dir(), &task(), TaskStatus::Running, TaskStatus::Failed);
+        assert!(out.contains("said: 1"), "{out}");
+        assert!(!out.contains("39999"), "the whole flood came through: {out}");
+        assert!(began.elapsed() < Duration::from_secs(10), "it blocked");
+    }
+
+    #[test]
+    fn what_is_quoted_is_the_first_line_there_is_and_a_bounded_one() {
+        assert_eq!(said(""), "");
+        assert_eq!(said("\n  \n\t\n"), "", "whitespace is not something said");
+        assert_eq!(
+            said("\n  refused  \nand a second line\n"),
+            "refused",
+            "the first line with anything on it, trimmed"
+        );
+        // Flattened, so a hook printing wecode's own shapes cannot forge a line of it.
+        assert_eq!(said("⏸ t\tneeds  you"), "⏸ t needs you");
+
+        let cut = said(&"x".repeat(QUOTE + 50));
+        assert!(cut.ends_with('…'), "{cut}");
+        assert_eq!(cut.chars().count(), QUOTE + 1, "the bound plus the mark");
+        // Cut on a character and not inside one: a hook's output is arbitrary bytes.
+        assert_eq!(said(&"é".repeat(QUOTE + 50)).chars().count(), QUOTE + 1);
     }
 
     #[test]
@@ -388,6 +761,17 @@ mod tests {
             began.elapsed() < Duration::from_secs(30),
             "did not wait it out"
         );
+    }
+
+    #[test]
+    fn a_hook_killed_at_its_limit_is_reported_with_whatever_it_managed_to_say() {
+        // A notifier that named what it was doing and then hung on it has named the
+        // thing that hung it, and `killed after 1s` alone leaves that on the floor.
+        let c = company(
+            "\n[notify]\ncommand = \"echo resolving proxy; sleep 5\"\ntimeout = \"1s\"\n",
+        );
+        let out = on_status_change(&c, &dir(), &task(), TaskStatus::Running, TaskStatus::Failed);
+        assert!(out.contains("killed after 1s — resolving proxy"), "{out}");
     }
 
     #[test]
