@@ -121,7 +121,7 @@ which is how you check a scope before assigning work to a seat that cannot reach
 | **Shared build cache** | directories a project's worktrees share, so a task is not a cold build |
 | **Spawning** | environment from an allowlist, new process group, wall and idle timeouts |
 | **Intelligence** | a seat declares how clever its occupant is, 1–10, and the model is derived |
-| **Verification** | the diff against the declared scope, then the acceptance commands |
+| **Verification** | the branch's diff against the declared scope, then the acceptance commands |
 | **Commits** | every attempt, pass or fail, authored by wecode |
 | **Spend** | tokens read out of the agent's own output, per attempt and on the ledger |
 | **Handoff** | a predecessor's diff — or its design document — never the agent's account |
@@ -189,6 +189,24 @@ handoff used to say — claimed the first while meaning the second.
 
 **Nothing reads `.wecode/result.json`.** The diff is ground truth and an agent's account
 of its own work is inadmissible, so the file is written and ignored.
+
+**The scope check reads the branch, not the working tree.** Both halves of a verdict have
+to survive a retry, and one of them did not: wecode commits every attempt, and a retry
+opens with `git reset --hard`, so a second attempt is judged on top of the first one's
+commit. The acceptance commands were never troubled by that — they run against the
+worktree, which carries the committed work either way — but the diff was read as
+`git diff HEAD`, and everything the previous attempt wrote sits *behind* `HEAD`. An
+attempt that added nothing was therefore judged against an empty diff, and an empty diff
+violates no scope. A first attempt rejected for writing outside its scope passed on the
+retry that ignored it, with the out-of-scope file still on the branch and on its way to a
+merge. The retry did not overturn the finding; it stopped looking, which is the worse of
+the two because it reads as a clean run — a green check beside a diff saying *nothing
+changed*. The verdict now takes the uncommitted diff together with this task's own
+attempt commits, matched by their subject, so what is judged is what the branch would
+land. Its own, and not the log's: a subtask shares its parent's branch and its siblings'
+attempts are in the same history, each already judged against its own scope, and the base
+carries the predecessor work this branch was cut from, which is nobody here's to answer
+for.
 
 **The merge report is committed, not printed and lost.** It goes to
 `docs/wecode/<task>/report.md` on the integration branch — the same directory the design

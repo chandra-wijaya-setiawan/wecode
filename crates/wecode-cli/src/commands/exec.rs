@@ -765,7 +765,11 @@ fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error
     cache::ensure(&shared)?;
 
     let mut v = verify::run_acceptance(&dir, &task.acceptance, &shared);
-    v.changed = git::changed_files(&dir)?;
+    // The branch's work, not just what is uncommitted: a retry starts from a
+    // `reset --hard` on top of the previous attempt's commit, and asking only the
+    // working tree would judge the attempt that changed nothing instead of the work
+    // that is actually standing there.
+    v.changed = verify::changed(&dir, &id)?;
     v.violations = verify::violations(&v.changed, &task.scope);
 
     // Record before deciding, so a crash between the two loses the transition rather
