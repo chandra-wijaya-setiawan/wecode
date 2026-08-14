@@ -67,6 +67,12 @@ pub enum OrgError {
         id: String,
         users: (String, String),
     },
+    /// An acknowledgement configured with nothing to acknowledge.
+    ///
+    /// A tap is read by `fetch` like every other update; `answer` only says what came of
+    /// one. Without a fetch it would never run, and the operator who wrote it would be
+    /// left tapping buttons that stay silent for a reason nothing states.
+    AnswerWithoutFetch,
 }
 
 impl fmt::Display for OrgError {
@@ -111,6 +117,11 @@ impl fmt::Display for OrgError {
                 f,
                 "users `{a}` and `{b}` both give telegram = \"{id}\" — \
                  a reply from it could be signed as either"
+            ),
+            Self::AnswerWithoutFetch => write!(
+                f,
+                "[telegram] answer is set but fetch is not — nothing would read \
+                 the taps it answers"
             ),
         }
     }
@@ -270,14 +281,17 @@ impl Default for NotifyBlock {
     }
 }
 
-/// The command that hands back replies, and how long it may take.
+/// The commands that hand replies back and say what came of them, and how long either
+/// may take.
 ///
-/// `fetch` is an `Option` for the reason `[notify] command` is: a block that reads as
-/// configured and does nothing is worse than no block, so writing it empty is refused.
+/// Both are an `Option` for the reason `[notify] command` is: a block that reads as
+/// configured and does nothing is worse than no block, so writing either empty is
+/// refused.
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 struct TelegramBlock {
     fetch: Option<String>,
+    answer: Option<String>,
     #[serde(default = "thirty_seconds")]
     timeout: String,
 }
@@ -291,6 +305,7 @@ impl Default for TelegramBlock {
     fn default() -> Self {
         Self {
             fetch: None,
+            answer: None,
             timeout: thirty_seconds(),
         }
     }
@@ -594,8 +609,19 @@ pub struct Notify {
 pub struct Telegram {
     /// `None` — the default — means replies are not read at all.
     pub fetch: Option<String>,
+    /// The command that tells the chat what came of a tap — a `curl` of
+    /// `answerCallbackQuery`, usually. The callback to answer and the line to say arrive
+    /// in its environment as `WECODE_TELEGRAM_CALLBACK` and `WECODE_TELEGRAM_ANSWER`.
+    ///
+    /// `None` means a tap is acted on and nothing is said back. That works, and it is
+    /// the wrong shape of working: a button that signs a merge silently looks exactly
+    /// like a button that is broken, and the operator goes to a terminal to find out
+    /// which — the journey this whole channel exists to save. Only taps use it; a typed
+    /// reply is already visible in the chat that carries it.
+    pub answer: Option<String>,
     /// How long the fetch may take before it is killed. `wecode loop` runs this every
-    /// pass; a poll that hangs must not take the loop with it.
+    /// pass; a poll that hangs must not take the loop with it. The answer is held to the
+    /// same limit, for the same reason and against the same clock-bound loop.
     pub timeout: Duration,
 }
 
@@ -906,26 +932,43 @@ fn notify_of(b: &NotifyBlock) -> Result<Notify, OrgError> {
     })
 }
 
-/// The reply channel as configured, refused the two ways it can read as on and behave
-/// as off. Exactly [`notify_of`]'s argument, at the other end of the same round trip.
+/// The reply channel as configured, refused every way it can read as on and behave as
+/// off. Exactly [`notify_of`]'s argument, at the other end of the same round trip.
 fn telegram_of(b: &TelegramBlock) -> Result<Telegram, OrgError> {
-    let fetch = match b.fetch.as_deref().map(str::trim) {
-        None => None,
-        Some("") => {
-            return Err(OrgError::BadValue {
-                at: "[telegram] fetch".into(),
-                value: b.fetch.clone().unwrap_or_default(),
-            });
-        }
-        Some(cmd) => Some(cmd.to_string()),
-    };
+    let fetch = command_at("[telegram] fetch", b.fetch.as_deref())?;
+    let answer = command_at("[telegram] answer", b.answer.as_deref())?;
+    // Not a `BadValue`: the line is fine, and what is wrong is that nothing would ever
+    // reach it. Silence configured this way is indistinguishable from a broken button.
+    if answer.is_some() && fetch.is_none() {
+        return Err(OrgError::AnswerWithoutFetch);
+    }
     let timeout = parse_duration(&b.timeout)
         .filter(|d| !d.is_zero())
         .ok_or_else(|| OrgError::BadValue {
             at: "[telegram] timeout".into(),
             value: b.timeout.clone(),
         })?;
-    Ok(Telegram { fetch, timeout })
+    Ok(Telegram {
+        fetch,
+        answer,
+        timeout,
+    })
+}
+
+/// A command line as configured: absent, or something there is to run. A key written
+/// blank is refused rather than read as absent, because the two look the same from the
+/// outside and only one of them was meant.
+fn command_at(at: &str, written: Option<&str>) -> Result<Option<String>, OrgError> {
+    match written.map(str::trim) {
+        None => Ok(None),
+        Some("") => Err(OrgError::BadValue {
+            at: at.into(),
+            // As written, whitespace and all: an operator looking for what to fix wants
+            // the value the file holds and not a tidied one.
+            value: written.unwrap_or_default().to_string(),
+        }),
+        Some(cmd) => Ok(Some(cmd.to_string())),
+    }
 }
 
 fn charter_of(b: &InvariantBlock) -> Charter {
@@ -1167,6 +1210,7 @@ agent = "claude-code"
         // approved something in a chat it does not know about.
         let c = Company::parse(MINIMAL).unwrap();
         assert_eq!(c.telegram.fetch, None);
+        assert_eq!(c.telegram.answer, None);
         assert_eq!(c.telegram.timeout, Duration::from_secs(30));
     }
 
@@ -1179,11 +1223,42 @@ agent = "claude-code"
     }
 
     #[test]
-    fn a_blank_fetch_or_an_impossible_timeout_is_refused_at_load() {
-        // Same two shapes as `[notify]`, refused in the same place: a block that says
-        // replies will be read, and a value that means none ever are.
+    fn a_tap_may_be_acknowledged_by_a_command_of_its_own() {
+        // The other direction, and the reason a button beats a typed reply: what the tap
+        // did comes back to the phone that made it, so nobody has to open a terminal to
+        // find out whether it worked.
+        let text = format!(
+            "{MINIMAL}\n[telegram]\nfetch = \"curl -s x\"\nanswer = \"curl -s answerCallbackQuery\"\n"
+        );
+        let c = Company::parse(&text).unwrap();
+        assert_eq!(
+            c.telegram.answer.as_deref(),
+            Some("curl -s answerCallbackQuery")
+        );
+        // One timeout for both. A command that answers a chat is on the same clock as the
+        // one that reads it, and a second knob would be a second thing to get wrong.
+        assert_eq!(c.telegram.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn an_answer_with_no_fetch_to_read_taps_is_refused_at_load() {
+        // Nothing would ever run it: taps arrive through the fetch. Configured this way
+        // it is a button that stays silent, which is the shape of broken that sends the
+        // operator back to a terminal to find out what happened.
+        let text = format!("{MINIMAL}\n[telegram]\nanswer = \"curl -s answerCallbackQuery\"\n");
+        match Company::parse(&text).unwrap_err() {
+            OrgError::AnswerWithoutFetch => {}
+            other => panic!("expected AnswerWithoutFetch, got {other}"),
+        }
+    }
+
+    #[test]
+    fn a_blank_command_or_an_impossible_timeout_is_refused_at_load() {
+        // Same shapes as `[notify]`, refused in the same place: a block that says
+        // replies will be read or answered, and a value that means none ever are.
         for (block, at) in [
             ("fetch = \"\"", "[telegram] fetch"),
+            ("fetch = \"true\"\nanswer = \"\"", "[telegram] answer"),
             ("fetch = \"true\"\ntimeout = \"0s\"", "[telegram] timeout"),
             ("fetch = \"true\"\ntimeout = \"soon\"", "[telegram] timeout"),
         ] {

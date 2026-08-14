@@ -37,6 +37,7 @@ timeout = "10s"                   # killed at this; see below
 
 [telegram]                        # and how the answer gets back; see below
 fetch = "curl -sS -m 20 \"https://api.telegram.org/bot$TG_TOKEN/getUpdates?offset=$WECODE_TELEGRAM_OFFSET\""
+answer = "curl -sS -m 20 -d callback_query_id=\"$WECODE_TELEGRAM_CALLBACK\" -d text=\"$WECODE_TELEGRAM_ANSWER\" \"https://api.telegram.org/bot$TG_TOKEN/answerCallbackQuery\""
 timeout = "30s"
 
 [invariants]                      # outrank every grant below
@@ -250,7 +251,8 @@ must not have. `wecode company show` prints the hook, or says there is none.
 
 The notify hook is half a loop: it says a task has stopped for you, and the signature
 still needed a terminal. `[telegram] fetch` is the way back — reply `approve` under the
-message, and the next pass of `wecode loop` signs it.
+message, and the next pass of `wecode loop` signs it. On a phone, [tap a button
+instead](#signing-by-tapping-a-button).
 
 ```toml
 [telegram]
@@ -318,6 +320,67 @@ sign and moves neither a signature nor the cursor.
 
 An empty `fetch` or a zero `timeout` is refused at load, for the reason `[notify]`'s are.
 `wecode company show` prints the fetch and who may sign by reply, or says there is none.
+
+### Signing by tapping a button
+
+On a phone, typing is the part still left. Put an inline keyboard on the notification your
+`[notify] command` sends and the answer is one thumb — no keyboard, and nothing to remember
+about which task it was:
+
+```sh
+# in your [notify] command: the button's callback_data is the words a reply would carry
+curl -sS -d chat_id="$TG_CHAT" -d text="$WECODE_TASK: $WECODE_WAITING_FOR" \
+  --data-urlencode "reply_markup={\"inline_keyboard\":[[
+     {\"text\":\"Approve\",\"callback_data\":\"approve $WECODE_TASK\"},
+     {\"text\":\"Hold\",\"callback_data\":\"no $WECODE_TASK\"}]]}" \
+  "https://api.telegram.org/bot$TG_TOKEN/sendMessage"
+```
+
+**A tap is not a second way to sign anything.** Telegram hands it back through the same
+`getUpdates` as a `callback_query`, and wecode reads it as the message it stands for: the
+button's `callback_data` is the text, the notification the keyboard hangs under is the
+message being answered. So the table above is the whole grammar — `approve`, `no`,
+`approve merge`, `approve #4` mean on a button exactly what they mean typed — and the
+account check, the task resolution and the Broker call are the same code. Put the task in
+the `callback_data` rather than relying on the notification's text: 64 bytes is plenty for
+`approve #4`, and Telegram stops handing out the message an old keyboard belongs to.
+
+`answer` is what tells the phone what the tap did:
+
+```toml
+[telegram]
+fetch = "curl -sS -m 20 \"https://api.telegram.org/bot$TG_TOKEN/getUpdates?offset=$WECODE_TELEGRAM_OFFSET&timeout=0\""
+answer = "curl -sS -m 20 -d callback_query_id=\"$WECODE_TELEGRAM_CALLBACK\" -d text=\"$WECODE_TELEGRAM_ANSWER\" \"https://api.telegram.org/bot$TG_TOKEN/answerCallbackQuery\""
+```
+
+The callback to acknowledge arrives as `WECODE_TELEGRAM_CALLBACK` and the one line to say
+as `WECODE_TELEGRAM_ANSWER` — flattened to one line and cut at 200 characters, which is
+`answerCallbackQuery`'s own ceiling. Both run under the single `timeout`, and `answer` is
+no more above `never_run` than `fetch` is.
+
+It is optional, and worth writing anyway. A typed reply is its own receipt — the words are
+in the chat, in front of whoever typed them — but a tap leaves nothing: the spinner stops
+and a button that signed a merge looks exactly like a button that is broken. Four things
+follow from that:
+
+- **Every tap is acknowledged**, whatever came of it: what was signed, that the account
+  signs nothing, that the task has nothing waiting to be signed, or that the button's
+  `callback_data` decides nothing at all. Silence is the one answer that never informs.
+- **A typed reply is not.** It would be wecode repeating the operator back at themselves.
+- **A `--dry-run` says nothing into the chat**, because it moves nothing anywhere.
+- **A receipt that failed to send is `⚠ could not say so in the chat: …`** under the
+  outcome, not instead of it. The signature is already in the ledger, and un-signing it
+  because the acknowledgement bounced would throw away an approval that was really given.
+
+`answer` without `fetch` is refused at load: nothing would ever reach it, since taps arrive
+through the fetch, and an operator tapping buttons that stay silent has been given the
+failure this key exists to prevent.
+
+Worth being clear-eyed about one more thing. A button is more findable than a sentence —
+anyone in the chat can press it, and they will. That is safe for the reason a typed reply
+is: the account resolves to a `[[users]]` entry or to nobody, and what the person may sign
+is their post's business either way. A stranger pressing *Approve* gets a refusal, and the
+attempt is on the record.
 
 Two things to be clear-eyed about. A bot token in a shell command is a credential in
 `company.toml`'s neighbourhood — keep it in an environment variable, as above, and treat
