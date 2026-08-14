@@ -1231,7 +1231,10 @@ agent = "claude-code"
             "{MINIMAL}\n[telegram]\nfetch = \"curl -s x\"\nanswer = \"curl -s answerCallbackQuery\"\n"
         );
         let c = Company::parse(&text).unwrap();
-        assert_eq!(c.telegram.answer.as_deref(), Some("curl -s answerCallbackQuery"));
+        assert_eq!(
+            c.telegram.answer.as_deref(),
+            Some("curl -s answerCallbackQuery")
+        );
         // One timeout for both. A command that answers a chat is on the same clock as the
         // one that reads it, and a second knob would be a second thing to get wrong.
         assert_eq!(c.telegram.timeout, Duration::from_secs(30));

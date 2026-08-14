@@ -510,8 +510,20 @@ fn tail(errors: &str) -> String {
 /// is behaving. A message with a newline in it could otherwise print a line that looks
 /// like one of wecode's, and one with a novel in it could bury the pass it arrived on.
 fn echo(said: &str) -> String {
+    oneline(said, ECHO)
+}
+
+/// One line of at most `limit` characters, whatever it was given.
+///
+/// Shared by both places a string leaves this module — the report an operator reads and
+/// the answer a tap is given — because the two need the same thing for two reasons. The
+/// report must not gain a line that looks like one of wecode's; the answer is a value in
+/// a command's environment, where a newline could end the line the operator wrote and a
+/// long one is a call Telegram refuses outright. Counted in characters and never bytes:
+/// cutting a multi-byte one in half would panic.
+fn oneline(said: &str, limit: usize) -> String {
     let flat: String = said.split_whitespace().collect::<Vec<_>>().join(" ");
-    match flat.char_indices().nth(ECHO) {
+    match flat.char_indices().nth(limit) {
         Some((at, _)) => format!("{}…", &flat[..at]),
         None => flat,
     }
@@ -557,7 +569,7 @@ pub(crate) fn drain_channel(
     // wecode, because wecode is the thing that would sign twice.
     for update in updates.iter().filter(|u| read_to.is_none_or(|l| u.id > l)) {
         if let Some(msg) = &update.message {
-            out.push_str(&apply(store, company, msg, dry));
+            out.push_str(&apply(store, company, ws.root(), msg, dry));
         }
         if !dry {
             // After acting, and for every update whatever came of it. A reply that was
@@ -573,31 +585,57 @@ pub(crate) fn drain_channel(
     Ok(out)
 }
 
-/// Applies one message. Never fails: a refusal is the report, not an error, because
-/// four good replies behind a bad one still have to be read.
-fn apply(store: &Store, company: &Company, msg: &Message, dry: bool) -> String {
-    let Some(verdict) = verdict(&msg.text) else {
-        // Chat. Not every message in a channel is an instruction, and answering the
-        // ones that are not is how a notifier becomes a nuisance.
-        return String::new();
+/// Applies one message, and tells a tap what came of it. Never fails: a refusal is the
+/// report, not an error, because four good replies behind a bad one still have to be read.
+fn apply(store: &Store, company: &Company, org: &Path, msg: &Message, dry: bool) -> String {
+    let outcome = match (decided(store, company, msg, dry), &msg.tap) {
+        (Some(outcome), _) => outcome,
+        // Chat. Not every message in a channel is an instruction, and answering the ones
+        // that are not is how a notifier becomes a nuisance.
+        (None, None) => return String::new(),
+        // A tap is never chat: `data` is a string wecode's own operator wrote on a
+        // button, so one that decides nothing is a keyboard to fix. Said out loud in
+        // both directions, because the operator holding the phone is the one who can fix
+        // it and a spinner that stops with nothing said tells them nothing.
+        (None, Some(_)) => "    ✗ that button decides nothing — nothing signed\n".to_string(),
     };
-    let said = format!(
-        "  {} ({}): {}",
+
+    let mut report = format!(
+        "  {} ({}): {}\n{outcome}",
         echo(&msg.who),
         echo(&msg.from),
         echo(&msg.text)
     );
-
-    let Some(user) = company.user_by_telegram(&msg.from) else {
-        return format!(
-            "{said}\n    ✗ no user in company.toml gives telegram = \"{}\" — nothing signed\n",
-            echo(&msg.from)
-        );
-    };
-    match decide(store, company, msg, user, verdict, dry) {
-        Ok(report) => format!("{said}\n{report}"),
-        Err(e) => format!("{said}\n    ✗ {e}\n"),
+    // Every tap, whatever it came to, and no typed reply ever — the module's fifth
+    // reason. Not in a dry run: what it moves is the chat, and a dry run moves nothing.
+    if let Some(callback) = &msg.tap
+        && !dry
+        && let Err(e) = answer(company, org, callback, &outcome)
+    {
+        // Reported under the outcome rather than in place of it. The signature is
+        // already given; what failed is saying so, and an operator whose taps have gone
+        // quiet needs to see which of the two it was.
+        report.push_str(&format!("    ⚠ could not say so in the chat: {e}\n"));
     }
+    report
+}
+
+/// What one message decided, and `None` for one that decided nothing.
+///
+/// Separate from the reporting because a tap needs this sentence twice: once in the
+/// output of the pass it arrived on, and once back on the phone that sent it.
+fn decided(store: &Store, company: &Company, msg: &Message, dry: bool) -> Option<String> {
+    let verdict = verdict(&msg.text)?;
+    let Some(user) = company.user_by_telegram(&msg.from) else {
+        return Some(format!(
+            "    ✗ no user in company.toml gives telegram = \"{}\" — nothing signed\n",
+            echo(&msg.from)
+        ));
+    };
+    Some(match decide(store, company, msg, user, verdict, dry) {
+        Ok(report) => report,
+        Err(e) => format!("    ✗ {e}\n"),
+    })
 }
 
 /// Everything about one reply that can go wrong, in one place with one error type.
@@ -728,12 +766,36 @@ mod tests {
             })
     }
 
+    /// A getUpdates response with one tapped button in it, from the same account and
+    /// under the same notification as [`ONE`]. The pair is the comparison every test
+    /// about taps is really making.
+    const TAPPED: &str = r#"{
+      "ok": true,
+      "result": [
+        {
+          "update_id": 700124,
+          "callback_query": {
+            "id": "4382abc",
+            "from": {"id": 48210934, "is_bot": false, "first_name": "C", "username": "cws"},
+            "chat_instance": "-176",
+            "data": "approve",
+            "message": {
+              "message_id": 41,
+              "from": {"id": 700, "is_bot": true, "username": "wecode_bot"},
+              "text": "cache-tests needs you: approval"
+            }
+          }
+        }
+      ]
+    }"#;
+
     fn message(text: &str, quoted: &str) -> Message {
         Message {
             from: "48210934".into(),
             who: "cws".into(),
             text: text.into(),
             quoted: quoted.into(),
+            tap: None,
         }
     }
 
@@ -749,6 +811,111 @@ mod tests {
         assert_eq!(m.who, "cws");
         assert_eq!(m.text, "approve");
         assert_eq!(m.quoted, "cache-tests needs you: approval");
+    }
+
+    #[test]
+    fn a_tap_is_read_as_the_reply_it_stands_for() {
+        // The whole of what a keyboard costs. Read down to the same four fields, from the
+        // same account, about the same notification — so nothing past here can tell the
+        // two apart, and nothing past here needs a second opinion about a tap.
+        let typed = updates(ONE).unwrap()[0].message.clone().expect("a message");
+        let tapped = updates(TAPPED).unwrap()[0]
+            .message
+            .clone()
+            .expect("a tap is a message");
+        assert_eq!(tapped.from, typed.from);
+        assert_eq!(tapped.who, typed.who);
+        // `data` is read as the words a reply would have used: one grammar, not two.
+        assert_eq!(tapped.text, typed.text);
+        // The notification the keyboard hangs under is the message a reply answers.
+        assert_eq!(tapped.quoted, typed.quoted);
+
+        // And so the decisions come out the same, which is the property that matters.
+        assert_eq!(verdict(&tapped.text), verdict(&typed.text));
+        assert_eq!(
+            target(&tapped, &plan()).unwrap(),
+            target(&typed, &plan()).unwrap()
+        );
+
+        // The one field that differs, and it decides nothing: it is what the tap has to
+        // be acknowledged with.
+        assert_eq!(tapped.tap.as_deref(), Some("4382abc"));
+        assert_eq!(typed.tap, None);
+    }
+
+    #[test]
+    fn a_button_carries_its_task_even_when_the_notification_it_hangs_under_is_gone() {
+        // Telegram stops handing out the message an old keyboard belongs to, and a tap
+        // then answers nothing. Which is the reason to put the task in `callback_data`:
+        // 64 bytes is plenty for `approve #2`, and unlike the quoted text it cannot go
+        // stale.
+        let got = updates(
+            r#"{"ok":true,"result":[{"update_id":9,"callback_query":{
+                 "id":"77","from":{"id":48210934,"username":"cws"},"data":"approve #2"}}]}"#,
+        )
+        .unwrap();
+        let m = got[0].message.clone().expect("a tap");
+        assert_eq!(m.quoted, "");
+        assert_eq!(target(&m, &numbered()).unwrap().as_str(), "cache-tests");
+    }
+
+    #[test]
+    fn a_tap_with_no_callback_to_answer_is_not_read_as_a_message() {
+        // It could be signed and never acknowledged, which is the one shape of silence
+        // this whole direction of the channel exists to remove. An update nothing can
+        // read is still got past — the id is there — so this costs a button that cannot
+        // work anyway and nothing else.
+        let got = updates(
+            r#"{"ok":true,"result":[{"update_id":9,"callback_query":{
+                 "from":{"id":48210934,"username":"cws"},"data":"approve"}}]}"#,
+        )
+        .unwrap();
+        assert!(got[0].message.is_none());
+        assert_eq!(got[0].id, 9);
+    }
+
+    #[test]
+    fn an_answer_is_flattened_and_bounded_to_what_telegram_will_take() {
+        // Both halves are load-bearing here rather than cosmetic. This value goes into a
+        // command's environment, where a newline could end the line the operator wrote;
+        // and `answerCallbackQuery` refuses a text over its own ceiling outright, which
+        // would turn a long refusal into no answer at all.
+        let out = oneline("    ✗ names no task\n    nothing signed\n", ANSWER);
+        assert_eq!(out, "✗ names no task nothing signed");
+
+        let long = oneline(&"é".repeat(400), ANSWER);
+        assert_eq!(long.chars().count(), ANSWER + 1, "200 and an ellipsis");
+    }
+
+    #[test]
+    fn nothing_is_said_back_and_nothing_fails_when_no_answer_is_configured() {
+        // The channel still works one-way: taps sign, and the operator finds out in a
+        // terminal. Worse than configuring it, better than refusing to read the channel.
+        let c = company("\n[telegram]\nfetch = \"true\"\n");
+        assert!(answer(&c, &std::env::temp_dir(), "4382abc", "signed").is_ok());
+    }
+
+    #[test]
+    fn an_answer_the_charter_forbids_is_not_run() {
+        // Both directions of the channel are command lines in the same file as the
+        // charter, and an invariant outranks the operator in both.
+        let c = company(
+            "\n[invariants]\nnever_run = [\"curl *\"]\n\n[telegram]\nfetch = \"true\"\nanswer = \"curl example.invalid\"\n",
+        );
+        let e = answer(&c, &std::env::temp_dir(), "4382abc", "signed").unwrap_err();
+        assert!(e.contains("never_run"), "{e}");
+    }
+
+    #[test]
+    fn an_answer_that_fails_says_what_the_command_complained_about() {
+        // Reported and not raised, up in `apply` — but it has to arrive there saying
+        // which of the two commands broke.
+        let c = company(
+            "\n[telegram]\nfetch = \"true\"\nanswer = \"echo query is too old >&2; exit 6\"\n",
+        );
+        let e = answer(&c, &std::env::temp_dir(), "4382abc", "signed").unwrap_err();
+        assert!(e.contains("exited 6"), "{e}");
+        assert!(e.contains("query is too old"), "{e}");
     }
 
     #[test]
