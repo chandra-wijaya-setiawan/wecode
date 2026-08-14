@@ -134,9 +134,11 @@ pub(crate) fn take_down(
 /// - the tree holds uncommitted work, which the merge did not take
 /// - git refused the removal
 ///
-/// The first is why merging a *subtask* removes nothing: the branch belongs to the main
-/// task, so a subtask's merge lands the whole tree's work, while its siblings still have
-/// somewhere to be. The tree comes down when the last of them closes.
+/// The first is why a merge with a step still open removes nothing. The branch belongs to
+/// the main task and every subtask shares it, so landing it takes the whole tree's work
+/// while those subtasks still have somewhere to be — a passing one is `done` and holds
+/// nothing, but an unfinished sibling has the directory open. The tree comes down when the
+/// last of them closes.
 ///
 /// No separate authorisation. Merging was authorised, this is the merge finishing its own
 /// sentence, and a directory whose every commit is on the integration branch is not
@@ -212,8 +214,8 @@ mod tests {
 
     #[test]
     fn the_owner_and_its_subtasks_all_count_as_working_in_the_tree() {
-        // The fault this guards: merging one subtask lands the whole tree's branch, and
-        // removing the tree then takes the directory out from under its siblings.
+        // The fault this guards: landing the main task lands the whole tree's branch, and
+        // removing the tree then takes the directory out from under its open steps.
         assert_eq!(open(&plan(), "feat"), vec!["docs", "feat", "impl"]);
     }
 

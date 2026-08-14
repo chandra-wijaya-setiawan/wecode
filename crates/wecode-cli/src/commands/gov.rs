@@ -263,6 +263,29 @@ pub(crate) fn merge_task(a: &Args) -> Res {
         .project(&task.project)
         .ok_or_else(|| format!("no such project: {}", task.project))?;
 
+    // Cloned rather than held: the plan is reloaded after the merge lands, and a
+    // borrow of the old one would outlive it.
+    let owner = work::owner(&plan, &id)
+        .ok_or("task is not in the plan")?
+        .id
+        .clone();
+
+    // Asked before the status, because it decides whether this is the right task to be
+    // asking about at all. A subtask has no branch of its own — `owner` is the main
+    // task — so merging here would put that task's whole branch on the integration
+    // branch, every step of it including the ones that have not run, and then mark
+    // only this one done. Telling the operator to verify it first would send them the
+    // wrong way: no state this task can reach makes it mergeable.
+    if owner != id {
+        return Err(format!(
+            "{id} is part of {owner} and shares its branch — a step lands nothing on its own\n  \
+             its commits are already on `{}`; the main task is what puts them on the\n  \
+             integration branch: wecode merge {owner}",
+            work::branch_for(&owner)
+        )
+        .into());
+    }
+
     if task.status != TaskStatus::NeedsApproval {
         return Err(format!(
             "{id} is {} — only verified work merges. `wecode verify {id}` first",
@@ -283,12 +306,6 @@ pub(crate) fn merge_task(a: &Args) -> Res {
             )
         })?;
 
-    // Cloned rather than held: the plan is reloaded after the merge lands, and a
-    // borrow of the old one would outlive it.
-    let owner = work::owner(&plan, &id)
-        .ok_or("task is not in the plan")?
-        .id
-        .clone();
     let branch = work::branch_for(&owner);
     if !git::branch_exists(&repo, &branch) {
         return Err(format!("no branch `{branch}` — this task produced nothing to merge").into());

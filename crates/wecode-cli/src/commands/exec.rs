@@ -815,22 +815,30 @@ fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error
     }
     store.append_records(broker.ledger())?;
 
-    let next = if v.passed() {
-        // Passing acceptance is not the same as landed. A task with a worktree has a
-        // branch nobody has merged, and merging is a signature wecode does not yet
-        // collect — so it waits for a person rather than claiming to be done.
-        //
-        // A design waits for the same reason with a different cause: the document
-        // exists, which is all a command can check, and whether it is the right
-        // design is exactly the part no command can. Dependents must not start on the
-        // strength of a file being present.
-        if task.kind.needs_a_signature() || dir.starts_with(work::run_root()) {
-            TaskStatus::NeedsApproval
-        } else {
-            TaskStatus::Done
-        }
-    } else {
+    // Passing acceptance is not the same as landed, but only for work that has
+    // something of its own to land: a branch nobody has merged. That is `owner.id ==
+    // id` and nothing weaker, because a **subtask has no branch of its own**. Its
+    // commits are on the main task's, and `merge` on a subtask would put that whole
+    // branch on the integration branch — every step of the expansion, including the
+    // ones that have not run — while marking only this task done. So there was no
+    // approval to grant, and asking for one stopped the plan: a sibling declared
+    // `--after` this step stays `waiting`, since readiness follows `done`, and the
+    // loop stops dispatching entirely while anything needs a human. One passing step
+    // held up the rest of its own expansion, waiting on a merge that would have been
+    // premature. A step that passes is as finished as a step can be; the main task is
+    // what lands.
+    //
+    // A design is the exception at any depth, and for the other reason: the document
+    // exists, which is all a command can check, and whether it is the *right* design
+    // is exactly the part no command can. Dependents must not start on the strength of
+    // a file being present.
+    let owns_a_branch = owner.id == id && dir.starts_with(work::run_root());
+    let next = if !v.passed() {
         TaskStatus::Failed
+    } else if task.kind.needs_a_signature() || owns_a_branch {
+        TaskStatus::NeedsApproval
+    } else {
+        TaskStatus::Done
     };
     store.set_task_status(&id, next)?;
     // The two verdicts a person has to act on — verified-and-unlanded, and failed —
@@ -852,7 +860,10 @@ fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error
     });
 
     Ok((
-        format!("{}{announced}", render::verdict(&task, &dir, &v, next)),
+        format!(
+            "{}{announced}",
+            render::verdict(&task, &owner.id, &dir, &v, next)
+        ),
         reason,
     ))
 }

@@ -31,14 +31,24 @@
 | → `waiting` | `assign`, or `task add --to` | naming a post *is* assigning; a half-assigned task is invisible to the queue |
 | `waiting` ⇄ `ready` | **the scheduler, alone** | recomputed from the graph each tick, so a missed tick delays a promotion and cannot lose one |
 | → `running` | `start` or `run` | |
-| → `needs-approval` | `verify` passes in a worktree | passing is not landing; the branch is unmerged |
-| → `done` | `verify` passes with no worktree, or `merge` | |
+| → `needs-approval` | `verify` passes on a task that owns a branch, or on a design | passing is not landing; the branch is unmerged |
+| → `done` | `verify` passes with nothing of its own to land, or `merge` | a subtask, or a kind that gets no worktree, has no separate landing decision |
 | → `failed` | `verify` fails, or the agent did not exit cleanly | |
 | `done` → `needs-approval` | `rollback` | the work still passed; the decision to land it was withdrawn |
 
 Demotion matters as much as promotion. Reopening a finished prerequisite puts its
 dependents back to `waiting`, or the queue keeps offering work whose groundwork has been
 undone.
+
+**Owning a branch is what makes passing short of finished**, and only a main task does.
+A subtask works in its parent's tree, on its parent's branch, so a step that passes is
+`done`: there is nothing about it left to land separately, and the main task is what
+lands. Parking it at `needs-approval` asked for a decision nobody could correctly take —
+`merge` on a step would have put the whole shared branch on the integration branch,
+every step of the expansion including the ones that had not run. Worse, it stopped the
+plan: the sibling declared `--after` that step stayed `waiting`, because readiness
+follows `done`, and the loop stops dispatching entirely while anything needs a human. A
+design is still the exception at any depth, for the other reason — see below.
 
 ## One run of one task
 
@@ -155,6 +165,10 @@ such slot.
 
 `merge` puts a verified branch on the project's integration branch, always `--no-ff`, so
 every merge is exactly one commit you can revert.
+
+Only a **main task** merges. Naming a subtask is refused, and the refusal says which task
+does land it: a step has no branch of its own, so merging it would take the whole tree's
+work — including steps that have not run — while marking one task done.
 
 Two gates, and they are different things:
 
