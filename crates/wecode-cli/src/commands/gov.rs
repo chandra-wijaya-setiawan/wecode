@@ -3,12 +3,12 @@
 
 use wecode_core::{TaskId, TaskStatus};
 use wecode_gov::{Action, ActionKind, glob};
-use wecode_store::{AuditQuery, Store};
+use wecode_store::AuditQuery;
 
 use crate::args::Args;
 use crate::commands::ctx::*;
 use crate::render;
-use crate::{git, record, teardown, work};
+use crate::{git, ledger, record, teardown, work};
 
 pub(crate) fn parse_action(a: &Args) -> Result<Action, String> {
     let verb = a.cmd(2);
@@ -71,8 +71,21 @@ pub(crate) fn approve(a: &Args) -> Res {
                 .join(", ")
         )
     })?;
+    let plan = store.load_plan()?;
+    // A signature attributed to a task that does not exist signs nothing, and every
+    // gate reading the ledger afterwards would go on refusing without saying why.
+    // Checked before the Broker is asked, so a mistyped id costs a message rather than
+    // a record that looks like authority.
+    let task = match a.get("task") {
+        Some(id) => Some(
+            plan.task(&TaskId::new(id))
+                .ok_or_else(|| format!("no such task: {id}"))?
+                .clone(),
+        ),
+        None => None,
+    };
     let who = actor(a, &store, &company)?;
-    let on = attribution(a, &store.load_plan()?);
+    let on = attribution(a, &plan);
 
     require_allowed(
         &store,
@@ -93,17 +106,32 @@ pub(crate) fn approve(a: &Args) -> Res {
         }
     );
 
+    // Admission is the *dispatch* signature. Nothing changes status here, because
+    // nothing about the task changed: it became dispatchable, which is a fact about the
+    // ledger and is read at the door by `start` and `run`. Said out loud all the same —
+    // the other thing an operator could take from silence is that nothing happened.
+    if kind == ActionKind::Admission
+        && let Some(t) = &task
+    {
+        out.push_str(&format!("  {}  may be dispatched\n", t.id));
+        let gated = plan
+            .project(&t.project)
+            .and_then(|p| playbook_of(&company, p).ok().flatten())
+            .is_some_and(|pb| pb.project.dispatch.needs_a_signature());
+        if !gated {
+            out.push_str(
+                "  nothing was waiting on it — this project dispatches without a signature\n",
+            );
+        }
+    }
+
     // A design approval is the transition, not a note about one. Merge approval is
     // read later by `merge`, which does its own work afterwards; a design has no
     // later step to read it, so signing is the last thing that happens to it.
     if kind == ActionKind::Design
-        && let Some(id) = a.get("task")
+        && let Some(task) = &task
     {
-        let id = TaskId::new(id);
-        let plan = store.load_plan()?;
-        let task = plan
-            .task(&id)
-            .ok_or_else(|| format!("no such task: {id}"))?;
+        let id = &task.id;
         if !task.kind.needs_a_signature() {
             return Err(format!(
                 "{id} is a {} task — only a design is signed off this way",
@@ -118,7 +146,7 @@ pub(crate) fn approve(a: &Args) -> Res {
             )
             .into());
         }
-        store.set_task_status(&id, TaskStatus::Done)?;
+        store.set_task_status(id, TaskStatus::Done)?;
         out.push_str(&format!("  {id}  needs-approval → done\n"));
     }
     Ok(out)
@@ -145,21 +173,6 @@ pub(crate) fn audit(a: &Args) -> Res {
         });
     }
     Ok(render::audit(&lines))
-}
-
-/// Whether a merge approval is on the record for this task.
-///
-/// Read from the ledger rather than taken as a flag: a signature that a command-line
-/// switch could stand in for is not a signature. `wecode approve` writes it, and it is
-/// attributable to the post that gave it.
-fn signed_off(store: &Store, task: &TaskId) -> Result<bool, Box<dyn std::error::Error>> {
-    let lines = store.audit(&AuditQuery {
-        task: Some(task.to_string()),
-        ..Default::default()
-    })?;
-    Ok(lines
-        .iter()
-        .any(|l| l.action == "approve" && l.target == "Merge" && l.outcome == "allow"))
 }
 
 /// Lands a verified task on its project's integration branch.
@@ -224,7 +237,7 @@ pub(crate) fn merge_task(a: &Args) -> Res {
     let needs_signature = protected || policy == wecode_org::MergePolicy::Approved;
 
     let who = actor(a, &store, &company)?;
-    let signed = signed_off(&store, &id)?;
+    let signed = ledger::is_signed(&store, &id, ActionKind::Merge)?;
     if needs_signature && !signed {
         let mut msg = format!("{id} → {target} needs a signature");
         if protected {

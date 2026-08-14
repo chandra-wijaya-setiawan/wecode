@@ -79,7 +79,9 @@ WORK
   wecode worktree remove <task|path>   take one down (--force if dirty)
         a path reaches the trees no task can: an orphan's, and the merge scratch
   wecode approve <merge|admission|design|budget|measure> [<what>] --as <post>
-        approve design --task <id>   signs a design off: needs-approval → done
+        approve design --task <id>      signs a design off: needs-approval → done
+        approve admission --task <id>   signs a task for dispatch, where its playbook
+                                        says dispatch = "approved"
   wecode guard <post> <verb> <target>  authorise an action; records the decision
         verbs: read write run merge spend        --tokens <n> for spend
         --task <id> / --project <id> attributes the record
@@ -114,6 +116,17 @@ Use it to check whether a seat can reach the work before assigning it there.
 branch, same envelope. `start` hands you the envelope and steps back; `run` spawns the
 agent and supervises it. They share one code path so a task worked by hand and a task
 worked by an agent cannot land somewhere different.
+
+That shared path is also where the dispatch gate lives, so it holds for both. A project
+whose playbook says `dispatch = "approved"` refuses either until `wecode approve admission
+--task <id>` is on the ledger, and refuses before the worktree is cut — a tree made for
+work nobody signed for is a tree left standing. `wecode loop` reports the same tasks as
+`⏸ <id> needs your signature` and dispatches past them rather than failing them, so an
+unsigned task at the head of the queue does not hold a slot.
+
+A signature earlier than the last change to the task does not count: `task scope` records
+a definition, so widening signed work asks for the signature again. The refusal says which
+of the two it is, and `wecode audit --task <id>` shows the sequence.
 
 **`wecode verify`** can be run on its own, and is the same code path `run` uses. It reads
 the *uncommitted* diff, so run it before committing by hand.

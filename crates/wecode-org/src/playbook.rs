@@ -156,6 +156,8 @@ struct ProjectBlock {
     merge_to: Option<String>,
     #[serde(default)]
     merge: Option<String>,
+    #[serde(default)]
+    dispatch: Option<String>,
 }
 
 /// The fields a kind block has. Named here because the strict check is done by hand
@@ -227,6 +229,8 @@ pub struct ProjectSettings {
     pub merge_to: Option<String>,
     /// Whether passing work merges by itself.
     pub merge: MergePolicy,
+    /// Whether a task may be dispatched before a holder has signed for it.
+    pub dispatch: DispatchPolicy,
 }
 
 /// Who decides that verified work may land.
@@ -260,6 +264,54 @@ impl MergePolicy {
             "auto" => Self::Auto,
             _ => return None,
         })
+    }
+}
+
+/// Who decides that a task may be worked on at all.
+///
+/// The same two words as [`MergePolicy`], one door earlier: `approved` means a
+/// capability holder signs before anything is spawned, `auto` means the admission gate
+/// is the only door. Separate from `merge` because the two questions are separate —
+/// "is this the work we want done" is asked of a plan, "may this land" of a diff — and
+/// a project may reasonably answer them differently.
+///
+/// The default is `Auto`, where [`MergePolicy`]'s is `Approved`, and the difference is
+/// reversibility rather than a lapse. A dispatched run happens in its own worktree
+/// under a budget and is judged before it can reach a shared branch; a merge is the
+/// step that cannot be un-decided quietly. Defaulting this to `Approved` would also
+/// mean `wecode loop` — which exists to run unattended — stopped on every task in every
+/// project that had never heard of the setting.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum DispatchPolicy {
+    /// The admission gate is the whole check. What wecode has always done.
+    #[default]
+    Auto,
+    /// A holder signs each task before it may be dispatched: `wecode approve
+    /// admission --task <id>`.
+    Approved,
+}
+
+impl DispatchPolicy {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Approved => "approved",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "auto" => Self::Auto,
+            "approved" => Self::Approved,
+            _ => return None,
+        })
+    }
+
+    /// Whether a recorded signature is required before dispatch.
+    #[must_use]
+    pub fn needs_a_signature(self) -> bool {
+        matches!(self, Self::Approved)
     }
 }
 
@@ -530,6 +582,14 @@ impl Playbook {
                         known: "auto, approved".to_string(),
                     })?,
                 },
+                dispatch: match w.project.dispatch.as_deref() {
+                    None => DispatchPolicy::default(),
+                    Some(v) => DispatchPolicy::parse(v).ok_or_else(|| PlaybookError::BadValue {
+                        at: "[project] dispatch".to_string(),
+                        value: v.to_string(),
+                        known: "auto, approved".to_string(),
+                    })?,
+                },
             },
             kinds,
         })
@@ -644,6 +704,12 @@ language = "{language}"
 # signature; `auto` merges and reports what it did. The charter still outranks this —
 # a branch it protects needs a signature whatever this says.
 # merge = "approved"
+#
+# Whether a task may be dispatched before anyone signs for it. `auto` (the default)
+# lets the admission gate be the only door; `approved` means no agent is spawned until
+# a holder signs — `wecode approve admission --task <id>`. Turn it on where the work is
+# planned by an agent, so a person sees each task before its budget is spent.
+# dispatch = "approved"
 
 [feature]
 worktree  = true
@@ -825,6 +891,33 @@ guidance = "Single task, no subtasks."
         let p = Playbook::parse("[feature]\ndesign_required = true\n\n[bug]\n").unwrap();
         assert!(p.for_kind(TaskKind::Feature).unwrap().design_required);
         assert_eq!(p.design_required_kinds(), vec![TaskKind::Feature]);
+    }
+
+    #[test]
+    fn dispatch_is_auto_unless_a_project_asks_to_sign_first() {
+        // The default is the behaviour every existing project already has; asking for
+        // the gate is a deliberate line in the file.
+        assert_eq!(
+            Playbook::parse(SAMPLE).unwrap().project.dispatch,
+            DispatchPolicy::Auto
+        );
+        assert!(!DispatchPolicy::Auto.needs_a_signature());
+
+        let p = Playbook::parse("[project]\ndispatch = \"approved\"\n").unwrap();
+        assert_eq!(p.project.dispatch, DispatchPolicy::Approved);
+        assert!(p.project.dispatch.needs_a_signature());
+    }
+
+    #[test]
+    fn a_dispatch_policy_nobody_defined_is_refused_by_name() {
+        // `dispatch = "manual"` would otherwise read as strict and behave as `auto`,
+        // which is the one failure mode a gate must not have.
+        let msg = Playbook::parse("[project]\ndispatch = \"manual\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("[project] dispatch"), "{msg}");
+        assert!(msg.contains("manual"), "{msg}");
+        assert!(msg.contains("auto, approved"), "{msg}");
     }
 
     #[test]

@@ -28,6 +28,7 @@ Only a few fields are typed, because wecode itself acts on them:
 | `accept` | fills acceptance when you omit `--accept-cmd` |
 | `tokens`, `wall_secs` | fill the budget |
 | `merge_to`, `merge` | where work lands, and whether it needs a signature |
+| `dispatch` | whether a task needs a signature before it may be started at all |
 | `subtasks` | what `task add --expand` emits |
 
 Everything in `guidance` is carried to the reader and never parsed.
@@ -116,6 +117,32 @@ tasks. A gated kind whose template declares a `design` step passes at `task add
 the design in the plan. A feature created before the gate was turned on can be repaired
 the same way — a dependency cannot be added to an existing task, but a subtask can:
 `wecode task add <id>-design --parent <id> --kind design ...`.
+
+## The dispatch gate
+
+The design gate asks whether a *feature* was thought about. This asks the narrower
+question about each task: did a person agree to this one, as written, before its budget
+was spent? One line, on the project rather than on a kind:
+
+```toml
+[project]
+dispatch = "approved"
+```
+
+`start` and `run` then refuse until a holder signs — `wecode approve admission --task
+<id>` — and `wecode loop` reports the task as `⏸ <id> needs your signature` and carries
+on with whatever else is ready. Nothing is prepared first: no worktree is cut for work
+nobody has agreed to.
+
+It is off by default, and worth turning on exactly where the plan is written by an
+agent. The admission gate is deterministic — it can tell you a task is vague, unscoped
+or unbudgeted, and it cannot tell you the task is the wrong thing to build. That
+judgement is a person's, and this is where it fits.
+
+The signature is one line in the ledger, attributed to the post that gave it and to the
+person in that seat. It covers one task, not the subtasks beneath it, and it goes stale
+if the task is redefined afterwards: amending a scope asks for it again, so signing
+something small and then widening it is not a way through.
 
 ## Writing a good one
 
