@@ -5219,6 +5219,20 @@ fn notified_with(org: &Org, body: &str, extra: &str) -> PathBuf {
     log
 }
 
+/// Points the workspace's notify hook at `command` itself.
+///
+/// For the cases where what the hook *says* is the thing under test rather than what
+/// it is told, so the command is not wrapped in a redirect to a log.
+fn hooked(org: &Org, command: &str) {
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        format!("{text}\n[notify]\ncommand = \"{command}\"\ntimeout = \"20s\"\n"),
+    )
+    .unwrap();
+}
+
 /// Every line the hook has written, in order.
 fn announcements(log: &Path) -> Vec<String> {
     std::fs::read_to_string(log)
@@ -5413,9 +5427,7 @@ fn a_hook_that_fails_is_reported_without_touching_the_verdict() {
     // its notifier did would send the operator hunting in the wrong place.
     let org = Org::new("notify-broken", "solo");
     org.seed();
-    let conf = org.path("company.toml");
-    let text = std::fs::read_to_string(&conf).unwrap();
-    std::fs::write(&conf, format!("{text}\n[notify]\ncommand = \"exit 7\"\n")).unwrap();
+    hooked(&org, "exit 7");
 
     org.run(&["status", "cache-tests", "needs-approval"])
         .assert_ok("the status change still succeeds")
@@ -5423,6 +5435,80 @@ fn a_hook_that_fails_is_reported_without_touching_the_verdict() {
         .assert_contains("exited 7");
     org.run(&["show", "cache-tests"])
         .assert_contains("status     needs-approval");
+}
+
+#[test]
+fn a_hook_that_exits_well_and_refuses_the_message_is_not_reported_as_a_delivery() {
+    // The failure this half of the module exists for. A chat API refuses a wrong id in
+    // its *reply*: the `curl` carrying the refusal exits `0` having done exactly what it
+    // was asked, and its body went to stdout, which wecode used to throw away. So a
+    // message that never arrived reached the terminal as the same silence a delivered
+    // one does — and the operator waits on a phone for a notification that was refused
+    // an hour ago, which is the whole thing this module is for.
+    let org = Org::new("notify-refused", "solo");
+    org.seed();
+    hooked(&org, "echo Bad Request: chat not found");
+
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("the status change still succeeds")
+        .assert_contains("⚠ notify")
+        .assert_contains("Bad Request: chat not found");
+    // Still not a verdict about the work: the task stopped for a person whether or not
+    // anything managed to tell them.
+    org.run(&["show", "cache-tests"])
+        .assert_contains("status     needs-approval");
+}
+
+#[test]
+fn a_hook_that_delivers_quietly_is_left_alone() {
+    // The control, and the reason the rule can be this weak. A notifier that got its
+    // `200` has nothing to say, and a report on every announcement would be a warning
+    // the operator learns to read past — which is how the refusal above gets missed.
+    let org = Org::new("notify-quiet-hook", "solo");
+    org.seed();
+    hooked(&org, "true");
+
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("stop it for a person")
+        .assert_lacks("⚠ notify");
+}
+
+#[test]
+fn a_hook_that_fails_is_reported_with_the_reason_it_gave_for_failing() {
+    // `exited 6` names the failure and not the cause. The cause was in the sentence the
+    // hook wrote on the way out, and answering "why did nothing tell me" from a status
+    // number alone means going and running the notifier by hand.
+    let org = Org::new("notify-why", "solo");
+    org.seed();
+    hooked(&org, "echo could not resolve api.example.invalid >&2; exit 6");
+
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("the status change still succeeds")
+        .assert_contains("exited 6")
+        // Caught on stderr as readily as on stdout: `curl` complains on one and prints
+        // the refusal it is complaining about on the other.
+        .assert_contains("could not resolve api.example.invalid");
+}
+
+#[test]
+fn a_hook_that_floods_is_quoted_by_one_line_and_does_not_stall_the_run() {
+    // Two bounds at once. A notifier's chatter must not become the record of the work —
+    // that is why it was thrown away in the first place — so however much it wrote, one
+    // line of it goes beside the wait. And it must be able to write more than a pipe
+    // holds without the run stopping to wait on it.
+    let org = Org::new("notify-loud", "solo");
+    org.seed();
+    hooked(&org, "seq 1 40000");
+
+    let r = org.run(&["status", "cache-tests", "needs-approval"]);
+    r.assert_ok("the status change still succeeds")
+        .assert_contains("said: 1")
+        .assert_lacks("39999");
+    assert!(
+        r.all().lines().count() < 20,
+        "the hook buried the run:\n{}",
+        r.all()
+    );
 }
 
 #[test]
