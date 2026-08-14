@@ -2,7 +2,8 @@
 //!
 //! Two questions, both answered without asking the agent:
 //!
-//! - **Did it stay in scope?** From `git diff`, not from a self-report.
+//! - **Did it stay in scope?** From the branch's own diff, not from a self-report — and
+//!   from all of it, including the attempts already committed on it.
 //! - **Does it pass?** By running the acceptance commands here, not by being told.
 //!
 //! That ordering is the design's own rule — the diff always wins. An agent's
@@ -16,8 +17,10 @@
 use std::path::Path;
 use std::process::Command;
 
-use wecode_core::{Measure, Scope};
+use wecode_core::{Measure, Scope, TaskId};
 use wecode_gov::glob;
+
+use crate::git;
 
 /// One acceptance command, run.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -87,6 +90,47 @@ fn is_worker_area(path: &str) -> bool {
     path.starts_with(wecode_core::WORKER_DIR)
 }
 
+/// Every path this task's work touched in `dir`, committed attempts included.
+///
+/// Not the uncommitted diff alone, which is what this used to be and what left a hole
+/// exactly one retry wide. wecode commits each attempt, pass or fail, and a retry opens
+/// with `git reset --hard`: by the time a second attempt is judged, the first one's
+/// writes are *behind* `HEAD`, where `git diff HEAD` cannot see them. So an attempt that
+/// added nothing was judged against an empty diff — and an empty diff violates no scope.
+/// A first attempt rejected for writing outside its scope passed on the retry that
+/// changed nothing, with the out-of-scope file still standing on the branch, on its way
+/// to a merge. The retry did not overturn the finding; it stopped looking.
+///
+/// The acceptance commands never had this problem — they run against the worktree, which
+/// carries the committed work whether or not anything is uncommitted. It was only the
+/// half of the verdict that reads the diff that could be emptied out this way, which is
+/// why the failure is quiet: a passing check beside a blank diff reads as a clean run.
+///
+/// Attempts are picked out by subject rather than taken wholesale. A subtask shares its
+/// parent's branch and its siblings' attempts are in the same log, each already judged
+/// against its own scope; and the base carries the predecessor work this task was cut
+/// from, which is not this task's to answer for.
+///
+/// The window is [`git::attempts_on`]'s — the newest twenty commits wecode made here —
+/// so a branch carrying more than that behind the current attempt is read from the last
+/// twenty. That is the same history `wecode show` and the handoff already read, and
+/// widening it belongs there rather than in one caller's copy of the question.
+pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Vec<String>, git::GitError> {
+    let mut all = git::changed_files(dir)?;
+    let mine = format!("{id}: attempt");
+    for (sha, subject) in git::attempts_on(dir)? {
+        if subject.starts_with(&mine) {
+            // The file list is the whole of what a scope check wants. The diff body is
+            // the handoff's business, so it is asked for at zero bytes and dropped.
+            let (files, _) = git::commit_summary(dir, &sha, 0)?;
+            all.extend(files);
+        }
+    }
+    all.sort();
+    all.dedup();
+    Ok(all)
+}
+
 /// Changed paths the scope does not permit.
 ///
 /// An empty write scope means the task claimed it would change nothing, so *any*
@@ -154,8 +198,8 @@ mod tests {
         Scope::write(globs)
     }
 
-    fn changed(paths: &[&str]) -> Vec<String> {
-        paths.iter().map(|s| (*s).to_string()).collect()
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
     }
 
     /// Acceptance with no shared cache — what a project that declares none gets.
@@ -170,10 +214,161 @@ mod tests {
         }
     }
 
+    /// A real repository, standing where a task's worktree would. git is a subprocess,
+    /// so faking it would test nothing — least of all the part that only shows up once
+    /// a commit is between the work and `HEAD`.
+    fn worktree(name: &str) -> std::path::PathBuf {
+        let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+        let dir = Path::new(&base).join(format!("wecode-verify-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let run = |args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "operator@localhost"]);
+        run(&["config", "user.name", "operator"]);
+        // Base history, by a hand other than wecode's: what the branch was cut from is
+        // never the task's answer to give.
+        write(&dir, "README.md", "the project\n");
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "the base this branch was cut from"]);
+        dir
+    }
+
+    fn write(dir: &Path, path: &str, body: &str) {
+        let full = dir.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(full, body).unwrap();
+    }
+
+    /// One finished attempt, committed exactly as `run` commits one.
+    fn attempt(dir: &Path, id: &str, n: u32, files: &[(&str, &str)]) {
+        for (path, body) in files {
+            write(dir, path, body);
+        }
+        git::commit_all(dir, &format!("{id}: attempt {n}\n\nexit 0"))
+            .unwrap()
+            .expect("the attempt changed something");
+    }
+
+    /// The retry itself: wecode resets the tree before handing it to the next agent.
+    fn retry(dir: &Path) {
+        git::reset_hard(dir).unwrap();
+    }
+
+    #[test]
+    fn a_retry_that_added_nothing_is_still_judged_on_what_the_branch_carries() {
+        // The whole point. Attempt 1 wrote outside its scope and was rejected for it;
+        // attempt 2 did nothing at all. Reading only the working tree, the second
+        // verdict saw an empty diff, found no violation in it, and passed work whose
+        // out-of-scope file was still sitting on the branch waiting to be merged.
+        let dir = worktree("retry-adds-nothing");
+        attempt(
+            &dir,
+            "t1",
+            1,
+            &[("src/a.rs", "fn a() {}\n"), ("Cargo.toml", "[package]\n")],
+        );
+        retry(&dir);
+
+        let changed = changed(&dir, &TaskId::new("t1")).unwrap();
+        assert_eq!(
+            changed,
+            vec!["Cargo.toml".to_string(), "src/a.rs".to_string()]
+        );
+        assert_eq!(
+            violations(&changed, &scope(&["src/**"])),
+            vec!["Cargo.toml".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_work_a_retry_did_add_joins_the_work_it_inherited() {
+        // Both halves, once, in one list: the retry's own uncommitted writes and the
+        // attempt underneath them. A file touched by both is one path, not two.
+        let dir = worktree("retry-adds-more");
+        attempt(
+            &dir,
+            "t1",
+            1,
+            &[("src/a.rs", "fn a() {}\n"), ("docs/note.md", "why\n")],
+        );
+        retry(&dir);
+        // One file the retry rewrote, one it added, and one it left exactly as the
+        // attempt underneath it wrote it.
+        write(&dir, "src/a.rs", "fn a() { todo!() }\n");
+        write(&dir, "src/b.rs", "fn b() {}\n");
+
+        assert_eq!(
+            changed(&dir, &TaskId::new("t1")).unwrap(),
+            vec![
+                "docs/note.md".to_string(),
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_siblings_attempts_on_a_shared_branch_are_not_this_tasks_to_answer_for() {
+        // A subtask works in its parent's tree, so the log carries its siblings'
+        // attempts. Each was judged against its own scope, and charging them here would
+        // fail every step after the first for work that was already accepted.
+        let dir = worktree("shared-branch");
+        attempt(&dir, "step-one", 1, &[("docs/one.md", "one\n")]);
+        attempt(&dir, "step-two", 1, &[("src/two.rs", "fn two() {}\n")]);
+        retry(&dir);
+
+        assert_eq!(
+            changed(&dir, &TaskId::new("step-two")).unwrap(),
+            vec!["src/two.rs".to_string()]
+        );
+        assert!(
+            violations(
+                &changed(&dir, &TaskId::new("step-two")).unwrap(),
+                &scope(&["src/**"])
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn work_that_came_with_the_base_is_not_this_tasks_work() {
+        // A branch cut from a predecessor's carries that predecessor's commits. They
+        // are not in this diff, and a task is not asked to declare a scope covering the
+        // ground it was handed.
+        let dir = worktree("base-history");
+        let changed = changed(&dir, &TaskId::new("t1")).unwrap();
+        assert!(changed.is_empty(), "{changed:?}");
+    }
+
+    #[test]
+    fn a_first_attempt_is_read_exactly_as_before() {
+        // Judging happens before the commit, so on the first run there is nothing
+        // behind HEAD and this is the plain working-tree diff it has always been.
+        let dir = worktree("first-attempt");
+        write(&dir, "src/a.rs", "fn a() {}\n");
+        assert_eq!(
+            changed(&dir, &TaskId::new("t1")).unwrap(),
+            git::changed_files(&dir).unwrap()
+        );
+    }
+
     #[test]
     fn a_change_inside_the_declared_scope_is_clean() {
         let v = violations(
-            &changed(&["crates/wecode-cli/src/main.rs"]),
+            &paths(&["crates/wecode-cli/src/main.rs"]),
             &scope(&["crates/wecode-cli/src/**"]),
         );
         assert!(v.is_empty(), "{v:?}");
@@ -184,7 +379,7 @@ mod tests {
         // The exact case this module exists for: a task scoped to the cli crate that
         // quietly edited core.
         let v = violations(
-            &changed(&[
+            &paths(&[
                 "crates/wecode-cli/src/render.rs",
                 "crates/wecode-core/src/plan.rs",
             ]),
@@ -197,7 +392,7 @@ mod tests {
     fn an_empty_scope_permits_nothing_rather_than_everything() {
         // A spike declares no write scope. One that edited files did something it
         // never said it would, so the fail-closed reading is the correct one.
-        let v = violations(&changed(&["src/a.rs"]), &Scope::default());
+        let v = violations(&paths(&["src/a.rs"]), &Scope::default());
         assert_eq!(v.len(), 1);
     }
 
@@ -206,7 +401,7 @@ mod tests {
         // The envelope tells the agent to write .wecode/run/result.json. Counting that
         // against it would fail every task for following instructions.
         let v = violations(
-            &changed(&[".wecode/run/result.json", "src/a.rs"]),
+            &paths(&[".wecode/run/result.json", "src/a.rs"]),
             &scope(&["src/**"]),
         );
         assert!(v.is_empty(), "{v:?}");
@@ -216,7 +411,7 @@ mod tests {
     fn the_playbook_itself_is_still_guarded() {
         // Only the run directory is exempt. A task quietly rewriting the guidance it
         // was given is exactly what the split of .wecode/ exists to prevent.
-        let v = violations(&changed(&[".wecode/playbook.toml"]), &scope(&["src/**"]));
+        let v = violations(&paths(&[".wecode/playbook.toml"]), &scope(&["src/**"]));
         assert_eq!(v, vec![".wecode/playbook.toml".to_string()]);
     }
 

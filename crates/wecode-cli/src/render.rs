@@ -1730,21 +1730,60 @@ fn replay(o: &crate::spawn::Outcome) -> String {
     }
 }
 
+/// The clock the run was held to, and whose clock it was.
+///
+/// Beside `took`, because the two numbers only mean anything together: a run that ended
+/// at 60s under a 60s wall was killed, and one that ended at 60s under half an hour
+/// finished. Without the second figure "killed — wall limit" sends the operator to
+/// `company.toml` to find out which limit, and half the time the answer is the task's own
+/// budget rather than anything in that file.
+///
+/// So the source is named, not just the number. A task's wall and a harness's wall are
+/// two declarations in two files with two owners, and "give it longer" means editing a
+/// different one depending on which of them bit. Silent when the run was held to nothing
+/// at all, which is what an unlimited configuration deserves to look like.
+fn held_to(task: &Task, post: &Post, l: crate::spawn::Limits) -> String {
+    let mut parts = Vec::new();
+    if let Some(wall) = l.wall {
+        // The task's when it declared this figure — including when the template happens
+        // to name the same one, since then it is both, and the task is the declaration
+        // the operator has in front of them.
+        let whose = if task.budget.wall_secs == Some(wall.as_secs()) {
+            "this task's budget".to_string()
+        } else {
+            format!("the {} template", post.agent)
+        };
+        parts.push(format!("wall {}s ({whose})", wall.as_secs()));
+    }
+    if let Some(idle) = l.idle {
+        parts.push(format!("idle {}s", idle.as_secs()));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("  limit    {}\n", parts.join(", "))
+}
+
 /// What running the agent did. Facts only — the verdict comes from `verify`.
 ///
 /// `model` is what the seat's level resolved to. Named on the line rather than left to
 /// be inferred: it is the most expensive variable in a run, and a spend figure beside a
 /// model nobody wrote down is a number with no unit.
+///
+/// `limits` is what the run was actually stopped by, passed in rather than read back off
+/// the task or the template: it is composed from both, and a report that recomputed it
+/// could disagree with the clock the process was held to.
 #[must_use]
 pub(crate) fn ran(
     task: &Task,
     post: &Post,
     model: Option<&str>,
     cwd: &std::path::Path,
+    limits: crate::spawn::Limits,
     o: &crate::spawn::Outcome,
 ) -> String {
     let mut out = format!(
-        "{} {}  {}\n  post     {} ({})\n  in       {}\n  took     {:.0}s\n  spent    {}\n  {}\n",
+        "{} {}  {}\n  post     {} ({})\n  in       {}\n  took     {:.0}s\n{}  spent    {}\n  {}\n",
         kind_tag(task.kind),
         task.id,
         task.title,
@@ -1757,6 +1796,7 @@ pub(crate) fn ran(
         },
         cwd.display(),
         o.took.as_secs_f64(),
+        held_to(task, post, limits),
         match o.spent {
             Some(n) => format!("{n} tokens, as the agent reported them{}", replay(o)),
             // Not "0": the agent's protocol says nothing wecode can read a count
@@ -2942,6 +2982,76 @@ mod tests {
         let coder = available_commands(&engineer());
         let names: Vec<&str> = coder.iter().map(|(c, _)| *c).collect();
         assert!(!names.contains(&"project add"), "{names:?}");
+    }
+
+    /// A finished run, so a test can vary the clock it was held to and nothing else.
+    fn outcome() -> crate::spawn::Outcome {
+        crate::spawn::Outcome {
+            ended: crate::spawn::Ended::Exited(0),
+            output: String::new(),
+            took: std::time::Duration::from_secs(12),
+            truncated: false,
+            spent: Some(90),
+            replayed: None,
+        }
+    }
+
+    fn seat() -> Post {
+        Post {
+            name: "impl".into(),
+            role: "engineer".into(),
+            agent: "claude-code".into(),
+            intelligence: None,
+        }
+    }
+
+    fn ran_under(wall: Option<u64>, idle: Option<u64>) -> String {
+        let plan = plan();
+        let task = plan.task(&TaskId::new("cache")).unwrap();
+        ran(
+            task,
+            &seat(),
+            None,
+            std::path::Path::new("/run/cws/cache"),
+            crate::spawn::Limits {
+                wall: wall.map(std::time::Duration::from_secs),
+                idle: idle.map(std::time::Duration::from_secs),
+            },
+            &outcome(),
+        )
+    }
+
+    #[test]
+    fn a_run_says_which_clock_it_was_held_to_and_whose_it_was() {
+        // `cache` is budgeted at 600s. Held to that figure, the report names the task —
+        // because "killed — wall limit" otherwise sends the operator to company.toml to
+        // find a limit that is not written there.
+        let out = ran_under(Some(600), Some(300));
+        assert!(
+            out.contains("limit    wall 600s (this task's budget), idle 300s"),
+            "{out}"
+        );
+
+        // Held to the harness's own instead: a different file, a different owner, and
+        // the thing to edit if this run wants longer.
+        let out = ran_under(Some(1800), Some(300));
+        assert!(
+            out.contains("limit    wall 1800s (the claude-code template)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_run_under_no_clock_at_all_says_nothing_about_one() {
+        // An unlimited configuration should look unlimited, not like a limit nobody
+        // filled in.
+        let out = ran_under(None, None);
+        assert!(!out.contains("limit"), "{out}");
+        assert!(out.contains("took     12s"), "{out}");
+
+        // And one half alone still prints, without a stray separator.
+        let out = ran_under(None, Some(300));
+        assert!(out.contains("limit    idle 300s\n"), "{out}");
     }
 
     #[test]
