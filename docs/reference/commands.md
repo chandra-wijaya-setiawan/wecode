@@ -144,6 +144,41 @@ this build opens its `wecode.db`.
 that reaches a phone can carry the thing the operator has to type back. See
 [config](config.md).
 
+**`wecode archive task <id>`** files a task away *with its subtasks*, and
+`wecode unarchive task <id>` brings the group back. A bare id — `wecode archive caching` —
+is a project, as it always was.
+
+The cascade is the point. A feature expanded into four subtasks is one piece of work and
+five rows; filing the parent alone would clear the heading and none of the clutter, and
+five ids typed by hand is why nobody would file anything. It follows *is part of* and
+nothing else: a subtask can be put away on its own, leaving the feature it belongs to on
+the board, and a task that merely comes **after** this one is not part of it and is left
+where it is.
+
+The two levels do not archive alike, which is why the level is named rather than guessed
+from the id:
+
+- **A project is parked.** `ready`, the scheduler and the overlap check all skip it, so
+  nothing in it is promoted or dispatched.
+- **A task is only hidden.** Nothing in the domain reads the flag: an archived task is
+  still promoted, still dispatched, still merged, and still competition for the files it
+  writes.
+
+So filing a task **refuses work that could still move on its own** — anything that is not
+`done`, `dropped` or `draft` — and names the rows it would have hidden. `--force`
+overrides, and the reason it needs one is that a hidden `ready` row gets dispatched with
+nothing on screen to say so. A draft needs no force: nothing dispatches a draft, so a
+mis-scoped one can be put away without first being dropped.
+
+Filing is a display decision, not a judgement about the work, so it is reversible and
+says nothing about status: `wecode archive task 4` twice reports *already archived* rather
+than failing. What it changes is the cockpit — `board` and `up` — where a filed-away group
+is one hidden row rather than four. `board --all` and the cockpit's `a` bring them back,
+greyed on the snapshot board and marked `archived` in the cockpit; naming a filed-away
+task directly (`wecode board 4`) shows its group in full, there being no `--all` at that
+level. `wecode tree`, `show` and `check` are plan listings rather than cockpit views and
+report every task whatever its filing.
+
 **`wecode brief`** is how an agent learns what it is. Run it once at the start of a
 session; everything in it is derived from the seat's grant, so it cannot promise
 authority the Broker will refuse. The bootstrap — the one thing that cannot be
@@ -256,5 +291,5 @@ before the registry existed reads as a task row anyway, since its path is still 
 wecode computes for that task.
 
 **`--all`** widens a narrowed default: `tree --all` and `board --all` include archived
-projects. Put it last — the argument parser takes the next token as a flag's value, so
-`board --all migration` loses the positional.
+projects, and `board --all` archived tasks as well. Put it last — the argument parser takes
+the next token as a flag's value, so `board --all migration` loses the positional.

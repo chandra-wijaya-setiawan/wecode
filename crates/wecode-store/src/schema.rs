@@ -15,8 +15,8 @@ use rusqlite::Connection;
 ///
 /// 2 adds `projects.archived`. 3 adds `task_executions`. 4 adds
 /// `task_executions.spent_tokens`, once something wrote it. 5 adds `worktrees`.
-/// 6 adds `inbox_cursor`. 7 adds `short_numbers`.
-pub const VERSION: i64 = 7;
+/// 6 adds `inbox_cursor`. 7 adds `short_numbers`. 8 adds `tasks.archived`.
+pub const VERSION: i64 = 8;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -39,6 +39,11 @@ CREATE TABLE tasks (
     -- hierarchy: is part of. At most one parent, hence a column.
     parent_id     TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     status        TEXT NOT NULL,
+    -- Filed away by the operator, with everything that is part of it. Display only,
+    -- and here that is the whole of it: unlike `projects.archived`, nothing in the
+    -- domain reads this, so an archived task is still dispatchable. The command that
+    -- sets it is what refuses to hide work that could still move.
+    archived      INTEGER NOT NULL DEFAULT 0,
     assignee      TEXT,               -- a [[posts]] name; checked in code
     budget_tokens INTEGER,
     budget_wall   INTEGER
@@ -361,6 +366,13 @@ const UPGRADES: &[(i64, &str)] = &[
     (4, ADD_WORKTREES),
     (5, ADD_INBOX),
     (6, ADD_SHORT_NUMBERS),
+    // Nothing backfills, and here that needs no argument either way: the default is
+    // the truth. A workspace upgrading has filed nothing away, because until now it
+    // could not.
+    (
+        7,
+        "ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+    ),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -492,6 +504,10 @@ mod tests {
             .query_row("SELECT count(*) FROM short_numbers", [], |r| r.get(0))
             .expect("short_numbers exists after 6→7");
         assert_eq!(numbered, 0, "there was nothing in the plan to number");
+        let filed: i64 = c
+            .query_row("SELECT count(archived) FROM tasks", [], |r| r.get(0))
+            .expect("tasks.archived exists after 7→8");
+        assert_eq!(filed, 0);
     }
 
     #[test]
@@ -503,8 +519,12 @@ mod tests {
         // fetch turns into an offset of 0.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("DROP TABLE inbox_cursor; DROP TABLE short_numbers;")
-            .unwrap();
+        c.execute_batch(
+            "DROP TABLE inbox_cursor;
+             DROP TABLE short_numbers;
+             ALTER TABLE tasks DROP COLUMN archived;",
+        )
+        .unwrap();
         c.pragma_update(None, "user_version", 5i64).unwrap();
 
         migrate(&c).unwrap();
@@ -522,8 +542,13 @@ mod tests {
         // put a creation date in the database that nobody observed.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("DROP TABLE worktrees; DROP TABLE inbox_cursor; DROP TABLE short_numbers;")
-            .unwrap();
+        c.execute_batch(
+            "DROP TABLE worktrees;
+             DROP TABLE inbox_cursor;
+             DROP TABLE short_numbers;
+             ALTER TABLE tasks DROP COLUMN archived;",
+        )
+        .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
              VALUES ('p','wecode','an objective','active');
@@ -552,7 +577,8 @@ mod tests {
         // need handles. Leaving them out would number only what is created next.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("DROP TABLE short_numbers").unwrap();
+        c.execute_batch("DROP TABLE short_numbers; ALTER TABLE tasks DROP COLUMN archived;")
+            .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
              VALUES ('caching','wecode','an objective','active');
@@ -586,6 +612,37 @@ mod tests {
     }
 
     #[test]
+    fn a_database_that_predates_filing_keeps_every_task_on_the_board() {
+        // The upgrade a workspace in use takes. There is nothing to backfill here and
+        // no judgement in that: until this column existed nothing could be filed away,
+        // so the default *is* the history.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("ALTER TABLE tasks DROP COLUMN archived")
+            .unwrap();
+        c.execute_batch(
+            "INSERT INTO projects (id, repo, objective, status)
+             VALUES ('caching','wecode','an objective','active');
+             INSERT INTO tasks (id, project_id, kind, title, status)
+             VALUES ('layer','caching','feature','write the cache layer','done');",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 7i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let (title, archived): (String, i64) = c
+            .query_row(
+                "SELECT title, archived FROM tasks WHERE id = 'layer'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("tasks.archived exists");
+        assert_eq!(title, "write the cache layer", "the plan survived");
+        assert_eq!(archived, 0, "a done task is not filed away on its behalf");
+    }
+
+    #[test]
     fn a_path_holds_one_live_tree_and_any_number_of_dead_ones() {
         // The partial index is what lets a directory be used again without the
         // tombstone for its last occupant standing in the way.
@@ -608,12 +665,13 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
         // Back to the shape version 3 really had: no spend column, no worktrees, no
-        // inbox cursor.
+        // inbox cursor, no numbers, nothing filed away.
         c.execute_batch(
             "ALTER TABLE task_executions DROP COLUMN spent_tokens;
              DROP TABLE worktrees;
              DROP TABLE inbox_cursor;
-             DROP TABLE short_numbers;",
+             DROP TABLE short_numbers;
+             ALTER TABLE tasks DROP COLUMN archived;",
         )
         .unwrap();
         c.execute_batch(

@@ -120,7 +120,7 @@ impl Store {
         // parents first; dependencies are attached afterwards for the same reason.
         let mut stmt = self.conn().prepare(
             "SELECT id, project_id, kind, title, parent_id, status, assignee,
-                    budget_tokens, budget_wall
+                    budget_tokens, budget_wall, archived
              FROM tasks ORDER BY (parent_id IS NOT NULL), id",
         )?;
         type Row = (
@@ -133,6 +133,7 @@ impl Store {
             Option<String>,
             Option<i64>,
             Option<i64>,
+            i64,
         );
         let rows: Vec<Row> = stmt
             .query_map([], |r| {
@@ -146,11 +147,12 @@ impl Store {
                     r.get(6)?,
                     r.get(7)?,
                     r.get(8)?,
+                    r.get(9)?,
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
 
-        for (id, project, kind, title, parent, status, assignee, tokens, wall) in rows {
+        for (id, project, kind, title, parent, status, assignee, tokens, wall, archived) in rows {
             let mut t = Task::new(TaskId::new(&id), ProjectId::new(&project), title);
             t.number = task_numbers.get(&id).copied();
             t.kind = TaskKind::parse(&kind).ok_or_else(|| StoreError::Corrupt {
@@ -167,6 +169,7 @@ impl Store {
                 tokens: crate::int::opt_from_db(tokens, "budget tokens")?,
                 wall_secs: crate::int::opt_from_db(wall, "budget wall")?,
             };
+            t.archived = archived != 0;
             t.acceptance = self.measures(&MeasureTable::Task, &id)?;
             t.scope = self.scope(&id)?;
             plan.add_task(t).map_err(structural)?;
@@ -315,11 +318,12 @@ impl Store {
         let c = self.conn();
         c.execute(
             "INSERT INTO tasks (id, project_id, kind, title, parent_id, status, assignee,
-                                budget_tokens, budget_wall)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                                budget_tokens, budget_wall, archived)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 project_id = ?2, kind = ?3, title = ?4, parent_id = ?5,
-                status = ?6, assignee = ?7, budget_tokens = ?8, budget_wall = ?9",
+                status = ?6, assignee = ?7, budget_tokens = ?8, budget_wall = ?9,
+                archived = ?10",
             params![
                 t.id.as_str(),
                 t.project.as_str(),
@@ -330,6 +334,7 @@ impl Store {
                 t.assignee,
                 crate::int::opt_to_db(t.budget.tokens),
                 crate::int::opt_to_db(t.budget.wall_secs),
+                i64::from(t.archived),
             ],
         )?;
         self.replace_measures(&MeasureTable::Task, t.id.as_str(), &t.acceptance)?;
@@ -477,6 +482,48 @@ impl Store {
             c.execute(sql, [id.as_str()])?;
         }
         Ok(())
+    }
+
+    /// Files a task away with everything that is part of it, or brings the group back.
+    /// Returns the ids whose flag actually changed, in id order.
+    ///
+    /// The cascade is one query rather than a walk in the caller, so no subtask can be
+    /// left behind by a plan that was read a moment earlier — the same reason
+    /// `delete_task` does its own clearing up. It follows `parent_id` only: hiding
+    /// everything that merely comes *after* this task is a different claim, and one
+    /// nobody asked for.
+    ///
+    /// `UNION`, not `UNION ALL`. `Plan` refuses a parent loop, but `foreign_keys` is
+    /// per-connection and anyone can open wecode.db with the sqlite3 CLI, so a loop is
+    /// reachable — and the difference between the two keywords there is termination.
+    pub fn set_task_archived(
+        &self,
+        id: &TaskId,
+        archived: bool,
+    ) -> Result<Vec<TaskId>, StoreError> {
+        let c = self.conn();
+        let mut stmt = c.prepare(
+            "WITH RECURSIVE part_of(id) AS (
+                 SELECT id FROM tasks WHERE id = ?1
+                 UNION
+                 SELECT t.id FROM tasks t JOIN part_of ON t.parent_id = part_of.id
+             )
+             SELECT t.id FROM tasks t JOIN part_of ON t.id = part_of.id
+             WHERE t.archived <> ?2 ORDER BY t.id",
+        )?;
+        let changed: Vec<TaskId> = stmt
+            .query_map(params![id.as_str(), i64::from(archived)], |r| {
+                r.get::<_, String>(0).map(TaskId::new)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        for t in &changed {
+            c.execute(
+                "UPDATE tasks SET archived = ?2 WHERE id = ?1",
+                params![t.as_str(), i64::from(archived)],
+            )?;
+        }
+        Ok(changed)
     }
 
     /// Files a project away, or brings it back. Separate from status on purpose:
@@ -633,6 +680,114 @@ mod tests {
         assert_eq!(
             s.load_plan().unwrap().task(&"cache-layer".into()),
             Some(&expected)
+        );
+    }
+
+    #[test]
+    fn filing_a_task_away_takes_everything_that_is_part_of_it() {
+        // The whole point of the cascade: an expansion is one piece of work and several
+        // rows, so filing the parent and leaving the children clears the heading and
+        // none of the clutter.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("layer")).unwrap();
+        s.save_task(&task("keys").under("layer")).unwrap();
+        s.save_task(&task("salt").under("keys")).unwrap();
+        // A sibling of the group, to prove the cascade stops where the hierarchy does.
+        s.save_task(&task("bench").after("layer")).unwrap();
+
+        let changed = s.set_task_archived(&"layer".into(), true).unwrap();
+        assert_eq!(
+            changed,
+            vec![
+                TaskId::new("keys"),
+                TaskId::new("layer"),
+                TaskId::new("salt")
+            ],
+            "the group, however deep, and only the group"
+        );
+
+        let plan = s.load_plan().unwrap();
+        for id in ["layer", "keys", "salt"] {
+            assert!(!plan.task(&id.into()).unwrap().is_visible(), "{id}");
+        }
+        assert!(
+            plan.task(&"bench".into()).unwrap().is_visible(),
+            "a dependent is not part of the task it waits on"
+        );
+    }
+
+    #[test]
+    fn filing_is_reversible_and_says_when_there_was_nothing_to_do() {
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("layer")).unwrap();
+        s.save_task(&task("keys").under("layer")).unwrap();
+
+        assert_eq!(s.set_task_archived(&"layer".into(), true).unwrap().len(), 2);
+        // Idempotent, and distinguishably so: an empty list is how the caller knows to
+        // say "already filed away" rather than reporting work it did not do.
+        assert!(
+            s.set_task_archived(&"layer".into(), true)
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(
+            s.set_task_archived(&"layer".into(), false).unwrap().len(),
+            2
+        );
+        let plan = s.load_plan().unwrap();
+        assert!(plan.task(&"layer".into()).unwrap().is_visible());
+        assert!(plan.task(&"keys".into()).unwrap().is_visible());
+    }
+
+    #[test]
+    fn filing_a_subtask_leaves_its_parent_on_the_board() {
+        // Filing reaches down, never up: a finished step of a live feature can be put
+        // away without the feature going with it.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("layer")).unwrap();
+        s.save_task(&task("keys").under("layer")).unwrap();
+
+        assert_eq!(
+            s.set_task_archived(&"keys".into(), true).unwrap(),
+            vec![TaskId::new("keys")]
+        );
+        let plan = s.load_plan().unwrap();
+        assert!(plan.task(&"layer".into()).unwrap().is_visible());
+        assert!(!plan.task(&"keys".into()).unwrap().is_visible());
+    }
+
+    #[test]
+    fn filing_survives_a_round_trip_and_leaves_status_alone() {
+        // The two properties are independent in both directions, as on a project.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        let mut t = task("layer");
+        t.archived = true;
+        t.status = TaskStatus::Ready;
+        s.save_task(&t).unwrap();
+
+        let got = s
+            .load_plan()
+            .unwrap()
+            .task(&"layer".into())
+            .unwrap()
+            .clone();
+        assert!(got.archived);
+        assert_eq!(got.status, TaskStatus::Ready, "status untouched");
+
+        // And a later save — which every status change is — does not un-file it.
+        s.set_task_status(&"layer".into(), TaskStatus::Done)
+            .unwrap();
+        assert!(
+            s.load_plan()
+                .unwrap()
+                .task(&"layer".into())
+                .unwrap()
+                .archived
         );
     }
 

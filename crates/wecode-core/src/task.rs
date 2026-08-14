@@ -114,6 +114,16 @@ pub struct Task {
     /// The post doing it, once assigned.
     pub assignee: Option<String>,
     pub status: TaskStatus,
+    /// Whether the operator has filed this away. Orthogonal to `status`, as on a
+    /// project: a `done` task can stay on the board, and a `draft` one can be hidden.
+    ///
+    /// Weaker than a project's flag, deliberately. Archiving a project *parks* it —
+    /// `Plan::ready_tasks`, the scheduler and the overlap check all skip it — whereas
+    /// this only hides: an archived task is still promoted, still dispatched, still
+    /// competition for the files it writes. Nothing in the domain reads it, which is
+    /// why the command that sets it refuses to file away work that could still move on
+    /// its own. Filing is for work that is finished with, not for parking.
+    pub archived: bool,
 }
 
 impl Task {
@@ -135,6 +145,7 @@ impl Task {
             budget: Budget::default(),
             assignee: None,
             status: TaskStatus::Draft,
+            archived: false,
         }
     }
 
@@ -186,6 +197,14 @@ impl Task {
     #[must_use]
     pub fn has_executable_acceptance(&self) -> bool {
         self.acceptance.iter().any(Measure::is_executable)
+    }
+
+    /// Whether the cockpit should show this. A method rather than reading the field, so
+    /// the rule has one home if it ever grows past the flag — `Project::is_visible`
+    /// exists for the same reason.
+    #[must_use]
+    pub fn is_visible(&self) -> bool {
+        !self.archived
     }
 }
 
@@ -250,5 +269,21 @@ mod tests {
         assert!(t.depends_on.is_empty());
         assert!(t.assignee.is_none());
         assert!(!t.has_executable_acceptance());
+        assert!(t.is_visible(), "nothing is filed away to begin with");
+    }
+
+    #[test]
+    fn filing_a_task_away_says_nothing_about_its_status() {
+        // The two must not be inferable from each other in either direction: a done
+        // task can stay on the board, and an unfinished one can be hidden — which is
+        // why the command, not the model, is what guards against hiding live work.
+        let mut t = Task::new("t", "p", "x");
+        t.status = TaskStatus::Done;
+        assert!(t.is_visible(), "finished is not filed away");
+
+        t.archived = true;
+        t.status = TaskStatus::Running;
+        assert!(!t.is_visible());
+        assert_eq!(t.status, TaskStatus::Running, "filing did not move it");
     }
 }
