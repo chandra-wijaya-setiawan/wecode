@@ -35,7 +35,7 @@ language = "rust"
 worktree  = true
 assign_to = "impl"
 accept    = ["cargo test --workspace", "cargo clippy --all-targets -- -D warnings"]
-tokens    = 120000
+tokens    = 1200000
 wall_secs = 5400
 guidance  = """
 One main task per behaviour that changes. Subtasks only when the work spans crates —
@@ -95,7 +95,7 @@ the option of reordering.
 worktree  = true
 assign_to = "impl"
 accept    = ["cargo test --workspace"]
-tokens    = 60000
+tokens    = 600000
 wall_secs = 2700
 guidance  = """
 Reproduce first.
@@ -138,7 +138,7 @@ which is why it is the right shape for "find out why".
 worktree  = true
 assign_to = "impl"
 accept    = ["cargo test --workspace", "cargo clippy --all-targets -- -D warnings"]
-tokens    = 90000
+tokens    = 900000
 wall_secs = 3600
 guidance  = """
 Behaviour must not change, so the acceptance is the existing suite passing unchanged.
@@ -154,7 +154,7 @@ Renaming a public item is a refactor; changing what it returns is not.
 worktree  = true
 assign_to = "impl"
 accept    = ["cargo test --workspace"]
-tokens    = 40000
+tokens    = 400000
 wall_secs = 1800
 guidance  = """
 Dependency bumps, config, tooling, gitignore. No behaviour change intended, but
@@ -168,7 +168,7 @@ hides both.
 worktree  = false
 assign_to = "impl"
 accept    = ["test -f docs/theory.md"]
-tokens    = 30000
+tokens    = 300000
 wall_secs = 1800
 guidance  = """
 Answers a question; changes no code. Needs no write scope, which is the one
@@ -184,7 +184,7 @@ Time-box it. A spike that turns into an implementation should have been a featur
 [design]
 worktree  = false
 assign_to = "impl"
-tokens    = 40000
+tokens    = 400000
 wall_secs = 1800
 # No default acceptance: it wants the task id in the path, and nothing substitutes one
 # until `--expand` lands. Pass --accept-cmd "test -f docs/wecode/<task>/design.md".
@@ -203,7 +203,7 @@ the opposite today, so reversing a decision is deliberate rather than accidental
 worktree  = false
 assign_to = "impl"
 accept    = ["test -f docs/README.md"]
-tokens    = 30000
+tokens    = 300000
 wall_secs = 1800
 guidance  = """
 Single task. No subtasks, no worktree — prose does not conflict the way code does,
