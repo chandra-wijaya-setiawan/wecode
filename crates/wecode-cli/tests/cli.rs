@@ -5200,13 +5200,18 @@ fn merging_twice_is_refused_rather_than_silently_doing_nothing() {
 /// with the task in its environment, and `notify-send` would prove the same thing
 /// only on a machine with a desktop on it.
 fn notified(org: &Org, body: &str) -> PathBuf {
+    notified_with(org, body, "")
+}
+
+/// The same, with `extra` lines added to the `[notify]` block.
+fn notified_with(org: &Org, body: &str, extra: &str) -> PathBuf {
     let log = org.path("notified.txt");
     let conf = org.path("company.toml");
     let text = std::fs::read_to_string(&conf).unwrap();
     std::fs::write(
         &conf,
         format!(
-            "{text}\n[notify]\ncommand = \"{body} >> {}\"\ntimeout = \"30s\"\n",
+            "{text}\n[notify]\ncommand = \"{body} >> {}\"\ntimeout = \"30s\"\n{extra}",
             log.display()
         ),
     )
@@ -5306,6 +5311,72 @@ fn a_run_that_ends_in_front_of_a_person_announces_it() {
         .assert_ok("run")
         .assert_contains("passed");
     assert_eq!(announcements(&log), vec!["t approval"]);
+}
+
+#[test]
+fn the_message_carries_what_the_run_produced() {
+    // The other half of answering from a phone. `t approval` says you are wanted; it
+    // does not say what for, and deciding whether to sign meant opening a terminal to
+    // look at the diff — which is the trip the hook exists to save. So the paths go
+    // out with it, read out of git rather than taken from the agent's word for it.
+    let (org, _) = with_agent("notify-made", "echo done >> a.txt");
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+    let log = notified(
+        &org,
+        "echo $WECODE_CHANGED_COUNT $WECODE_CHANGED_FILES $WECODE_WORKTREE",
+    );
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed");
+    let said = announcements(&log);
+    assert_eq!(said.len(), 1, "one wait, one announcement: {said:?}");
+    let mut parts = said[0].split_whitespace();
+    assert_eq!(parts.next(), Some("1"), "one path changed: {said:?}");
+    assert_eq!(parts.next(), Some("a.txt"), "and it is named: {said:?}");
+    // The tree itself, so a hook wanting the diff rather than the names can ask git
+    // for it. It is the work's own worktree, not the workspace or the repository.
+    let tree = PathBuf::from(parts.next().expect("the tree: {said:?}"));
+    assert!(tree.join("a.txt").is_file(), "not the worktree: {said:?}");
+    assert_eq!(parts.next(), None, "nothing else on the line: {said:?}");
+}
+
+#[test]
+fn the_names_are_capped_where_the_operator_says_and_the_count_never_is() {
+    // Why the count is its own variable. The bound is on what an environment should
+    // carry to a channel with one line in it; a message that answered "how much
+    // changed" with the bound would be the notification agreeing with itself instead
+    // of with the diff.
+    let (org, _) = with_agent("notify-capped", "echo done >> a.txt; echo done >> b.txt");
+    a_task(&org, "t", "*.txt", "grep -q done b.txt");
+    let log = notified_with(
+        &org,
+        "echo $WECODE_CHANGED_COUNT $WECODE_CHANGED_FILES",
+        "max_files = 1\n",
+    );
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed");
+    assert_eq!(announcements(&log), vec!["2 a.txt"]);
+}
+
+#[test]
+fn a_wait_for_permission_to_start_has_nothing_to_show_yet() {
+    // `signature` is the one wait that comes before any work, and empty is what says
+    // so. Reporting `0` here would have the notification describing an empty diff
+    // that nothing produced.
+    let org = signs_first("notify-unmade", "echo done >> src/app.txt");
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+    let log = notified(
+        &org,
+        "echo $WECODE_WAITING_FOR [$WECODE_CHANGED_COUNT] [$WECODE_WORKTREE]",
+    );
+
+    org.run(&["loop", "--once"])
+        .assert_ok("one pass")
+        .assert_contains("⏸ t needs your signature");
+    assert_eq!(announcements(&log), vec!["signature [] []"]);
 }
 
 #[test]

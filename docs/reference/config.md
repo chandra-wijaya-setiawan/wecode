@@ -178,6 +178,9 @@ default, nothing is run and waits are silent.
 | `WECODE_PROJECT` | the project it belongs to |
 | `WECODE_COMPANY` | `[company] name` |
 | `WECODE_ORG` | the workspace, so the hook can call `wecode` back |
+| `WECODE_CHANGED_COUNT` | how many paths the task changed |
+| `WECODE_CHANGED_FILES` | those paths, one per line, at most `max_files` of them |
+| `WECODE_WORKTREE` | the tree the work is in |
 
 `WECODE_WAITING_FOR` is the one to branch on. `signature` is the dispatch gate holding a
 task that is otherwise `ready`, which no status can express — the other three restate
@@ -189,10 +192,36 @@ characters where `cache-warm-on-deploy` is twenty spelled exactly. The variable 
 digits alone so the hook decides how to write them — a hook that wants the sigil writes
 `#$WECODE_TASK_NUMBER`, and one that wants a bare number cannot portably strip one.
 
+**Say what it produced.** A message that only names the task answers *you are wanted* and
+not *for what*, and deciding whether to sign a diff then means opening a terminal to look
+at it — which is the trip the hook exists to save. The three artifact variables are the
+diff in the message: a desktop line has room for `$WECODE_CHANGED_COUNT files`, a chat
+message has room for the names under it, and a script that wants the diff itself is
+handed `$WECODE_WORKTREE` and can ask git anything.
+
 ```toml
 [notify]
-command = "notify-send 'wecode' \"#$WECODE_TASK_NUMBER $WECODE_TASK: $WECODE_WAITING_FOR\""
+command = "notify-send 'wecode' \"#$WECODE_TASK_NUMBER $WECODE_TASK: $WECODE_WAITING_FOR, $WECODE_CHANGED_COUNT files\""
+max_files = 20                    # names handed over; the count is never capped
 ```
+
+They are read out of git, never taken from the agent's report — the same rule the verdict
+is judged under, and for the same reason: a diff is ground truth where a self-report is a
+claim, and a notification carrying a claim is one more thing to go and check. It is the
+uncommitted diff, which is exactly the one `wecode verify` judged, because an attempt is
+committed only after the verdict.
+
+`max_files` (default `20`) bounds the **names** and never the count, so a hook handed ten
+paths of forty can still say forty. `0` is legal and means the count alone. The bound
+exists because an environment is not the place to put a thousand paths, and it is yours
+to set because the channel is: a desktop notification has a line where a log file has room
+for everything.
+
+All three are **empty** when there is nothing yet to show — no worktree, because the task
+has not started. That is the ordinary case for `signature`, which is a wait for permission
+to begin. Empty rather than `0`: *has written nothing* and *has not run* are different
+things to be woken up for, and a hook that reported the second as the first would be
+describing an empty diff nobody produced.
 
 The line runs through `sh -c`, in the workspace, with your environment: it is your own
 command, and a desktop notifier needs the session it was configured in. The task is
