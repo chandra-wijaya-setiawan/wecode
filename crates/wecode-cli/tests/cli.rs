@@ -3669,6 +3669,33 @@ fn an_overspending_agent_turns_its_row_red_after_the_fact() {
 }
 
 #[test]
+fn a_conversation_is_not_billed_for_the_context_it_re_read() {
+    // The budget is a number a person wrote — 100 tokens for this task — and the
+    // agent added 90. It also replayed half a million tokens of its own context,
+    // which is what a long conversation does every turn and what no budget is
+    // written in. Counted into the spend, this run is 5,000x over and the board is
+    // red for every task that ever ran; kept in its own unit, the row is honest and
+    // the replay is still on the screen.
+    let (org, _) = with_agent(
+        "run-cached",
+        "echo done >> a.txt; echo '{\"type\":\"result\",\"usage\":\
+         {\"input_tokens\":60,\"output_tokens\":30,\
+         \"cache_read_input_tokens\":500000}}'",
+    );
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("spent    90 tokens")
+        .assert_contains("500000 re-read from cache");
+
+    org.run(&["board", "caching"])
+        .assert_ok("board")
+        .assert_contains("90/100")
+        .assert_lacks("over budget");
+}
+
+#[test]
 fn a_run_killed_on_its_limit_still_reports_what_it_burned() {
     // The case a spend recorded only on success would hide, and the expensive one:
     // an agent that ran away with the budget and had to be killed.

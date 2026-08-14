@@ -108,6 +108,14 @@ the budget you declared. Over budget turns the row red, after the fact: the toke
 gone before anyone hears about them, and the wall limit is the control that stops a run
 mid-flight.
 
+Both numbers are tokens the run *added* — its prompts, its cache writes, its output.
+Context an agent re-read from its cache is not counted against the budget, because a
+long conversation replays the same context every turn and the total runs to millions
+where the work runs to thousands. Pick the budget by thinking about how much work the
+task is; that is the scale it is checked in. `wecode run` prints the replayed figure
+beside the spend, so nothing is being hidden — it is just not the number the budget is
+about.
+
 A cell still reading `0` after a run means the agent reported no token count, not that
 it was free. `wecode show <task>` has the per-attempt column and says which, and
 [config.md](../reference/config.md) lists the `protocol` values wecode can read a count

@@ -1665,6 +1665,21 @@ pub(crate) fn rolled_back(task: &Task, target: &str, merge: &str, revert: &str) 
     out
 }
 
+/// The cached context a run re-read, said beside what it spent.
+///
+/// Not added to it: those tokens are counted when they are written, and a long
+/// conversation replays them once per turn — the figure runs to millions where the
+/// spend runs to thousands, which is why a budget is not written in it. Saying it
+/// here is what keeps that decision from hiding real money, since cache reads are
+/// billed, at a tenth of the rate. Silent when there were none, so a short run's
+/// line stays a short line.
+fn replay(o: &crate::spawn::Outcome) -> String {
+    match o.replayed {
+        Some(n) if n > 0 => format!(" (+{n} re-read from cache, not budgeted)"),
+        _ => String::new(),
+    }
+}
+
 /// What running the agent did. Facts only — the verdict comes from `verify`.
 #[must_use]
 pub(crate) fn ran(
@@ -1683,7 +1698,7 @@ pub(crate) fn ran(
         cwd.display(),
         o.took.as_secs_f64(),
         match o.spent {
-            Some(n) => format!("{n} tokens, as the agent reported them"),
+            Some(n) => format!("{n} tokens, as the agent reported them{}", replay(o)),
             // Not "0": the agent's protocol says nothing wecode can read a count
             // out of, and a budget cannot be checked against a number nobody has.
             None => "unmetered — this agent reports no token usage".to_string(),

@@ -207,6 +207,21 @@ Counting happens as the output streams past, not afterwards: the buffer is cappe
 exactly the ones a read-it-at-the-end approach would lose. The cost is recorded however
 the run ended — a killed agent still burned what it burned.
 
+**Spend is counted in the unit budgets are written in**, which is tokens the run *added*
+— what it sent, what it wrote to the cache, and everything the model produced. Context
+re-read out of the cache is not in that number. Those tokens were counted once already,
+on the turn that wrote them, and a conversation replays its whole context on every turn
+after: the replay grows with turns *times* context while the work grows with the
+conversation. Nobody estimates a task in the first scale. Judged against it, a 120k
+budget was blown before the agent had written a line, every row on the board was red,
+and a genuine overrun looked exactly like a cheap run — which is how this was found, by
+running wecode on itself.
+
+The replay is not hidden, because cache reads are billed, at a tenth of the rate. It is
+reported beside the spend on the `wecode run` line — `spent 163400 tokens, as the agent
+reported them (+4812000 re-read from cache, not budgeted)` — where a long conversation's
+cost is visible without a budget having to be denominated in it.
+
 ## Watching
 
 | | |
