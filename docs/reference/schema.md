@@ -76,7 +76,8 @@ CREATE TABLE projects (
     budget_tokens INTEGER,
     budget_wall   INTEGER,
     -- Filed away by the operator. STRICT tables have no BOOLEAN, hence INTEGER.
-    -- Display only: archiving never changes what is dispatchable.
+    -- Parks the project: hidden, never promoted or dispatched, and not counted as
+    -- competition for files by the admission gate. All of it reverses on unarchive.
     archived      INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 

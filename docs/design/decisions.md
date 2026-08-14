@@ -50,6 +50,25 @@ by its parent, and a predecessor is not a parent; conflating them is the classic
 modelling error here. Each earns its keep: `parent` decides which worktree you work in,
 `depends_on` decides when you may start and what your handoff contains.
 
+## The repository is the resource, not the project
+
+A project owns exactly one repo — a project spanning two codebases is two projects — and
+it is tempting to read that backwards, as though a repo belonged to a project. It does
+not. A codebase being worked on from more than one angle is the ordinary reason to start
+a second project, and both then check out the same files.
+
+So every question about *competing for files* is asked per repository. Scope overlap is
+the one that had it wrong: it scanned a project's own tasks, and two projects on one repo
+each admitted a task claiming the same paths, with nothing saying no until two worktrees
+came back having changed the same lines. Both had been paid for by then, and at most one
+could merge.
+
+The same shape holds for the exemptions, which is how you can tell the rule is the right
+one: a closed task's scope is history, an archived project dispatches nothing, and a
+dependency in either direction sequences the two — none of those care which project
+either task sits in, and `depends_on` deliberately does not stop at the boundary the way
+`parent` does.
+
 ## Regimented or sanctioned, split by reversibility
 
 Not by severity. An irreversible action — a merge to a protected branch, a forbidden

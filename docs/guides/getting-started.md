@@ -52,8 +52,11 @@ wecode task add cache --project api "add a response cache to the export endpoint
 
 Expect to be refused at least once. The gate asks a fixed question for each defect: a
 title naming two outcomes, a word like *faster*, missing acceptance, missing scope,
-missing budget, a scope that overlaps a task which could run at the same time. Answer
-it, or pass `--force` and the defects are recorded as waivers.
+missing budget, a scope that overlaps a task which could run at the same time. That last
+one looks across projects: a repo can carry several, and two of them claiming the same
+paths is two worktrees changing the same lines. Answer it — narrow the scope, or add
+`--after <task>`, which may name a task in another project — or pass `--force` and the
+defects are recorded as waivers.
 
 ## 5. Teach the project how it works
 
