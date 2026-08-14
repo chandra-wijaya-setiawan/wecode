@@ -54,6 +54,14 @@ Three things people conflate, kept apart:
 A **user** is a person named against a post. Authority lives on the *role*, so naming a
 user adds accountability rather than power. A post with no user is an agent-only seat.
 
+A post also says how clever its occupant should be — `intelligence`, 1 to 10 — and that
+sits on the post rather than the role for the same reason `agent` does. A role is what a
+seat *may do*; intelligence is a property of who is in it, and two seats with the same
+authority and different models is a shape the chart has to be able to express. The
+number is matched against the harness's own list of models, weakest first, so what is
+declared is an *ordering* and not a name that goes stale. See
+[reference/config.md](reference/config.md).
+
 The **chief** post is special in one way: it may not write files or run commands, and
 loading a company whose chief can is a validation error. An agent that can both set the
 criteria and satisfy them is not governed.

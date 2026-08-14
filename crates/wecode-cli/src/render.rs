@@ -10,7 +10,7 @@ use wecode_core::{
     Admission, Blocker, Defect, Plan, Project, ProjectId, Task, TaskId, TaskKind, TaskStatus,
 };
 use wecode_gov::{Action, ControlMode, Decision, Grant, Invariant, WorkKind};
-use wecode_org::{Company, Post};
+use wecode_org::{Company, Intelligence, Post};
 use wecode_org::{Gap, Playbook};
 use wecode_store::{AuditLine, SessionInfo};
 
@@ -1681,10 +1681,15 @@ fn replay(o: &crate::spawn::Outcome) -> String {
 }
 
 /// What running the agent did. Facts only — the verdict comes from `verify`.
+///
+/// `model` is what the seat's level resolved to. Named on the line rather than left to
+/// be inferred: it is the most expensive variable in a run, and a spend figure beside a
+/// model nobody wrote down is a number with no unit.
 #[must_use]
 pub(crate) fn ran(
     task: &Task,
     post: &Post,
+    model: Option<&str>,
     cwd: &std::path::Path,
     o: &crate::spawn::Outcome,
 ) -> String {
@@ -1694,7 +1699,12 @@ pub(crate) fn ran(
         task.id,
         task.title,
         post.name,
-        post.agent,
+        match (model, post.intelligence) {
+            (Some(m), Some(i)) => format!("{}, {m} at {i}", post.agent),
+            // A harness left to its own default. Said as such, because "claude" alone
+            // reads as a complete answer to the question of what ran.
+            _ => format!("{}, its own default model", post.agent),
+        },
         cwd.display(),
         o.took.as_secs_f64(),
         match o.spent {
@@ -1900,8 +1910,8 @@ pub(crate) fn company(c: &Company) -> String {
 
     out.push_str("\nposts\n");
     out.push_str(&format!(
-        "  {:<10} {:<11} {:<14} {}\n",
-        "post", "role", "agent", "writes"
+        "  {:<10} {:<11} {:<14} {:<18} {}\n",
+        "post", "role", "agent", "model", "writes"
     ));
     for p in &c.posts {
         let writes = match c.grant_of(p) {
@@ -1909,10 +1919,36 @@ pub(crate) fn company(c: &Company) -> String {
             Some(g) => g.write.join(", "),
             None => "?? unknown role".to_string(),
         };
+        // The level *and* what it resolved to. Either alone is half the answer: the
+        // number is what the file says, the name is what will actually be launched, and
+        // the whole point of the level is that the name is not written down anywhere.
+        let model = match (c.model_for(p), c.intelligence_of(p)) {
+            (Some(m), Some(i)) => format!("{m} ({i})"),
+            _ => "— harness default".to_string(),
+        };
         out.push_str(&format!(
-            "  {:<10} {:<11} {:<14} {}\n",
-            p.name, p.role, p.agent, writes
+            "  {:<10} {:<11} {:<14} {:<18} {}\n",
+            p.name, p.role, p.agent, model, writes
         ));
+    }
+    // The catalogue the numbers above are matched against, weakest first, with the
+    // level each answers up to. Without it the column reads as a model chosen by magic.
+    let ranked: Vec<_> = c
+        .agents
+        .iter()
+        .filter(|(_, a)| !a.models.is_empty())
+        .collect();
+    if !ranked.is_empty() {
+        out.push_str("\nmodels, weakest first\n");
+        for (name, a) in ranked {
+            let scale: Vec<String> = a
+                .models
+                .iter()
+                .enumerate()
+                .map(|(i, m)| format!("{m} ≤{}", Intelligence::of_rank(i, a.models.len())))
+                .collect();
+            out.push_str(&format!("  {:<14} {}\n", name, scale.join(", ")));
+        }
     }
 
     if let Some(chief) = c.chief() {
@@ -1978,6 +2014,15 @@ pub(crate) fn company(c: &Company) -> String {
     out.push_str("\ninvariants (outrank every grant above)\n");
     for inv in &c.charter.invariants {
         out.push_str(&format!("  {}\n", invariant_line(inv)));
+    }
+    // Listed with the others, though it is not a `Charter` invariant: it is checked at
+    // load rather than judged per action, and an operator reading this block wants the
+    // whole ceiling and not the part that happens to be enforced at run time.
+    if let Some(cap) = c.max_intelligence {
+        // Spelled in full rather than padded to the column the others share: this one
+        // is the name of a key somebody has to find in a file, and an abbreviation that
+        // aligned prettily would be a worse thing to search for.
+        out.push_str(&format!("  max intelligence {cap}\n"));
     }
     out
 }
@@ -2191,6 +2236,62 @@ mod tests {
     use super::*;
     use wecode_core::{Budget, Measure, Scope, admission};
     use wecode_gov::{Broker, Charter, Effective, Grant, Invariant, Session};
+
+    /// A company whose one seat is staffed at `level`, with whatever ceiling is passed.
+    fn levelled(level: &str, ceiling: &str) -> Company {
+        Company::parse(&format!(
+            "[company]\nname = \"cws\"\n{ceiling}\n\
+             [roles.engineer]\nwrite = [\"src/**\"]\n\n\
+             [agents.claude-code]\ncommand = \"claude\"\n\
+             models = [\"haiku\", \"sonnet\", \"opus\", \"fable\"]\n\n\
+             [[posts]]\nname = \"impl\"\nrole = \"engineer\"\nagent = \"claude-code\"\n\
+             intelligence = {level}\n"
+        ))
+        .expect("parses")
+    }
+
+    #[test]
+    fn a_seat_names_the_model_its_level_resolved_to() {
+        // Both halves: the number is what the file says, the name is what will be
+        // launched, and a column with only one of them answers half the question.
+        let out = company(&levelled("7.5", ""));
+        assert!(out.contains("opus (7.5)"), "{out}");
+        // The catalogue it was matched against, so the column is not magic.
+        assert!(
+            out.contains("haiku ≤2.5, sonnet ≤5, opus ≤7.5, fable ≤10"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("max intelligence"),
+            "no ceiling was declared: {out}"
+        );
+    }
+
+    #[test]
+    fn a_declared_ceiling_is_listed_with_the_invariants_it_belongs_to() {
+        // It is not a `Charter` invariant — it is checked at load rather than judged
+        // per action — but an operator reading this block wants the whole ceiling.
+        let out = company(&levelled("5", "[invariants]\nmax_intelligence = 5\n"));
+        assert!(out.contains("max intelligence 5"), "{out}");
+        assert!(out.contains("sonnet (5)"), "{out}");
+    }
+
+    #[test]
+    fn a_seat_with_no_level_says_so_rather_than_leaving_the_column_blank() {
+        // "claude" alone reads as a complete answer to what ran. It is not one.
+        let c = Company::parse(
+            "[company]\nname = \"cws\"\n\n[roles.engineer]\nwrite = [\"src/**\"]\n\n\
+             [agents.claude-code]\ncommand = \"claude\"\n\n\
+             [[posts]]\nname = \"impl\"\nrole = \"engineer\"\nagent = \"claude-code\"\n",
+        )
+        .expect("parses");
+        let out = company(&c);
+        assert!(out.contains("harness default"), "{out}");
+        assert!(
+            !out.contains("models, weakest first"),
+            "nothing to list: {out}"
+        );
+    }
 
     fn plan() -> Plan {
         let mut p = Plan::new();

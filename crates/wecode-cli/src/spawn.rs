@@ -132,13 +132,28 @@ pub(crate) fn allowed_tools(grant: &wecode_gov::Grant) -> String {
     out.join(",")
 }
 
-pub(crate) fn argv(t: &AgentTemplate, prompt: &str, tools: &str) -> Vec<String> {
+/// `model` is the one the seat's level resolved to, and `None` leaves the harness to
+/// its own default — see [`wecode_org::Company::model_for`].
+///
+/// It is appended rather than substituted into a placeholder, and the two halves travel
+/// together: an operator who had written `--model {{model}}` in `args` would, on a seat
+/// with no level, be launching a flag with nothing behind it.
+pub(crate) fn argv(
+    t: &AgentTemplate,
+    prompt: &str,
+    tools: &str,
+    model: Option<&str>,
+) -> Vec<String> {
     let mut out = vec![t.command.clone()];
     out.extend(
         t.args
             .iter()
             .map(|a| a.replace("{{prompt}}", prompt).replace("{{tools}}", tools)),
     );
+    if let Some(m) = model {
+        out.push(t.model_flag.clone());
+        out.push(m.to_string());
+    }
     out
 }
 
@@ -152,11 +167,12 @@ pub(crate) fn run(
     t: &AgentTemplate,
     prompt: &str,
     tools: &str,
+    model: Option<&str>,
     cwd: &Path,
     env: &[(String, std::path::PathBuf)],
     limits: Limits,
 ) -> std::io::Result<Outcome> {
-    let args: Vec<String> = argv(t, prompt, tools).into_iter().skip(1).collect();
+    let args: Vec<String> = argv(t, prompt, tools, model).into_iter().skip(1).collect();
 
     let mut cmd = Command::new(&t.command);
     cmd.args(&args)
@@ -370,7 +386,7 @@ mod tests {
         let t = agent("--allowedTools {{tools}}", None, None);
         // `agent` builds `sh -c <script>`, so the placeholder is inside arg 2.
         assert_eq!(
-            argv(&t, "p", "Bash(cargo *),Edit")[2],
+            argv(&t, "p", "Bash(cargo *),Edit", None)[2],
             "--allowedTools Bash(cargo *),Edit"
         );
     }
@@ -385,6 +401,8 @@ mod tests {
             env_allowlist: vec![],
             wall_secs: wall,
             idle_secs: idle,
+            models: vec![],
+            model_flag: "--model".to_string(),
         }
     }
 
@@ -396,15 +414,53 @@ mod tests {
     fn a_prompt_is_substituted_into_the_argv() {
         let t = agent("echo {{prompt}}", None, None);
         assert_eq!(
-            argv(&t, "do the thing", ""),
+            argv(&t, "do the thing", "", None),
             vec!["sh", "-c", "echo do the thing"]
+        );
+    }
+
+    #[test]
+    fn a_resolved_model_reaches_the_launch_line_with_its_flag() {
+        let mut t = agent("true", None, None);
+        t.models = vec!["haiku".into(), "opus".into()];
+        assert_eq!(
+            argv(&t, "p", "", Some("opus")),
+            vec!["sh", "-c", "true", "--model", "opus"]
+        );
+    }
+
+    #[test]
+    fn a_harness_that_spells_the_flag_differently_is_launched_its_way() {
+        let mut t = agent("true", None, None);
+        t.model_flag = "-m".to_string();
+        assert_eq!(argv(&t, "p", "", Some("small"))[3..], ["-m", "small"]);
+    }
+
+    #[test]
+    fn no_model_leaves_no_flag_behind() {
+        // The reason the flag is a field rather than a `{{model}}` placeholder the
+        // operator positions: a placeholder would leave `--model` standing alone here.
+        let t = agent("true", None, None);
+        assert_eq!(argv(&t, "p", "", None), vec!["sh", "-c", "true"]);
+    }
+
+    #[test]
+    fn the_model_actually_reaches_the_process() {
+        // `sh -c <script> --model opus` hands the two extra arguments to the script as
+        // `$0` and `$1` — a stand-in for the flag pair a real harness parses.
+        let t = agent("echo flag=[$0] model=[$1]", None, None);
+        let o = run(&t, "", "", Some("opus"), &cwd(), &[], Limits::default()).unwrap();
+        assert!(
+            o.output.contains("flag=[--model] model=[opus]"),
+            "{}",
+            o.output
         );
     }
 
     #[test]
     fn output_is_captured_and_the_exit_code_kept() {
         let t = agent("echo hello; echo oops >&2; exit 3", None, None);
-        let o = run(&t, "", "", &cwd(), &[], Limits::default()).unwrap();
+        let o = run(&t, "", "", None, &cwd(), &[], Limits::default()).unwrap();
         assert_eq!(o.ended, Ended::Exited(3));
         assert!(!o.ended.ok());
         assert!(o.output.contains("hello"), "{}", o.output);
@@ -422,7 +478,7 @@ mod tests {
         let mut t = agent("echo path=[$PATH] home=[$HOME]", None, None);
         t.env_allowlist = vec!["PATH".to_string()];
 
-        let o = run(&t, "", "", &cwd(), &[], Limits::default()).unwrap();
+        let o = run(&t, "", "", None, &cwd(), &[], Limits::default()).unwrap();
         assert!(
             o.output.contains("path=[/"),
             "PATH should pass: {}",
@@ -446,7 +502,7 @@ mod tests {
             "CARGO_TARGET_DIR".to_string(),
             std::path::PathBuf::from("/tmp/shared-target"),
         )];
-        let o = run(&t, "", "", &cwd(), &env, Limits::default()).unwrap();
+        let o = run(&t, "", "", None, &cwd(), &env, Limits::default()).unwrap();
         assert!(
             o.output.contains("target=[/tmp/shared-target]"),
             "{}",
@@ -466,7 +522,7 @@ mod tests {
             "HOME".to_string(),
             std::path::PathBuf::from("/tmp/declared-wins"),
         )];
-        let o = run(&t, "", "", &cwd(), &env, Limits::default()).unwrap();
+        let o = run(&t, "", "", None, &cwd(), &env, Limits::default()).unwrap();
         assert!(
             o.output.contains("home=[/tmp/declared-wins]"),
             "{}",
@@ -483,7 +539,7 @@ mod tests {
 
         let t = agent("test -f marker", None, None);
         assert!(
-            run(&t, "", "", &dir, &[], Limits::default())
+            run(&t, "", "", None, &dir, &[], Limits::default())
                 .unwrap()
                 .ended
                 .ok()
@@ -497,6 +553,7 @@ mod tests {
             &t,
             "",
             "",
+            None,
             &cwd(),
             &[],
             Limits {
@@ -522,6 +579,7 @@ mod tests {
             &t,
             "",
             "",
+            None,
             &cwd(),
             &[],
             Limits {
@@ -546,6 +604,7 @@ mod tests {
             &t,
             "",
             "",
+            None,
             &cwd(),
             &[],
             Limits {
@@ -566,6 +625,7 @@ mod tests {
             &t,
             "",
             "",
+            None,
             &cwd(),
             &[],
             Limits {
@@ -588,7 +648,7 @@ mod tests {
             None,
             None,
         );
-        let o = run(&t, "", "", &cwd(), &[], Limits::default()).unwrap();
+        let o = run(&t, "", "", None, &cwd(), &[], Limits::default()).unwrap();
         assert!(o.truncated, "should have hit the cap");
         assert!(o.output.len() <= OUTPUT_CAP, "{}", o.output.len());
         // The point of draining past the cap: the child still gets to finish.
@@ -607,7 +667,7 @@ mod tests {
         let t = metered_agent(
             r#"echo '{"type":"result","usage":{"input_tokens":1200,"output_tokens":340}}'"#,
         );
-        let o = run(&t, "", "", &cwd(), &[], Limits::default()).unwrap();
+        let o = run(&t, "", "", None, &cwd(), &[], Limits::default()).unwrap();
         assert_eq!(o.spent, Some(1540));
     }
 
@@ -621,7 +681,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            run(&t, "", "", &cwd(), &[], Limits::default())
+            run(&t, "", "", None, &cwd(), &[], Limits::default())
                 .unwrap()
                 .spent,
             None
@@ -636,7 +696,7 @@ mod tests {
             "i=0; while [ $i -lt 40000 ]; do echo aaaaaaaaaaaaaaaaaaaa; i=$((i+1)); done; \
              echo '{\"type\":\"result\",\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}'",
         );
-        let o = run(&t, "", "", &cwd(), &[], Limits::default()).unwrap();
+        let o = run(&t, "", "", None, &cwd(), &[], Limits::default()).unwrap();
         assert!(o.truncated, "the cap should have been hit");
         assert!(
             !o.output.contains("input_tokens"),
@@ -657,6 +717,7 @@ mod tests {
             &t,
             "",
             "",
+            None,
             &cwd(),
             &[],
             Limits {

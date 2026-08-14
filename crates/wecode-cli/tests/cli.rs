@@ -368,6 +368,25 @@ fn company_show_reports_posts_and_invariants() {
 }
 
 #[test]
+fn company_show_says_which_model_each_seat_is_staffed_with() {
+    // The gap this closes: the most expensive variable in the system used to be
+    // decided by whatever the operator last typed at `/model`, and nothing recorded
+    // it. Here it is a column, beside the level the file actually declares.
+    let org = Org::new("levels", "software-company");
+    org.run(&["company", "show"])
+        .assert_ok("company show")
+        .assert_contains("model")
+        // `impl` sits at 5 against a three-model catalogue, which is the middle one.
+        .assert_contains("sonnet (5)")
+        // And the catalogue the numbers are matched against, so the column is not
+        // a model chosen by magic.
+        .assert_contains("models, weakest first")
+        .assert_contains("haiku")
+        // The tester's harness declares none, and says so rather than showing blank.
+        .assert_contains("harness default");
+}
+
+#[test]
 fn a_broken_company_file_names_the_problem() {
     let org = Org::new("broken", "solo");
     std::fs::write(org.path("company.toml"), "[company]\nprofile = \"solo\"\n").unwrap();
