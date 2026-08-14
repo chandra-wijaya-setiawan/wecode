@@ -1,4 +1,4 @@
-//! Signing an approval from a reply in a chat.
+//! Signing an approval from a reply — or a tap — in a chat.
 //!
 //! [`crate::notify`] is half a loop. A task stops for a person at 02:14, the hook
 //! pushes *`t` needs your signature* to wherever that person is, and then the only way
@@ -10,7 +10,16 @@
 //! and the next pass of `wecode loop` turns that into the same ledger record `wecode
 //! approve` writes, given by the same post, checked by the same Broker.
 //!
-//! Four things are load-bearing:
+//! And on a phone, typing is the part still left. A notification the operator sent with
+//! an inline keyboard on it is answered by tapping *Approve* — one thumb, no keyboard,
+//! nothing to remember about which task it was. Telegram hands that back as a
+//! `callback_query` rather than a message, and [`tap_of`] reads it as the same
+//! [`Message`]: the button's `callback_data` is the words a reply would have carried,
+//! the notification it hangs under is the message a reply would have answered. So a tap
+//! is not a second way to sign anything. It is the same sentence, delivered without a
+//! keyboard, through the same identity check and the same Broker call.
+//!
+//! Five things are load-bearing:
 //!
 //! - **wecode holds no token and speaks no HTTP.** `[telegram] fetch` is a command the
 //!   operator writes — a `curl` of the Bot API's `getUpdates` — and what it prints is
@@ -30,6 +39,13 @@
 //! - **A bad reply is reported, not raised.** One message that names no task must not
 //!   stop the four behind it, and a fetch that failed must not take `wecode loop` down
 //!   with it. Only a fetch that could not be believed at all is an error.
+//! - **A tap is told what it did.** A typed reply is its own receipt — the words are in
+//!   the chat, in front of the person who typed them. A tap leaves nothing: the phone
+//!   shows a spinner, the spinner stops, and whether a merge was signed is a question
+//!   for a terminal. So `[telegram] answer` says the outcome back into the chat, in the
+//!   same shape `fetch` reads it — a command the operator wrote, given the callback to
+//!   answer and the one line to say. Not saying it would leave a button that signs and a
+//!   button that is broken looking exactly alike.
 //!
 //! What is deliberately *not* here is a second gate. A reply is not a weaker signature
 //! than a typed one — it is the same record, and the reason to trust it is the same
@@ -78,14 +94,18 @@ pub(crate) enum Verdict {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Update {
     pub(crate) id: i64,
-    /// The message it carries, when it is one a person sent. `None` for everything
-    /// else the channel may contain — an edit, a join, a poll answer. Those are read
-    /// and passed over, because an update nothing understands still has to be got past
-    /// or the cursor stops at it forever.
+    /// What a person said in it — typed as a message, or pressed as a button. `None` for
+    /// everything else the channel may contain — an edit, a join, a poll answer. Those
+    /// are read and passed over, because an update nothing understands still has to be
+    /// got past or the cursor stops at it forever.
     pub(crate) message: Option<Message>,
 }
 
 /// A message somebody sent, reduced to what a signature needs.
+///
+/// A tapped button becomes one of these too, and that is the point: everything past this
+/// struct — who may sign, which task, what kind, what the Broker says — cannot tell the
+/// two apart and therefore cannot answer them differently.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Message {
     /// The numeric account that sent it. The only field with any authority in it.
@@ -93,10 +113,17 @@ pub(crate) struct Message {
     /// The display name Telegram supplies, for the report. Never for identity: it is
     /// chosen by the sender and two people may pick the same one.
     pub(crate) who: String,
+    /// What was said: the text of a reply, or the `callback_data` of a button.
     pub(crate) text: String,
-    /// The text of the message this replies to. Empty when it replies to nothing —
-    /// which is most chat, and is why a reply is what this reads.
+    /// The text of the message this answers — replied to, or carrying the keyboard that
+    /// was tapped. Empty when it answers nothing, which is most chat, and is why an
+    /// answer to something is what this reads.
     pub(crate) quoted: String,
+    /// The callback a tap has to be answered with, and `None` when a person typed it.
+    ///
+    /// Load-bearing twice over: it is what `[telegram] answer` acknowledges, and its
+    /// presence is the only thing that makes a tap a tap. Nothing decides anything by it.
+    pub(crate) tap: Option<String>,
 }
 
 /// Parses a `getUpdates` response.
@@ -126,7 +153,13 @@ pub(crate) fn updates(body: &str) -> Result<Vec<Update>, String> {
         .filter_map(|u| {
             Some(Update {
                 id: u.get("update_id")?.as_i64()?,
-                message: u.get("message").and_then(message_of),
+                // A typed message first, a tapped button second, and nothing else. An
+                // update is one or the other; the order is only so this reads in the
+                // order the channel is used.
+                message: u
+                    .get("message")
+                    .and_then(message_of)
+                    .or_else(|| u.get("callback_query").and_then(tap_of)),
             })
         })
         .collect();
@@ -138,22 +171,63 @@ pub(crate) fn updates(body: &str) -> Result<Vec<Update>, String> {
 }
 
 fn message_of(m: &Value) -> Option<Message> {
-    let from = m.get("from")?;
+    let (from, who) = sender(m.get("from")?)?;
     Some(Message {
+        from,
+        who,
+        text: m.get("text").map(scalar).unwrap_or_default(),
+        quoted: text_of(m.get("reply_to_message")),
+        tap: None,
+    })
+}
+
+/// A button press, read as the message it stands for.
+///
+/// This is the whole of what a keyboard costs. A `callback_query` carries an account, a
+/// string wecode's own operator put on the button, and the notification that button hangs
+/// under — which is a sender, something said, and something answered, and so is a reply.
+/// Read as a [`Message`] it goes through the identity check, the target resolution and
+/// the Broker call that were already there, and cannot come to a different conclusion
+/// from the typed word it stands for.
+fn tap_of(q: &Value) -> Option<Message> {
+    let (from, who) = sender(q.get("from")?)?;
+    Some(Message {
+        from,
+        who,
+        // `data` is what the operator wrote on the button, read as the words a reply
+        // would have used. One grammar and not two: `approve` means the same thing
+        // whichever way it arrives, and a button is not a private language.
+        text: q.get("data").map(scalar).unwrap_or_default(),
+        // The message the keyboard is attached to — wecode's own notification, which is
+        // where the task id usually is. Empty when Telegram will not hand that message
+        // over any more, which is the reason to put the task in the button's `data`: 64
+        // bytes is plenty for `approve #12`, and it never goes stale.
+        quoted: text_of(q.get("message")),
+        // Not the message id and not the account: the callback, which is the only thing
+        // `answerCallbackQuery` will take and the only reason this field exists.
+        tap: Some(q.get("id").map(scalar)?),
+    })
+}
+
+/// Who sent something: the account, and the name to print for it.
+fn sender(from: &Value) -> Option<(String, String)> {
+    Some((
         // As written, whatever it is: the id is compared against `company.toml` and
         // never arithmetic, so a future non-integer id costs nothing here.
-        from: from.get("id").map(scalar)?,
-        who: from
-            .get("username")
+        from.get("id").map(scalar)?,
+        from.get("username")
             .or_else(|| from.get("first_name"))
             .map_or_else(|| "?".to_string(), scalar),
-        text: m.get("text").map(scalar).unwrap_or_default(),
-        quoted: m
-            .get("reply_to_message")
-            .and_then(|r| r.get("text"))
-            .map(scalar)
-            .unwrap_or_default(),
-    })
+    ))
+}
+
+/// The text of a message wecode was handed a reference to, and nothing when there is
+/// none — an image with no caption, or a message Telegram no longer gives out.
+fn text_of(message: Option<&Value>) -> String {
+    message
+        .and_then(|m| m.get("text"))
+        .map(scalar)
+        .unwrap_or_default()
 }
 
 /// A JSON scalar as the string it prints as — `48210934`, not `"48210934"`.
@@ -289,7 +363,57 @@ pub(crate) fn fetch(company: &Company, org: &Path, offset: i64) -> Result<String
         .fetch
         .as_deref()
         .ok_or("no [telegram] fetch is configured")?;
+    run(
+        company,
+        org,
+        command,
+        &[("WECODE_TELEGRAM_OFFSET", &offset.to_string())],
+    )
+}
 
+/// Tells the chat what came of a tap, and does nothing at all when no `[telegram] answer`
+/// is configured.
+///
+/// Reported and not raised, which is the notify hook's argument rather than [`fetch`]'s:
+/// an acknowledgement that did not arrive does not un-sign the signature it was about,
+/// and the four taps queued behind this one still have to be read. What it must not be is
+/// skipped — see the module's fifth reason.
+fn answer(company: &Company, org: &Path, callback: &str, said: &str) -> Result<(), String> {
+    let Some(command) = company.telegram.answer.as_deref() else {
+        return Ok(());
+    };
+    run(
+        company,
+        org,
+        command,
+        &[
+            ("WECODE_TELEGRAM_CALLBACK", callback),
+            // Flattened and bounded like everything else that is quoted anywhere, and
+            // for one more reason here: this is a value in a command's environment, and
+            // a newline in it could end the line the operator wrote.
+            ("WECODE_TELEGRAM_ANSWER", &oneline(said, ANSWER)),
+        ],
+    )
+    .map(|_| ())
+}
+
+/// How much of an outcome a tap is told. Telegram's own ceiling for the text of an
+/// answered callback — asking it to show more is a call it refuses outright, which would
+/// turn a long refusal into no answer at all.
+const ANSWER: usize = 200;
+
+/// Runs one of the operator's command lines, with what wecode has to tell it in the
+/// environment, bounded by `[telegram] timeout`.
+///
+/// Shared by both directions of the channel, so the line that reads it and the line that
+/// answers it get the same charter check, the same clock, and the same care about a pipe
+/// nobody is draining.
+fn run(
+    company: &Company,
+    org: &Path,
+    command: &str,
+    env: &[(&str, &str)],
+) -> Result<String, String> {
     // The same charter check the agent launch line and the notify hook get, from the
     // same function. An invariant outranks every grant, and a config is not an
     // exception: this is one more place the operator writes a command line for wecode
@@ -300,20 +424,24 @@ pub(crate) fn fetch(company: &Company, org: &Path, offset: i64) -> Result<String
         ));
     }
 
-    let mut child = Command::new("sh")
+    let mut spawning = Command::new("sh");
+    spawning
         .arg("-c")
         .arg(command)
         .current_dir(org)
-        // The offset, not the URL: the operator's line names the API and holds the
-        // token, and wecode says only how far it has already read. Substituting into
-        // the command line instead would put wecode in the business of quoting a URL
-        // that has a credential in it.
-        .env("WECODE_TELEGRAM_OFFSET", offset.to_string())
         .env("WECODE_ORG", org)
         .env("WECODE_COMPANY", &company.name)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // The parameters, never the URL: the operator's line names the API and holds the
+    // token, and wecode says only how far it has already read and what it decided.
+    // Substituting into the command line instead would put wecode in the business of
+    // quoting a line with a credential in it.
+    for (key, value) in env {
+        spawning.env(key, value);
+    }
+    let mut child = spawning
         .spawn()
         .map_err(|e| format!("could not run `{command}`: {e}"))?;
 
