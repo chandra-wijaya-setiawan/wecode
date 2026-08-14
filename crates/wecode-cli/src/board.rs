@@ -341,7 +341,12 @@ fn number_cell(n: Option<Number>) -> String {
 /// The declared state alongside the computed one. Both, always: a task can be
 /// entirely healthy and not started, and a board that shows only the faults cannot
 /// say which. The needs-you cell wears the computed health as its colour.
-fn row(number: Option<Number>, label: &str, status: &str, v: &Vitals) -> String {
+///
+/// A filed-away row is drawn grey. There is nowhere in these columns to write the word
+/// — `what` truncates at 26, so a marker there is the first thing a deep row loses —
+/// and a row that is only ever on screen because somebody asked for everything must
+/// still not read as live.
+fn row(number: Option<Number>, label: &str, status: &str, v: &Vitals, archived: bool) -> String {
     let needs = if v.needs.is_empty() {
         format!("{DIM}—{RESET}")
     } else {
@@ -352,14 +357,24 @@ fn row(number: Option<Number>, label: &str, status: &str, v: &Vitals) -> String 
             Health::Green => words,
         }
     };
-    format!(
-        "│ {} {:<26} {:<11} {:<12} {}\n",
+    let line = format!(
+        "│ {} {:<26} {:<11} {:<12} {}",
         number_cell(number),
         truncate(label, 26),
         status,
         spend_cell(v.spent, v.budget),
         needs
-    )
+    );
+    if archived {
+        // Re-opened after every reset the row already carries: the needs-you cell closes
+        // its own colour, and the grey would otherwise end wherever that cell does.
+        format!(
+            "{DIM}{}{RESET}\n",
+            line.replace(RESET, &format!("{RESET}{DIM}"))
+        )
+    } else {
+        format!("{line}\n")
+    }
 }
 
 fn project_status(p: &Project) -> String {
@@ -403,26 +418,53 @@ fn kids_of<'a>(plan: &'a Plan, t: &Task) -> Vec<&'a Task> {
     kids
 }
 
+/// A tree being drawn, and how many rows it left out.
+///
+/// The count travels with the text because only the walk that skipped the rows knows
+/// how many there were, and a view that shows less than everything has to be able to
+/// say so.
+#[derive(Default, Debug)]
+struct Drawn {
+    text: String,
+    hidden: usize,
+}
+
 /// A task's row, then every task beneath it, indented one step per level.
 ///
 /// Recursive to the leaves. Both views used to stop one level short of wherever
 /// their subject was — the portfolio at root tasks, a project focus at the same —
 /// so a plan that broke its work down at all hid the half that was broken down.
 ///
+/// A filed-away task stops the walk, and its subtasks are not counted separately: they
+/// were put away as one group and reading them back as four hidden rows would say there
+/// is far more out of sight than there is.
+///
 /// Depth is spelled in spaces rather than tree glyphs because this column
 /// truncates at 26: a glyph that survives the cut while the id does not costs a
 /// reader the one thing the row is for.
-fn subtree(plan: &Plan, t: &Task, l: &Ledger, gates: &DesignGates, depth: usize) -> String {
-    let mut out = row(
+fn subtree(
+    plan: &Plan,
+    t: &Task,
+    l: &Ledger,
+    gates: &DesignGates,
+    depth: usize,
+    show_all: bool,
+    out: &mut Drawn,
+) {
+    if t.archived && !show_all {
+        out.hidden += 1;
+        return;
+    }
+    out.text.push_str(&row(
         t.number,
         &format!("{}{} {}", "  ".repeat(depth), kind_tag(t.kind), t.id),
         &task_status(t),
         &task_vitals(plan, t, l, gates),
-    );
+        t.archived,
+    ));
     for k in kids_of(plan, t) {
-        out.push_str(&subtree(plan, k, l, gates, depth + 1));
+        subtree(plan, k, l, gates, depth + 1, show_all, out);
     }
-    out
 }
 
 /// The portfolio view: one line per project, then the whole tree of its tasks.
@@ -446,19 +488,28 @@ pub(crate) fn portfolio(
     } else {
         plan.projects().collect()
     };
+    let mut drawn = Drawn::default();
     for p in projects {
-        out.push_str(&row(
+        drawn.text.push_str(&row(
             p.number,
             &format!("PROJECT {} [{}]", p.id, p.repo),
             &project_status(p),
             &project_vitals(plan, p, &l, known_repos),
+            p.archived,
         ));
         for t in roots_of(plan, &p.id) {
-            out.push_str(&subtree(plan, t, &l, gates, 1));
+            subtree(plan, t, &l, gates, 1, show_all, &mut drawn);
         }
     }
-    let hidden = plan.archived_count();
-    out.push_str(&footer(&if hidden > 0 && !show_all {
+    out.push_str(&drawn.text);
+    // Projects, plus whatever the walk stopped at. A hidden project's tasks are not
+    // added to that: the project is the one row this view left out on their behalf.
+    let hidden = if show_all {
+        0
+    } else {
+        plan.archived_count() + drawn.hidden
+    };
+    out.push_str(&footer(&if hidden > 0 {
         format!("alarms freeze dispatch · {hidden} archived, --all to include")
     } else {
         "alarms freeze dispatch · silence on green".to_string()
@@ -471,6 +522,11 @@ pub(crate) fn portfolio(
 /// `named` is what the operator typed — an id or a short number. Everything past the
 /// lookup uses the subject's own id, because the incident filter and the title both have
 /// to name what the ledger names.
+///
+/// Filed-away rows are hidden here as in the portfolio, with one exception: a subject
+/// that is itself archived shows its group in full. Filing a task away takes its
+/// subtasks with it, so the group is one thing — and naming it is the only way to reach
+/// inside, there being no `--all` at this level.
 pub(crate) fn focus(
     plan: &Plan,
     audit: &[AuditLine],
@@ -491,15 +547,18 @@ pub(crate) fn focus(
             &format!("PROJECT {} [{}]", p.id, p.repo),
             &project_status(p),
             &v,
+            p.archived,
         ));
+        let mut drawn = Drawn::default();
         for t in roots_of(plan, &p.id) {
-            out.push_str(&subtree(plan, t, &l, gates, 1));
+            subtree(plan, t, &l, gates, 1, p.archived, &mut drawn);
         }
+        out.push_str(&drawn.text);
         // Every incident in the project, including its tasks'. The project row
         // rolls their alarms up, so hiding the rows leaves a count with nothing to
         // explain it — and no way to find what tripped.
         out.push_str(&incidents(audit, |x| x.project == id));
-        out.push_str(&footer(hint_for(&v)));
+        out.push_str(&footer(&hint_for(&v, drawn.hidden)));
         return out;
     }
 
@@ -514,23 +573,34 @@ pub(crate) fn focus(
             &format!("{} {}", kind_tag(t.kind), t.id),
             &task_status(t),
             &v,
+            t.archived,
         ));
+        let mut drawn = Drawn::default();
         for k in kids_of(plan, t) {
-            out.push_str(&subtree(plan, k, &l, gates, 1));
+            subtree(plan, k, &l, gates, 1, t.archived, &mut drawn);
         }
+        out.push_str(&drawn.text);
         out.push_str(&incidents(audit, |x| x.task == id));
-        out.push_str(&footer(hint_for(&v)));
+        out.push_str(&footer(&hint_for(&v, drawn.hidden)));
         return out;
     }
 
     format!("no project or task: {named}\n")
 }
 
-fn hint_for(v: &Vitals) -> &'static str {
-    if v.needs.is_empty() {
+/// The footer of a focused view, and what it left out. `--all` does not reach this
+/// level, so the way back in is to name the filed-away task — which is what the count
+/// is there to prompt.
+fn hint_for(v: &Vitals, hidden: usize) -> String {
+    let hint = if v.needs.is_empty() {
         "nothing needs you here"
     } else {
         "wecode check <id> · wecode audit --alarms"
+    };
+    if hidden == 0 {
+        hint.to_string()
+    } else {
+        format!("{hidden} archived, hidden — name one to open it · {hint}")
     }
 }
 
@@ -1009,6 +1079,87 @@ mod tests {
         );
         assert!(v.needs.iter().any(|n| n == "1 stuck"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
+    }
+
+    /// Files a task away in a plan, the way the store's cascade would.
+    fn file_away(p: &mut Plan, id: &str) {
+        let mut t = p.task(&TaskId::new(id)).unwrap().clone();
+        t.archived = true;
+        p.update_task(t).unwrap();
+    }
+
+    #[test]
+    fn a_filed_away_task_leaves_the_portfolio_with_its_subtasks() {
+        // The cascade is what makes filing worth doing, so the view has to honour it:
+        // one hidden group, not one hidden heading over three visible rows.
+        let mut p = nested();
+        for id in ["t1", "t2", "t3"] {
+            file_away(&mut p, id);
+        }
+        let out = portfolio(&p, &[], &repos(), &no_gates(), false);
+        for row in ["feat t1", "feat t2", "feat t3"] {
+            assert!(!out.contains(row), "`{row}` should be filed away:\n{out}");
+        }
+        // Counted as the one group it is. Three would read as three separate decisions.
+        assert!(out.contains("1 archived, --all to include"), "{out}");
+        assert!(out.contains("PROJECT caching"), "the project stays:\n{out}");
+    }
+
+    #[test]
+    fn all_brings_a_filed_away_group_back_greyed() {
+        let mut p = nested();
+        file_away(&mut p, "t2");
+        let out = portfolio(&p, &[], &repos(), &no_gates(), true);
+        assert!(out.contains("feat t2"), "{out}");
+        assert!(out.contains("feat t3"), "and what is under it:\n{out}");
+        assert!(!out.contains("archived, --all"), "nothing left out:\n{out}");
+        // Grey, because there is nowhere in these columns to write the word.
+        let t2 = out
+            .lines()
+            .find(|l| l.contains("feat t2"))
+            .expect("the row is there");
+        assert!(t2.starts_with(DIM), "{t2:?}");
+        let t1 = out.lines().find(|l| l.contains("feat t1")).unwrap();
+        assert!(!t1.starts_with(DIM), "a live row is not greyed: {t1:?}");
+    }
+
+    #[test]
+    fn filing_a_subtask_leaves_its_parent_on_the_board() {
+        let mut p = nested();
+        file_away(&mut p, "t2");
+        let out = portfolio(&p, &[], &repos(), &no_gates(), false);
+        assert!(out.contains("feat t1"), "the parent stays:\n{out}");
+        assert!(!out.contains("feat t2"), "{out}");
+        assert!(!out.contains("feat t3"), "and what is under it:\n{out}");
+        assert!(out.contains("1 archived"), "{out}");
+    }
+
+    #[test]
+    fn naming_a_filed_away_task_shows_its_whole_group() {
+        // There is no --all at this level, so naming the group is the way in. Without
+        // this, descending onto something filed away lands on an empty screen.
+        let mut p = nested();
+        file_away(&mut p, "t2");
+        file_away(&mut p, "t3");
+        let out = focus(&p, &[], "t2", &repos(), &no_gates());
+        assert!(out.contains("feat t2"), "{out}");
+        assert!(out.contains(&at_depth("feat t3", 1)), "{out}");
+        assert!(
+            !out.contains("archived, hidden"),
+            "nothing left out:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_focused_project_says_how_much_it_is_not_showing() {
+        // Hiding is never silent — the count is what tells a reader there is something
+        // to name.
+        let mut p = nested();
+        file_away(&mut p, "t2");
+        let out = focus(&p, &[], "caching", &repos(), &no_gates());
+        assert!(out.contains("feat t1"), "{out}");
+        assert!(!out.contains("feat t2"), "{out}");
+        assert!(out.contains("1 archived, hidden"), "{out}");
     }
 
     #[test]

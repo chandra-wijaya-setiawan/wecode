@@ -118,8 +118,8 @@ struct App {
     table: TableState,
     pane: Pane,
     last_reload: Instant,
-    /// Whether archived projects are on screen. Off by default — archiving is a
-    /// request to stop seeing something.
+    /// Whether filed-away projects and tasks are on screen. Off by default — archiving
+    /// is a request to stop seeing something.
     show_archived: bool,
     /// Rows whose children are folded away. Empty to begin with: the tree is what
     /// there is to see, and a view that starts by hiding most of it is the gap this
@@ -189,6 +189,7 @@ impl App {
             ledger: &l,
             gates: &self.gates,
             collapsed: &self.collapsed,
+            show_archived: self.archived_shown(),
         };
         let mut rows = Vec::new();
 
@@ -230,6 +231,27 @@ impl App {
         self.rows.get(self.table.selected()?)
     }
 
+    /// Whether filed-away rows are on screen: the `a` toggle, or a focused subject that
+    /// is itself archived.
+    ///
+    /// The second half is not a convenience. Filing a task away takes its subtasks with
+    /// it, so the group is one thing — and without this, descending into one would land
+    /// on a screen showing only the row descended into, which is the same gap
+    /// `descend` opens a folded row to avoid.
+    fn archived_shown(&self) -> bool {
+        self.show_archived
+            || match &self.focus {
+                Some(Subject::Task(id)) => self.plan.task(id).is_some_and(|t| t.archived),
+                Some(Subject::Project(id)) => self.plan.project(id).is_some_and(|p| p.archived),
+                None => false,
+            }
+    }
+
+    /// How much is filed away, for the message the `a` key prints.
+    fn archived_count(&self) -> usize {
+        self.plan.archived_count() + self.plan.tasks().filter(|t| t.archived).count()
+    }
+
     fn move_by(&mut self, delta: isize) {
         if self.rows.is_empty() {
             return;
@@ -245,9 +267,13 @@ impl App {
     fn descend(&mut self) {
         let Some(row) = self.selected() else { return };
         let subject = row.subject.clone();
+        // What this view would *draw*, not what the plan holds. A parent whose only
+        // subtask is filed away is a leaf here, and descending onto it would otherwise
+        // land on a screen showing one row.
+        let shown = self.archived_shown();
         let has_children = match &subject {
-            Subject::Project(id) => self.plan.tasks_of(id).next().is_some(),
-            Subject::Task(id) => self.plan.subtasks(id).next().is_some(),
+            Subject::Project(id) => self.plan.roots_of(id).any(|t| shown || !t.archived),
+            Subject::Task(id) => self.plan.subtasks(id).any(|k| shown || !k.archived),
         };
         if has_children {
             // Zooming into something folded shut would land on a screen showing
@@ -336,7 +362,7 @@ impl App {
             KeyCode::Char('Z') => self.fold_all(false),
             KeyCode::Char('a') => {
                 self.show_archived = !self.show_archived;
-                let n = self.plan.archived_count();
+                let n = self.archived_count();
                 self.status = if self.show_archived {
                     format!("showing {n} archived")
                 } else {
@@ -375,9 +401,32 @@ struct Tree<'a> {
     ledger: &'a Ledger,
     gates: &'a board::DesignGates,
     collapsed: &'a HashSet<Subject>,
+    /// Whether filed-away work is drawn. Applied where the children of a row are
+    /// chosen rather than where a row is built, so a parent whose subtasks are all
+    /// filed away reads as a leaf — a fold marker on it would point at nothing.
+    show_archived: bool,
 }
 
-impl Tree<'_> {
+impl<'a> Tree<'a> {
+    /// The subtasks this view will draw, in id order so it does not reshuffle between
+    /// frames.
+    fn kids(&self, id: &TaskId) -> Vec<&'a Task> {
+        sorted(
+            self.plan
+                .subtasks(id)
+                .filter(|k| self.show_archived || !k.archived),
+        )
+    }
+
+    /// The same for a project's top-level tasks.
+    fn roots(&self, id: &ProjectId) -> Vec<&'a Task> {
+        sorted(
+            self.plan
+                .roots_of(id)
+                .filter(|t| self.show_archived || !t.archived),
+        )
+    }
+
     fn fold_of(&self, subject: &Subject, has_children: bool) -> Fold {
         if !has_children {
             Fold::Leaf
@@ -394,7 +443,7 @@ impl Tree<'_> {
     /// works on.
     fn push_project(&self, rows: &mut Vec<RowItem>, p: &Project, known_repos: &[String]) {
         let subject = Subject::Project(p.id.clone());
-        let roots = sorted(self.plan.roots_of(&p.id));
+        let roots = self.roots(&p.id);
         let fold = self.fold_of(&subject, !roots.is_empty());
         rows.push(RowItem {
             number: p.number,
@@ -421,7 +470,7 @@ impl Tree<'_> {
     /// this function picked — unless the operator has folded it shut.
     fn push_task(&self, rows: &mut Vec<RowItem>, t: &Task, depth: usize, is_last: bool) {
         let subject = Subject::Task(t.id.clone());
-        let kids = sorted(self.plan.subtasks(&t.id));
+        let kids = self.kids(&t.id);
         let fold = self.fold_of(&subject, !kids.is_empty());
         // A child's connector lands in its parent's marker column, so a branch
         // reads as one column of glyphs rather than two that nearly line up.
@@ -437,10 +486,13 @@ impl Tree<'_> {
         rows.push(RowItem {
             number: t.number,
             label: format!(
-                "{connector}{}{} {}",
+                "{connector}{}{} {}{}",
                 fold.glyph(),
                 crate::render::kind_tag(t.kind),
-                t.id
+                t.id,
+                // Said in words rather than by greying the row, as on a project. This
+                // column has room to grow; the snapshot board's does not.
+                if t.archived { "  archived" } else { "" }
             ),
             status: format!("{} {}", t.status.mark(), status_word(t.status)),
             vitals: board::task_vitals(self.plan, t, self.ledger, self.gates),
@@ -765,7 +817,7 @@ fn help(f: &mut Frame, area: Rect) {
         Line::from("enter / l    descend into selection".to_string()),
         Line::from("esc / h      up one level".to_string()),
         Line::from("g / G        first / last".to_string()),
-        Line::from("a            show or hide archived projects".to_string()),
+        Line::from("a            show or hide what is filed away".to_string()),
         Line::from("r            reload now".to_string()),
         Line::from("q            quit".to_string()),
         Line::from(""),
@@ -1076,6 +1128,65 @@ mod tests {
         assert_eq!(a.focus, Some(Subject::Project(ProjectId::new("caching"))));
         let out = render(&mut a, 118, 24);
         assert!(out.contains("feat layer"), "{out}");
+    }
+
+    #[test]
+    fn filing_a_task_away_takes_its_subtasks_off_the_cockpit() {
+        let mut a = app("filed");
+        a.store
+            .set_task_archived(&TaskId::new("layer"), true)
+            .unwrap();
+        a.reload();
+        let out = render(&mut a, 118, 24);
+        assert!(!out.contains("feat layer"), "{out}");
+        assert!(
+            !out.contains("feat keys"),
+            "the group goes together:\n{out}"
+        );
+        // The project row is left, and reads as a leaf: the fold marker would otherwise
+        // point at rows this view is not drawing.
+        assert!(out.contains("PROJECT caching"), "{out}");
+        assert!(!out.contains("▾ PROJECT caching"), "{out}");
+
+        a.key(KeyEvent::from(KeyCode::Char('a')));
+        let out = render(&mut a, 118, 24);
+        assert!(out.contains("feat layer  archived"), "{out}");
+        assert!(out.contains("feat keys  archived"), "{out}");
+        assert!(a.status.contains("showing 2 archived"), "{}", a.status);
+    }
+
+    #[test]
+    fn descending_onto_a_filed_away_task_shows_its_group() {
+        // Otherwise the one way to look inside a filed-away group lands on a screen
+        // showing only the row you came from.
+        let mut a = app("filed-descend");
+        a.store
+            .set_task_archived(&TaskId::new("layer"), true)
+            .unwrap();
+        a.reload();
+        a.focus = Some(Subject::Task(TaskId::new("layer")));
+        a.rebuild();
+        let out = render(&mut a, 118, 24);
+        assert!(out.contains("feat layer"), "{out}");
+        assert!(out.contains("feat keys"), "and what is part of it:\n{out}");
+    }
+
+    #[test]
+    fn a_filed_away_row_is_not_offered_as_somewhere_to_descend() {
+        let mut a = app("filed-leaf");
+        a.store
+            .set_task_archived(&TaskId::new("keys"), true)
+            .unwrap();
+        a.reload();
+        let pos = a
+            .rows
+            .iter()
+            .position(|r| r.subject == Subject::Task(TaskId::new("layer")))
+            .unwrap();
+        a.table.select(Some(pos));
+        a.descend();
+        assert!(a.focus.is_none(), "focus unchanged");
+        assert!(a.status.contains("leaf"), "{}", a.status);
     }
 
     #[test]
