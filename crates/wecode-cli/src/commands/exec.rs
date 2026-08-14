@@ -13,7 +13,7 @@ use wecode_store::Store;
 
 use crate::args::Args;
 use crate::commands::ctx::*;
-use crate::{git, ledger, render, scheduler, spawn, teardown, verify, work};
+use crate::{cache, git, ledger, render, scheduler, spawn, teardown, verify, work};
 
 /// Begins work on a task: prepares the worktree its playbook asks for, marks it
 /// running, and prints the envelope for whoever does the work.
@@ -44,6 +44,11 @@ fn predecessor_branch(repo: &std::path::Path, plan: &Plan, task: &Task) -> Optio
 /// A task made ready to work on: where, and with what instructions.
 pub(crate) struct Prepared {
     pub(crate) cwd: PathBuf,
+    /// The directories this project shares between worktrees, already created.
+    ///
+    /// Carried rather than looked up again at spawn, so what the notes told the
+    /// operator and what the agent is actually given are one value.
+    pub(crate) cache: cache::Shared,
     pub(crate) envelope: String,
     /// The same instruction as the protocol models it. `envelope` is one rendering of
     /// this, so the two cannot describe different work.
@@ -170,6 +175,16 @@ pub(crate) fn prepare(
         ));
     }
 
+    // After the worktree, because that is what makes the cache worth having: this is
+    // the checkout whose `target/` would otherwise start empty. Reported in the notes
+    // for the same reason the worktree is — an operator running the task by hand needs
+    // the same directories the agent is given, or the two builds do not share one.
+    let shared = cache::shared(pb.as_ref());
+    cache::ensure(&shared)?;
+    for (var, dir) in &shared {
+        notes.push_str(&format!("  cache    {var}={}\n", dir.display()));
+    }
+
     let a2a = render::a2a_task(
         &company.templates.task_envelope,
         task,
@@ -182,6 +197,7 @@ pub(crate) fn prepare(
         envelope: render::envelope(&a2a),
         a2a,
         cwd,
+        cache: shared,
         notes,
     })
 }
@@ -517,7 +533,14 @@ pub(crate) fn run_task(a: &Args) -> Res {
     // rather than no trace of the run at all.
     let exec = store.start_execution(&id, &who.session, prepared.cwd.to_str(), None)?;
     let limits = spawn::Limits::from(&template);
-    let outcome = spawn::run(&template, &prepared.envelope, &tools, &prepared.cwd, limits)?;
+    let outcome = spawn::run(
+        &template,
+        &prepared.envelope,
+        &tools,
+        &prepared.cwd,
+        &prepared.cache,
+        limits,
+    )?;
 
     // The exit is a fact we observed, not a claim the agent made. `Allow` even when
     // it exited badly: launching the agent was wecode's own permitted act, and the
@@ -674,7 +697,17 @@ fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error
         return Err(format!("{} is not a git repository", dir.display()).into());
     }
 
-    let mut v = verify::run_acceptance(&dir, &task.acceptance);
+    // The playbook again, for the shared build cache. `verify` is reachable on its own
+    // — a hand-run task, a re-judged one — so it resolves the cache itself rather than
+    // relying on a `prepare` that may have happened in another process, or last week.
+    //
+    // A playbook that does not load therefore stops a verdict, exactly as it already
+    // stops preparation. That is the right way round: the alternative is judging work
+    // with a cache the project asked for and did not get, and reporting it as passed.
+    let shared = cache::shared(playbook_of(&company, project)?.as_ref());
+    cache::ensure(&shared)?;
+
+    let mut v = verify::run_acceptance(&dir, &task.acceptance, &shared);
     v.changed = git::changed_files(&dir)?;
     v.violations = verify::violations(&v.changed, &task.scope);
 

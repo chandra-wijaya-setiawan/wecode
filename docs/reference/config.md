@@ -111,6 +111,9 @@ merge_to = "dev"                  # the integration branch: branch from it, merg
 merge = "approved"                # approved | auto — the charter still outranks this
 dispatch = "approved"             # auto | approved — sign each task before it runs
 
+[project.build_cache]             # directories every worktree of this project shares
+CARGO_TARGET_DIR = "~/.cache/wecode/app/target"
+
 [feature]
 worktree  = true
 design_required = true            # refuse a feature with no design task behind it
@@ -165,6 +168,43 @@ A signature covers one task, not its subtasks — each is dispatched on its own 
 each is signed on its own. And a signature older than the last `define` record for that
 task is stale: amending a scope after signing asks for the signature again, so the gate
 cannot be walked past by signing something small and then changing it.
+
+### The build cache
+
+A worktree is a clean checkout, so its `target/` starts empty and every task pays for a
+cold build twice — once inside the agent, once in verification. None of that output is
+task-specific, so `[project.build_cache]` names directories that live outside every
+worktree and are shared by all of them.
+
+Each key is the environment variable a toolchain reads; each value is a directory.
+wecode sets them and knows nothing else about them, which is what keeps this from being
+a list of ecosystems: `CARGO_TARGET_DIR`, `GOCACHE`, `YARN_CACHE_FOLDER`, `SCCACHE_DIR`.
+The directories are created before anything is pointed at them, and one that cannot be
+created is an error — a toolchain handed an uncreatable path quietly builds into the
+worktree instead, which is the failure this is meant to remove.
+
+They are set on the **agent and on the acceptance commands alike**. Verification is
+usually the larger build of the two, and sharing only the agent's would leave the
+expensive half cold while looking like the setting was on. Nothing needs to be added to
+`env_allowlist`: that allowlist governs what an agent may *inherit* from the operator's
+shell, and these values are not inherited — they are what this file says. Where a
+variable is both allowlisted and declared here, the declaration wins; an inherited
+`CARGO_TARGET_DIR` would point at the operator's own checkout.
+
+| refused | why |
+|---|---|
+| a relative path | resolves inside whichever worktree is running, so each task gets its own copy under a name promising the opposite — and the build still succeeds |
+| a key that is not an environment variable name | could never be set |
+| `PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_*` | say which program runs, not where output goes — choosing the toolchain belongs to `company.toml` |
+
+A `~` is resolved when the cache is used, not when the playbook is parsed, so one file
+describes the same cache on two machines with different homes.
+
+**Sharing serialises.** Cargo takes an exclusive lock on its target directory, so two
+tasks building at the same moment queue rather than building twice. That is the trade —
+seconds of waiting against minutes of rebuilding — and a project that would rather have
+parallel cold builds declares nothing. Nothing removes a cache: `wecode worktree remove`
+leaves it alone, and cleaning it is the toolchain's own business.
 
 ### Subtasks
 

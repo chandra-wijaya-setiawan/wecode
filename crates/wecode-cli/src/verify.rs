@@ -104,7 +104,21 @@ pub(crate) fn violations(changed: &[String], scope: &Scope) -> Vec<String> {
 ///
 /// Through `sh -c`, because acceptance is written as a shell line — `cargo clippy
 /// --all-targets -- -D warnings` is not an argv this could split correctly.
-pub(crate) fn run_acceptance(dir: &Path, measures: &[Measure]) -> Verdict {
+///
+/// `env` is the project's shared build cache — see [`crate::cache`]. Acceptance is the
+/// second cold build a worktree pays for and usually the larger one: the agent may
+/// have run `cargo check`, this runs the suite. Setting it on the agent alone would
+/// have shared half a cache.
+///
+/// Unlike a spawned agent's, this environment is inherited: these commands are the
+/// operator's own, run by wecode, and they need the toolchain the operator has. The
+/// declared variables are laid over it, so a project's answer for this repository beats
+/// whatever the shell was carrying.
+pub(crate) fn run_acceptance(
+    dir: &Path,
+    measures: &[Measure],
+    env: &[(String, std::path::PathBuf)],
+) -> Verdict {
     let mut v = Verdict::default();
     for m in measures {
         match m {
@@ -113,6 +127,7 @@ pub(crate) fn run_acceptance(dir: &Path, measures: &[Measure]) -> Verdict {
                     .arg("-c")
                     .arg(cmd)
                     .current_dir(dir)
+                    .envs(env.iter().map(|(k, v)| (k, v)))
                     .status()
                     .ok()
                     .and_then(|s| s.code());
@@ -141,6 +156,18 @@ mod tests {
 
     fn changed(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// Acceptance with no shared cache — what a project that declares none gets.
+    fn ran(dir: &Path, measures: &[Measure]) -> Verdict {
+        run_acceptance(dir, measures, &[])
+    }
+
+    fn cmd(line: &str) -> Measure {
+        Measure::Command {
+            cmd: line.to_string(),
+            expect_status: 0,
+        }
     }
 
     #[test]
@@ -201,7 +228,7 @@ mod tests {
     #[test]
     fn a_passing_command_is_recorded_with_its_code() {
         let dir = std::env::temp_dir();
-        let v = run_acceptance(
+        let v = ran(
             &dir,
             &[Measure::Command {
                 cmd: "true".into(),
@@ -216,7 +243,7 @@ mod tests {
     #[test]
     fn a_failing_command_fails_the_verdict_and_says_what_it_wanted() {
         let dir = std::env::temp_dir();
-        let v = run_acceptance(
+        let v = ran(
             &dir,
             &[
                 Measure::Command {
@@ -245,7 +272,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("marker"), "x").unwrap();
 
-        let v = run_acceptance(
+        let v = ran(
             &dir,
             &[Measure::Command {
                 cmd: "test -f marker".into(),
@@ -256,9 +283,40 @@ mod tests {
     }
 
     #[test]
+    fn the_shared_build_cache_is_set_on_the_acceptance_commands_too() {
+        // Acceptance is the second cold build a worktree pays for, and usually the
+        // larger one: the agent may have run `cargo check`, this runs the suite.
+        let v = run_acceptance(
+            &std::env::temp_dir(),
+            &[cmd("test \"$CARGO_TARGET_DIR\" = /tmp/shared-target")],
+            &[(
+                "CARGO_TARGET_DIR".to_string(),
+                std::path::PathBuf::from("/tmp/shared-target"),
+            )],
+        );
+        assert!(v.passed(), "{:?}", v.checks);
+    }
+
+    #[test]
+    fn acceptance_still_inherits_the_environment_it_needs_to_run_at_all() {
+        // Unlike a spawned agent's, this environment is not built from an allowlist:
+        // the commands are the operator's own, and one without `PATH` could not find
+        // the toolchain it is supposed to be judging with.
+        let v = run_acceptance(
+            &std::env::temp_dir(),
+            &[cmd("test -n \"$PATH\"")],
+            &[(
+                "CARGO_TARGET_DIR".to_string(),
+                std::path::PathBuf::from("/tmp/shared-target"),
+            )],
+        );
+        assert!(v.passed(), "{:?}", v.checks);
+    }
+
+    #[test]
     fn a_measure_no_command_can_settle_blocks_the_verdict() {
         let dir = std::env::temp_dir();
-        let v = run_acceptance(
+        let v = ran(
             &dir,
             &[Measure::Metric {
                 name: "p99".into(),
@@ -273,7 +331,7 @@ mod tests {
     #[test]
     fn a_missing_command_is_reported_as_missing_not_as_a_failure() {
         // 127 from `sh` means the toolchain is absent, not that the work is wrong.
-        let v = run_acceptance(
+        let v = ran(
             &std::env::temp_dir(),
             &[Measure::Command {
                 cmd: "definitely-not-a-real-binary-xyz".into(),
@@ -291,7 +349,7 @@ mod tests {
 
     #[test]
     fn a_check_that_wants_127_is_not_mistaken_for_a_missing_command() {
-        let v = run_acceptance(
+        let v = ran(
             &std::env::temp_dir(),
             &[Measure::Command {
                 cmd: "exit 127".into(),
@@ -306,7 +364,7 @@ mod tests {
     fn a_task_with_no_acceptance_never_passes() {
         // Vacuously-true verification is worse than none: it would mark work done on
         // the strength of having asked nothing.
-        let v = run_acceptance(&std::env::temp_dir(), &[]);
+        let v = ran(&std::env::temp_dir(), &[]);
         assert!(!v.passed());
     }
 }

@@ -2,6 +2,7 @@
 
 mod args;
 mod board;
+mod cache;
 mod commands;
 mod git;
 mod ledger;

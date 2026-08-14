@@ -139,8 +139,14 @@ A signature earlier than the last change to the task does not count: `task scope
 a definition, so widening signed work asks for the signature again. The refusal says which
 of the two it is, and `wecode audit --task <id>` shows the sequence.
 
+`start` also reports the project's shared build cache — `cache CARGO_TARGET_DIR=...`,
+beside the worktree — because a hand-run task that built somewhere else would be the one
+build not sharing it. See [config](config.md#the-build-cache).
+
 **`wecode verify`** can be run on its own, and is the same code path `run` uses. It reads
-the *uncommitted* diff, so run it before committing by hand.
+the *uncommitted* diff, so run it before committing by hand. The acceptance commands get
+the same shared build cache the agent had; verification is usually the larger build of
+the two.
 
 **`wecode worktree`** lists checkouts grouped by the **repository** they were cut from,
 because that is what a worktree belongs to — several projects sharing one repo share one

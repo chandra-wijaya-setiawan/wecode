@@ -22,7 +22,8 @@ pub mod workspace;
 pub use company::{AgentTemplate, Attention, Company, OrgError, Post, Repo, Templates, User};
 pub use gap::{Gap, GapError};
 pub use playbook::{
-    DispatchPolicy, KindPlaybook, MergePolicy, Playbook, PlaybookError, Subtask, SubtaskTemplate,
+    CacheDir, DispatchPolicy, KindPlaybook, MergePolicy, Playbook, PlaybookError, Subtask,
+    SubtaskTemplate,
 };
 pub use template::Template;
 pub use workspace::{Workspace, WorkspaceError, expand_home, init, resolve};
