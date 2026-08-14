@@ -25,6 +25,15 @@ has no executable acceptance; if it has no write scope (except a spike); if it h
 budget; if its scope overlaps a task that could run at the same time; or if it would
 close a dependency cycle. `--force` admits it anyway and records the defects as waivers.
 
+**Scope overlap is judged per repository, not per project.** A project owns one repo; a
+repo carries as many projects as anyone starts on it. Two of them claiming the same paths
+is two worktrees changing the same lines, and only one of the two can merge cleanly — so
+the check scans every open task on the same repo, names the project the other task
+belongs to, and takes the same two repairs as a sibling conflict: narrow one scope, or
+sequence them, which a `depends_on` may do across the boundary. Tasks on different repos
+never collide however alike their globs read, a closed task's scope is history, and an
+archived project dispatches nothing, so neither is treated as competition.
+
 The **design gate** is the admission check that keeps a feature from going from an idea
 to a merged branch with no human ever seeing a design. A playbook kind that sets
 `design_required` is refused unless a `design` task stands before it — a predecessor

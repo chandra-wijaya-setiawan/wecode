@@ -23,8 +23,10 @@ pub struct Project {
     /// Whether the operator has filed this away. Orthogonal to `status`: a project
     /// can be `done` and still on the board, or `active` and hidden while parked.
     ///
-    /// Display only. Archiving must never change what work is dispatchable — hiding
-    /// a project to tidy the board is not a decision to stop it.
+    /// Archiving *parks* a project rather than merely hiding it: [`crate::Plan::ready_tasks`]
+    /// and the scheduler both skip it, so nothing in it is promoted or dispatched, and
+    /// the admission gate stops treating its tasks as competition for files. All of
+    /// that reverses on `unarchive`; nothing is lost, and the ledger keeps what ran.
     pub archived: bool,
 }
 

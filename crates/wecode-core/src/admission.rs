@@ -4,7 +4,7 @@
 //! That is the point — a gate that sometimes says yes for reasons nobody can
 //! reproduce is not a gate.
 
-use crate::id::TaskId;
+use crate::id::{ProjectId, TaskId};
 use crate::plan::Plan;
 use crate::project::Project;
 use crate::task::{Task, TaskKind};
@@ -65,9 +65,16 @@ pub enum Defect {
     ScopeTooBroad {
         glob: String,
     },
+    /// Two tasks that could run at once claim the same paths in the same repo.
+    ///
+    /// `in_project` names the other task's project when it is not this one, and is
+    /// `None` when both are siblings. A repository is what tasks compete for, and a
+    /// repository outlives any one project on it — so the conflict crosses projects,
+    /// while the id alone reads as a task the operator cannot find on their board.
     ScopeOverlaps {
         with: TaskId,
         glob: String,
+        in_project: Option<ProjectId>,
     },
     BudgetMissing,
     /// The project demands a design before work of this kind, and no task of the
@@ -125,9 +132,25 @@ impl Defect {
             Self::ScopeTooBroad { glob } => {
                 format!("Write scope {glob:?} covers everything. Which paths specifically?")
             }
-            Self::ScopeOverlaps { with, glob } => format!(
+            Self::ScopeOverlaps {
+                with,
+                glob,
+                in_project: None,
+            } => format!(
                 "Write scope {glob:?} overlaps task `{with}`, which could run at the same time. \
                  Narrow one, or make this depend on it."
+            ),
+            // The same defect, said so it survives the reader not having the other
+            // project on screen — an id alone reads as a task missing from their own
+            // board. Both repairs still hold across the boundary: a dependency may
+            // name any task in the plan, whatever project it belongs to.
+            Self::ScopeOverlaps {
+                with,
+                glob,
+                in_project: Some(other),
+            } => format!(
+                "Write scope {glob:?} overlaps task `{with}` in project `{other}`, which shares \
+                 this repo and could run at the same time. Narrow one, or make this depend on it."
             ),
             Self::BudgetMissing => "What is the budget — tokens, wall time, or both?".into(),
             Self::DesignMissing => "This project requires a design before work of this kind. \
@@ -284,17 +307,37 @@ pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defec
         out.push(Defect::DesignMissing);
     }
 
-    // Two further things stop concurrency: a dependency in either direction
-    // sequences them, and a parent/child relation means one contains the other
-    // rather than competing with it.
-    for other in plan.tasks_of(&t.project) {
+    // Nothing in a parked project ever starts — `Plan::ready_tasks` and the scheduler
+    // both skip it — so a task there is not competition for anyone, itself included.
+    if parked(plan, &t.project) {
+        return out;
+    }
+
+    // The competition is for a working tree, and a working tree belongs to a
+    // repository rather than to a project. Two projects on one repo is the ordinary
+    // shape of a codebase that is being worked on from more than one angle, and
+    // scanning only `tasks_of(&t.project)` let each of them admit a task claiming the
+    // same files: nothing said no until two worktrees came back with the same lines
+    // changed, by which point both had been paid for.
+    //
+    // Three further things stop concurrency: a dependency in either direction
+    // sequences them — across projects too, since a dependency may name any task in
+    // the plan — a parent/child relation means one contains the other rather than
+    // competing with it, and a different repository means they never touch the same
+    // file however alike their globs read.
+    for other in plan.tasks() {
         if other.id == t.id
             || other.status.is_closed()
+            || parked(plan, &other.project)
+            || !share_a_repo(plan, t, other)
             || sequenced(plan, t, other)
             || nested(plan, t, other)
         {
             continue;
         }
+        // Named only when it is somewhere else. A sibling conflict is the common one
+        // and reads better without a project it was never ambiguous about.
+        let elsewhere = (other.project != t.project).then(|| other.project.clone());
         for glob in &t.scope.write {
             if glob.starts_with(crate::WORKER_DIR) {
                 continue;
@@ -303,11 +346,39 @@ pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defec
                 out.push(Defect::ScopeOverlaps {
                     with: other.id.clone(),
                     glob: glob.clone(),
+                    in_project: elsewhere.clone(),
                 });
             }
         }
     }
     out
+}
+
+/// Whether a project is archived, and so dispatches nothing.
+///
+/// A project the plan does not hold is treated as live: the task being admitted may
+/// name a project that is about to be created, and skipping the whole check on that
+/// basis would let the first task of a new project claim anything.
+fn parked(plan: &Plan, id: &ProjectId) -> bool {
+    plan.project(id).is_some_and(|p| p.archived)
+}
+
+/// Whether two tasks would be editing the same checkout.
+///
+/// Same project is the common case and settles it without a lookup — a project owns
+/// exactly one repo, so its own tasks always agree. Across projects the repo name each
+/// one registers decides it; an unregistered or absent project answers no, which keeps
+/// this check from inventing conflicts out of missing data. A project with a blank
+/// repo is a defect [`check_project`] already reports, and pairing two of them off
+/// each other would report it a second time as something else.
+fn share_a_repo(plan: &Plan, a: &Task, b: &Task) -> bool {
+    if a.project == b.project {
+        return true;
+    }
+    match (plan.project(&a.project), plan.project(&b.project)) {
+        (Some(x), Some(y)) => !x.repo.trim().is_empty() && x.repo == y.repo,
+        _ => false,
+    }
 }
 
 /// Whether either task waits on the other, in either direction, at any remove.
@@ -759,6 +830,221 @@ mod tests {
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "{:?}",
             check_task(&other, &plan, &[])
+        );
+    }
+
+    // ------------------------------------------------- across projects ------
+
+    /// A second project on the same repo as `good_project`.
+    fn neighbour() -> Project {
+        Project::new("exports", "cut the export payload in half", "wecode")
+            .measured(cmd())
+            .budgeted(budget())
+    }
+
+    /// `caching` and `exports`, both on `wecode`, with `cache-layer` already in.
+    fn two_projects() -> Plan {
+        let mut plan = seeded();
+        plan.add_project(neighbour()).unwrap();
+        plan.add_task(good_task()).unwrap();
+        plan
+    }
+
+    fn rival(project: &str) -> Task {
+        Task::new("export-writer", project, "rewrite the export writer")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/export/**"]))
+            .budgeted(budget())
+    }
+
+    fn overlap(defects: &[Defect]) -> Option<&Defect> {
+        defects
+            .iter()
+            .find(|d| matches!(d, Defect::ScopeOverlaps { .. }))
+    }
+
+    #[test]
+    fn two_projects_on_one_repo_may_not_claim_the_same_files() {
+        // The gap using wecode on itself kept finding: a repository carries as many
+        // projects as anyone starts, each was checked only against its own tasks, and
+        // so both admitted a task on the same paths. Nothing said no until two
+        // worktrees came back having changed the same lines.
+        let plan = two_projects();
+        let d = check_task(&rival("exports"), &plan, &[]);
+        match overlap(&d) {
+            Some(Defect::ScopeOverlaps {
+                with, in_project, ..
+            }) => {
+                assert_eq!(with.as_str(), "cache-layer");
+                assert_eq!(
+                    in_project.as_ref().map(ProjectId::as_str),
+                    Some("caching"),
+                    "the operator is looking at `exports` and cannot find `cache-layer` on it"
+                );
+            }
+            other => panic!("expected a cross-project overlap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_question_names_the_other_project_only_when_there_is_one() {
+        // The field exists to be said out loud; a defect whose message never differs
+        // is a distinction only the type system can see.
+        let across = Defect::ScopeOverlaps {
+            with: "cache-layer".into(),
+            glob: "crates/export/**".into(),
+            in_project: Some("caching".into()),
+        };
+        let q = across.question();
+        assert!(q.contains("`cache-layer`"), "{q}");
+        assert!(q.contains("`caching`"), "{q}");
+        assert!(q.contains("shares this repo"), "{q}");
+
+        let sibling = Defect::ScopeOverlaps {
+            with: "cache-layer".into(),
+            glob: "crates/export/**".into(),
+            in_project: None,
+        };
+        assert!(!sibling.question().contains("project"), "{q}");
+    }
+
+    #[test]
+    fn a_sibling_conflict_still_names_no_project() {
+        // The control on the field: within one project it was never ambiguous, and
+        // the message that has always been printed must not gain a clause.
+        let plan = two_projects();
+        assert!(
+            matches!(
+                overlap(&check_task(&rival("caching"), &plan, &[])),
+                Some(Defect::ScopeOverlaps {
+                    in_project: None,
+                    ..
+                })
+            ),
+            "{:?}",
+            check_task(&rival("caching"), &plan, &[])
+        );
+    }
+
+    #[test]
+    fn two_projects_on_different_repos_never_collide() {
+        // Identical globs against different checkouts are different files. Without
+        // this the check would refuse most of a company's board at once.
+        let mut plan = seeded();
+        let mut far = neighbour();
+        far.repo = "wemail".into();
+        plan.add_project(far).unwrap();
+        plan.add_task(good_task()).unwrap();
+        assert!(
+            overlap(&check_task(&rival("exports"), &plan, &[])).is_none(),
+            "{:?}",
+            check_task(&rival("exports"), &plan, &[])
+        );
+    }
+
+    #[test]
+    fn a_dependency_across_projects_sequences_them_too() {
+        // The repair the message offers has to actually work: `depends_on` is not
+        // confined to one project, so ordering removes a cross-project conflict the
+        // same way it removes a sibling one.
+        let plan = two_projects();
+        let later = rival("exports").after("cache-layer");
+        assert!(
+            overlap(&check_task(&later, &plan, &[])).is_none(),
+            "{:?}",
+            check_task(&later, &plan, &[])
+        );
+    }
+
+    #[test]
+    fn a_parked_project_is_not_competition() {
+        // Archiving parks a project: the scheduler and `ready_tasks` both skip it, so
+        // nothing in it can be running while this task is. Reporting it would say
+        // "could run at the same time" about work that cannot start at all.
+        let mut plan = two_projects();
+        let mut parked = plan.project(&"caching".into()).unwrap().clone();
+        parked.archived = true;
+        plan.update_project(parked).unwrap();
+        assert!(
+            overlap(&check_task(&rival("exports"), &plan, &[])).is_none(),
+            "{:?}",
+            check_task(&rival("exports"), &plan, &[])
+        );
+
+        // ...and unarchiving is all it takes to get the conflict back.
+        let mut live = plan.project(&"caching".into()).unwrap().clone();
+        live.archived = false;
+        plan.update_project(live).unwrap();
+        assert!(overlap(&check_task(&rival("exports"), &plan, &[])).is_some());
+    }
+
+    #[test]
+    fn a_task_in_a_parked_project_claims_nothing() {
+        // The other direction of the same rule. A task that will never be dispatched
+        // is not competing for files, so it neither raises a conflict nor is faulted
+        // for one.
+        let mut plan = two_projects();
+        let mut parked = plan.project(&"exports".into()).unwrap().clone();
+        parked.archived = true;
+        plan.update_project(parked).unwrap();
+        assert!(
+            overlap(&check_task(&rival("exports"), &plan, &[])).is_none(),
+            "{:?}",
+            check_task(&rival("exports"), &plan, &[])
+        );
+    }
+
+    #[test]
+    fn the_worker_area_is_shared_across_projects_as_well() {
+        // Every task is told to write its result there whatever project it belongs
+        // to, and each runs in its own worktree. The exemption has to survive the
+        // widened scan, or the second project's first task is un-admittable.
+        let mut plan = seeded();
+        plan.add_project(neighbour()).unwrap();
+        let mut first = good_task();
+        first.scope = Scope::write(&["crates/export/**", ".wecode/run/**"]);
+        plan.add_task(first).unwrap();
+
+        let other = Task::new("export-writer", "exports", "a different piece of work")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/import/**", ".wecode/run/**"]))
+            .budgeted(budget());
+        assert!(
+            overlap(&check_task(&other, &plan, &[])).is_none(),
+            "{:?}",
+            check_task(&other, &plan, &[])
+        );
+    }
+
+    #[test]
+    fn a_closed_task_in_another_project_does_not_block_a_new_scope() {
+        let mut plan = two_projects();
+        let mut done = plan.task(&"cache-layer".into()).unwrap().clone();
+        done.status = TaskStatus::Done;
+        plan.update_task(done).unwrap();
+        assert!(
+            overlap(&check_task(&rival("exports"), &plan, &[])).is_none(),
+            "{:?}",
+            check_task(&rival("exports"), &plan, &[])
+        );
+    }
+
+    #[test]
+    fn a_project_the_plan_does_not_hold_competes_with_nobody_elses_work() {
+        // `project add` checks its own admission before the project is saved, and a
+        // task may be probed against a plan that does not carry it yet. Answering
+        // "same repo" on missing data would invent conflicts; answering no leaves the
+        // sibling check, which needs no lookup, exactly as it was.
+        let mut plan = Plan::new();
+        plan.add_project(good_project()).unwrap();
+        plan.add_task(good_task()).unwrap();
+
+        let mut orphan = rival("exports");
+        orphan.project = "nowhere".into();
+        assert!(
+            overlap(&check_task(&orphan, &plan, &[])).is_none(),
+            "{:?}",
+            check_task(&orphan, &plan, &[])
         );
     }
 

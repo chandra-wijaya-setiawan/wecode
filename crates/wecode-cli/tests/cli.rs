@@ -968,6 +968,159 @@ fn a_chain_stays_admissible_past_its_second_link() {
         .assert_contains("admitted");
 }
 
+/// Declares a second repository, so a test can put two projects on different ones.
+///
+/// The path need not exist: nothing resolves it until a task starts, and the point
+/// here is which name a project registers, not what is checked out under it.
+fn second_repo(org: &Org, name: &str) {
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        format!("{text}\n[[repos]]\nname = \"{name}\"\npath = \"~/projects/{name}\"\n"),
+    )
+    .unwrap();
+}
+
+/// A second project, so its tasks meet the seeded ones across a project boundary.
+fn second_project(org: &Org, id: &str, repo: &str) {
+    org.run(&[
+        "project",
+        "add",
+        id,
+        "cut the export payload in half",
+        "--repo",
+        repo,
+        "--measure-cmd",
+        "cargo test",
+        "--tokens",
+        "200000",
+        "--wall",
+        "1800",
+    ])
+    .assert_ok("add second project");
+}
+
+/// A task on `tests/**` — the paths the seeded `cache-tests` already claims.
+fn claims_the_seeded_scope(org: &Org, id: &str, project: &str, after: Option<&str>) -> Run {
+    let mut args = vec![
+        "task",
+        "add",
+        id,
+        "extend the export tests",
+        "--project",
+        project,
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "tests/**",
+        "--tokens",
+        "1000",
+    ];
+    if let Some(dep) = after {
+        args.extend_from_slice(&["--after", dep]);
+    }
+    org.run(&args)
+}
+
+#[test]
+fn a_second_project_on_the_same_repo_may_not_claim_the_same_files() {
+    // The gap using wecode on itself kept finding. A repository carries as many
+    // projects as anyone starts, and the overlap check only ever looked inside one
+    // of them — so both admitted a task on the same paths, and nothing said no until
+    // two worktrees came back having changed the same lines.
+    let org = Org::new("overlap-cross", "solo");
+    org.seed();
+    second_project(&org, "exports", "app");
+
+    let r = claims_the_seeded_scope(&org, "export-tests", "exports", None);
+    r.assert_contains("overlaps")
+        .assert_contains("cache-tests")
+        // The reader is looking at `exports` and will not find `cache-tests` on it.
+        .assert_contains("caching")
+        .assert_contains("not saved");
+}
+
+#[test]
+fn projects_on_different_repos_do_not_collide() {
+    // The control. Identical globs against different checkouts are different files,
+    // and without this the check would refuse most of a company's board at once.
+    let org = Org::new("overlap-cross-repos", "solo");
+    org.seed();
+    second_repo(&org, "other");
+    second_project(&org, "exports", "other");
+
+    claims_the_seeded_scope(&org, "export-tests", "exports", None)
+        .assert_ok("different repo")
+        .assert_contains("admitted")
+        .assert_lacks("overlaps");
+}
+
+#[test]
+fn a_dependency_across_projects_settles_a_shared_scope() {
+    // The repair the message offers has to work across the boundary it reports, or
+    // the only way past the gate is --force. A dependency may name any task in the
+    // plan, and ordering removes the conflict the same way it does for siblings.
+    let org = Org::new("overlap-cross-seq", "solo");
+    org.seed();
+    second_project(&org, "exports", "app");
+
+    claims_the_seeded_scope(&org, "export-tests", "exports", Some("cache-tests"))
+        .assert_ok("sequenced across projects")
+        .assert_contains("admitted");
+}
+
+#[test]
+fn archiving_a_project_stops_its_tasks_claiming_files() {
+    // Archiving parks a project: the scheduler never dispatches from it, so its
+    // tasks cannot be running while anything else is. Reporting one would say "could
+    // run at the same time" about work that cannot start at all — and unarchiving is
+    // all it takes to get the conflict back.
+    let org = Org::new("overlap-cross-parked", "solo");
+    org.seed();
+    second_project(&org, "exports", "app");
+    org.run(&["archive", "caching"]).assert_ok("archive");
+
+    claims_the_seeded_scope(&org, "export-tests", "exports", None)
+        .assert_ok("parked is not competition")
+        .assert_contains("admitted");
+
+    org.run(&["unarchive", "caching"]).assert_ok("unarchive");
+    org.run(&["check", "export-tests"])
+        .assert_contains("overlaps")
+        .assert_contains("cache-tests");
+}
+
+#[test]
+fn widening_a_scope_onto_another_projects_files_is_refused() {
+    // `task scope` re-runs the same check, so the hole would reopen through the back
+    // door if only `task add` had been widened.
+    let org = Org::new("overlap-cross-scope", "solo");
+    org.seed();
+    second_project(&org, "exports", "app");
+    org.run(&[
+        "task",
+        "add",
+        "export-writer",
+        "rewrite the export writer",
+        "--project",
+        "exports",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "crates/export/**",
+        "--tokens",
+        "1000",
+    ])
+    .assert_ok("add on its own paths")
+    .assert_contains("admitted");
+
+    org.run(&["task", "scope", "export-writer", "--write", "tests/**"])
+        .assert_contains("overlaps")
+        .assert_contains("caching")
+        .assert_contains("not changed");
+}
+
 // -------------------------------------------------------------- design ---------
 
 #[test]
