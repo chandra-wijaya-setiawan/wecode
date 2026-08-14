@@ -241,6 +241,23 @@ which is what withholding a signature already means. Anything else is chat and i
 alone. Every message is acted on once: the update read is kept in `wecode.db`, so a
 `getUpdates` retried after a network error cannot sign twice.
 
+**Every level shows the whole tree beneath it.** The portfolio used to stop at root
+tasks, so a plan that broke its work down showed only the tops of the breakdowns — and
+the row that is actually running, over budget or waiting for a signature is usually a
+leaf. It was there on the project row as a rolled-up `2 to answer`, with no way to find
+out which two without descending into each project in turn. Now the portfolio draws
+projects, their tasks, their subtasks, and so on to the bottom; `wecode board <id>` and
+the focused levels of `wecode up` do the same from wherever they start.
+
+A tree that is drawn in full is a tree that can be longer than the screen, so `wecode up`
+folds: `space` puts the selection's children away, `z` folds the whole plan down to its
+projects, `Z` opens it again, and `▾`/`▸` on the row says which way it points. It starts
+open, because what is not on screen should be what the operator put away rather than what
+the view decided to omit — and a fold is remembered by subject, so it survives the
+reload a second and a half later. Descending into a folded row opens it, since zooming in
+is asking to see inside. `wecode board` does not fold: a snapshot piped into a pager is
+already scrollable, and a fold state a one-shot command forgets is a flag nobody sets.
+
 Health is **computed** from the ledger, the budget and the defect checks — never
 reported. It is the colour of the needs-you cell rather than a column of its own:
 every cause of amber or red writes an entry there, so a column beside it only ever
@@ -251,7 +268,7 @@ healthy and not started.
 whose prerequisite `failed` or was `dropped` looks exactly like one whose prerequisite
 is still running — both say *waiting* — but no tick will ever release the first. The
 board marks it amber with `stuck on <id>`, the project row carries a `N stuck` count so
-a stranded subtask is visible before descending, `ready` counts stuck work apart from
+a stranded subtask is countable without reading its branch, `ready` counts stuck work apart from
 work that time will resolve, and `wecode status <t> failed|dropped` names the dependents
 the act just stranded. Deliberately narrow: a prerequisite at `needs-approval` or
 `needs-input` is a signature or an answer away from done — work queuing behind an
@@ -275,6 +292,22 @@ the task while it happens. `needs-input` is never set — nothing detects an age
 stopping to ask, and a subprocess CLI that has paused generally cannot be resumed
 anyway. Both remain in the vocabulary because the A2A mapping needs them and the board
 renders them.
+
+## A plan more than two levels deep may not load again
+
+`Plan` puts no limit on how deep the is-part-of tree goes, and every view now draws it
+to the bottom. The **store cannot always read one back**. `load_plan` orders tasks
+`(parent_id IS NOT NULL), id` — roots first, then everything else by id — which gets a
+parent before its child for exactly two levels. A grandchild whose id sorts before its
+parent's arrives first, `Plan::add_task` refuses it as `no task <parent>`, and the load
+fails: `stored plan structure is not recognised`. Not the task, the whole workspace,
+every command, until the row is deleted by hand.
+
+Found by writing a three-level tree into a test store, and left here rather than fixed
+because the fix is in `wecode-store` and this task could only write to the CLI. It wants
+a walk from the roots outward, or a topological sort, in place of the ordering trick —
+about ten lines, and worth doing before anybody plans three levels deep in anger. Two
+levels are safe in any order, which is why nothing has hit it yet.
 
 ## Enforcement is post-hoc, not intercepted
 
