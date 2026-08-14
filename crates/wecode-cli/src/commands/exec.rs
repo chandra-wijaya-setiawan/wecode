@@ -4,10 +4,11 @@
 //! what should be true, the other finds out what is.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use wecode_core::{Plan, Task, TaskId, TaskStatus, admission};
 use wecode_gov::{Action, ActionKind, Broker, Session, glob};
-use wecode_org::{Company, Playbook, Workspace};
+use wecode_org::{AgentTemplate, Company, Playbook, Workspace};
 
 use wecode_store::Store;
 
@@ -505,6 +506,38 @@ pub(crate) fn forbidden_by_charter(company: &Company, line: &str) -> Option<Stri
     })
 }
 
+/// The clock one run is held to: the harness's limits, tightened by the task's own wall.
+///
+/// A task states a wall. `--wall` writes it, a playbook's default for the kind fills it
+/// in, the admission gate refuses a task that declares no budget at all, and `wecode
+/// show` prints it back as `wall 60s`. None of that ever reached the process: the only
+/// wall a run was held to was the agent template's, one figure in `company.toml` shared
+/// by every task that harness runs. A chore given sixty seconds ran to the harness's
+/// thirty minutes, and the number on the task was decoration — read by the operator,
+/// answered by nobody.
+///
+/// Which is the half of a budget that could have been enforced. Tokens cannot: the count
+/// only exists once the agent reports it, which is after the money is gone, so that half
+/// is post-hoc by nature and the board is where it lands. Time is the one thing wecode
+/// measures itself, on its own clock, while the run is still going — a wall is the only
+/// part of a task's budget that can stop a runaway rather than describe one afterwards.
+///
+/// The **tighter** of the two, not the task's outright. The template's wall is the
+/// harness's own stop, the backstop under every task whatever its plan says, and a task
+/// must not widen its way past it by declaring a longer one. Either may be absent, and
+/// then the other is the whole answer.
+///
+/// Idle stays the template's. A budget says how long the work may take, not how long the
+/// harness may go quiet in the middle of it — different questions, and only the agent's
+/// own output stream can answer the second one.
+fn limits_for(template: &AgentTemplate, task: &Task) -> spawn::Limits {
+    let mut limits = spawn::Limits::from(template);
+    if let Some(declared) = task.budget.wall_secs.map(Duration::from_secs) {
+        limits.wall = Some(limits.wall.map_or(declared, |cap| cap.min(declared)));
+    }
+    limits
+}
+
 /// Runs a task: prepares it, spawns the agent that holds its post, then judges it.
 ///
 /// The agent is never given a session. The supervisor opens one and records on its
@@ -581,7 +614,9 @@ pub(crate) fn run_task(a: &Args) -> Res {
     // Opened before the process starts, so a crash leaves a row saying `working`
     // rather than no trace of the run at all.
     let exec = store.start_execution(&id, &who.session, prepared.cwd.to_str(), None)?;
-    let limits = spawn::Limits::from(&template);
+    // The harness's clock, tightened by the wall this task declared and `wecode show`
+    // has been printing all along.
+    let limits = limits_for(&template, &task);
     let outcome = spawn::run(
         &template,
         &prepared.envelope,
@@ -631,7 +666,14 @@ pub(crate) fn run_task(a: &Args) -> Res {
     );
     store.append_records(broker.ledger())?;
 
-    let mut out = render::ran(&task, &post, model.as_deref(), &prepared.cwd, &outcome);
+    let mut out = render::ran(
+        &task,
+        &post,
+        model.as_deref(),
+        &prepared.cwd,
+        limits,
+        &outcome,
+    );
     if outcome.ended.ok() {
         // Verification is the same code path a hand-run task takes, so the two can
         // never disagree about what passing means.
@@ -1088,5 +1130,67 @@ pub(crate) fn worktree_remove(a: &Args) -> Res {
         // though the tree were gone.
         teardown::Torn::Dirty { .. } => Err(report.into()),
         _ => Ok(report),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wecode_core::Budget;
+
+    /// A harness with whatever clock the test is about.
+    fn harness(wall: Option<u64>, idle: Option<u64>) -> AgentTemplate {
+        AgentTemplate {
+            command: "sh".to_string(),
+            protocol: String::new(),
+            args: vec![],
+            env_allowlist: vec![],
+            wall_secs: wall,
+            idle_secs: idle,
+            models: vec![],
+            model_flag: "--model".to_string(),
+        }
+    }
+
+    fn budgeted(wall: Option<u64>) -> Task {
+        Task::new("t", "caching", "append a marker comment to the source").budgeted(Budget {
+            tokens: Some(1000),
+            wall_secs: wall,
+        })
+    }
+
+    #[test]
+    fn a_task_is_held_to_the_wall_it_declared() {
+        // The whole defect: this number was printed by `wecode show` and enforced by
+        // nothing, so a task budgeted at a minute ran to the harness's half hour.
+        let l = limits_for(&harness(Some(1800), Some(300)), &budgeted(Some(60)));
+        assert_eq!(l.wall, Some(Duration::from_secs(60)));
+        // And only the wall: a budget has nothing to say about silence.
+        assert_eq!(l.idle, Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn a_task_cannot_declare_its_way_past_the_harnesss_wall() {
+        // The tighter of the two, in both directions. The template's wall is the stop
+        // under every run this harness makes, and a budget is not a way to lift it.
+        let l = limits_for(&harness(Some(600), None), &budgeted(Some(5400)));
+        assert_eq!(l.wall, Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn either_wall_alone_is_the_whole_answer() {
+        // A harness with no clock is held to the task's...
+        let l = limits_for(&harness(None, Some(300)), &budgeted(Some(90)));
+        assert_eq!(l.wall, Some(Duration::from_secs(90)));
+
+        // ...and a task budgeted in tokens alone is held to the harness's, which is
+        // what every task got before this and is still right when there is nothing
+        // tighter to apply.
+        let l = limits_for(&harness(Some(1800), Some(300)), &budgeted(None));
+        assert_eq!(l.wall, Some(Duration::from_secs(1800)));
+
+        // Neither declares one: nothing to enforce, and no invented limit either.
+        let l = limits_for(&harness(None, None), &budgeted(None));
+        assert_eq!(l.wall, None);
     }
 }
