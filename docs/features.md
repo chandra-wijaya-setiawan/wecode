@@ -120,6 +120,7 @@ which is how you check a scope before assigning work to a seat that cannot reach
 | **Worktrees** | one per main task, outside the repo and the workspace |
 | **Shared build cache** | directories a project's worktrees share, so a task is not a cold build |
 | **Spawning** | environment from an allowlist, new process group, wall and idle timeouts |
+| **Intelligence** | a seat declares how clever its occupant is, 1–10, and the model is derived |
 | **Verification** | the diff against the declared scope, then the acceptance commands |
 | **Commits** | every attempt, pass or fail, authored by wecode |
 | **Spend** | tokens read out of the agent's own output, per attempt and on the ledger |
@@ -133,6 +134,21 @@ The **environment is built, not inherited** — a coding CLI would otherwise rea
 secret in the shell, and absent a container that is the only network control there is. A
 **new process group** matters because coding CLIs spawn children, and signalling only
 the parent leaves them running.
+
+**Which model runs is now a property of the chart.** It used to be a property of the
+operator's terminal: no model was named anywhere in `company.toml`, every agent
+inherited whatever `/model` was last set to, and two runs of the same task on different
+afternoons could cost tenfold with nothing recording why. A post now carries
+`intelligence`, 1–10, and its harness carries `models` weakest first; the scale is
+spread over that list and the level picks the weakest model that reaches it. A level
+rather than a name, because names churn and an ordering does not — add a model and every
+seat keeps meaning roughly what it meant. `[invariants] max_intelligence` is the ceiling,
+and it is a ceiling and not a default, so a seat under it keeps its own number. The
+resolved model goes on the launch line, which is the line the ledger already records, and
+`wecode run` says which model ran beside what the run cost. It is not a quality control:
+a level names what is launched, and whether the work is good is still the acceptance
+commands and the human signature. A company that declares none of it names no model at
+all and behaves exactly as it did before.
 
 The **shared build cache** is what keeps a clean worktree from meaning a cold build. A
 project names the directories its worktrees share — `[project.build_cache]` in its
@@ -408,6 +424,13 @@ opinion about clearing it, and one wecode ran on its own schedule would be a way
 a cache at the worst moment. The growth is the operator's to watch. Concurrent tasks
 also queue on the toolchain's own lock rather than building in parallel, which is the
 trade the feature is for and not a defect.
+
+**A task cannot ask for a cleverer occupant than its seat has.** `intelligence` is a
+post property and there is no `--intelligence` on a task, so the lever for one unusually
+hard piece of work is to assign it to a seat that carries the level — which the playbook
+already does per subtask, and which is the case worth optimising for anyway. The
+per-task override would have to freeze with the acceptance and the scope to be worth
+anything, and a number that lives only on the command line is a number nobody can audit.
 
 `protocol` is now matched on, but for one thing and one value: `claude-stream-json`,
 to read a token count. It is still not validated at load, so a typo in `company.toml`

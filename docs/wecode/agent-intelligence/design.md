@@ -1,6 +1,8 @@
 # Intelligence as a seat property
 
-Status: **proposed** — awaiting approval.
+Status: **built**, with one piece deliberately left out — see *What shipped* at the
+bottom, which also records the two places the implementation departed from the sketch
+below.
 
 ## The problem
 
@@ -112,3 +114,43 @@ for what it does becomes visible rather than inferred.
 It is not a quality control. A level names which model is launched, nothing more —
 whether the work is good is still the acceptance commands and the human signature.
 Raising a number will not rescue a task whose acceptance cannot tell right from wrong.
+
+## What shipped
+
+`models` on the agent, `intelligence` on the post, `max_intelligence` in `[invariants]`,
+the derived scale, and the resolved model on the launch line — which is the line the
+ledger already records, so the most expensive variable in a run is now audited by the
+machinery that was already there. `wecode company show` prints the catalogue and what
+each seat resolved to; `wecode run` names the model beside what the run cost.
+
+Two departures from the sketch above, both about the absent case:
+
+**The flag is a field, not a placeholder.** `{{model}}` positioned in `args` reads well
+until a seat has no level: the operator's own `--model` is still standing in the list,
+now with nothing behind it. So the harness names its `model_flag` — defaulting to
+`--model` — and wecode appends the pair or neither.
+
+**A level the harness cannot honour is refused at load.** A post with `intelligence`
+against an agent declaring no `models` would have been a number that reads as configured
+and decides nothing, which is the shape of wrong `company.toml` refuses everywhere else.
+The message names the one line that repairs it. So is a level off the scale, and so is a
+post configured above the ceiling — a post is written by hand, and silently lowering one
+would make the file lie about what it staffs.
+
+That last one makes the *clamp* above unnecessary rather than merely unused: the file is
+validated on every load, so nothing that reaches `intelligence_of` can be above the
+ceiling, and a `min` there would be a branch no input can enter. Resolution is still its
+own step, because that is where a clamp would belong the day a level can be *asked for*
+rather than written down — a per-task override, which is the piece below.
+
+**`--intelligence` on a task is not built.** The seat is the main lever and it works;
+the override is for the exception, and it needs to freeze with the acceptance and the
+scope to be worth having, which is a change to the task record rather than to this
+slice. Recorded as an absence in [features.md](../../features.md) rather than left as a
+half-built flag.
+
+The ceiling is carried on the `Company` rather than as a `Charter` invariant, and that
+is a smaller claim than it looks: the other invariants describe things an agent *does*,
+which the Broker judges as they happen, and this one describes what an agent *is*. There
+is no run-time action to judge — the check has already happened, at load, against the
+file that declared it.

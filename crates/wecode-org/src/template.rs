@@ -90,6 +90,7 @@ never_touch = [".github/**", "infra/**", "**/*.pem", "**/*.key", "**/.env"]
 never_run = ["git push --force*", "npm publish*", "terraform apply*", "rm -rf /*"]
 approval_to_merge = ["main", "master", "release/**"]
 max_tokens = 1000000
+# max_intelligence = 7.5  # no seat may be staffed above this level; see posts below
 
 [session]
 ttl = "8h"                # idle timeout for an interactive session
@@ -142,26 +143,35 @@ wall_secs = 300
 # ---------------------------------------------------------------- posts --------
 # A post is a seat; `agent` is what types for it. Re-staff without touching the
 # org chart.
+#
+# `intelligence` is how clever the occupant should be, 1–10, matched against the
+# `models` list on its agent below — not a model name, so this chart does not rot
+# when one is renamed. Omit it and the harness runs whatever it runs by default.
 
 [[posts]]
 name = "chief"
 role = "chief"
 agent = "claude-code"
+intelligence = 7.5        # decides what the work is; the expensive judgement
 
 [[posts]]
 name = "impl"
 role = "engineer"
 agent = "claude-code"
+intelligence = 5
 
 [[posts]]
 name = "test"
 role = "tester"
 agent = "codex"
+# No level: `codex` below lists no models, so there is nothing to pick from and
+# setting one here would be refused at load rather than quietly ignored.
 
 [[posts]]
 name = "review"
 role = "reviewer"
 agent = "claude-code"
+intelligence = 7.5
 
 # ---------------------------------------------------------------- users --------
 # A person holding a seat. Authority lives on the role, so naming a user adds
@@ -181,6 +191,11 @@ args = ["-p", "{{prompt}}", "--output-format", "stream-json", "--verbose", "--al
 env_allowlist = ["ANTHROPIC_API_KEY", "PATH", "HOME", "LANG"]
 wall_secs = 1800
 idle_secs = 300
+# Weakest first. The 1–10 scale is spread over this list — three entries answer
+# up to 3.3, 6.6 and 10 — so adding one keeps every seat's number meaning roughly
+# what it meant. Launched as `--model <name>`; set `model_flag` if this harness
+# spells it differently. Omit the list and no model is named at all.
+models = ["haiku", "sonnet", "opus"]
 
 [agents.codex]
 command = "codex"
@@ -248,6 +263,7 @@ never_touch = [".github/**", "**/*.pem", "**/.env"]
 never_run = ["git push --force*", "npm publish*"]
 approval_to_merge = ["main", "master"]
 max_tokens = 500000
+# max_intelligence = 7.5  # no seat may be staffed above this level
 
 [session]
 ttl = "8h"
@@ -277,15 +293,21 @@ run = ["cargo *"]
 tokens = 200000
 wall_secs = 1800
 
+# `intelligence` is how clever the occupant should be, 1–10, matched against the
+# `models` list on the agent below. Not a model name, so this does not rot when one
+# is renamed; omit it and the harness runs its own default.
+
 [[posts]]
 name = "chief"
 role = "chief"
 agent = "claude-code"
+intelligence = 7.5        # decides what the work is; the expensive judgement
 
 [[posts]]
 name = "impl"
 role = "engineer"
 agent = "claude-code"
+intelligence = 5
 
 [[users]]
 name = "you"
@@ -299,6 +321,9 @@ args = ["-p", "{{prompt}}", "--output-format", "stream-json", "--verbose", "--al
 env_allowlist = ["ANTHROPIC_API_KEY", "PATH", "HOME", "LANG"]
 wall_secs = 1800
 idle_secs = 300
+# Weakest first: the 1–10 scale is spread over this list, so a seat's number keeps
+# meaning roughly what it meant when one is added. Launched as `--model <name>`.
+models = ["haiku", "sonnet", "opus"]
 
 [templates]
 task_envelope = """
@@ -414,6 +439,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_starter_staffs_its_seats_by_level_rather_than_by_model_name() {
+        // The starter is where an operator learns the vocabulary. A chart that named
+        // `opus` here would teach them to pin a name and rot at the next release.
+        for t in all() {
+            let c = company_of(t);
+            let chief = c.chief().unwrap_or_else(|| panic!("{}", t.name));
+            assert!(
+                c.model_for(chief).is_some(),
+                "{}: the chief is left to whatever the terminal last set",
+                t.name
+            );
+            for p in &c.posts {
+                // A level and a name are never both written down: the name is derived.
+                assert!(
+                    !c.agents[&p.agent].models.iter().any(|m| m == &p.agent),
+                    "{}: post `{}` looks pinned to a model name",
+                    t.name,
+                    p.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_seat_on_an_unranked_harness_declares_no_level() {
+        // Which is also the load-time check working: a starter that set one would be
+        // refused by `company_of` above, so this is here to say it is deliberate.
+        let c = company_of(&SOFTWARE_COMPANY);
+        let test = c.post("test").expect("the tester seat exists");
+        assert!(c.agents[&test.agent].models.is_empty());
+        assert_eq!(test.intelligence, None);
+        assert_eq!(c.model_for(test), None, "codex runs its own default");
     }
 
     #[test]

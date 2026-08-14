@@ -561,7 +561,12 @@ pub(crate) fn run_task(a: &Args) -> Res {
         .grant_of(&post)
         .map(spawn::allowed_tools)
         .unwrap_or_default();
-    let launch = spawn::argv(&template, "{{prompt}}", &tools).join(" ");
+    // Which model, from the seat's declared level rather than from whatever the
+    // operator's terminal last remembered. On the launch line for the same reason the
+    // tools are: the ledger records the command as configured, and the most expensive
+    // variable in the system should not be the one thing missing from it.
+    let model = company.model_for(&post).map(ToString::to_string);
+    let launch = spawn::argv(&template, "{{prompt}}", &tools, model.as_deref()).join(" ");
 
     // Only the charter is consulted here, not the post's `run` grant. That grant says
     // what the *agent* may run while working — `cargo *` for an engineer — and it is
@@ -587,6 +592,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
         &template,
         &prepared.envelope,
         &tools,
+        model.as_deref(),
         &prepared.cwd,
         &prepared.cache,
         limits,
@@ -631,7 +637,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
     );
     store.append_records(broker.ledger())?;
 
-    let mut out = render::ran(&task, &post, &prepared.cwd, &outcome);
+    let mut out = render::ran(&task, &post, model.as_deref(), &prepared.cwd, &outcome);
     if outcome.ended.ok() {
         // Verification is the same code path a hand-run task takes, so the two can
         // never disagree about what passing means.
