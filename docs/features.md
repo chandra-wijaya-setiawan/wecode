@@ -90,6 +90,7 @@ which is how you check a scope before assigning work to a seat that cannot reach
 | | |
 |---|---|
 | **Worktrees** | one per main task, outside the repo and the workspace |
+| **Shared build cache** | directories a project's worktrees share, so a task is not a cold build |
 | **Spawning** | environment from an allowlist, new process group, wall and idle timeouts |
 | **Verification** | the diff against the declared scope, then the acceptance commands |
 | **Commits** | every attempt, pass or fail, authored by wecode |
@@ -104,6 +105,19 @@ The **environment is built, not inherited** — a coding CLI would otherwise rea
 secret in the shell, and absent a container that is the only network control there is. A
 **new process group** matters because coding CLIs spawn children, and signalling only
 the parent leaves them running.
+
+The **shared build cache** is what keeps a clean worktree from meaning a cold build. A
+project names the directories its worktrees share — `[project.build_cache]` in its
+playbook, one environment variable per line — and wecode sets them on the agent and on
+the acceptance commands alike, since both build and verification's is usually the larger
+of the two. wecode carries a name and a path and knows nothing about either, so
+`CARGO_TARGET_DIR`, `GOCACHE` and `SCCACHE_DIR` all work without wecode having heard of
+them. A relative path is refused, because it would resolve inside each worktree and hand
+every task its own copy under a name promising the opposite; so are the variables that
+decide which program runs rather than where its output goes. The trade is honest and
+stated: cargo locks a target directory, so tasks building at the same moment queue
+instead of rebuilding, which is seconds against minutes. A project that declares nothing
+behaves exactly as before.
 
 The **instruction is an A2A task**, not a string built beside one. What the worker is
 told is a `Message`; what it is given to read — a predecessor's commit, its own failed
@@ -232,6 +246,14 @@ And if the loop dies mid-run the task stays `running` forever, leaking a slot ea
 Serving or calling A2A over JSON-RPC — the model is wired, the transport is not — plus
 streaming progress, containers, RACI, and the recursive management functions the theory
 describes.
+
+A **shared build cache is never cleaned or bounded**. wecode creates the directory and
+sets the variable; nothing evicts it, no worktree teardown touches it, and there is no
+`wecode cache clean` — every toolchain that reads one of these variables has its own
+opinion about clearing it, and one wecode ran on its own schedule would be a way to lose
+a cache at the worst moment. The growth is the operator's to watch. Concurrent tasks
+also queue on the toolchain's own lock rather than building in parallel, which is the
+trade the feature is for and not a defect.
 
 `protocol` is now matched on, but for one thing and one value: `claude-stream-json`,
 to read a token count. It is still not validated at load, so a typo in `company.toml`

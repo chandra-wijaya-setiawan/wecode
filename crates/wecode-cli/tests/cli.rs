@@ -1477,9 +1477,15 @@ guidance = "Single task, no worktree."
 
 /// A workspace with a real repo and a playbook in it.
 fn with_playbook(name: &str) -> (Org, PathBuf) {
+    with_playbook_body(name, PLAYBOOK)
+}
+
+/// The same, with guidance the test states itself — for the settings the shared
+/// constant deliberately does not carry.
+fn with_playbook_body(name: &str, body: &str) -> (Org, PathBuf) {
     let org = Org::new(name, "solo");
     let repo = org.repo();
-    org.playbook(&repo, PLAYBOOK);
+    org.playbook(&repo, body);
     org.run(&[
         "project",
         "add",
@@ -3102,6 +3108,103 @@ fn run_spawns_the_agent_and_verifies_what_it_did() {
     // for the signature rather than claiming to be done.
     org.run(&["show", "t"])
         .assert_contains("status     needs-approval");
+}
+
+// ------------------------------------------------------------ build cache ------
+
+/// A cache directory outside every worktree and outside the workspace, which is what
+/// the setting is for: `Org` wipes its own directory on each run, and a cache that went
+/// with it would be shared with nothing.
+fn cache_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("wecode-e2e-cache-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir.join("target")
+}
+
+/// The shared playbook with a build cache declared on top of it.
+fn with_cache(target: &Path) -> String {
+    format!(
+        "{PLAYBOOK}\n[project.build_cache]\nCARGO_TARGET_DIR = \"{}\"\n",
+        target.display()
+    )
+}
+
+#[test]
+fn one_build_cache_reaches_both_the_agent_and_the_commands_that_judge_it() {
+    // The whole path in one test, because half of it is worse than none: an agent
+    // building into the shared directory while acceptance rebuilds from scratch in the
+    // worktree pays the cost this exists to remove, and looks like it did not.
+    let target = cache_dir("both");
+    let (org, _) = with_playbook_body("cache-both", &with_cache(&target));
+    org.agent("echo \"$CARGO_TARGET_DIR\" > seen.txt");
+
+    let seen = format!("grep -qx {} seen.txt", target.display());
+    let judged = format!("test \"$CARGO_TARGET_DIR\" = {}", target.display());
+    org.run(&[
+        "task",
+        "add",
+        "t",
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "append a marker comment to the source",
+        "--write",
+        "seen.txt",
+        "--accept-cmd",
+        &seen,
+        "--accept-cmd",
+        &judged,
+        "--tokens",
+        "100",
+        "--wall",
+        "30",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("task add");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("exit 0")
+        .assert_contains("passed");
+    // Made by wecode rather than by whatever ran first: a toolchain handed a path it
+    // cannot create either fails obscurely or quietly builds into the worktree.
+    assert!(target.is_dir(), "{} was not created", target.display());
+}
+
+#[test]
+fn the_shared_cache_is_shown_in_the_guidance_and_reported_where_work_is_prepared() {
+    let target = cache_dir("shown");
+    let (org, _) = with_playbook_body("cache-shown", &with_cache(&target));
+
+    // In the playbook view as written, since that is a view of the file.
+    org.run(&["playbook"])
+        .assert_ok("playbook")
+        .assert_contains("cache")
+        .assert_contains("CARGO_TARGET_DIR");
+
+    // And resolved where the operator is told which directory to work in — a hand-run
+    // task that built somewhere else would be the one build not sharing the cache.
+    a_task(&org, "t", "a.txt", "true");
+    org.run(&["start", "t"])
+        .assert_ok("start")
+        .assert_contains(&format!("cache    CARGO_TARGET_DIR={}", target.display()));
+}
+
+#[test]
+fn a_cache_that_would_land_inside_a_worktree_is_refused_by_name() {
+    // `target/shared` resolves against whichever worktree is running, so it would be a
+    // per-task directory with a name promising the opposite. Refused where the playbook
+    // is read, which is before any budget is spent.
+    let (org, _) = with_playbook_body(
+        "cache-relative",
+        &format!("{PLAYBOOK}\n[project.build_cache]\nCARGO_TARGET_DIR = \"target/shared\"\n"),
+    );
+    let r = org.run(&["playbook"]);
+    assert!(!r.ok(), "a playbook that cannot be honoured must not load");
+    r.assert_contains("CARGO_TARGET_DIR")
+        .assert_contains("relative");
 }
 
 #[test]

@@ -29,6 +29,7 @@ Only a few fields are typed, because wecode itself acts on them:
 | `tokens`, `wall_secs` | fill the budget |
 | `merge_to`, `merge` | where work lands, and whether it needs a signature |
 | `dispatch` | whether a task needs a signature before it may be started at all |
+| `build_cache` | directories every worktree of this project shares |
 | `subtasks` | what `task add --expand` emits |
 
 Everything in `guidance` is carried to the reader and never parsed.
@@ -143,6 +144,38 @@ The signature is one line in the ledger, attributed to the post that gave it and
 person in that seat. It covers one task, not the subtasks beneath it, and it goes stale
 if the task is redefined afterwards: amending a scope asks for it again, so signing
 something small and then widening it is not a way through.
+
+## Sharing the build cache
+
+A worktree is a clean checkout, which is what makes it safe — and it means `target/`
+starts empty. Every task then pays for a cold build twice: once inside the agent, and
+once in verification, which runs the suite to judge it. On a Rust workspace that is
+minutes per attempt, paid again by every retry, and it comes out of the wall budget the
+task was given for doing the work.
+
+None of that output is task-specific, so point the toolchain somewhere all the
+worktrees can reach:
+
+```toml
+[project.build_cache]
+CARGO_TARGET_DIR = "~/.cache/wecode/app/target"
+```
+
+Key is the environment variable, value is a directory — absolute, or under `~/`. wecode
+sets it on the agent and on the acceptance commands, creates it if it is missing, and
+knows nothing else about it, so `GOCACHE`, `YARN_CACHE_FOLDER` or `SCCACHE_DIR` work the
+same way. It goes here rather than in `env_allowlist`, which is about what an agent may
+inherit from the operator's shell; this is not inherited from anywhere.
+
+Two things to know before turning it on:
+
+- **A relative path is refused**, and that refusal is the useful part. `target/shared`
+  resolves against whichever worktree is running, so each task would quietly get its own
+  copy while the setting said otherwise.
+- **Sharing serialises.** Cargo locks its target directory, so two tasks building at the
+  same moment queue instead of building twice. Seconds of waiting against minutes of
+  rebuilding is a good trade in nearly every project, and one that would rather have
+  parallel cold builds simply declares nothing.
 
 ## Writing a good one
 

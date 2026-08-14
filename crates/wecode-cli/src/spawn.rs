@@ -139,11 +139,17 @@ pub(crate) fn argv(t: &AgentTemplate, prompt: &str, tools: &str) -> Vec<String> 
 }
 
 /// Runs the agent to completion, or kills it.
+///
+/// `env` is what the project shares between its worktrees — see [`crate::cache`]. It is
+/// set from values wecode already holds rather than read out of the ambient
+/// environment, so it adds directories without adding a way for the shell's secrets to
+/// arrive by another door.
 pub(crate) fn run(
     t: &AgentTemplate,
     prompt: &str,
     tools: &str,
     cwd: &Path,
+    env: &[(String, std::path::PathBuf)],
     limits: Limits,
 ) -> std::io::Result<Outcome> {
     let args: Vec<String> = argv(t, prompt, tools).into_iter().skip(1).collect();
@@ -162,6 +168,13 @@ pub(crate) fn run(
         if let Ok(v) = std::env::var(key) {
             cmd.env(key, v);
         }
+    }
+    // After the allowlist, and that ordering is the decision: the project said where
+    // this repository's build output goes, and an inherited `CARGO_TARGET_DIR` naming
+    // the operator's own checkout would otherwise win — putting the agent's build in
+    // the one directory a worktree run must not touch.
+    for (key, dir) in env {
+        cmd.env(key, dir);
     }
 
     let started = Instant::now();
@@ -383,7 +396,7 @@ mod tests {
     #[test]
     fn output_is_captured_and_the_exit_code_kept() {
         let t = agent("echo hello; echo oops >&2; exit 3", None, None);
-        let o = run(&t, "", "", &cwd(), Limits::default()).unwrap();
+        let o = run(&t, "", "", &cwd(), &[], Limits::default()).unwrap();
         assert_eq!(o.ended, Ended::Exited(3));
         assert!(!o.ended.ok());
         assert!(o.output.contains("hello"), "{}", o.output);
@@ -401,7 +414,7 @@ mod tests {
         let mut t = agent("echo path=[$PATH] home=[$HOME]", None, None);
         t.env_allowlist = vec!["PATH".to_string()];
 
-        let o = run(&t, "", "", &cwd(), Limits::default()).unwrap();
+        let o = run(&t, "", "", &cwd(), &[], Limits::default()).unwrap();
         assert!(
             o.output.contains("path=[/"),
             "PATH should pass: {}",
@@ -415,6 +428,45 @@ mod tests {
     }
 
     #[test]
+    fn the_shared_build_cache_reaches_the_agent_without_being_on_the_allowlist() {
+        // The allowlist is about what may be *inherited*; this value is not inherited
+        // from anywhere, it is what the project's playbook said. Requiring it to be
+        // listed twice would mean a company.toml edit for every project that wanted a
+        // cache, which is the wrong file to be editing.
+        let t = agent("echo target=[$CARGO_TARGET_DIR]", None, None);
+        let env = [(
+            "CARGO_TARGET_DIR".to_string(),
+            std::path::PathBuf::from("/tmp/shared-target"),
+        )];
+        let o = run(&t, "", "", &cwd(), &env, Limits::default()).unwrap();
+        assert!(
+            o.output.contains("target=[/tmp/shared-target]"),
+            "{}",
+            o.output
+        );
+    }
+
+    #[test]
+    fn the_project_s_cache_outranks_an_inherited_value_of_the_same_name() {
+        // Otherwise an allowlisted variable pointing at the operator's own checkout
+        // wins, and a worktree run builds into the directory it must not touch. `HOME`
+        // stands in for a cache variable here only because it is the one this process
+        // is guaranteed to have inherited.
+        let mut t = agent("echo home=[$HOME]", None, None);
+        t.env_allowlist = vec!["HOME".to_string()];
+        let env = [(
+            "HOME".to_string(),
+            std::path::PathBuf::from("/tmp/declared-wins"),
+        )];
+        let o = run(&t, "", "", &cwd(), &env, Limits::default()).unwrap();
+        assert!(
+            o.output.contains("home=[/tmp/declared-wins]"),
+            "{}",
+            o.output
+        );
+    }
+
+    #[test]
     fn it_runs_in_the_directory_it_is_given() {
         let dir = std::env::temp_dir().join("wecode-spawn-cwd");
         let _ = std::fs::remove_dir_all(&dir);
@@ -422,7 +474,12 @@ mod tests {
         std::fs::write(dir.join("marker"), "x").unwrap();
 
         let t = agent("test -f marker", None, None);
-        assert!(run(&t, "", "", &dir, Limits::default()).unwrap().ended.ok());
+        assert!(
+            run(&t, "", "", &dir, &[], Limits::default())
+                .unwrap()
+                .ended
+                .ok()
+        );
     }
 
     #[test]
@@ -433,6 +490,7 @@ mod tests {
             "",
             "",
             &cwd(),
+            &[],
             Limits {
                 wall: Some(Duration::from_millis(300)),
                 idle: None,
@@ -457,6 +515,7 @@ mod tests {
             "",
             "",
             &cwd(),
+            &[],
             Limits {
                 wall: Some(Duration::from_secs(60)),
                 idle: Some(Duration::from_millis(300)),
@@ -480,6 +539,7 @@ mod tests {
             "",
             "",
             &cwd(),
+            &[],
             Limits {
                 wall: Some(Duration::from_secs(30)),
                 idle: Some(Duration::from_millis(400)),
@@ -499,6 +559,7 @@ mod tests {
             "",
             "",
             &cwd(),
+            &[],
             Limits {
                 wall: Some(Duration::from_secs(5)),
                 idle: Some(Duration::from_millis(500)),
@@ -519,7 +580,7 @@ mod tests {
             None,
             None,
         );
-        let o = run(&t, "", "", &cwd(), Limits::default()).unwrap();
+        let o = run(&t, "", "", &cwd(), &[], Limits::default()).unwrap();
         assert!(o.truncated, "should have hit the cap");
         assert!(o.output.len() <= OUTPUT_CAP, "{}", o.output.len());
         // The point of draining past the cap: the child still gets to finish.
@@ -538,7 +599,7 @@ mod tests {
         let t = metered_agent(
             r#"echo '{"type":"result","usage":{"input_tokens":1200,"output_tokens":340}}'"#,
         );
-        let o = run(&t, "", "", &cwd(), Limits::default()).unwrap();
+        let o = run(&t, "", "", &cwd(), &[], Limits::default()).unwrap();
         assert_eq!(o.spent, Some(1540));
     }
 
@@ -552,7 +613,9 @@ mod tests {
             None,
         );
         assert_eq!(
-            run(&t, "", "", &cwd(), Limits::default()).unwrap().spent,
+            run(&t, "", "", &cwd(), &[], Limits::default())
+                .unwrap()
+                .spent,
             None
         );
     }
@@ -565,7 +628,7 @@ mod tests {
             "i=0; while [ $i -lt 40000 ]; do echo aaaaaaaaaaaaaaaaaaaa; i=$((i+1)); done; \
              echo '{\"type\":\"result\",\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}'",
         );
-        let o = run(&t, "", "", &cwd(), Limits::default()).unwrap();
+        let o = run(&t, "", "", &cwd(), &[], Limits::default()).unwrap();
         assert!(o.truncated, "the cap should have been hit");
         assert!(
             !o.output.contains("input_tokens"),
@@ -587,6 +650,7 @@ mod tests {
             "",
             "",
             &cwd(),
+            &[],
             Limits {
                 wall: Some(Duration::from_millis(300)),
                 idle: None,

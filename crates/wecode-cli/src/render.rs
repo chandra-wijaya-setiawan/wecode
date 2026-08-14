@@ -417,6 +417,12 @@ pub(crate) fn playbook_all(project: &Project, pb: &Playbook, gaps: &[Gap]) -> St
     if let Some(b) = &pb.project.merge_to {
         out.push_str(&format!("  branch    from {b}\n"));
     }
+    // As written in the file, `~` and all. This is a view of the playbook; where that
+    // path lands on this machine is what `wecode start` reports, in the notes beside
+    // the worktree it belongs to.
+    for c in &pb.project.build_cache {
+        out.push_str(&format!("  cache     {} = {}\n", c.var, c.path));
+    }
     if pb.is_empty() {
         out.push_str("\n  no kinds have guidance yet\n");
         return out;
@@ -2334,6 +2340,36 @@ mod tests {
         assert!(out.contains("source"), "the column is headed: {out}");
         assert!(out.contains("harness"), "{out}");
         assert!(out.contains("1540t/42s"), "{out}");
+    }
+
+    #[test]
+    fn the_shared_build_cache_is_listed_as_the_playbook_wrote_it() {
+        // Unexpanded, because this is a view of the file. Where `~` lands on this
+        // machine is what `wecode start` reports, beside the worktree it belongs to.
+        let pb = Playbook::parse(
+            "[project.build_cache]\nCARGO_TARGET_DIR = \"~/.cache/w/target\"\n\n[bug]\n",
+        )
+        .unwrap();
+        let out = playbook_all(
+            &Project::new("export", "cut export p99 below 500ms", "api"),
+            &pb,
+            &[],
+        );
+        assert!(
+            out.contains("cache     CARGO_TARGET_DIR = ~/.cache/w/target"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_project_that_shares_nothing_says_nothing_about_a_cache() {
+        let pb = Playbook::parse("[bug]\nguidance = \"reproduce first\"\n").unwrap();
+        let out = playbook_all(
+            &Project::new("export", "cut export p99 below 500ms", "api"),
+            &pb,
+            &[],
+        );
+        assert!(!out.contains("cache"), "{out}");
     }
 
     // ------------------------------------------------------------- gaps ------
