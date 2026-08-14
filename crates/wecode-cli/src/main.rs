@@ -73,7 +73,11 @@ PLAN
         replace a scope after the fact; recorded violations are not erased
 
   wecode playbook [<kind>]             this project's guidance for that kind
-        --project <p>   init            `init` writes a starter into the repo
+        --project <p>
+  wecode playbook init [--language <l>]   writes a starter into the repo; the language
+                                        decides its accept commands, its shared build
+                                        cache and the globs a build dirties, and is
+                                        read off the repo's manifest when omitted
   wecode playbook gap \"<what the guidance does not say>\"
         --kind <k> --task <id>          record a gap you found while planning;
                                         shown to whoever reads that kind next

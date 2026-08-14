@@ -473,6 +473,83 @@ pub(crate) fn playbook_all(project: &Project, pb: &Playbook, gaps: &[Gap]) -> St
     out
 }
 
+/// What `playbook init` wrote, and what it decided while writing it.
+///
+/// Every decision the starter made on the project's behalf is reported here rather
+/// than left in the file to be discovered: which language, where it was read from, the
+/// commands that will judge every task, and the directory the worktrees will share.
+/// These are the lines a person is expected to disagree with — a starter that stated
+/// them only in TOML would be trusted by whoever never opened it.
+///
+/// `refusal` is the load-time check applied to what was just written. It is a warning
+/// and not an error: the file is correct for the repository and wrong only for this
+/// machine, and deleting it would be the wrong answer to that.
+#[must_use]
+pub(crate) fn playbook_written(
+    project: &Project,
+    w: &wecode_org::Written,
+    refusal: Option<&str>,
+) -> String {
+    let mut out = format!("  wrote {}\n\n", w.path.display());
+
+    match (&w.toolchain, w.detected_from) {
+        (Some(t), Some(from)) => {
+            out.push_str(&format!("  language  {} — read off {from}\n", t.name));
+        }
+        (Some(t), None) => out.push_str(&format!("  language  {}\n", t.name)),
+        (None, _) => {
+            let said = if w.language.is_empty() {
+                "none given, and none could be read off the repo".to_string()
+            } else {
+                format!("{} — no toolchain here answers to it", w.language)
+            };
+            out.push_str(&format!(
+                "  language  {said}\n            accept is empty and every guidance is TODO; \
+                 wecode knows {}\n",
+                wecode_org::toolchain::known()
+            ));
+        }
+    }
+    if let Some(t) = w.toolchain {
+        for (i, cmd) in t.accept.iter().enumerate() {
+            out.push_str(&format!(
+                "  {:<9} {cmd}\n",
+                if i == 0 { "accept" } else { "" }
+            ));
+        }
+        for (i, (var, dir)) in w.cache.iter().enumerate() {
+            out.push_str(&format!(
+                "  {:<9} {var} = {dir}\n",
+                if i == 0 { "cache" } else { "" }
+            ));
+        }
+    }
+
+    if let Some(why) = refusal {
+        out.push_str(&format!(
+            "\n  ! this machine cannot run what the starter names\n    {}\n    \
+             every command that reads this playbook refuses it until that line names \
+             something this machine has\n",
+            why.trim()
+        ));
+    }
+
+    out.push_str(if w.toolchain.is_some() {
+        "\n  The accept lines are the toolchain's usual commands rather than this \
+         project's —\n  run them once, then fill in the guidance for each kind:\n"
+    } else {
+        "\n  Fill in the acceptance commands and the guidance for each kind:\n"
+    });
+    out.push_str(&format!(
+        "    wecode playbook bug --project {}\n\n  Commit it — it describes this code, \
+         so it belongs with it.\n  Add {}/ to .gitignore; it is the worker-writable \
+         area.\n",
+        project.id,
+        wecode_org::playbook::RUN_DIR
+    ));
+    out
+}
+
 /// Counted rather than listed: the index is not where a gap is read, it is where a
 /// reader finds out there is one. Saying nothing here would leave findings sitting in
 /// a file nobody opens.
@@ -2359,6 +2436,68 @@ mod tests {
             out.contains("cache     CARGO_TARGET_DIR = ~/.cache/w/target"),
             "{out}"
         );
+    }
+
+    /// What `playbook init` returns for one language, without touching a repository.
+    fn written(language: &str) -> wecode_org::Written {
+        let dir = std::env::temp_dir().join(format!("wecode-render-init-{language}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        wecode_org::playbook::init(&dir, language).unwrap()
+    }
+
+    #[test]
+    fn what_a_starter_decided_is_reported_rather_than_left_in_the_file() {
+        // The accept commands and the shared cache are the two lines a person is
+        // expected to disagree with. Stated only in TOML they would be trusted by
+        // whoever never opened it.
+        let out = playbook_written(
+            &Project::new("export", "cut export p99 below 500ms", "api"),
+            &written("rust"),
+            None,
+        );
+        assert!(out.contains("language  rust"), "{out}");
+        assert!(out.contains("accept    cargo test --workspace"), "{out}");
+        assert!(out.contains("cargo clippy --all-targets"), "{out}");
+        assert!(
+            out.contains("cache     CARGO_TARGET_DIR = ~/.cache/"),
+            "{out}"
+        );
+        assert!(
+            out.contains("wecode playbook bug --project export"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_language_nothing_answers_to_says_what_it_could_have_written() {
+        let out = playbook_written(
+            &Project::new("export", "cut export p99 below 500ms", "api"),
+            &written("cobol"),
+            None,
+        );
+        assert!(out.contains("no toolchain here answers to it"), "{out}");
+        assert!(out.contains("rust"), "the known ones are named: {out}");
+        assert!(!out.contains("accept  "), "nothing to report: {out}");
+        assert!(
+            out.contains("Fill in the acceptance commands"),
+            "and the reader is told whose job that now is: {out}"
+        );
+    }
+
+    #[test]
+    fn a_command_this_machine_lacks_is_a_warning_and_not_a_failure() {
+        // The file is right for the repository and wrong only here — deleting it
+        // would be the wrong answer, so the refusal is reported beside what was
+        // written and the exit stays zero.
+        let out = playbook_written(
+            &Project::new("export", "cut export p99 below 500ms", "api"),
+            &written("python"),
+            Some("[bug] accept: `uv` is not on this machine — `uv run pytest -q` would ..."),
+        );
+        assert!(out.contains("wrote "), "{out}");
+        assert!(out.contains("! this machine cannot run"), "{out}");
+        assert!(out.contains("`uv` is not on this machine"), "{out}");
     }
 
     #[test]

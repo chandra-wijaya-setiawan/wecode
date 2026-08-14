@@ -5,7 +5,7 @@ project**. It lives in the project's own repository, committed, because it descr
 that code — change the test command and the guidance changes in the same commit.
 
 ```bash
-wecode playbook init --language rust    # writes .wecode/playbook.toml
+wecode playbook init                    # writes .wecode/playbook.toml
 wecode playbook bug                     # what an orchestrator reads before planning
 ```
 
@@ -43,6 +43,39 @@ the same file is legal on a machine that has the toolchain. The check reads only
 line's first word, past any `VAR=value` prefixes, and stays silent wherever reading
 the word would take a shell — quoting, substitution, a path into the worktree — so it
 refuses only what could never run, and guesses at nothing.
+
+## The starter knows the toolchain
+
+`init` reads the repository's own manifest — `Cargo.toml`, `go.mod`, `pyproject.toml`,
+`package.json` — and writes a starter for that language. `--language` overrides it, and
+is worth passing where a repo carries two manifests; the first match in that order wins,
+so a Rust workspace with a docs site in it is scaffolded as Rust.
+
+Three of the typed fields above then arrive filled in, and each of them used to be a
+blank the project paid for on its first task:
+
+- **`accept`.** `["cargo test --workspace", "cargo clippy --all-targets -- -D warnings"]`
+  on every kind that changes code, rather than `accept = []` and a task accepted by
+  nothing until somebody typed a command in from memory.
+- **`build_cache`.** Declared, not commented out: the cold build it prevents is paid by
+  the first task, long before anyone has read that far down the file. Delete the block
+  to give every worktree its own; the path is keyed on the repository's directory name,
+  so change it if two repos here share one.
+- **The write scope in the `subtasks` example**, including what a build dirties —
+  `Cargo.lock`, `uv.lock`, `go.sum`, `package-lock.json`. That file is also named in the
+  `guidance` of every kind that changes code, because a planner reads one kind and not
+  the file. A task that adds a dependency without declaring the lock file is reported as
+  reaching outside its scope, after its budget is spent.
+
+The commands are the toolchain's usual ones and not this project's, which is why `init`
+prints them instead of leaving them in the file to be trusted. It also reads back what
+it wrote and says if this machine cannot run it — the load-time check above, applied
+while the fix is one edit rather than a spent budget. The file is still written: it is
+right for the repository and wrong only here.
+
+A language nothing answers to — wecode writes for rust, go, python and node — gets the
+prompts-and-TODO starter, which is what every language got before this existed, and a
+line at the top saying which ones would have got more.
 
 ## Writing the decomposition down
 
@@ -154,7 +187,7 @@ minutes per attempt, paid again by every retry, and it comes out of the wall bud
 task was given for doing the work.
 
 None of that output is task-specific, so point the toolchain somewhere all the
-worktrees can reach:
+worktrees can reach — which `playbook init` already did if it knew the language:
 
 ```toml
 [project.build_cache]

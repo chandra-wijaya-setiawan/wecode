@@ -188,6 +188,15 @@ fn parse_kind(want: &str) -> Result<TaskKind, String> {
 }
 
 /// Writes a starter playbook into the project's repo.
+///
+/// `--language` is optional and usually omitted: the repository's own manifest says
+/// what it is, and a flag that must be remembered is a flag that gets left off — which
+/// is how every new project used to start with `accept = []`.
+///
+/// What is written is then read back, because a starter now names a real test command
+/// and can name one this machine does not have. That refusal is reported rather than
+/// raised: the file is right for the repository and wrong only here, and it costs one
+/// edit to a file that is already open.
 pub(crate) fn playbook_init(a: &Args) -> Res {
     let (_, store, company) = open_full(a)?;
     let plan = store.load_plan()?;
@@ -202,13 +211,12 @@ pub(crate) fn playbook_init(a: &Args) -> Res {
         )
         .into());
     }
-    let language = a.get("language").unwrap_or("");
-    let path = playbook::init(&repo, language)?;
-    Ok(format!(
-        "  wrote {}\n\n  Fill in the guidance for each kind, then:\n    wecode playbook bug --project {}\n\n  Commit it — it describes this code, so it belongs with it.\n  Add {}/ to .gitignore; it is the worker-writable area.\n",
-        path.display(),
-        project.id,
-        playbook::RUN_DIR
+    let written = playbook::init(&repo, a.get("language").unwrap_or(""))?;
+    let refusal = playbook::Playbook::at(&repo).err().map(|e| e.to_string());
+    Ok(render::playbook_written(
+        &project,
+        &written,
+        refusal.as_deref(),
     ))
 }
 
