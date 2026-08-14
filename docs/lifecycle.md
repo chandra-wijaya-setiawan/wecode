@@ -121,8 +121,8 @@ it if the work reopens, and the worst a removal costs is a rebuild.
 
 What the next agent is told is **assembled by wecode from what it observed**, never
 passed by the agent that produced it. Posts do not talk to each other, and an agent's
-account of its own work is inadmissible — so it is read out of git and the execution
-record.
+account of its own work is inadmissible — so it is read out of git, the working tree and
+the execution record.
 
 Both payloads are [A2A](design/decisions.md#a2a) **artifacts**, because that is what
 they are — the output of a run that already happened:
@@ -134,6 +134,16 @@ they are — the output of a run that already happened:
 
 Both carry the real diff, capped, because an envelope is a prompt and an unbounded diff
 would crowd out the instruction.
+
+**Except a design.** A design's output is not code, so its handoff is not a diff: the
+predecessor's document is handed over whole, at whatever path its write scope declared,
+falling back to `docs/wecode/<task>/design.md`. It has to be read from a file rather than
+from git because a design asks for no worktree and wecode therefore never commits it —
+before this, a signed design reached the task built on it as `(no commits in this
+worktree)`, which is the design gate holding work back for a decision the implementer was
+then never shown. The document is looked for in the design's own tree, then this task's,
+then the project's checkout, and if none of them has it the handoff names the path it
+tried instead of implying nothing was written.
 
 The instruction itself is an A2A `Message`, and the two together are one A2A `Task` —
 wecode's *execution*, in state `submitted` until something is spawned. `wecode start
