@@ -17,6 +17,7 @@ Then, by task:
 - **[reference/config.md](reference/config.md)** — `company.toml` and `.wecode/playbook.toml`
 - **[reference/schema.md](reference/schema.md)** — what is in `wecode.db`
 - **[design/decisions.md](design/decisions.md)** — why it is like this
+[method.md](design/method.md) — the development method, and which of its rules the machinery enforces rather than an orchestrator remembering
 - **[design/theory.md](design/theory.md)** — prior art, and the open questions
 
 ## How these are maintained

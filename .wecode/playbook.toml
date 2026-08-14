@@ -61,6 +61,34 @@ work is done. Three tasks in a row have been caught by this.
 
 Acceptance is an executable command, never a description. `Judged` is illegal on a
 task and the gate will refuse it.
+
+Group work into sprints. A parent task is the sprint; its subtasks are the items.
+Subtasks share the parent's worktree and its branch, so a sprint costs one checkout
+and one build no matter how many items it holds — and it lands on one merge
+signature, because a passing subtask finishes on its own.
+
+  parent    one outcome, one branch, one signature
+  subtask   one item, verified on its own, `--parent <sprint>`
+
+Two rules decide the grouping, and neither is about files:
+
+  What ships together is one sprint. If you would never revert one item without
+  the others, they belong to the same parent. If you would, they do not.
+
+  A sprint goal is singular. The admission gate refuses a title naming two
+  outcomes, which is the same rule: a sprint you cannot state in one sentence is
+  two sprints.
+
+Sprints that share no files run at the same time. Declare scopes as **files, not
+crates** — `crates/x/src/foo.rs`, not `crates/x/**`. A crate-wide glob collides with
+every other task in that crate and serialises work that never touches the same line;
+seven such tasks became one chain of seven before this was written down. Name the
+files, and three of them run at once.
+
+Within a sprint, order items with `--after` when one genuinely needs the last. Do
+not chain them out of habit: siblings that touch different files still share the
+worktree, so they run one at a time regardless, and a false dependency only removes
+the option of reordering.
 """
 
 [bug]
