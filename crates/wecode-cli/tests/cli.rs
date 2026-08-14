@@ -1618,6 +1618,203 @@ fn up_refuses_without_a_terminal_and_points_at_board() {
         .assert_contains("board");
 }
 
+// --------------------------------------------------------- short numbers ------
+
+/// `seed()` creates `caching`, then `cache-tests`, then `bench` — one sequence across
+/// both levels, so the numbers are 1, 2, 3 in that order. Named here rather than
+/// recomputed in each test below.
+const CACHING: &str = "1";
+const CACHE_TESTS: &str = "2";
+const BENCH: &str = "3";
+
+#[test]
+fn the_plan_views_print_a_number_beside_everything() {
+    let org = Org::new("numbers-shown", "software-company");
+    org.seed();
+
+    let tree = org.run(&["tree"]);
+    tree.assert_ok("tree");
+    // A project and both tasks, each with its handle, and the line that says the
+    // column can be typed.
+    for n in ["#1", "#2", "#3"] {
+        tree.assert_contains(n);
+    }
+    tree.assert_contains("wecode show 4");
+
+    org.run(&["board"]).assert_ok("board").assert_contains("#2");
+    org.run(&["show", "cache-tests"])
+        .assert_ok("show")
+        .assert_contains("#2");
+}
+
+#[test]
+fn a_number_works_wherever_an_id_does() {
+    let org = Org::new("numbers-resolve", "software-company");
+    org.seed();
+
+    // Reading: both levels, and the two commands that take either.
+    org.run(&["show", CACHING])
+        .assert_ok("show a project by number")
+        .assert_contains("caching");
+    org.run(&["show", CACHE_TESTS])
+        .assert_ok("show a task by number")
+        .assert_contains("cover the cache layer with tests");
+    org.run(&["check", BENCH])
+        .assert_ok("check by number")
+        .assert_contains("bench");
+    org.run(&["board", CACHE_TESTS])
+        .assert_ok("board by number")
+        .assert_contains("L2 · cache-tests");
+
+    // Writing. `assign` is the one that goes past the Broker and onto the ledger.
+    org.run(&["assign", CACHE_TESTS, "--to", "test"])
+        .assert_ok("assign by number")
+        .assert_contains("assigned cache-tests");
+    org.run(&["status", BENCH, "dropped"])
+        .assert_ok("status by number")
+        .assert_contains("bench");
+    org.run(&["archive", CACHING])
+        .assert_ok("archive by number")
+        .assert_contains("archived caching");
+}
+
+#[test]
+fn the_ledger_records_the_id_a_number_named_and_not_the_number() {
+    // The number is a way of typing, never a way of storing. A record filed under `2`
+    // is a record no later query correlates with anything.
+    let org = Org::new("numbers-ledger", "software-company");
+    org.seed();
+    org.run(&["assign", CACHE_TESTS, "--to", "test"])
+        .assert_ok("assign");
+
+    // The query is keyed on `task_id`, so a filter by number returning the record is
+    // proof the number became an id before it was written down. Compared against the
+    // filter by id, because either being empty would pass a bare `contains`.
+    let by_id = org.run(&["audit", "--task", "cache-tests"]);
+    by_id.assert_ok("audit by id").assert_contains("staff");
+    let by_number = org.run(&["audit", "--task", CACHE_TESTS]);
+    by_number.assert_ok("audit by number");
+    assert_eq!(
+        by_id.stdout, by_number.stdout,
+        "a number and the id it names have to select the same records"
+    );
+}
+
+#[test]
+fn a_number_is_stable_across_a_removal() {
+    // The property the whole feature rests on: a number in a message sent six hours
+    // ago still names what it named. A recycled number would sign the wrong task.
+    let org = Org::new("numbers-stable", "software-company");
+    org.seed();
+    org.run(&["task", "rm", "bench"]).assert_ok("rm");
+    org.run(&[
+        "task",
+        "add",
+        "later",
+        "warm the cache on deploy",
+        "--project",
+        "caching",
+        // Sequenced after cache-tests, whose `tests/**` covers this, or admission
+        // refuses the overlap and nothing is saved to number.
+        "--after",
+        "cache-tests",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "tests/later/**",
+        "--tokens",
+        "10000",
+    ])
+    .assert_ok("add after the removal")
+    .assert_contains("saved");
+
+    let tree = org.run(&["tree"]);
+    tree.assert_ok("tree").assert_contains("#4");
+    // `bench` was #3 and `later` must not have inherited it.
+    org.run(&["show", BENCH])
+        .assert_contains("no project or task");
+    org.run(&["show", "4"])
+        .assert_ok("the new task has the next number")
+        .assert_contains("later");
+}
+
+#[test]
+fn a_task_named_for_a_number_keeps_its_own_name() {
+    // The collision rule. A bare digit string is a name first, so a workspace that has
+    // a task called `2` keeps it — and `#2` is how the number is still reached.
+    let org = Org::new("numbers-collide", "software-company");
+    org.seed();
+    org.run(&[
+        "task",
+        "add",
+        "2",
+        "sweep the stale cache entries",
+        "--project",
+        "caching",
+        "--after",
+        "cache-tests",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "tests/sweep/**",
+        "--tokens",
+        "10000",
+    ])
+    .assert_ok("a task may be called 2")
+    .assert_contains("saved");
+
+    org.run(&["show", "2"])
+        .assert_ok("show")
+        .assert_contains("sweep the stale cache entries");
+    org.run(&["show", "#2"])
+        .assert_ok("show")
+        .assert_contains("cover the cache layer with tests");
+}
+
+#[test]
+fn a_number_naming_nothing_says_where_to_find_one() {
+    let org = Org::new("numbers-missing", "software-company");
+    org.seed();
+    let r = org.run(&["merge", "99"]);
+    assert!(!r.ok(), "99 names nothing");
+    r.assert_contains("no such task: 99")
+        .assert_contains("wecode tree");
+}
+
+#[test]
+fn task_add_takes_numbers_for_the_work_it_points_at() {
+    // `--project`, `--parent` and `--after` name existing work, so they resolve. The
+    // task's own id does not: `task add 7` creates a task called `7`.
+    let org = Org::new("numbers-planning", "software-company");
+    org.seed();
+    org.run(&[
+        "task",
+        "add",
+        "evict",
+        "evict entries past their ttl",
+        "--project",
+        CACHING,
+        "--after",
+        CACHE_TESTS,
+        "--parent",
+        BENCH,
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "tests/evict/**",
+        "--tokens",
+        "10000",
+    ])
+    .assert_ok("plan by number");
+
+    let shown = org.run(&["show", "evict"]);
+    shown
+        .assert_ok("show")
+        .assert_contains("caching")
+        .assert_contains("cache-tests")
+        .assert_contains("bench");
+}
+
 // ----------------------------------------------------------------- misc --------
 
 #[test]
@@ -5044,6 +5241,21 @@ fn a_task_that_stops_for_a_person_runs_the_hook() {
         announcements(&log),
         vec!["cache-tests approval needs-approval caching"]
     );
+}
+
+#[test]
+fn the_hook_is_handed_the_number_to_reply_with() {
+    // The notification and the answer, closed. A message naming only `cache-tests`
+    // leaves the operator spelling a slug back on a phone keyboard; one that carries
+    // the number leaves them typing `approve #2`.
+    let org = Org::new("notify-number", "solo");
+    org.seed();
+    let log = notified(&org, "echo $WECODE_TASK '#'$WECODE_TASK_NUMBER");
+
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("stop it for a person");
+    // The digits alone in the variable, so the hook decides how to write it.
+    assert_eq!(announcements(&log), vec!["cache-tests #2"]);
 }
 
 #[test]

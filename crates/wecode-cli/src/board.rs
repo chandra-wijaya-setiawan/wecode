@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use wecode_core::{
-    Plan, Project, ProjectId, ProjectStatus, Task, TaskId, TaskKind, TaskStatus, admission,
+    Number, Plan, Project, ProjectId, ProjectStatus, Task, TaskId, TaskKind, TaskStatus, admission,
 };
 use wecode_store::AuditLine;
 
@@ -320,15 +320,28 @@ fn title_bar(level: &str, subject: &str, hint: &str) -> String {
 
 fn header_row() -> String {
     format!(
-        "{DIM}│ {:<26} {:<11} {:<12} {}{RESET}\n",
-        "what", "status", "spend", "needs you"
+        "{DIM}│ {:>4} {:<26} {:<11} {:<12} {}{RESET}\n",
+        "#", "what", "status", "spend", "needs you"
     )
+}
+
+/// The short number, in a column of its own rather than inside `what`.
+///
+/// `what` truncates at 26 and carries the indent, so a number folded into it would be
+/// the first thing a deep row lost and would sit at a different column on every level.
+/// A number that cannot be read off in one glance is a number nobody types.
+///
+/// Blank rather than `—` when there is none, unlike every other cell here. A missing
+/// spend is a fact about the run; a missing number is a plan nothing has minted numbers
+/// for, which is only ever an in-memory one. This is a gutter, not a reading.
+fn number_cell(n: Option<Number>) -> String {
+    n.map_or_else(|| " ".repeat(4), |n| format!("{n:>4}"))
 }
 
 /// The declared state alongside the computed one. Both, always: a task can be
 /// entirely healthy and not started, and a board that shows only the faults cannot
 /// say which. The needs-you cell wears the computed health as its colour.
-fn row(label: &str, status: &str, v: &Vitals) -> String {
+fn row(number: Option<Number>, label: &str, status: &str, v: &Vitals) -> String {
     let needs = if v.needs.is_empty() {
         format!("{DIM}—{RESET}")
     } else {
@@ -340,7 +353,8 @@ fn row(label: &str, status: &str, v: &Vitals) -> String {
         }
     };
     format!(
-        "│ {:<26} {:<11} {:<12} {}\n",
+        "│ {} {:<26} {:<11} {:<12} {}\n",
+        number_cell(number),
         truncate(label, 26),
         status,
         spend_cell(v.spent, v.budget),
@@ -400,6 +414,7 @@ fn kids_of<'a>(plan: &'a Plan, t: &Task) -> Vec<&'a Task> {
 /// reader the one thing the row is for.
 fn subtree(plan: &Plan, t: &Task, l: &Ledger, gates: &DesignGates, depth: usize) -> String {
     let mut out = row(
+        t.number,
         &format!("{}{} {}", "  ".repeat(depth), kind_tag(t.kind), t.id),
         &task_status(t),
         &task_vitals(plan, t, l, gates),
@@ -433,6 +448,7 @@ pub(crate) fn portfolio(
     };
     for p in projects {
         out.push_str(&row(
+            p.number,
             &format!("PROJECT {} [{}]", p.id, p.repo),
             &project_status(p),
             &project_vitals(plan, p, &l, known_repos),
@@ -451,21 +467,27 @@ pub(crate) fn portfolio(
 }
 
 /// A focused view on either level: the subject, what is beneath it, its incidents.
+///
+/// `named` is what the operator typed — an id or a short number. Everything past the
+/// lookup uses the subject's own id, because the incident filter and the title both have
+/// to name what the ledger names.
 pub(crate) fn focus(
     plan: &Plan,
     audit: &[AuditLine],
-    id: &str,
+    named: &str,
     known_repos: &[String],
     gates: &DesignGates,
 ) -> String {
     let l = ledger_index(audit);
 
-    if let Some(p) = plan.project(&ProjectId::new(id)) {
+    if let Some(p) = plan.project_ref(named) {
+        let id = p.id.as_str();
         let v = project_vitals(plan, p, &l, known_repos);
         let mut out = title_bar("L1", id, "wecode board to go up");
         out.push_str(&format!("{DIM}│ {}  [{}]{RESET}\n", p.objective, p.repo));
         out.push_str(&header_row());
         out.push_str(&row(
+            p.number,
             &format!("PROJECT {} [{}]", p.id, p.repo),
             &project_status(p),
             &v,
@@ -481,12 +503,14 @@ pub(crate) fn focus(
         return out;
     }
 
-    if let Some(t) = plan.task(&TaskId::new(id)) {
+    if let Some(t) = plan.task_ref(named) {
+        let id = t.id.as_str();
         let v = task_vitals(plan, t, &l, gates);
         let mut out = title_bar("L2", id, "wecode board to go up");
         out.push_str(&format!("{DIM}│ {}{RESET}\n", t.title));
         out.push_str(&header_row());
         out.push_str(&row(
+            t.number,
             &format!("{} {}", kind_tag(t.kind), t.id),
             &task_status(t),
             &v,
@@ -499,7 +523,7 @@ pub(crate) fn focus(
         return out;
     }
 
-    format!("no project or task: {id}\n")
+    format!("no project or task: {named}\n")
 }
 
 fn hint_for(v: &Vitals) -> &'static str {
@@ -613,6 +637,14 @@ mod tests {
         assert!(out.contains("L0 · PORTFOLIO"), "{out}");
     }
 
+    /// A task row as it appears at a given depth, number column included.
+    ///
+    /// Spelled as the row is built rather than as a hand-counted string of spaces, so a
+    /// depth assertion pins the tree indent and not the width of the handle beside it.
+    fn at_depth(label: &str, depth: usize) -> String {
+        format!("│ {} {}{label}", number_cell(None), "  ".repeat(depth))
+    }
+
     /// `t1` with `t2` under it and `t3` under that — three levels, so a view that
     /// stops one short of the leaves is caught rather than passing on the middle row.
     fn nested() -> Plan {
@@ -625,29 +657,57 @@ mod tests {
     }
 
     #[test]
+    fn every_row_carries_its_number_in_a_column_of_its_own() {
+        // The handle column, and the property that makes it one: it is the same width
+        // at every depth, so an operator reads down the left edge rather than hunting
+        // for the number inside a truncated label.
+        let mut p = nested();
+        let mut proj = p.project(&ProjectId::new("caching")).unwrap().clone();
+        proj.number = Some(Number::new(1));
+        p.update_project(proj).unwrap();
+        for (id, n) in [("t1", 2), ("t2", 3), ("t3", 4)] {
+            let mut t = p.task(&TaskId::new(id)).unwrap().clone();
+            t.number = Some(Number::new(n));
+            p.update_task(t).unwrap();
+        }
+        let out = portfolio(&p, &[], &repos(), &no_gates(), false);
+        for (n, label, depth) in [
+            (1, "PROJECT caching", 0),
+            (2, "feat t1", 1),
+            (3, "feat t2", 2),
+            (4, "feat t3", 3),
+        ] {
+            let row = format!("│ {:>4} {}{label}", format!("#{n}"), "  ".repeat(depth));
+            assert!(out.contains(&row), "missing `{row}` in:\n{out}");
+        }
+    }
+
+    #[test]
     fn the_portfolio_draws_the_whole_tree_not_just_root_tasks() {
         // The gap this closes: a plan that broke its work down showed only the tops
         // of the breakdowns, and the work actually being done is usually a leaf.
         let out = portfolio(&nested(), &[], &repos(), &no_gates(), false);
-        // Indented one step per level. Asserted with the row's leading `│` so the
-        // depth is pinned — `  feat t2` alone matches at any depth below its own.
-        for row in ["│   feat t1", "│     feat t2", "│       feat t3"] {
-            assert!(out.contains(row), "missing `{row}` in:\n{out}");
+        // Indented one step per level. Asserted with the row's leading `│` and number
+        // column so the depth is pinned — `  feat t2` alone matches at any depth below
+        // its own.
+        for (label, depth) in [("feat t1", 1), ("feat t2", 2), ("feat t3", 3)] {
+            let row = at_depth(label, depth);
+            assert!(out.contains(&row), "missing `{row}` in:\n{out}");
         }
     }
 
     #[test]
     fn a_focused_project_reaches_past_its_root_tasks() {
         let out = focus(&nested(), &[], "caching", &repos(), &no_gates());
-        assert!(out.contains("│       feat t3"), "{out}");
+        assert!(out.contains(&at_depth("feat t3", 3)), "{out}");
     }
 
     #[test]
     fn a_focused_task_reaches_past_its_own_children() {
         // `t3` is a grandchild of `t1`, and L2 used to end at children.
         let out = focus(&nested(), &[], "t1", &repos(), &no_gates());
-        assert!(out.contains("│   feat t2"), "{out}");
-        assert!(out.contains("│     feat t3"), "{out}");
+        assert!(out.contains(&at_depth("feat t2", 1)), "{out}");
+        assert!(out.contains(&at_depth("feat t3", 2)), "{out}");
     }
 
     #[test]

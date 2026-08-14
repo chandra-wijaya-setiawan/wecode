@@ -7,10 +7,15 @@
 
 use crate::common::{Budget, Measure, ProjectStatus};
 use crate::id::ProjectId;
+use crate::short::Number;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub id: ProjectId,
+    /// The short number this project also answers to. `None` for a plan nothing has
+    /// minted numbers for — an in-memory one in a test, or a project being built to be
+    /// saved. See [`crate::short`] for why they are stored rather than counted.
+    pub number: Option<Number>,
     /// What this project is trying to achieve. One sentence.
     pub objective: String,
     /// The repository this project works in, by the name the company registers it
@@ -41,6 +46,7 @@ impl Project {
     ) -> Self {
         Self {
             id: id.into(),
+            number: None,
             objective: objective.into(),
             repo: repo.into(),
             measures: Vec::new(),

@@ -43,7 +43,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use wecode_core::{Plan, Task, TaskId, TaskStatus};
+use wecode_core::{Plan, Task, TaskId, TaskStatus, short};
 use wecode_gov::ActionKind;
 use wecode_org::Company;
 use wecode_store::Store;
@@ -181,8 +181,36 @@ pub(crate) fn verdict(text: &str) -> Option<Verdict> {
 pub(crate) fn named_kind(text: &str, plan: &Plan) -> Option<ActionKind> {
     text.split_whitespace()
         .skip(1)
-        .filter(|w| plan.task(&TaskId::new(*w)).is_none())
+        .filter(|w| task_named(w, plan).is_none())
         .find_map(|w| ActionKind::parse(&word(w)))
+}
+
+/// One word of a message, as a task reference.
+///
+/// Punctuation goes from the end, so `approve cache-tests.` works. A leading `#` stays,
+/// because here it is the whole difference between a reference and a number in a
+/// sentence — see [`task_named`].
+fn reference(raw: &str) -> &str {
+    raw.trim_end_matches(|c: char| !c.is_alphanumeric())
+        .trim_start_matches(|c: char| !(c.is_alphanumeric() || c == short::SIGIL))
+}
+
+/// The task one word names, if it names one.
+///
+/// **A short number must wear its `#` here**, unlike on the command line, and that is a
+/// deliberate difference rather than an inconsistency. An argv position where a task is
+/// wanted has nothing else it could be; a word in a chat message has everything else it
+/// could be. `approve 2` is as likely to mean *two of them look fine* as it is to mean
+/// task two, and a signature given on the wrong reading of that is a signature nobody
+/// gave — the one failure the whole channel must not have. `approve #2` is unambiguous
+/// and costs one keystroke.
+fn task_named<'a>(raw: &str, plan: &'a Plan) -> Option<&'a Task> {
+    let w = reference(raw);
+    if w.starts_with(short::SIGIL) {
+        plan.task_ref(w)
+    } else {
+        plan.task(&TaskId::new(w))
+    }
 }
 
 /// Every task the text names, in the order it names them.
@@ -193,9 +221,10 @@ pub(crate) fn named_kind(text: &str, plan: &Plan) -> Option<ActionKind> {
 fn tasks_named(text: &str, plan: &Plan) -> Vec<TaskId> {
     let mut out: Vec<TaskId> = Vec::new();
     for w in text.split_whitespace() {
-        let id = TaskId::new(w);
-        if plan.task(&id).is_some() && !out.contains(&id) {
-            out.push(id);
+        if let Some(t) = task_named(w, plan)
+            && !out.contains(&t.id)
+        {
+            out.push(t.id.clone());
         }
     }
     out
@@ -682,6 +711,75 @@ mod tests {
     fn punctuation_and_case_do_not_hide_a_task() {
         let p = plan();
         let m = message("approve Cache-Tests.", "");
+        assert_eq!(target(&m, &p).unwrap().as_str(), "cache-tests");
+    }
+
+    /// The plan above, with numbers, since a plan an operator replies about is one that
+    /// came out of a store.
+    fn numbered() -> Plan {
+        let mut p = plan();
+        for (id, n) in [("cache-tests", 2), ("bench", 3)] {
+            let mut t = p.task(&TaskId::new(id)).unwrap().clone();
+            t.number = Some(wecode_core::Number::new(n));
+            p.update_task(t).unwrap();
+        }
+        let mut proj = p.project(&"caching".into()).unwrap().clone();
+        proj.number = Some(wecode_core::Number::new(1));
+        p.update_project(proj).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_reply_may_name_a_task_by_its_number() {
+        // The point of the whole channel, one step further: the notification carries
+        // `#3`, and answering it is four characters on a phone keyboard.
+        let p = numbered();
+        let m = message("approve #3", "cache-tests needs you: approval");
+        assert_eq!(target(&m, &p).unwrap().as_str(), "bench");
+
+        // And out of the message being answered, which is where the number usually is.
+        let m = message("approve", "#2 needs you: approval");
+        assert_eq!(target(&m, &p).unwrap().as_str(), "cache-tests");
+
+        // Punctuation and brackets around it, the way a hook's message template puts it.
+        for text in ["approve (#3)", "yes #3.", "ok — #3!"] {
+            assert_eq!(
+                target(&message(text, ""), &p).unwrap().as_str(),
+                "bench",
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_number_in_a_chat_message_names_nothing() {
+        // The rule that separates this from the command line. `approve 2` is as likely
+        // to be "2 of them look fine" as a reference, and a signature given on the
+        // wrong reading of that is a signature nobody gave. So the sigil is required
+        // here, and only here.
+        let p = numbered();
+        let e = target(&message("approve 3", ""), &p).unwrap_err();
+        assert!(e.contains("names no task"), "{e}");
+
+        // Prose with numbers in it is prose, however much of it there is.
+        let e = target(
+            &message("approve", "3 tasks are waiting, 2 of them for you"),
+            &p,
+        )
+        .unwrap_err();
+        assert!(e.contains("names no task"), "{e}");
+
+        // A project's number is not a task's, either: approvals are given per task.
+        let e = target(&message("approve #1", ""), &p).unwrap_err();
+        assert!(e.contains("names no task"), "{e}");
+    }
+
+    #[test]
+    fn a_number_and_the_id_it_names_are_not_two_tasks() {
+        // Both spellings of one task must not trip the two-tasks refusal, which is
+        // exactly what a hook printing `cache-tests (#2)` would produce.
+        let p = numbered();
+        let m = message("approve", "cache-tests (#2) needs you: approval");
         assert_eq!(target(&m, &p).unwrap().as_str(), "cache-tests");
     }
 

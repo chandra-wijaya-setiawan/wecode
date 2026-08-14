@@ -55,6 +55,10 @@ SETUP
 PLAN
   A project owns one repo and carries an objective. A task is the executable unit.
 
+  Anywhere below takes a <project> or <task> by its id or by its short number: every
+  view prints one in the left column, and `wecode merge 4` is `wecode merge
+  cache-warm-on-deploy`. Write `#4` where a task is actually called `4`.
+
   wecode project add <id> --repo <name> \"<objective>\"
         --measure-cmd \"<cmd>\"   --measure-metric <name>:<lt|lte|gt|gte|eq>:<n>
         --tokens <n>  --wall <secs>
@@ -120,6 +124,8 @@ WORK
   wecode telegram [--dry-run]          sign what the replies in Telegram approved
         needs [telegram] fetch and a telegram id on the user who replies; `loop`
         reads the channel every pass on its own
+        a reply names a task by id or by `#4` — the `#` is required in a chat, where
+        a bare number is as likely to be prose
   wecode guard <post> <verb> <target>  authorise an action; records the decision
         verbs: read write run merge spend        --tokens <n> for spend
         --task <id> / --project <id> attributes the record

@@ -29,6 +29,10 @@ SETUP
 PLAN
   A project owns one repo and carries an objective. A task is the executable unit.
 
+  Anywhere below takes a <project> or <task> by its id or by its short number: every
+  view prints one in the left column, and `wecode merge 4` is `wecode merge
+  cache-warm-on-deploy`. Write `#4` where a task is actually called `4`.
+
   wecode project add <id> --repo <name> "<objective>"
         --measure-cmd "<cmd>"   --measure-metric <name>:<lt|lte|gt|gte|eq>:<n>
         --tokens <n>  --wall <secs>
@@ -94,6 +98,8 @@ WORK
   wecode telegram [--dry-run]          sign what the replies in Telegram approved
         needs [telegram] fetch and a telegram id on the user who replies; `loop`
         reads the channel every pass on its own
+        a reply names a task by id or by `#4` — the `#` is required in a chat, where
+        a bare number is as likely to be prose
   wecode guard <post> <verb> <target>  authorise an action; records the decision
         verbs: read write run merge spend        --tokens <n> for spend
         --task <id> / --project <id> attributes the record
@@ -101,6 +107,42 @@ WORK
 ```
 
 ## The ones worth explaining
+
+**Short numbers** are the same commands, typed with four keystrokes instead of twenty.
+Every project and task carries one, printed in the left column of `tree`, `ready`,
+`board` and `up` and beside the id on `show`; anywhere a command takes a project or a
+task, the number does as well. `wecode merge 4`. `wecode assign 7 --to impl`. `wecode
+audit --task 4`.
+
+It exists because the *reader* and the *typist* are not the same person at the same
+keyboard. Ids are slugs so they can be read — in a prompt, in the ledger, on the board —
+and `cache-warm-on-deploy` is a fine thing to read and an unpleasant thing to spell back
+on a phone at 02:14, which is exactly when the notification arrives.
+
+Three rules, and the first two are the only ones worth memorising:
+
+- **A number is a name, not a position.** It is minted once, when the project or task is
+  created, and never reused — not even by a task with the same id created after the
+  original was removed with `wecode task rm`. A row number would renumber on every
+  `task add`, and the number in a message six hours old has to still mean what it meant
+  when it was sent.
+- **One sequence covers both levels**, so a number names exactly one thing and
+  `wecode show 4` never asks which kind of 4 you meant. Projects tend to hold the low
+  numbers, because they are created first.
+- **A name always wins.** `4` is looked up as an id first, so a workspace with a task
+  genuinely called `4` keeps it; `#4` is a number and nothing else. In a **Telegram
+  reply the `#` is required** — `approve 2` in a chat is as likely to mean *two of them
+  look fine*, and a signature given on that reading is a signature nobody gave.
+
+What is stored is always the id. The number resolves before anything is written, so the
+ledger, the branch names and `docs/wecode/<task>/report.md` are keyed on ids exactly as
+before — `wecode audit --task 4` finds records filed under `cache-warm-on-deploy`. A
+workspace that predates this acquires numbers for everything already in it the first time
+this build opens its `wecode.db`.
+
+`[notify] command` is handed `WECODE_TASK_NUMBER`, the digits with no `#`, so the message
+that reaches a phone can carry the thing the operator has to type back. See
+[config](config.md).
 
 **`wecode brief`** is how an agent learns what it is. Run it once at the start of a
 session; everything in it is derived from the seat's grant, so it cannot promise

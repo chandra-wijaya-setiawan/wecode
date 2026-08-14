@@ -5,12 +5,15 @@
 //! validation, so a database that somehow held a cycle would be caught on read
 //! rather than propagating.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{OptionalExtension, params};
 use wecode_core::{
-    Budget, Cmp, Measure, Plan, Project, ProjectId, ProjectStatus, Scope, Task, TaskId, TaskKind,
-    TaskStatus,
+    Budget, Cmp, Measure, Number, Plan, Project, ProjectId, ProjectStatus, Scope, Task, TaskId,
+    TaskKind, TaskStatus,
 };
 
+use crate::short::Level;
 use crate::{Store, StoreError};
 
 /// Which table a measure came from, so one pair of helpers serves both.
@@ -61,6 +64,14 @@ impl Store {
     pub fn load_plan(&self) -> Result<Plan, StoreError> {
         let mut plan = Plan::new();
 
+        // Both mappings up front, so every project and task is numbered by the time
+        // anything reads the plan. A view or a resolver that had to reach back to the
+        // store for a number would be a second source for it.
+        let project_numbers: BTreeMap<String, Number> =
+            self.numbers(Level::Project)?.into_iter().collect();
+        let task_numbers: BTreeMap<String, Number> =
+            self.numbers(Level::Task)?.into_iter().collect();
+
         let mut stmt = self.conn().prepare(
             "SELECT id, repo, objective, status, budget_tokens, budget_wall, archived
              FROM projects ORDER BY id",
@@ -90,6 +101,7 @@ impl Store {
 
         for (id, repo, objective, status, tokens, wall, archived) in rows {
             let mut p = Project::new(ProjectId::new(&id), objective, repo);
+            p.number = project_numbers.get(&id).copied();
             p.status = ProjectStatus::parse(&status).ok_or_else(|| StoreError::Corrupt {
                 what: "project status",
                 value: status.clone(),
@@ -140,6 +152,7 @@ impl Store {
 
         for (id, project, kind, title, parent, status, assignee, tokens, wall) in rows {
             let mut t = Task::new(TaskId::new(&id), ProjectId::new(&project), title);
+            t.number = task_numbers.get(&id).copied();
             t.kind = TaskKind::parse(&kind).ok_or_else(|| StoreError::Corrupt {
                 what: "task kind",
                 value: kind.clone(),
@@ -289,6 +302,11 @@ impl Store {
             ],
         )?;
         self.replace_measures(&MeasureTable::Project, p.id.as_str(), &p.measures)?;
+        // After the row, so nothing carries a number for a project that failed to save,
+        // and unconditionally, so a project created before this existed acquires one the
+        // next time anything touches it. `p.number` is ignored: numbers are the store's
+        // to hand out, and honouring a caller's would let two projects claim one.
+        self.number_of(Level::Project, p.id.as_str())?;
         Ok(())
     }
 
@@ -339,6 +357,9 @@ impl Store {
                 params![t.id.as_str(), dep.as_str()],
             )?;
         }
+        // The one place a task can be created, so the one place a number has to be
+        // minted. See `save_project` for why `t.number` is not consulted.
+        self.number_of(Level::Task, t.id.as_str())?;
         Ok(())
     }
 
@@ -535,13 +556,19 @@ mod tests {
     }
 
     #[test]
-    fn a_project_round_trips_with_its_measures() {
+    fn a_project_round_trips_with_its_measures_and_a_number() {
         let s = store();
         let p = project();
         s.save_project(&p).unwrap();
 
         let loaded = s.load_plan().unwrap();
-        assert_eq!(loaded.project(&"caching".into()), Some(&p));
+        // Everything as written, plus the number saving minted for it — the caller
+        // passed `None` and the store is what decides. That is the only field a save
+        // adds rather than records.
+        let mut expected = p.clone();
+        expected.number = Some(Number::new(1));
+        assert_eq!(loaded.project(&"caching".into()), Some(&expected));
+        assert_eq!(loaded.project_ref("1").map(|x| &x.id), Some(&p.id));
     }
 
     #[test]
@@ -588,14 +615,25 @@ mod tests {
     }
 
     #[test]
-    fn a_task_round_trips_with_acceptance_and_scope() {
+    fn a_task_round_trips_with_acceptance_scope_and_a_number() {
         let s = store();
         s.save_project(&project()).unwrap();
         let t = task("cache-layer");
         s.save_task(&t).unwrap();
 
         let loaded = s.load_plan().unwrap();
-        assert_eq!(loaded.task(&"cache-layer".into()), Some(&t));
+        // 2, not 1: the sequence spans both levels and the project took the first.
+        let mut expected = t.clone();
+        expected.number = Some(Number::new(2));
+        assert_eq!(loaded.task(&"cache-layer".into()), Some(&expected));
+        assert_eq!(loaded.task_ref("2").map(|x| &x.id), Some(&t.id));
+
+        // Saving again — which every status change does — must not renumber it.
+        s.save_task(&t).unwrap();
+        assert_eq!(
+            s.load_plan().unwrap().task(&"cache-layer".into()),
+            Some(&expected)
+        );
     }
 
     #[test]
@@ -618,7 +656,9 @@ mod tests {
                 note: "operator decides".into(),
             });
         s.save_project(&p).unwrap();
-        assert_eq!(s.load_plan().unwrap().project(&"p".into()), Some(&p));
+        let mut expected = p.clone();
+        expected.number = Some(Number::new(1));
+        assert_eq!(s.load_plan().unwrap().project(&"p".into()), Some(&expected));
     }
 
     #[test]

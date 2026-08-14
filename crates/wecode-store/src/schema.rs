@@ -15,8 +15,8 @@ use rusqlite::Connection;
 ///
 /// 2 adds `projects.archived`. 3 adds `task_executions`. 4 adds
 /// `task_executions.spent_tokens`, once something wrote it. 5 adds `worktrees`.
-/// 6 adds `inbox_cursor`.
-pub const VERSION: i64 = 6;
+/// 6 adds `inbox_cursor`. 7 adds `short_numbers`.
+pub const VERSION: i64 = 7;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -193,6 +193,29 @@ CREATE TABLE inbox_cursor (
     last_id INTEGER NOT NULL,
     at      INTEGER NOT NULL
 ) STRICT;
+
+-- The short number each project and task also answers to, so an operator can type `4`
+-- where `cache-warm-on-deploy` was wanted. One sequence for both levels: a number names
+-- exactly one thing, and `wecode show 4` never has to ask which kind of 4 was meant.
+--
+-- `AUTOINCREMENT` rather than `max(n) + 1`, and that is the whole design. Without it
+-- SQLite reuses the highest free rowid, so deleting the newest task would hand its
+-- number to the next one created — and a notification sent six hours ago saying `#7
+-- needs your signature` would then sign something nobody had looked at. AUTOINCREMENT
+-- keeps the high-water mark in `sqlite_sequence`, so a number is never handed out
+-- twice however much is deleted. `audit_log.seq` is monotonic for the mirror reason.
+--
+-- No foreign key, for the same reason `worktrees.task_id` has none: the row has to
+-- outlive the task. A cascade would free the number, which is exactly what must not
+-- happen. What it does mean is that `wecode task rm` followed by re-adding the same id
+-- gets the same number back — the number names the id, permanently, which is a simpler
+-- promise than one depending on what has been deleted since.
+CREATE TABLE short_numbers (
+    n    INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,                     -- 'project' | 'task'
+    id   TEXT NOT NULL,
+    UNIQUE (kind, id)
+) STRICT;
 ";
 
 /// The `task_executions` table, as an upgrade for a database that predates it.
@@ -259,6 +282,32 @@ CREATE TABLE inbox_cursor (
 ) STRICT;
 ";
 
+/// The `short_numbers` table, as an upgrade for a database that predates it — and the
+/// one migration in this list that **backfills**.
+///
+/// The three above it deliberately do not, because inventing their rows would be a claim
+/// about the past: a worktree's creation date nobody observed, a cursor position saying
+/// which replies have already been read. A short number is not an observation. It is a
+/// name being minted now, and minting it during the upgrade is exactly as valid as
+/// minting it at `task add` — the alternative is a workspace where the projects that
+/// already exist are the only ones with no handle, which is every workspace that has
+/// been used.
+///
+/// Projects first, then tasks, each in id order, so two machines upgrading the same file
+/// from a backup agree about which number is which. That ordering is also why projects
+/// tend to hold the low numbers: they are what an operator reads first.
+const ADD_SHORT_NUMBERS: &str = "
+CREATE TABLE short_numbers (
+    n    INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    id   TEXT NOT NULL,
+    UNIQUE (kind, id)
+) STRICT;
+
+INSERT INTO short_numbers (kind, id) SELECT 'project', id FROM projects ORDER BY id;
+INSERT INTO short_numbers (kind, id) SELECT 'task', id FROM tasks ORDER BY id;
+";
+
 /// What `migrate` should do about a file at `current`.
 ///
 /// Split out as a pure function so every case is testable without depending on what
@@ -311,6 +360,7 @@ const UPGRADES: &[(i64, &str)] = &[
     ),
     (4, ADD_WORKTREES),
     (5, ADD_INBOX),
+    (6, ADD_SHORT_NUMBERS),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -438,6 +488,10 @@ mod tests {
             .query_row("SELECT count(*) FROM inbox_cursor", [], |r| r.get(0))
             .expect("inbox_cursor exists after 5→6");
         assert_eq!(read, 0);
+        let numbered: i64 = c
+            .query_row("SELECT count(*) FROM short_numbers", [], |r| r.get(0))
+            .expect("short_numbers exists after 6→7");
+        assert_eq!(numbered, 0, "there was nothing in the plan to number");
     }
 
     #[test]
@@ -449,7 +503,8 @@ mod tests {
         // fetch turns into an offset of 0.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("DROP TABLE inbox_cursor").unwrap();
+        c.execute_batch("DROP TABLE inbox_cursor; DROP TABLE short_numbers;")
+            .unwrap();
         c.pragma_update(None, "user_version", 5i64).unwrap();
 
         migrate(&c).unwrap();
@@ -467,7 +522,7 @@ mod tests {
         // put a creation date in the database that nobody observed.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("DROP TABLE worktrees; DROP TABLE inbox_cursor;")
+        c.execute_batch("DROP TABLE worktrees; DROP TABLE inbox_cursor; DROP TABLE short_numbers;")
             .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
@@ -488,6 +543,46 @@ mod tests {
             .query_row("SELECT title FROM tasks WHERE id = 't'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(title, "x", "the plan survived");
+    }
+
+    #[test]
+    fn a_database_that_predates_short_numbers_has_its_plan_numbered() {
+        // The one upgrade in the list that backfills, and the reason it must: a
+        // workspace already in use is exactly the workspace whose projects and tasks
+        // need handles. Leaving them out would number only what is created next.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("DROP TABLE short_numbers").unwrap();
+        c.execute_batch(
+            "INSERT INTO projects (id, repo, objective, status)
+             VALUES ('caching','wecode','an objective','active');
+             INSERT INTO tasks (id, project_id, kind, title, status)
+             VALUES ('layer','caching','feature','x','draft'),
+                    ('keys','caching','feature','y','draft');",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 6i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let mut stmt = c
+            .prepare("SELECT kind, id FROM short_numbers ORDER BY n")
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        // Projects first, then tasks in id order, so a file restored from a backup on
+        // another machine is numbered the same way.
+        assert_eq!(
+            rows,
+            vec![
+                ("project".to_string(), "caching".to_string()),
+                ("task".to_string(), "keys".to_string()),
+                ("task".to_string(), "layer".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -517,7 +612,8 @@ mod tests {
         c.execute_batch(
             "ALTER TABLE task_executions DROP COLUMN spent_tokens;
              DROP TABLE worktrees;
-             DROP TABLE inbox_cursor;",
+             DROP TABLE inbox_cursor;
+             DROP TABLE short_numbers;",
         )
         .unwrap();
         c.execute_batch(
@@ -548,6 +644,10 @@ mod tests {
                  id TEXT PRIMARY KEY, repo TEXT NOT NULL, objective TEXT NOT NULL,
                  status TEXT NOT NULL, budget_tokens INTEGER, budget_wall INTEGER
              ) STRICT;
+             -- Version 1 had tasks, and 6→7 reads them to number what is already there.
+             -- A stand-in file this test invents still has to have the tables the real
+             -- one had, or it proves the migration against a shape that never existed.
+             CREATE TABLE tasks (id TEXT PRIMARY KEY) STRICT;
              INSERT INTO projects (id, repo, objective, status)
              VALUES ('old', 'wecode', 'an objective', 'active');",
         )

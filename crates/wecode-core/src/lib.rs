@@ -18,12 +18,14 @@ pub mod execution;
 pub mod id;
 pub mod plan;
 pub mod project;
+pub mod short;
 pub mod task;
 
 pub use admission::{Admission, Defect, Waiver};
 pub use common::{Budget, Cmp, Measure, ProjectStatus, Scope, TaskStatus, WORKER_DIR};
 pub use execution::ExecutionStatus;
 pub use id::{ProjectId, TaskId};
+pub use short::Number;
 pub use plan::{Blocker, Plan, PlanError};
 pub use project::Project;
 pub use task::{Task, TaskKind};

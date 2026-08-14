@@ -109,12 +109,28 @@ pub(crate) fn project_add(a: &Args) -> Res {
     Ok(out)
 }
 
-pub(crate) fn build_task(a: &Args) -> Result<Task, Box<dyn std::error::Error>> {
+/// Assembles a task from the flags.
+///
+/// The plan is here for one reason: `--project`, `--parent` and `--after` name work that
+/// already exists, so they take a short number like everything else. The task's *own*
+/// id never does — `wecode task add 4 ...` names a new task `4`, which is what it says.
+///
+/// A reference that resolves to nothing is passed through as typed rather than refused
+/// here. The caller and `Plan::add_task` both have a better message for it than this
+/// does, and each names what the operator wrote.
+pub(crate) fn build_task(a: &Args, plan: &Plan) -> Result<Task, Box<dyn std::error::Error>> {
     let id = require(a.cmd(2), "task id")?;
     let project = require(a.get("project").unwrap_or(""), "--project <id>")?;
     let title = require(a.cmd(3), "title")?;
+    let named_task = |typed: &str| {
+        plan.task_ref(typed)
+            .map_or_else(|| TaskId::new(typed), |t| t.id.clone())
+    };
 
-    let mut t = Task::new(TaskId::new(id), ProjectId::new(project), title);
+    let project = plan
+        .project_ref(project)
+        .map_or_else(|| ProjectId::new(project), |p| p.id.clone());
+    let mut t = Task::new(TaskId::new(id), project, title);
 
     if let Some(k) = a.get("kind") {
         t = t.of_kind(TaskKind::parse(k).ok_or_else(|| {
@@ -129,10 +145,10 @@ pub(crate) fn build_task(a: &Args) -> Result<Task, Box<dyn std::error::Error>> {
         })?);
     }
     if let Some(parent) = a.get("parent") {
-        t = t.under(TaskId::new(parent));
+        t = t.under(named_task(parent));
     }
     for after in a.all("after") {
-        t = t.after(TaskId::new(after));
+        t = t.after(named_task(after));
     }
     for cmd in a.all("accept-cmd") {
         t = t.accepting(Measure::Command {
@@ -237,7 +253,10 @@ enum Assignment {
 
 pub(crate) fn task_add(a: &Args) -> Res {
     let (store, company) = open(a)?;
-    let mut t = build_task(a)?;
+    // Loaded before the task is assembled, because `--project`, `--parent` and `--after`
+    // are resolved against it.
+    let plan = store.load_plan()?;
+    let mut t = build_task(a, &plan)?;
     let mut from_playbook = Vec::new();
 
     if !store.project_exists(&t.project)? {
@@ -247,7 +266,6 @@ pub(crate) fn task_add(a: &Args) -> Res {
         )
         .into());
     }
-    let plan = store.load_plan()?;
     let pb = match plan.project(&t.project) {
         Some(project) => playbook_of(&company, project)?,
         None => None,
@@ -550,12 +568,9 @@ fn expand(
 /// exists to be orphaned.
 pub(crate) fn task_rm(a: &Args) -> Res {
     let (store, company) = open(a)?;
-    let id = TaskId::new(require(a.cmd(2), "task id")?);
     let plan = store.load_plan()?;
-    let task = plan
-        .task(&id)
-        .ok_or_else(|| format!("no such task: {id}"))?
-        .clone();
+    let task = the_task(&plan, require(a.cmd(2), "task id")?)?.clone();
+    let id = task.id.clone();
 
     let runs = store.executions(&id)?;
     if !runs.is_empty() {
@@ -617,14 +632,11 @@ pub(crate) fn task_rm(a: &Args) -> Res {
 
 pub(crate) fn task_scope(a: &Args) -> Res {
     let (store, company) = open(a)?;
-    let id = TaskId::new(require(a.cmd(2), "task id")?);
     let scope = scope_from(a).ok_or("give at least one --write or --read glob")?;
 
     let plan = store.load_plan()?;
-    let mut task = plan
-        .task(&id)
-        .ok_or_else(|| format!("no such task: {id}"))?
-        .clone();
+    let mut task = the_task(&plan, require(a.cmd(2), "task id")?)?.clone();
+    let id = task.id.clone();
     let was = task.scope.clone();
     task.scope = scope;
 
@@ -675,20 +687,23 @@ pub(crate) fn task_scope(a: &Args) -> Res {
 }
 
 /// `show <id>` accepts either level. Ids are unique per level, not globally, so a
-/// project is looked up first and a task second.
+/// project is looked up first and a task second — and a short number is unique across
+/// both, so at most one of the two ever answers to one.
 pub(crate) fn show(a: &Args) -> Res {
     let (store, _) = open(a)?;
     let id = require(a.cmd(1), "project or task id")?;
     let plan = store.load_plan()?;
 
-    if plan.project(&ProjectId::new(id)).is_some() {
-        return Ok(render::project_detail(&plan, &ProjectId::new(id)));
+    if let Some(p) = plan.project_ref(id) {
+        let pid = p.id.clone();
+        return Ok(render::project_detail(&plan, &pid));
     }
-    if plan.task(&TaskId::new(id)).is_some() {
-        let runs = store.executions(&TaskId::new(id))?;
+    if let Some(t) = plan.task_ref(id) {
+        let tid = t.id.clone();
+        let runs = store.executions(&tid)?;
         return Ok(format!(
             "{}{}",
-            render::task_detail(&plan, &TaskId::new(id)),
+            render::task_detail(&plan, &tid),
             render::executions(&runs)
         ));
     }
@@ -700,7 +715,7 @@ pub(crate) fn check(a: &Args) -> Res {
     let id = require(a.cmd(1), "project or task id")?;
     let plan = store.load_plan()?;
 
-    if let Some(p) = plan.project(&ProjectId::new(id)) {
+    if let Some(p) = plan.project_ref(id) {
         let defects = admission::check_project(p, &plan, &repo_names(&company));
         return Ok(render::admission(
             &render::project_heading(p),
@@ -708,7 +723,7 @@ pub(crate) fn check(a: &Args) -> Res {
             None,
         ));
     }
-    if let Some(t) = plan.task(&TaskId::new(id)) {
+    if let Some(t) = plan.task_ref(id) {
         let gate = plan
             .project(&t.project)
             .map(|p| design_gate(&company, p))
@@ -731,7 +746,10 @@ pub(crate) fn set_status(a: &Args) -> Res {
     let want = require(a.cmd(2), "status")?;
     let plan = store.load_plan()?;
 
-    if let Some(p) = plan.project(&ProjectId::new(id)) {
+    if let Some(p) = plan.project_ref(id) {
+        // From here on the id is the project's own, not what was typed: a number in the
+        // ledger, in the message, or in the count below would name nothing later.
+        let id = p.id.clone();
         let status = ProjectStatus::parse(want).ok_or_else(|| {
             format!(
                 "unknown project status `{want}` — have: {}",
@@ -756,11 +774,11 @@ pub(crate) fn set_status(a: &Args) -> Res {
             "setting a project's status",
         )?;
         let was = p.status;
-        store.set_project_status(&ProjectId::new(id), status)?;
+        store.set_project_status(&id, status)?;
         let mut out = format!("  {id}  {} → {}\n", was.as_str(), status.as_str());
         if status.is_closed() {
             let open = plan
-                .tasks_of(&ProjectId::new(id))
+                .tasks_of(&id)
                 .filter(|t| !t.status.is_closed())
                 .count();
             if open > 0 {
@@ -775,7 +793,6 @@ pub(crate) fn set_status(a: &Args) -> Res {
         return Ok(out);
     }
 
-    let id = TaskId::new(id);
     let status = TaskStatus::parse(want).ok_or_else(|| {
         format!(
             "unknown status `{want}` — have: {}",
@@ -788,8 +805,9 @@ pub(crate) fn set_status(a: &Args) -> Res {
     })?;
 
     let t = plan
-        .task(&id)
+        .task_ref(id)
         .ok_or_else(|| format!("no project or task `{id}` — `wecode tree` lists both"))?;
+    let id = t.id.clone();
 
     // Moving work is staffing, not defining: it changes who is expected to act.
     let who = actor(a, &store, &company)?;
@@ -843,11 +861,12 @@ pub(crate) fn set_status(a: &Args) -> Res {
 pub(crate) fn set_archived(a: &Args, archived: bool) -> Res {
     let (store, company) = open(a)?;
     let verb = if archived { "archive" } else { "unarchive" };
-    let id = ProjectId::new(require(a.cmd(1), "project id")?);
+    let named = require(a.cmd(1), "project id")?;
     let plan = store.load_plan()?;
-    let p = plan.project(&id).ok_or_else(|| {
-        format!("no such project: {id} — archiving applies to projects, not tasks")
+    let p = plan.project_ref(named).ok_or_else(|| {
+        format!("no such project: {named} — archiving applies to projects, not tasks")
     })?;
+    let id = p.id.clone();
 
     if p.archived == archived {
         return Ok(format!(
@@ -900,14 +919,13 @@ pub(crate) fn set_archived(a: &Args, archived: bool) -> Res {
 /// rejection later. Catching that here is deterministic and cheap.
 pub(crate) fn assign(a: &Args) -> Res {
     let (store, company) = open(a)?;
-    let id = TaskId::new(require(a.cmd(1), "task id")?);
+    let named = require(a.cmd(1), "task id")?;
     let post_name = require(a.get("to").unwrap_or(""), "--to <post>")?;
     let post = find_post(&company, post_name)?;
 
     let plan = store.load_plan()?;
-    let task = plan
-        .task(&id)
-        .ok_or_else(|| format!("no such task: {id}"))?;
+    let task = the_task(&plan, named)?;
+    let id = task.id.clone();
 
     let gate = plan
         .project(&task.project)

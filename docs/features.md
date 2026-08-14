@@ -246,6 +246,7 @@ cost is visible without a budget having to be denominated in it.
 | **`wecode board`** | the same view as a one-shot snapshot |
 | **`wecode brief`** | orients an agent, derived from its grant rather than stored |
 | **`wecode tree` / `ready`** | the plan, and what is startable |
+| **Short numbers** | every project and task also answers to a number you can type from a phone |
 | **Notify hook** | a command wecode runs when a task starts waiting on a person |
 | **`wecode telegram`** | signs what the replies to those notifications approved |
 
