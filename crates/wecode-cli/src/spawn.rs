@@ -19,7 +19,9 @@
 //!   read back out of a buffer that may have dropped it.
 //! - **The meter is a limit, not just a gauge.** A count read while the run is still
 //!   going is a count something can act on, and the supervisor stops a run that has
-//!   spent past the budget its task declared.
+//!   spent past the budget its task declared. It is the same count the ledger records
+//!   afterwards, and it has to be: a kill the surviving figure cannot account for is
+//!   indistinguishable from a bug — see [`crate::usage`] on one report per message.
 //!
 //! No `unsafe`, which the workspace forbids: `process_group` is safe, and signalling
 //! shells out to `kill` the way the rest of the tree shells out to `git`.
@@ -801,8 +803,8 @@ mod tests {
         // is not is a run that keeps going for another twenty turns.
         let t = metered_agent(
             "i=0; while [ $i -lt 20 ]; do echo '{\"type\":\"assistant\",\"message\":\
-             {\"usage\":{\"input_tokens\":30,\"output_tokens\":10}}}'; sleep 0.2; \
-             i=$((i+1)); done",
+             {\"id\":\"msg_'$i'\",\"usage\":{\"input_tokens\":30,\"output_tokens\":10}}}'; \
+             sleep 0.2; i=$((i+1)); done",
         );
         let o = run(
             &t,
@@ -848,6 +850,37 @@ mod tests {
         .unwrap();
         assert_eq!(o.ended, Ended::Exited(0));
         assert_eq!(o.spent, Some(90));
+    }
+
+    #[test]
+    fn a_turn_restated_across_its_blocks_is_not_a_budget_spent_four_times() {
+        // The count the supervisor kills on has to be the count the ledger records,
+        // and one turn announced once per content block used to be neither: summed
+        // live it crossed a 100-token budget on its fourth line, while the run's own
+        // total — the figure anyone reading afterwards would see — said 60. A kill
+        // nothing that survived the run could account for.
+        let t = metered_agent(
+            "i=0; while [ $i -lt 4 ]; do echo '{\"type\":\"assistant\",\"message\":\
+             {\"id\":\"msg_1\",\"usage\":{\"input_tokens\":30,\"output_tokens\":30}}}'; \
+             sleep 0.2; i=$((i+1)); done; \
+             echo '{\"type\":\"result\",\"usage\":{\"input_tokens\":30,\"output_tokens\":30}}'",
+        );
+        let o = run(
+            &t,
+            "",
+            "",
+            None,
+            &cwd(),
+            &[],
+            Limits {
+                wall: Some(Duration::from_secs(30)),
+                idle: None,
+                tokens: Some(100),
+            },
+        )
+        .unwrap();
+        assert_eq!(o.ended, Ended::Exited(0), "it never spent past 100");
+        assert_eq!(o.spent, Some(60));
     }
 
     #[test]
