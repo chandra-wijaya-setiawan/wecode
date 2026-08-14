@@ -166,6 +166,50 @@ Worth stating:
 Not worth stating: how to write good code, that acceptance should be executable (the
 gate enforces it), or anything the reader would do anyway.
 
+## Recording what it did not say
+
+Every line in the "traps" list above was learned by a task failing. Until there was
+somewhere to put that, the finding lived in whoever noticed it — an orchestrator plans
+against the guidance, discovers afterwards that it was short, and by the next session
+the fact is gone. wecode's own playbook says three tasks in a row were caught by one
+missing sentence.
+
+```bash
+wecode playbook gap "declare docs/** — the reference is generated and moves anyway" \
+  --task confirm-tasks
+```
+
+`--task` is usually the whole invocation: the task names its own project and its own
+kind, so the note lands against the guidance that was short. `--kind` states it
+directly; neither means the finding is about the project's planning as a whole, and it
+is then shown against every kind.
+
+It comes back out where the next planner already looks — at the end of `wecode playbook
+<kind>`, after the guidance, counted on `wecode playbook`, and listed by `wecode
+playbook gaps`.
+
+**A gap is a note, not a change.** Nothing acts on one: like `guidance`, wecode only
+carries it. That is exactly what makes it safe for an agent to record — a wrong note
+can mislead a reader, which the prose beside it could already do, and it cannot widen a
+scope, raise a budget or switch off a gate. The playbook stays hand-edited, in no
+role's write scope, for the reason it always was.
+
+It goes away when a person folds it into the playbook and deletes the entry. Nothing
+else deletes one, which is the point: it sits in front of the next planner until
+somebody has done something about it.
+
+Two details worth knowing:
+
+- **It is recorded in the workspace**, in `gaps.toml` beside `company.toml`, not in the
+  repository the playbook lives in. Verification judges a task from the repository's
+  own diff, and a kind whose playbook asks for no worktree is judged in the main
+  checkout — a file appearing there while such a task ran would be reported as *that
+  task's* scope violation. Recording a finding must not fail somebody else's work.
+- **The gate is `define project`**, not a write scope. The chief writes no code and is
+  the seat that finds these; the engineer writes the code and must not be able to
+  annotate the guidance it was handed. A file-write check would have had it backwards
+  on both counts.
+
 ## Kinds
 
 One section per task kind — `feature`, `bug`, `refactor`, `chore`, `spike`, `docs`. A

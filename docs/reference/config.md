@@ -10,6 +10,10 @@ Two hand-edited files. Everything else is in `wecode.db`, which no one edits by 
 The split is deliberate. The company is one thing; a project is a codebase with its own
 conventions, and its guidance is versioned with the code it describes.
 
+A third file, `gaps.toml`, sits in the workspace and belongs to neither category
+cleanly: it is written by machine and emptied by hand. It is guidance's inbox — see
+[below](#gapstoml).
+
 ## company.toml
 
 Lives in the workspace, alongside `wecode.db`. Unknown keys are an **error**, not a
@@ -193,6 +197,42 @@ Like `company.toml`, a playbook is **hand-edited and deliberately in no role's w
 scope**. A task that tried to change one would be refused at assignment, which is the
 right answer: letting a worker rewrite the guidance it was given is the same problem as
 letting it define its own acceptance.
+
+## gaps.toml
+
+In the workspace, beside `company.toml`. Appended by `wecode playbook gap`, read back
+by `wecode playbook`, and emptied by hand.
+
+```toml
+[[gap]]
+at      = 1755100000          # seconds since the epoch, stamped when it was recorded
+project = "caching"
+kind    = "bug"               # optional — absent means every kind sees it
+task    = "cache-layer"       # optional — where it was found, for attribution
+by      = "chief"             # the post that recorded it
+note    = "declare the test file: the scope check refuses the diff afterwards"
+```
+
+A gap is a **note, not a change**. Nothing in wecode branches on one; like `guidance`,
+it is only carried. That is what makes it safe for an agent to append to — a wrong note
+misleads a reader, which the prose beside it could already do, and it cannot widen a
+scope, raise a budget or switch off a gate. The playbook itself stays hand-edited and
+out of every write scope.
+
+The gate is `define project`, not a write scope: the seat that plans work is the one
+that finds these, and it is usually a seat that writes no code at all. The seat that
+writes the code is exactly the one that must not be able to annotate the guidance it
+was handed.
+
+It lives here rather than beside the playbook it is about because **the repository is
+what verification diffs**. A kind whose playbook asks for no worktree is judged in the
+main checkout, so a file appearing there mid-run would be reported as that task's scope
+violation — recording a finding would fail somebody else's work. The workspace is never
+diffed.
+
+Entries are appended, never rewritten, so comments and hand corrections survive. An
+entry goes away when a person folds it into the playbook and deletes it; nothing else
+deletes one.
 
 ## The envelope
 

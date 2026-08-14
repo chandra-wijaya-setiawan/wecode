@@ -50,6 +50,10 @@ PLAN
 
   wecode playbook [<kind>]             this project's guidance for that kind
         --project <p>   init            `init` writes a starter into the repo
+  wecode playbook gap "<what the guidance does not say>"
+        --kind <k> --task <id>          record a gap you found while planning;
+                                        shown to whoever reads that kind next
+  wecode playbook gaps                 what has been found and not folded in yet
   wecode brief                         who you are and how to work — read this first
   wecode tree [--all]                  projects and their task trees
   wecode ready                         what is schedulable right now
@@ -98,6 +102,13 @@ discovered — is a line in your `~/.claude/CLAUDE.md`: *if I say "use wecode", 
 
 **`wecode playbook <kind>`** is what an orchestrator reads before decomposing a request
 into tasks. See [../guides/playbooks.md](../guides/playbooks.md).
+
+**`wecode playbook gap "<...>"`** is the way back in. An orchestrator that plans against
+the guidance and finds out afterwards that it was short records the finding, and it is
+shown to whoever reads that kind's guidance next. `--task <id>` is usually the whole
+invocation — the task names its own project and kind. It is a note, not a change:
+nothing acts on one, and it goes away when a person folds it into the playbook and
+deletes it. `wecode playbook gaps` lists what is waiting.
 
 **`wecode task add --expand`** emits the subtasks that kind's playbook declares, with
 `{{task}}` substituted, instead of typing each one out. It runs once, at planning time,

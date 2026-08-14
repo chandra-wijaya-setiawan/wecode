@@ -73,6 +73,10 @@ PLAN
 
   wecode playbook [<kind>]             this project's guidance for that kind
         --project <p>   init            `init` writes a starter into the repo
+  wecode playbook gap \"<what the guidance does not say>\"
+        --kind <k> --task <id>          record a gap you found while planning;
+                                        shown to whoever reads that kind next
+  wecode playbook gaps                 what has been found and not folded in yet
   wecode brief                         who you are and how to work — read this first
   wecode tree [--all]                  projects and their task trees
   wecode ready                         what is schedulable right now
@@ -151,6 +155,8 @@ fn run(a: &Args) -> Res {
             Ok(render::ready(&store.load_plan()?))
         }
         ("playbook", "init") => playbook_init(a),
+        ("playbook", "gap") => playbook_gap(a),
+        ("playbook", "gaps") => playbook_gaps(a),
         ("playbook", _) => playbook_show(a),
         ("brief", _) => brief(a),
         ("start", _) => start(a),
