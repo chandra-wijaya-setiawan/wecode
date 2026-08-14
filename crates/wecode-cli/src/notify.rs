@@ -38,6 +38,15 @@
 //! the trip this exists to save. So the paths the attempt wrote go out with the
 //! message, read out of git rather than asked of the agent, for the reason the verdict
 //! is.
+//!
+//! And **the diff itself**, not only the paths it touched. A list of names says what a
+//! change reached and never what it did: `notify.rs, config.md` reads the same whether
+//! the attempt rewrote a module or fixed a typo in it. So an operator with a phone
+//! could be told they were wanted, and — once a reply could sign — sign, without ever
+//! having been shown the thing they were signing. The way out was `$WECODE_WORKTREE`:
+//! ask git yourself. That is a shell, and a notification's whole premise is that there
+//! is not one where the operator is standing. See [`diff_of`] for what is sent instead,
+//! and [`DIFF`] for how much of it.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -64,6 +73,21 @@ const KEEP: u64 = 4096;
 /// How much of that line is printed. Long enough to carry `chat not found`, short
 /// enough that a hook cannot take the pass it fired on with it.
 const QUOTE: usize = 120;
+
+/// How much of the diff the hook is handed, in characters.
+///
+/// A bound, because an environment is not the place to put a megabyte and no channel
+/// would carry it if it were. This much, because the tightest channel an operator
+/// actually reads a diff on is a chat message: Telegram refuses one over 4096
+/// characters outright — which is also why this counts characters and not lines — and
+/// the difference is the room a hook needs for its own words around it, truncation mark
+/// included.
+///
+/// Not the operator's to set, unlike [`Notify::max_files`](wecode_org::Notify), because
+/// there is nothing to trade. That one buys a shorter message by naming fewer files,
+/// and the count beside it stays true either way; a diff is not shorter for being cut,
+/// it is only less of a diff. A hook that wants all of it is handed the tree.
+const DIFF: usize = 4000;
 
 /// Why a task is waiting on a person.
 ///
@@ -158,8 +182,8 @@ fn number_env(task: &Task) -> String {
         .unwrap_or_default()
 }
 
-/// What a task has to show for itself: the tree the work is in, and the paths written
-/// in it.
+/// What a task has to show for itself: the tree the work is in, the paths written in
+/// it, and what was written in them.
 ///
 /// Read out of git, never asked of the agent — the same rule the verdict is judged
 /// under, and for the same reason: a diff is ground truth where a self-report is a
@@ -168,14 +192,16 @@ fn number_env(task: &Task) -> String {
 /// It is the *uncommitted* diff, which is precisely the one `verify` judged: an attempt
 /// is committed only after the verdict, so the announcement and the verdict that
 /// triggered it describe the same work by construction. A hook wanting more than this —
-/// the diff itself, the attempts before this one — is handed the tree and can ask git
-/// anything.
+/// the rest of a diff past [`DIFF`], the attempts before this one — is handed the tree
+/// and can ask git anything.
 #[derive(Debug)]
 struct Produced {
     /// The worktree the work happened in.
     dir: PathBuf,
     /// Every path changed in it, sorted, untracked files included.
     files: Vec<String>,
+    /// What changed in them, as a bounded diff — see [`diff_of`].
+    diff: String,
 }
 
 impl Produced {
@@ -190,7 +216,8 @@ impl Produced {
     fn of(org: &Path, task: &Task) -> Option<Self> {
         let dir = tree_of(org, task)?;
         let files = crate::git::changed_files(&dir).ok()?;
-        Some(Self { dir, files })
+        let diff = diff_of(&dir);
+        Some(Self { dir, files, diff })
     }
 
     /// How many paths there are, however few of them are listed.
@@ -236,6 +263,74 @@ fn tree_of(org: &Path, task: &Task) -> Option<PathBuf> {
     let owner = crate::work::owner(&plan, &task.id)?;
     let dir = crate::work::worktree_for(&crate::work::org_name(org), &owner.id);
     dir.is_dir().then_some(dir)
+}
+
+/// The uncommitted diff of `dir`, bounded to [`DIFF`] characters — the change itself,
+/// so that the message carrying it can be judged rather than only acted on.
+///
+/// Against `HEAD`, the same base [`crate::git::changed_files`] names its paths against,
+/// so the names and the diff beside them are two views of one change and not two
+/// changes. That is what lets a hook print a heading and a body without either
+/// contradicting the other.
+///
+/// Read, never written. A tree can have an agent in it while this runs — a subtask
+/// works in its parent's — so a file git has not seen yet is rendered with `--no-index`
+/// against `/dev/null` rather than with the shorter `add -N`, which would stage
+/// somebody else's work in the middle of it. An announcement that edited what it was
+/// describing would be worse than one that said nothing.
+fn diff_of(dir: &Path) -> String {
+    let mut text = asked(dir, &["diff", "--no-color", "HEAD"]);
+    let mut wide = text.chars().count();
+
+    // The half a plain `git diff` leaves out, and for a lot of tasks the whole of the
+    // work: a new module, a new test file, a playbook. Listed and never shown, those
+    // are a notification that looks complete and is empty. Abandoned as soon as there
+    // is enough to fill the bound, so a tree of new files costs a handful of reads
+    // rather than one per file.
+    for path in asked(dir, &["ls-files", "--others", "--exclude-standard"]).lines() {
+        if wide > DIFF {
+            break;
+        }
+        let more = asked(
+            dir,
+            &["diff", "--no-color", "--no-index", "--", "/dev/null", path],
+        );
+        wide += more.chars().count();
+        text.push_str(&more);
+    }
+
+    match text.char_indices().nth(DIFF) {
+        // Marked and never quietly cut, for the reason the count goes beside the names
+        // rather than being replaced by them: a hook handed part of a diff has to be
+        // able to say that it is a part. Counted in characters and cut on one, because
+        // a diff is arbitrary text and halving a multi-byte character would panic.
+        Some((at, _)) => format!("{}\n… truncated, {} bytes in full", &text[..at], text.len()),
+        None => text,
+    }
+}
+
+/// git in `dir`, and whatever it printed on stdout — nothing at all if it could not be
+/// run or would not answer.
+///
+/// Here rather than beside the rest of [`crate::git`], where every call hands back a
+/// `Result` its caller is expected to do something about. This one deliberately cannot
+/// fail: a diff wecode could not read is a thinner notification and never a missing
+/// one, and `--no-index` spells *these two files differ* as a non-zero exit, which is
+/// the answer rather than an error.
+fn asked(dir: &Path, args: &[&str]) -> String {
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        // Lossy, like the hook's own output and for the same reason: a diff touching a
+        // file in some other encoding is still worth reading, and an announcement is
+        // not the place to stop over a byte.
+        .map_or_else(
+            |_| String::new(),
+            |out| String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
 }
 
 /// Runs the hook. Returns what the caller should print: nothing when it ran or when
@@ -289,11 +384,12 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
         // So a hook can call wecode back — `wecode show "$WECODE_TASK"` — from whatever
         // directory it happens to be started in.
         .env("WECODE_ORG", org)
-        // What the task produced. Three variables and not one string, because a hook
-        // composes its own message: a desktop line wants the count, a chat message wants
-        // the names under it, and a script that wants the diff wants the directory.
+        // What the task produced. Four variables and not one string, because a hook
+        // composes its own message and every channel has a different amount of room: a
+        // desktop line holds the count, a chat message holds the names and the diff
+        // under them, and a script wanting more than the diff is handed the directory.
         //
-        // All three empty means there is nothing to say — see [`Produced::of`]. That is
+        // All four empty means there is nothing to say — see [`Produced::of`]. That is
         // the normal case for `signature`, which is a wait for permission to *start*.
         .env(
             "WECODE_WORKTREE",
@@ -309,6 +405,11 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
             made.as_ref()
                 .map_or_else(String::new, |m| m.listed(company.notify.max_files)),
         )
+        // The one that answers *what did it do*, where the three above answer *what did
+        // it touch*. Bounded when it was read rather than here: what is held in memory
+        // between a worktree and an environment should be a message's worth of diff and
+        // not a repository's.
+        .env("WECODE_DIFF", made.as_ref().map_or("", |m| m.diff.as_str()))
         .stdin(Stdio::null());
 
     // Caught rather than inherited. Letting a notifier write straight into the loop's
@@ -554,6 +655,27 @@ mod tests {
         std::env::temp_dir()
     }
 
+    /// A real repository with one commit in it, and one tracked file.
+    ///
+    /// Real because a diff is whatever git prints: a fake would be testing this module
+    /// against its own idea of the output it is bounding.
+    fn repo(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("wecode-notify-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "t@t"],
+            &["config", "user.name", "t"],
+        ] {
+            asked(&dir, args);
+        }
+        std::fs::write(dir.join("kept.txt"), "one\n").expect("a file to track");
+        asked(&dir, &["add", "."]);
+        asked(&dir, &["commit", "-qm", "first"]);
+        dir
+    }
+
     #[test]
     fn every_status_that_needs_a_human_has_a_reason_to_give_them() {
         // The two definitions are in different crates and must agree exactly: a status
@@ -658,12 +780,81 @@ mod tests {
         let made = Produced {
             dir: dir(),
             files: vec!["a.rs".into(), "b.rs".into(), "c.rs".into()],
+            diff: String::new(),
         };
         assert_eq!(made.count(), "3");
         assert_eq!(made.listed(2), "a.rs\nb.rs");
         assert_eq!(made.listed(9), "a.rs\nb.rs\nc.rs");
         assert_eq!(made.listed(0), "", "names off; the count still goes");
         assert_eq!(made.listed(u64::MAX), "a.rs\nb.rs\nc.rs", "no overflow");
+    }
+
+    #[test]
+    fn a_file_git_has_never_seen_is_in_the_diff_beside_the_ones_it_has() {
+        // The half a plain `git diff` leaves out, and for a lot of tasks the whole of
+        // the work. `changed_files` counts an untracked file, so a diff that dropped it
+        // would show a message naming three files and explaining two — which reads as
+        // *nothing happened here*, the one thing a diff must never say by omission.
+        let r = repo("diff-new");
+        std::fs::write(r.join("kept.txt"), "one\ntwo\n").expect("edit the tracked file");
+        std::fs::write(r.join("fresh.txt"), "hello\n").expect("write a new one");
+
+        let d = diff_of(&r);
+        assert!(d.contains("kept.txt"), "the tracked file is missing: {d}");
+        assert!(d.contains("+two"), "and what changed in it: {d}");
+        assert!(d.contains("fresh.txt"), "the new file is missing: {d}");
+        assert!(d.contains("+hello"), "and what is in it: {d}");
+    }
+
+    #[test]
+    fn reading_the_diff_leaves_the_tree_exactly_as_it_found_it() {
+        // Why `--no-index` rather than the shorter `add -N`. A subtask works in its
+        // parent's tree, so this can run while an agent is still writing in it, and an
+        // announcement that staged somebody's half-finished file would be editing the
+        // work it was sent to describe.
+        let r = repo("diff-readonly");
+        std::fs::write(r.join("fresh.txt"), "hello\n").expect("write a new one");
+
+        assert!(!diff_of(&r).is_empty(), "nothing was read at all");
+        assert_eq!(
+            asked(&r, &["diff", "--cached", "--name-only"]).trim(),
+            "",
+            "the index was written to"
+        );
+        assert!(
+            asked(&r, &["status", "--porcelain"]).contains("?? fresh.txt"),
+            "the file stopped being untracked"
+        );
+    }
+
+    #[test]
+    fn a_diff_too_long_for_a_message_is_cut_and_says_how_much_it_is_short() {
+        // A hook pastes this into a channel with a ceiling, so the bound is wecode's to
+        // apply — and the mark is what stops the operator reading a truncated diff as a
+        // whole one, which is the same failure as a count that agreed with its own cap.
+        let r = repo("diff-long");
+        std::fs::write(r.join("kept.txt"), "line\n".repeat(4000)).expect("a flood");
+
+        let d = diff_of(&r);
+        assert!(d.contains("… truncated,"), "not marked: {}", said(&d));
+        assert!(d.contains("bytes in full"), "no size given: {}", said(&d));
+        assert!(
+            d.chars().count() < DIFF + 60,
+            "the bound did not hold: {} characters",
+            d.chars().count()
+        );
+        // Cut on a character and never inside one: a diff is arbitrary text, and the
+        // slice below panics rather than truncating if this is got wrong.
+        let wide = repo("diff-wide");
+        std::fs::write(wide.join("kept.txt"), "é\n".repeat(4000)).expect("a wider flood");
+        assert!(diff_of(&wide).contains("… truncated,"), "not marked");
+    }
+
+    #[test]
+    fn a_directory_git_will_not_answer_about_is_a_thinner_message_and_not_a_failure() {
+        // The module's rule reaching one function further in. A notification that could
+        // not read a diff still has to go: the task stopped for a person either way.
+        assert_eq!(diff_of(&dir().join("wecode-notify-no-such-tree")), "");
     }
 
     #[test]

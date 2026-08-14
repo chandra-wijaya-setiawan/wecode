@@ -181,6 +181,7 @@ default, nothing is run and waits are silent.
 | `WECODE_ORG` | the workspace, so the hook can call `wecode` back |
 | `WECODE_CHANGED_COUNT` | how many paths the task changed |
 | `WECODE_CHANGED_FILES` | those paths, one per line, at most `max_files` of them |
+| `WECODE_DIFF` | what changed in them, as a diff, to 4000 characters |
 | `WECODE_WORKTREE` | the tree the work is in |
 
 `WECODE_WAITING_FOR` is the one to branch on. `signature` is the dispatch gate holding a
@@ -195,16 +196,41 @@ digits alone so the hook decides how to write them — a hook that wants the sig
 
 **Say what it produced.** A message that only names the task answers *you are wanted* and
 not *for what*, and deciding whether to sign a diff then means opening a terminal to look
-at it — which is the trip the hook exists to save. The three artifact variables are the
-diff in the message: a desktop line has room for `$WECODE_CHANGED_COUNT files`, a chat
-message has room for the names under it, and a script that wants the diff itself is
-handed `$WECODE_WORKTREE` and can ask git anything.
+at it — which is the trip the hook exists to save. The four artifact variables are the
+diff in the message, one per size of channel: a desktop line has room for
+`$WECODE_CHANGED_COUNT files`, a chat message has room for the names and `$WECODE_DIFF`
+under them, and a script wanting more than that is handed `$WECODE_WORKTREE` and can ask
+git anything.
 
 ```toml
 [notify]
 command = "notify-send 'wecode' \"#$WECODE_TASK_NUMBER $WECODE_TASK: $WECODE_WAITING_FOR, $WECODE_CHANGED_COUNT files\""
 max_files = 20                    # names handed over; the count is never capped
 ```
+
+**Send the diff where the reply can sign.** A list of names says what a change *reached*
+and never what it *did*: `notify.rs, config.md` reads the same whether the attempt rewrote
+a module or fixed a typo in it. Where the reply can approve — [a Telegram
+message](#signing-from-a-reply), where a tap is a signature — that is a decision made
+without the evidence for it, and *ask git yourself* is not an answer on a phone.
+
+```toml
+[notify]
+command = "curl -sS -m 20 https://api.telegram.org/bot$TG_TOKEN/sendMessage \
+  -d chat_id=$TG_CHAT --data-urlencode \
+  \"text=#$WECODE_TASK_NUMBER $WECODE_TASK_TITLE — $WECODE_WAITING_FOR ($WECODE_CHANGED_COUNT files)
+$WECODE_DIFF\""
+```
+
+`WECODE_DIFF` is cut at **4000 characters**, marked `… truncated, N bytes in full` when it
+is, so a hook can never present part of a diff as the whole of one. That bound is not
+yours to set, unlike `max_files`, because there is nothing to trade: fewer names still
+leave a true count beside them, where a shorter diff is only less of a diff. 4000 is what
+the tightest channel that carries one will take — Telegram refuses a message over 4096 —
+less the room a hook needs for its own words around it. Untracked files are in it, because
+they are in the count: a task whose whole output is new files would otherwise arrive
+listed and unexplained. Reading it writes nothing, so an announcement cannot disturb a
+worktree an agent is still in.
 
 They are read out of git, never taken from the agent's report — the same rule the verdict
 is judged under, and for the same reason: a diff is ground truth where a self-report is a
@@ -218,7 +244,7 @@ exists because an environment is not the place to put a thousand paths, and it i
 to set because the channel is: a desktop notification has a line where a log file has room
 for everything.
 
-All three are **empty** when there is nothing yet to show — no worktree, because the task
+All four are **empty** when there is nothing yet to show — no worktree, because the task
 has not started. That is the ordinary case for `signature`, which is a wait for permission
 to begin. Empty rather than `0`: *has written nothing* and *has not run* are different
 things to be woken up for, and a hook that reported the second as the first would be
