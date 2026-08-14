@@ -68,7 +68,8 @@ PLAN
         hide a project from the cockpit, or bring it back (--force if work is live)
 
 COCKPIT
-  wecode up                            live dashboard: j/k move, enter descend, q quit
+  wecode up                            live dashboard: j/k move, space fold, q quit
+        every level draws the whole task tree; z folds it all, Z opens it
   wecode board [<id>] [--all]          the same view as a one-shot snapshot
 
 WORK

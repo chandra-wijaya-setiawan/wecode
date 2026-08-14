@@ -93,10 +93,15 @@ wecode rollback cache         # if it should not have
 
 ```bash
 wecode board                  # a snapshot
-wecode up                     # live: j/k move, enter descend, a archived, q quit
+wecode up                     # live: j/k move, space fold, enter descend, q quit
 wecode ready                  # what a dispatcher could pick up now
 wecode audit --denied         # what was refused, and why
 ```
+
+Both draw the **whole task tree** — projects, their tasks, their subtasks, to the
+bottom — so the row that is running or waiting is on screen wherever it sits. In
+`wecode up` a row with work under it carries `▾`, and `space` folds it away to `▸`;
+`z` folds everything down to projects and `Z` opens it again.
 
 The **spend** cell fills in once a task has actually run — `90/50000`, tokens against
 the budget you declared. Over budget turns the row red, after the fact: the tokens are

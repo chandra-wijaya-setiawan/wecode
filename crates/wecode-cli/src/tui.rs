@@ -6,9 +6,15 @@
 //! by an agent; it is the colour of the needs-you cell rather than a column,
 //! because every cause of amber or red already writes an entry there.
 //!
+//! Every level draws the whole is-part-of tree beneath its subject, subtasks and
+//! their subtasks included. A row with work under it can be folded shut, which is
+//! how the portfolio stays a scan without hiding anything by default: what is not
+//! on screen is what the operator put away, not what the view decided to omit.
+//!
 //! Reloads from the store on a tick, so it tracks state as it changes rather than
 //! showing a snapshot.
 
+use std::collections::HashSet;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -37,7 +43,7 @@ enum Pane {
 
 /// What a row points at. Two levels of work means a row is one or the other, and
 /// an id alone cannot say which — project and task ids live in separate spaces.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Subject {
     Project(ProjectId),
     Task(TaskId),
@@ -52,6 +58,28 @@ impl Subject {
     }
 }
 
+/// Whether a row has anything under it, and whether it is showing it.
+///
+/// A leaf still occupies the marker column. Two spaces of nothing keep every id in
+/// the same place down a branch; without them a row's indentation would encode its
+/// depth *and* whether its neighbour had children, which is unreadable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Fold {
+    Leaf,
+    Open,
+    Shut,
+}
+
+impl Fold {
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Leaf => "  ",
+            Self::Open => "▾ ",
+            Self::Shut => "▸ ",
+        }
+    }
+}
+
 /// One visible line: a subject at a depth, with its derived vitals.
 struct RowItem {
     subject: Subject,
@@ -62,6 +90,7 @@ struct RowItem {
     /// which is computed — a task can be perfectly healthy and not started.
     status: String,
     vitals: Vitals,
+    fold: Fold,
 }
 
 impl RowItem {
@@ -88,6 +117,11 @@ struct App {
     /// Whether archived projects are on screen. Off by default — archiving is a
     /// request to stop seeing something.
     show_archived: bool,
+    /// Rows whose children are folded away. Empty to begin with: the tree is what
+    /// there is to see, and a view that starts by hiding most of it is the gap this
+    /// closed. Kept by subject rather than by row index so it survives a reload
+    /// that moves everything.
+    collapsed: HashSet<Subject>,
     status: String,
     quit: bool,
 }
@@ -108,7 +142,8 @@ impl App {
             pane: Pane::Board,
             last_reload: Instant::now(),
             show_archived: false,
-            status: "j/k move · enter descend · esc up · a archived · ? help · q quit".into(),
+            collapsed: HashSet::new(),
+            status: "j/k move · space fold · enter descend · esc up · ? help · q quit".into(),
             quit: false,
         };
         app.rebuild();
@@ -136,12 +171,24 @@ impl App {
 
     /// Flattens the current view into rows, preserving the selection if it survives
     /// the rebuild.
+    ///
+    /// One walk serves all three levels, because all three draw the same thing —
+    /// a subject and the tree beneath it — and only differ in where they start.
+    /// Hand-unrolled, each level stopped at whatever depth its author wrote out,
+    /// which is how the portfolio came to end at root tasks and a focused task at
+    /// its grandchildren.
     fn rebuild(&mut self) {
         let selected = self.selected().map(|r| r.subject.clone());
         let l = board::ledger_index(&self.audit);
+        let tree = Tree {
+            plan: &self.plan,
+            ledger: &l,
+            gates: &self.gates,
+            collapsed: &self.collapsed,
+        };
         let mut rows = Vec::new();
 
-        match self.focus.clone() {
+        match &self.focus {
             None => {
                 let projects: Vec<&Project> = if self.show_archived {
                     self.plan.all_projects().collect()
@@ -149,72 +196,17 @@ impl App {
                     self.plan.projects().collect()
                 };
                 for p in projects {
-                    rows.push(project_row(&self.plan, p, &l, &self.known_repos));
-                    let roots = sorted(self.plan.roots_of(&p.id));
-                    for (i, t) in roots.iter().enumerate() {
-                        rows.push(task_row(
-                            &self.plan,
-                            t,
-                            &l,
-                            &self.gates,
-                            1,
-                            last(i, roots.len()),
-                        ));
-                    }
+                    tree.push_project(&mut rows, p, &self.known_repos);
                 }
             }
             Some(Subject::Project(id)) => {
-                if let Some(p) = self.plan.project(&id) {
-                    rows.push(project_row(&self.plan, p, &l, &self.known_repos));
-                    let roots = sorted(self.plan.roots_of(&id));
-                    for (i, t) in roots.iter().enumerate() {
-                        rows.push(task_row(
-                            &self.plan,
-                            t,
-                            &l,
-                            &self.gates,
-                            1,
-                            last(i, roots.len()),
-                        ));
-                        let kids = sorted(self.plan.subtasks(&t.id));
-                        for (j, k) in kids.iter().enumerate() {
-                            rows.push(task_row(
-                                &self.plan,
-                                k,
-                                &l,
-                                &self.gates,
-                                2,
-                                last(j, kids.len()),
-                            ));
-                        }
-                    }
+                if let Some(p) = self.plan.project(id) {
+                    tree.push_project(&mut rows, p, &self.known_repos);
                 }
             }
             Some(Subject::Task(id)) => {
-                if let Some(t) = self.plan.task(&id) {
-                    rows.push(task_row(&self.plan, t, &l, &self.gates, 0, true));
-                    let kids = sorted(self.plan.subtasks(&id));
-                    for (i, k) in kids.iter().enumerate() {
-                        rows.push(task_row(
-                            &self.plan,
-                            k,
-                            &l,
-                            &self.gates,
-                            1,
-                            last(i, kids.len()),
-                        ));
-                        let grand = sorted(self.plan.subtasks(&k.id));
-                        for (j, g) in grand.iter().enumerate() {
-                            rows.push(task_row(
-                                &self.plan,
-                                g,
-                                &l,
-                                &self.gates,
-                                2,
-                                last(j, grand.len()),
-                            ));
-                        }
-                    }
+                if let Some(t) = self.plan.task(id) {
+                    tree.push_task(&mut rows, t, 0, true);
                 }
             }
         }
@@ -254,12 +246,55 @@ impl App {
             Subject::Task(id) => self.plan.subtasks(id).next().is_some(),
         };
         if has_children {
+            // Zooming into something folded shut would land on a screen showing
+            // only the thing you zoomed into. Descending *is* asking to see inside.
+            self.collapsed.remove(&subject);
             self.focus = Some(subject);
             self.rebuild();
             self.table.select(Some(0));
         } else {
             self.status = "leaf — nothing below".into();
         }
+    }
+
+    /// Folds the selected row shut, or opens it again.
+    fn toggle_fold(&mut self) {
+        let Some(row) = self.selected() else { return };
+        if row.fold == Fold::Leaf {
+            self.status = "leaf — nothing to fold".into();
+            return;
+        }
+        let subject = row.subject.clone();
+        if !self.collapsed.remove(&subject) {
+            self.collapsed.insert(subject);
+        }
+        self.rebuild();
+    }
+
+    /// Folds everything, or opens everything. The way back from a plan whose tree
+    /// is longer than the screen — one keystroke rather than one per project.
+    ///
+    /// "Everything" is every subject with children anywhere in the plan, not only
+    /// the rows currently drawn: folding what is visible and leaving the rest open
+    /// means the next descent lands somewhere the operator did not ask for.
+    fn fold_all(&mut self, shut: bool) {
+        self.collapsed.clear();
+        if shut {
+            // Only what has something to hide. A leaf recorded as folded is
+            // invisible today and wrong the moment somebody hangs a subtask off it.
+            for p in self.plan.all_projects() {
+                if self.plan.tasks_of(&p.id).next().is_some() {
+                    self.collapsed.insert(Subject::Project(p.id.clone()));
+                }
+            }
+            for t in self.plan.tasks() {
+                if self.plan.subtasks(&t.id).next().is_some() {
+                    self.collapsed.insert(Subject::Task(t.id.clone()));
+                }
+            }
+        }
+        self.status = if shut { "folded" } else { "unfolded" }.into();
+        self.rebuild();
     }
 
     /// Up one level. A task rises to its parent task if it has one, otherwise to
@@ -290,6 +325,11 @@ impl App {
             KeyCode::Char('G') => self.table.select(Some(self.rows.len().saturating_sub(1))),
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.descend(),
             KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left => self.ascend(),
+            KeyCode::Char(' ') => self.toggle_fold(),
+            // Shut with `z`, open with `Z`, rather than one key that toggles: what a
+            // toggle would do next depends on state the operator cannot see.
+            KeyCode::Char('z') => self.fold_all(true),
+            KeyCode::Char('Z') => self.fold_all(false),
             KeyCode::Char('a') => {
                 self.show_archived = !self.show_archived;
                 let n = self.plan.archived_count();
@@ -321,45 +361,91 @@ fn last(i: usize, n: usize) -> bool {
     i + 1 == n
 }
 
-/// A project row: the word `project`, its id, and the repo it owns. The repo is on
-/// the row rather than only in the detail pane because without it nothing on screen
-/// connects a project to the code it works on.
-fn project_row(plan: &Plan, p: &Project, l: &Ledger, known_repos: &[String]) -> RowItem {
-    RowItem {
-        subject: Subject::Project(p.id.clone()),
-        label: format!(
-            "PROJECT {}  [{}]{}",
-            p.id,
-            p.repo,
-            if p.archived { "  archived" } else { "" }
-        ),
-        status: format!("{} {}", p.status.mark(), p.status.as_str()),
-        vitals: board::project_vitals(plan, p, l, known_repos),
-    }
+/// Everything a row needs that is not the row's own subject.
+///
+/// Bundled so the walk can recurse without carrying five parameters down every
+/// branch, and borrowed rather than owned so building the rows never copies the
+/// plan.
+struct Tree<'a> {
+    plan: &'a Plan,
+    ledger: &'a Ledger,
+    gates: &'a board::DesignGates,
+    collapsed: &'a HashSet<Subject>,
 }
 
-fn task_row(
-    plan: &Plan,
-    t: &Task,
-    l: &Ledger,
-    gates: &board::DesignGates,
-    depth: usize,
-    is_last: bool,
-) -> RowItem {
-    let connector = if depth == 0 {
-        String::new()
-    } else {
-        format!(
-            "{}{} ",
-            "   ".repeat(depth - 1),
-            if is_last { "└─" } else { "├─" }
-        )
-    };
-    RowItem {
-        subject: Subject::Task(t.id.clone()),
-        label: format!("{connector}{} {}", crate::render::kind_tag(t.kind), t.id),
-        status: format!("{} {}", t.status.mark(), status_word(t.status)),
-        vitals: board::task_vitals(plan, t, l, gates),
+impl Tree<'_> {
+    fn fold_of(&self, subject: &Subject, has_children: bool) -> Fold {
+        if !has_children {
+            Fold::Leaf
+        } else if self.collapsed.contains(subject) {
+            Fold::Shut
+        } else {
+            Fold::Open
+        }
+    }
+
+    /// A project row — the word `project`, its id, and the repo it owns — then its
+    /// task tree. The repo is on the row rather than only in the detail pane
+    /// because without it nothing on screen connects a project to the code it
+    /// works on.
+    fn push_project(&self, rows: &mut Vec<RowItem>, p: &Project, known_repos: &[String]) {
+        let subject = Subject::Project(p.id.clone());
+        let roots = sorted(self.plan.roots_of(&p.id));
+        let fold = self.fold_of(&subject, !roots.is_empty());
+        rows.push(RowItem {
+            label: format!(
+                "{}PROJECT {}  [{}]{}",
+                fold.glyph(),
+                p.id,
+                p.repo,
+                if p.archived { "  archived" } else { "" }
+            ),
+            status: format!("{} {}", p.status.mark(), p.status.as_str()),
+            vitals: board::project_vitals(self.plan, p, self.ledger, known_repos),
+            subject,
+            fold,
+        });
+        if fold == Fold::Open {
+            for (i, t) in roots.iter().enumerate() {
+                self.push_task(rows, t, 1, last(i, roots.len()));
+            }
+        }
+    }
+
+    /// A task row, then everything beneath it — to the leaves, not to some depth
+    /// this function picked — unless the operator has folded it shut.
+    fn push_task(&self, rows: &mut Vec<RowItem>, t: &Task, depth: usize, is_last: bool) {
+        let subject = Subject::Task(t.id.clone());
+        let kids = sorted(self.plan.subtasks(&t.id));
+        let fold = self.fold_of(&subject, !kids.is_empty());
+        // A child's connector lands in its parent's marker column, so a branch
+        // reads as one column of glyphs rather than two that nearly line up.
+        let connector = if depth == 0 {
+            String::new()
+        } else {
+            format!(
+                "{}{} ",
+                "   ".repeat(depth - 1),
+                if is_last { "└─" } else { "├─" }
+            )
+        };
+        rows.push(RowItem {
+            label: format!(
+                "{connector}{}{} {}",
+                fold.glyph(),
+                crate::render::kind_tag(t.kind),
+                t.id
+            ),
+            status: format!("{} {}", t.status.mark(), status_word(t.status)),
+            vitals: board::task_vitals(self.plan, t, self.ledger, self.gates),
+            subject,
+            fold,
+        });
+        if fold == Fold::Open {
+            for (i, k) in kids.iter().enumerate() {
+                self.push_task(rows, k, depth + 1, last(i, kids.len()));
+            }
+        }
     }
 }
 
@@ -650,7 +736,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
 
 fn help(f: &mut Frame, area: Rect) {
     let w = 54u16.min(area.width.saturating_sub(4));
-    let h = 18u16.min(area.height.saturating_sub(2));
+    let h = 21u16.min(area.height.saturating_sub(2));
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -660,6 +746,8 @@ fn help(f: &mut Frame, area: Rect) {
     let text = vec![
         Line::from("j / ↓        next".to_string()),
         Line::from("k / ↑        previous".to_string()),
+        Line::from("space        fold or unfold the selection".to_string()),
+        Line::from("z / Z        fold or unfold everything".to_string()),
         Line::from("enter / l    descend into selection".to_string()),
         Line::from("esc / h      up one level".to_string()),
         Line::from("g / G        first / last".to_string()),
@@ -667,6 +755,7 @@ fn help(f: &mut Frame, area: Rect) {
         Line::from("r            reload now".to_string()),
         Line::from("q            quit".to_string()),
         Line::from(""),
+        Line::from("▾ open  ▸ folded shut  · the whole tree is drawn".fg(Color::DarkGray)),
         Line::from("status is declared:".fg(Color::DarkGray)),
         Line::from("  · draft  ⋯ waiting  ○ ready  > running".fg(Color::DarkGray)),
         Line::from("  ? verifying  ! approval  ✓ done  x failed".fg(Color::DarkGray)),
@@ -835,12 +924,12 @@ mod tests {
         a.rebuild();
         let out = render(&mut a, 118, 24);
         assert!(
-            out.contains("└─ feat layer"),
-            "the only root task is last:\n{out}"
+            out.contains("└─ ▾ feat layer"),
+            "the only root task is last, and has work under it:\n{out}"
         );
         assert!(
-            out.contains("└─ feat keys"),
-            "the subtask nests deeper:\n{out}"
+            out.contains("   └─   feat keys"),
+            "the subtask nests deeper, and is a leaf:\n{out}"
         );
     }
 
@@ -875,14 +964,104 @@ mod tests {
     }
 
     #[test]
-    fn the_portfolio_shows_projects_and_root_tasks_but_not_subtasks() {
-        // Depth is bounded on purpose: the portfolio is a scan, not a full tree.
-        let out = render(&mut app("depth"), 118, 24);
+    fn the_portfolio_draws_the_whole_tree_not_just_root_tasks() {
+        // The gap this closes: the portfolio stopped at root tasks, so a plan that
+        // broke its work down hid the half that was broken down — and the work
+        // actually being done is usually a leaf.
+        let mut a = app("depth");
+        // `salt` sorts after `keys` on purpose: the store loads non-root tasks in
+        // id order, so a grandchild whose id sorts before its parent's cannot be
+        // read back. That is a gap in `wecode-store`, recorded in features.md, and
+        // this test would be about it rather than about the view.
+        a.store
+            .save_task(&task("salt", "pick the salt", "crates/cache/salt.rs").under("keys"))
+            .unwrap();
+        a.reload();
+        let out = render(&mut a, 118, 24);
+        for row in ["feat layer", "feat keys", "feat salt"] {
+            assert!(out.contains(row), "missing `{row}` at L0:\n{out}");
+        }
+    }
+
+    #[test]
+    fn folding_a_row_hides_what_is_under_it_and_says_which_way_it_points() {
+        let mut a = app("fold");
+        // The project is selected to begin with, so this folds the whole tree away.
+        a.toggle_fold();
+        let out = render(&mut a, 118, 24);
+        assert!(out.contains("▸ PROJECT caching"), "marker flips:\n{out}");
+        assert!(!out.contains("feat layer"), "root task is away:\n{out}");
+
+        a.toggle_fold();
+        let out = render(&mut a, 118, 24);
+        assert!(out.contains("▾ PROJECT caching"), "{out}");
+        assert!(out.contains("feat keys"), "and all of it is back:\n{out}");
+    }
+
+    #[test]
+    fn folding_a_task_hides_its_subtasks_and_leaves_the_task() {
+        let mut a = app("fold-task");
+        let pos = a
+            .rows
+            .iter()
+            .position(|r| r.subject == Subject::Task(TaskId::new("layer")))
+            .unwrap();
+        a.table.select(Some(pos));
+        a.toggle_fold();
+        let out = render(&mut a, 118, 24);
+        assert!(out.contains("feat layer"), "the row itself stays:\n{out}");
+        assert!(!out.contains("feat keys"), "its subtask goes:\n{out}");
+    }
+
+    #[test]
+    fn a_leaf_has_nothing_to_fold_and_is_told_so() {
+        let mut a = app("fold-leaf");
+        let pos = a
+            .rows
+            .iter()
+            .position(|r| r.subject == Subject::Task(TaskId::new("keys")))
+            .unwrap();
+        a.table.select(Some(pos));
+        a.toggle_fold();
+        assert!(a.status.contains("nothing to fold"), "{}", a.status);
+        assert!(a.collapsed.is_empty(), "a leaf is not recorded as folded");
+    }
+
+    #[test]
+    fn a_fold_survives_a_reload() {
+        // Kept by subject, not by row index: a reload rebuilds every row, and a
+        // fold that reopened itself every tick and a half would be unusable.
+        let mut a = app("fold-reload");
+        a.toggle_fold();
+        a.reload();
+        let out = render(&mut a, 118, 24);
+        assert!(out.contains("▸ PROJECT caching"), "{out}");
+        assert!(!out.contains("feat layer"), "{out}");
+    }
+
+    #[test]
+    fn z_folds_the_whole_plan_and_shift_z_opens_it() {
+        let mut a = app("fold-all");
+        a.key(KeyEvent::from(KeyCode::Char('z')));
+        assert_eq!(a.rows.len(), 1, "projects only");
+        // Leaves are never recorded: the set holds `caching` and `layer`, not `keys`.
+        assert!(!a.collapsed.contains(&Subject::Task(TaskId::new("keys"))));
+
+        a.key(KeyEvent::from(KeyCode::Char('Z')));
+        assert!(a.collapsed.is_empty());
+        let out = render(&mut a, 118, 24);
+        assert!(out.contains("feat keys"), "{out}");
+    }
+
+    #[test]
+    fn descending_into_a_folded_row_opens_it_first() {
+        // Otherwise zooming in lands on a screen showing only the thing zoomed into.
+        let mut a = app("fold-descend");
+        a.toggle_fold();
+        a.descend();
+        assert_eq!(a.focus, Some(Subject::Project(ProjectId::new("caching"))));
+        let out = render(&mut a, 118, 24);
         assert!(out.contains("feat layer"), "{out}");
-        assert!(
-            !out.contains("feat keys"),
-            "subtask should need a descend:\n{out}"
-        );
     }
 
     #[test]

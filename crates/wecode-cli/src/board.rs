@@ -8,7 +8,9 @@
 //! a progress bar on a leaf task only ever restated its status.
 //!
 //! Two levels of work means two levels of board — the portfolio lists projects
-//! with their root tasks, and a focus view descends into either.
+//! with the whole task tree under each, and a focus view narrows to one of them.
+//! The tree goes all the way down: a plan that hangs its real work off a parent
+//! task showed none of it while the portfolio stopped at roots.
 
 use std::collections::BTreeMap;
 
@@ -152,8 +154,10 @@ pub(crate) fn project_vitals(
     if waiting > 0 {
         needs.push(format!("{waiting} to answer"));
     }
-    // Counted at the project level because the portfolio draws root rows only: a
-    // subtask stuck deep in the tree would otherwise be invisible until descent.
+    // Counted at the project level even though every subtask now has a row of its
+    // own: the rows are what to read next, and this is the number that says whether
+    // to read them at all. A count on the project also survives a long tree
+    // scrolling its stuck row off the screen.
     let stuck = plan
         .tasks_of(&p.id)
         .filter(|t| !t.status.is_closed() && is_stuck(plan, t))
@@ -371,7 +375,42 @@ fn footer(hint: &str) -> String {
     format!("{DIM}└─ {hint}{RESET}\n")
 }
 
-/// The portfolio view: one line per project, then its root tasks.
+/// A project's root tasks in id order.
+fn roots_of<'a>(plan: &'a Plan, p: &ProjectId) -> Vec<&'a Task> {
+    let mut roots: Vec<&Task> = plan.roots_of(p).collect();
+    roots.sort_by(|a, b| a.id.cmp(&b.id));
+    roots
+}
+
+/// Subtasks in id order, so two runs of the same command agree.
+fn kids_of<'a>(plan: &'a Plan, t: &Task) -> Vec<&'a Task> {
+    let mut kids: Vec<&Task> = plan.subtasks(&t.id).collect();
+    kids.sort_by(|a, b| a.id.cmp(&b.id));
+    kids
+}
+
+/// A task's row, then every task beneath it, indented one step per level.
+///
+/// Recursive to the leaves. Both views used to stop one level short of wherever
+/// their subject was — the portfolio at root tasks, a project focus at the same —
+/// so a plan that broke its work down at all hid the half that was broken down.
+///
+/// Depth is spelled in spaces rather than tree glyphs because this column
+/// truncates at 26: a glyph that survives the cut while the id does not costs a
+/// reader the one thing the row is for.
+fn subtree(plan: &Plan, t: &Task, l: &Ledger, gates: &DesignGates, depth: usize) -> String {
+    let mut out = row(
+        &format!("{}{} {}", "  ".repeat(depth), kind_tag(t.kind), t.id),
+        &task_status(t),
+        &task_vitals(plan, t, l, gates),
+    );
+    for k in kids_of(plan, t) {
+        out.push_str(&subtree(plan, k, l, gates, depth + 1));
+    }
+    out
+}
+
+/// The portfolio view: one line per project, then the whole tree of its tasks.
 pub(crate) fn portfolio(
     plan: &Plan,
     audit: &[AuditLine],
@@ -398,14 +437,8 @@ pub(crate) fn portfolio(
             &project_status(p),
             &project_vitals(plan, p, &l, known_repos),
         ));
-        let mut roots: Vec<&Task> = plan.roots_of(&p.id).collect();
-        roots.sort_by(|a, b| a.id.cmp(&b.id));
-        for t in roots {
-            out.push_str(&row(
-                &format!("  {} {}", kind_tag(t.kind), t.id),
-                &task_status(t),
-                &task_vitals(plan, t, &l, gates),
-            ));
+        for t in roots_of(plan, &p.id) {
+            out.push_str(&subtree(plan, t, &l, gates, 1));
         }
     }
     let hidden = plan.archived_count();
@@ -437,14 +470,8 @@ pub(crate) fn focus(
             &project_status(p),
             &v,
         ));
-        let mut roots: Vec<&Task> = plan.roots_of(&p.id).collect();
-        roots.sort_by(|a, b| a.id.cmp(&b.id));
-        for t in roots {
-            out.push_str(&row(
-                &format!("  {} {}", kind_tag(t.kind), t.id),
-                &task_status(t),
-                &task_vitals(plan, t, &l, gates),
-            ));
+        for t in roots_of(plan, &p.id) {
+            out.push_str(&subtree(plan, t, &l, gates, 1));
         }
         // Every incident in the project, including its tasks'. The project row
         // rolls their alarms up, so hiding the rows leaves a count with nothing to
@@ -464,14 +491,8 @@ pub(crate) fn focus(
             &task_status(t),
             &v,
         ));
-        let mut kids: Vec<&Task> = plan.subtasks(&t.id).collect();
-        kids.sort_by(|a, b| a.id.cmp(&b.id));
-        for k in kids {
-            out.push_str(&row(
-                &format!("  {} {}", kind_tag(k.kind), k.id),
-                &task_status(k),
-                &task_vitals(plan, k, &l, gates),
-            ));
+        for k in kids_of(plan, t) {
+            out.push_str(&subtree(plan, k, &l, gates, 1));
         }
         out.push_str(&incidents(audit, |x| x.task == id));
         out.push_str(&footer(hint_for(&v)));
@@ -590,6 +611,43 @@ mod tests {
         assert!(out.contains("caching"), "{out}");
         assert!(out.contains("feat t1"), "{out}");
         assert!(out.contains("L0 · PORTFOLIO"), "{out}");
+    }
+
+    /// `t1` with `t2` under it and `t3` under that — three levels, so a view that
+    /// stops one short of the leaves is caught rather than passing on the middle row.
+    fn nested() -> Plan {
+        let mut p = plan();
+        p.add_task(good_task("t2", "design the cache keys", "crates/cache/keys.rs").under("t1"))
+            .unwrap();
+        p.add_task(good_task("t3", "pick the hash", "crates/cache/hash.rs").under("t2"))
+            .unwrap();
+        p
+    }
+
+    #[test]
+    fn the_portfolio_draws_the_whole_tree_not_just_root_tasks() {
+        // The gap this closes: a plan that broke its work down showed only the tops
+        // of the breakdowns, and the work actually being done is usually a leaf.
+        let out = portfolio(&nested(), &[], &repos(), &no_gates(), false);
+        // Indented one step per level. Asserted with the row's leading `│` so the
+        // depth is pinned — `  feat t2` alone matches at any depth below its own.
+        for row in ["│   feat t1", "│     feat t2", "│       feat t3"] {
+            assert!(out.contains(row), "missing `{row}` in:\n{out}");
+        }
+    }
+
+    #[test]
+    fn a_focused_project_reaches_past_its_root_tasks() {
+        let out = focus(&nested(), &[], "caching", &repos(), &no_gates());
+        assert!(out.contains("│       feat t3"), "{out}");
+    }
+
+    #[test]
+    fn a_focused_task_reaches_past_its_own_children() {
+        // `t3` is a grandchild of `t1`, and L2 used to end at children.
+        let out = focus(&nested(), &[], "t1", &repos(), &no_gates());
+        assert!(out.contains("│   feat t2"), "{out}");
+        assert!(out.contains("│     feat t3"), "{out}");
     }
 
     #[test]
