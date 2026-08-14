@@ -67,6 +67,14 @@ max_open_items = 5
 max_interrupts_per_hour = 3
 digest_interval_mins = 20
 
+# Run when a task starts waiting on a person — a signature, an answer, a decision
+# about work that failed. Uncomment and make it whatever "tell me" means here. The
+# task arrives in the environment: WECODE_TASK, WECODE_TASK_TITLE, WECODE_PROJECT,
+# WECODE_TASK_STATUS, WECODE_WAITING_FOR (approval | input | failed | signature).
+# [notify]
+# command = "notify-send 'wecode' \"$WECODE_TASK needs you: $WECODE_WAITING_FOR\""
+# timeout = "10s"           # killed at this; a hung notifier must not hold the loop
+
 # Invariants outrank every grant below. A grant that would permit one of these is
 # itself the bug, so violations raise an alarm rather than a denial.
 [invariants]
@@ -214,6 +222,11 @@ description = "Replace with what this is for."
 max_open_items = 5
 max_interrupts_per_hour = 3
 digest_interval_mins = 20
+
+# Run when a task starts waiting on you. The task arrives in the environment —
+# WECODE_TASK, WECODE_WAITING_FOR (approval | input | failed | signature), and more.
+# [notify]
+# command = "notify-send 'wecode' \"$WECODE_TASK needs you: $WECODE_WAITING_FOR\""
 
 [invariants]
 never_touch = [".github/**", "**/*.pem", "**/.env"]

@@ -13,7 +13,7 @@ use wecode_store::Store;
 
 use crate::args::Args;
 use crate::commands::ctx::*;
-use crate::{cache, git, ledger, render, scheduler, spawn, teardown, verify, work};
+use crate::{cache, git, ledger, notify, render, scheduler, spawn, teardown, verify, work};
 
 /// Begins work on a task: prepares the worktree its playbook asks for, marks it
 /// running, and prints the envelope for whoever does the work.
@@ -375,10 +375,13 @@ pub(crate) fn tick(a: &Args) -> Res {
 /// Runs in the foreground. Backgrounding is the operator's job — `&`, systemd, a cron
 /// entry — because a daemon that forks is a daemon whose logs you cannot find.
 pub(crate) fn serve(a: &Args) -> Res {
-    let (_, store, company) = open_full(a)?;
+    let (ws, store, company) = open_full(a)?;
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let limit = scheduler::parallelism(company.attention.max_open_items, cores);
     let once = a.has("once");
+    // The dispatch gate is the one wait with nothing in the database to be the edge
+    // of, so the loop that recomputes it keeps the edge itself.
+    let mut announced = notify::Announced::default();
 
     println!(
         "  watching {} · {limit} at a time ({} open items, {cores} cores)\n  ctrl-c to stop\n",
@@ -406,6 +409,10 @@ pub(crate) fn serve(a: &Args) -> Res {
         // not help an unanswered question, and the attention budget is the point.
         let blocked = scheduler::awaiting_a_human(&plan);
         if !blocked.is_empty() {
+            // Printed every pass, and announced on none of them: each of these was
+            // announced as it stopped, by whatever wrote the status. This is the
+            // standing condition, and a notification per tick is a notifier nobody
+            // leaves switched on.
             for t in blocked.iter().take(3) {
                 println!("  ⏸ {} needs you — {}", t.id, t.status.as_str());
             }
@@ -415,8 +422,19 @@ pub(crate) fn serve(a: &Args) -> Res {
             // Named every pass, like the tasks that need an answer: the queue standing
             // still because nobody has signed is the operator's business, and a silent
             // idle loop looks like a loop with nothing to do.
+            announced.keep_only(&awaiting_a_signature);
             for id in awaiting_a_signature.iter().take(3) {
                 println!("  ⏸ {id} needs your signature — wecode approve admission --task {id}");
+            }
+            // Announced in full, not just the three that were printed: the list is
+            // truncated to keep the log readable, and a notification the operator
+            // never gets is not a readability problem.
+            for id in &awaiting_a_signature {
+                if announced.first_time(id)
+                    && let Some(task) = plan.task(id)
+                {
+                    print!("{}", notify::on_signature_wait(&company, ws.root(), task));
+                }
             }
             for id in ready {
                 println!("  ▶ {id}");
@@ -623,6 +641,16 @@ pub(crate) fn run_task(a: &Args) -> Res {
             outcome.spent,
         )?;
         out.push_str("\n  not verified — the agent did not finish cleanly\n");
+        // The other way a run ends in front of a person: no verdict was reached at
+        // all. `Running` is what the store held, whatever the loaded copy says — a
+        // retry of an already-failed task is a new wait, not a continuing one.
+        out.push_str(&notify::on_status_change(
+            &company,
+            ws.root(),
+            &task,
+            TaskStatus::Running,
+            TaskStatus::Failed,
+        ));
         out.push_str(&commit_attempt(&store, &id, &prepared.cwd, &outcome)?);
     }
     Ok(out)
@@ -773,6 +801,9 @@ fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error
         TaskStatus::Failed
     };
     store.set_task_status(&id, next)?;
+    // The two verdicts a person has to act on — verified-and-unlanded, and failed —
+    // both end here, which is why this is where the loop's own announcement is made.
+    let announced = notify::on_status_change(&company, ws.root(), &task, task.status, next);
 
     let reason = (!v.passed()).then(|| {
         let mut parts = Vec::new();
@@ -788,7 +819,10 @@ fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error
         parts.join("; ")
     });
 
-    Ok((render::verdict(&task, &dir, &v, next), reason))
+    Ok((
+        format!("{}{announced}", render::verdict(&task, &dir, &v, next)),
+        reason,
+    ))
 }
 
 /// Every repository some project in the plan is built from, each named once.

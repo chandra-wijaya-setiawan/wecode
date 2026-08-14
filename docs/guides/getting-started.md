@@ -119,6 +119,21 @@ a service, a systemd user unit with `Restart=always`, `--session <id>` so it nev
 to guess which seat, and an explicit `PATH` so the acceptance commands can find your
 toolchain.
 
+The loop stops on anything that needs you, which is only useful if you find out. Add a
+hook to `company.toml` and it will tell you instead of waiting to be looked at:
+
+```toml
+[notify]
+command = "notify-send 'wecode' \"$WECODE_TASK needs you: $WECODE_WAITING_FOR\""
+```
+
+It runs once, when a task *starts* waiting — for a signature, an answer, or a decision
+about work that failed. `WECODE_WAITING_FOR` is `approval`, `input`, `failed` or
+`signature`, so one `case` in shell can route them differently; the full list of
+variables is in [config.md](../reference/config.md#the-notify-hook). Anything that runs
+in a shell works, and a hook that fails is reported rather than allowed to affect the
+task.
+
 ## Working through an agent
 
 wecode is meant to be driven by your coding agent rather than typed. One line in

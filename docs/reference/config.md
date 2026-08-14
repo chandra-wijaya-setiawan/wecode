@@ -31,6 +31,10 @@ max_open_items = 5
 max_interrupts_per_hour = 3
 digest_interval_mins = 20
 
+[notify]                          # run when a task starts waiting on a person
+command = "notify-send 'wecode' \"$WECODE_TASK: $WECODE_WAITING_FOR\""
+timeout = "10s"                   # killed at this; see below
+
 [invariants]                      # outrank every grant below
 never_touch = [".github/**", "infra/**", "**/*.pem", "**/.env"]
 never_run = ["git push --force*", "rm -rf /*"]
@@ -98,6 +102,48 @@ It must match what `args` actually asks for: declaring `claude-stream-json` with
 not an error — the run still happens, is still timed, and still lands its wall spend on
 the ledger. It only means the token half of the spend column has nothing to show, which
 is the truth and not a zero.
+
+### The notify hook
+
+`[notify] command` runs when a task **starts** waiting on a person. Absent, which is the
+default, nothing is run and waits are silent.
+
+| variable | |
+|---|---|
+| `WECODE_TASK` | the task id |
+| `WECODE_TASK_TITLE` | its title, as written |
+| `WECODE_TASK_STATUS` | the status being set — `needs-approval`, `failed`, … |
+| `WECODE_WAITING_FOR` | `approval` \| `input` \| `failed` \| `signature` |
+| `WECODE_PROJECT` | the project it belongs to |
+| `WECODE_COMPANY` | `[company] name` |
+| `WECODE_ORG` | the workspace, so the hook can call `wecode` back |
+
+`WECODE_WAITING_FOR` is the one to branch on. `signature` is the dispatch gate holding a
+task that is otherwise `ready`, which no status can express — the other three restate
+the status in one word.
+
+The line runs through `sh -c`, in the workspace, with your environment: it is your own
+command, and a desktop notifier needs the session it was configured in. The task is
+passed in the environment rather than substituted into the line, because a title is
+arbitrary prose and pasting it into a shell is a quoting bug at best.
+
+Four things it deliberately does not do:
+
+- **It does not repeat.** The hook fires on the transition into waiting, so a task that
+  has been waiting a week fires once. `wecode loop` prints the standing condition every
+  pass; the hook is not that.
+- **It cannot fail the work.** A hook that exits non-zero, hangs, or does not exist is
+  reported as `⚠ notify: …` and stepped over. The task stopped for a person whether or
+  not anything managed to say so.
+- **It is killed at `timeout`** (default `10s`). `wecode loop` runs for days, and a
+  notifier blocked on a network call must not take it with it.
+- **It is not above the charter.** A command matching `never_run` is refused by name
+  rather than run — an invariant outranks every grant, and this file is not an exception
+  because the line happens to be in a different block of it.
+
+A `[notify]` block with an empty `command`, or a zero `timeout`, is refused at load. Both
+read as configured and behave as absent, which is the one failure mode a notification
+must not have. `wecode company show` prints the hook, or says there is none.
 
 ## .wecode/playbook.toml
 

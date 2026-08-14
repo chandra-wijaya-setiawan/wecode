@@ -1798,6 +1798,16 @@ pub(crate) fn company(c: &Company) -> String {
         c.attention.max_interrupts_per_hour,
         c.attention.digest_interval_mins
     ));
+    // Shown either way. A hook that is not there is the thing an operator wondering
+    // why nothing told them needs to read, and silence would look like the same
+    // silence they are already complaining about.
+    match &c.notify.command {
+        Some(cmd) => out.push_str(&format!(
+            "notify:    {cmd} — when a task starts waiting, killed after {}s\n",
+            c.notify.timeout.as_secs()
+        )),
+        None => out.push_str("notify:    nothing — no [notify] command; waits are silent\n"),
+    }
 
     out.push_str("\ninvariants (outrank every grant above)\n");
     for inv in &c.charter.invariants {

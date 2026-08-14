@@ -8,7 +8,7 @@ use wecode_store::AuditQuery;
 use crate::args::Args;
 use crate::commands::ctx::*;
 use crate::render;
-use crate::{git, ledger, record, teardown, work};
+use crate::{git, ledger, notify, record, teardown, work};
 
 pub(crate) fn parse_action(a: &Args) -> Result<Action, String> {
     let verb = a.cmd(2);
@@ -361,5 +361,17 @@ pub(crate) fn rollback_task(a: &Args) -> Res {
     // Back to needs-approval, not failed: the work still passed its acceptance. What
     // was withdrawn is the decision to land it.
     store.set_task_status(&id, TaskStatus::NeedsApproval)?;
-    Ok(render::rolled_back(&task, &target, &merge, &revert))
+    // A rollback puts finished work back in front of a person, which is the same
+    // wait as reaching `needs-approval` the first time and is announced as one.
+    let announced = notify::on_status_change(
+        &company,
+        ws.root(),
+        &task,
+        task.status,
+        TaskStatus::NeedsApproval,
+    );
+    Ok(format!(
+        "{}{announced}",
+        render::rolled_back(&task, &target, &merge, &revert)
+    ))
 }

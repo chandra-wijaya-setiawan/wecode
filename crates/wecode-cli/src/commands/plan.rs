@@ -12,7 +12,7 @@ use wecode_store::Store;
 
 use crate::args::Args;
 use crate::commands::ctx::*;
-use crate::render;
+use crate::{notify, render};
 
 pub(crate) fn parse_metric(spec: &str, flag: &str) -> Result<Measure, String> {
     let parts: Vec<&str> = spec.split(':').collect();
@@ -726,7 +726,7 @@ pub(crate) fn check(a: &Args) -> Res {
 /// judgement, not a rollup: `done` with two tasks unfinished is a legitimate thing to
 /// say, so nothing here consults progress.
 pub(crate) fn set_status(a: &Args) -> Res {
-    let (store, company) = open(a)?;
+    let (ws, store, company) = open_full(a)?;
     let id = require(a.cmd(1), "project or task id")?;
     let want = require(a.cmd(2), "status")?;
     let plan = store.load_plan()?;
@@ -805,6 +805,16 @@ pub(crate) fn set_status(a: &Args) -> Res {
     let was = t.status;
     store.set_task_status(&id, status)?;
     let mut out = format!("  {id}  {} → {}\n", was.as_str(), status.as_str());
+    // By hand and still announced. Whoever moved it is at a terminal and knows; the
+    // hook is how everyone else finds out, and a wait wecode only announces when it
+    // discovered the wait itself is a hook that cannot be relied on.
+    out.push_str(&notify::on_status_change(
+        &company,
+        ws.root(),
+        t,
+        was,
+        status,
+    ));
     // The moment of the act is when the operator can still reconsider. A failed or
     // dropped task will never finish on its own, so every open dependent behind it
     // is stranded right now — said here, rather than left for the board to notice.

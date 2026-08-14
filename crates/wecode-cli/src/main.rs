@@ -6,6 +6,7 @@ mod cache;
 mod commands;
 mod git;
 mod ledger;
+mod notify;
 mod record;
 mod render;
 mod scheduler;
