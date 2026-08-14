@@ -2,6 +2,7 @@
 //!
 //! Pure string functions so the output is testable without a terminal.
 
+use std::path::Path;
 use std::time::Duration;
 
 use wecode_a2a as a2a;
@@ -9,8 +10,8 @@ use wecode_core::{
     Admission, Blocker, Defect, Plan, Project, ProjectId, Task, TaskId, TaskKind, TaskStatus,
 };
 use wecode_gov::{Action, ControlMode, Decision, Grant, Invariant, WorkKind};
-use wecode_org::Playbook;
 use wecode_org::{Company, Post};
+use wecode_org::{Gap, Playbook};
 use wecode_store::{AuditLine, SessionInfo};
 
 use crate::record::Recorded;
@@ -411,7 +412,7 @@ fn playbook_header(project: &Project, pb: &Playbook) -> String {
 
 /// Every kind this project has guidance for.
 #[must_use]
-pub(crate) fn playbook_all(project: &Project, pb: &Playbook) -> String {
+pub(crate) fn playbook_all(project: &Project, pb: &Playbook, gaps: &[Gap]) -> String {
     let mut out = playbook_header(project, pb);
     if let Some(b) = &pb.project.merge_to {
         out.push_str(&format!("  branch    from {b}\n"));
@@ -461,19 +462,45 @@ pub(crate) fn playbook_all(project: &Project, pb: &Playbook) -> String {
             gated.join(", ")
         ));
     }
+    out.push_str(&gap_count(gaps));
     out.push_str("\n  wecode playbook <kind>  for the guidance itself\n");
     out
 }
 
+/// Counted rather than listed: the index is not where a gap is read, it is where a
+/// reader finds out there is one. Saying nothing here would leave findings sitting in
+/// a file nobody opens.
+#[must_use]
+pub(crate) fn gap_count(gaps: &[Gap]) -> String {
+    if gaps.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n  {} gap{} recorded and not folded in — wecode playbook gaps\n",
+        gaps.len(),
+        if gaps.len() == 1 { "" } else { "s" }
+    )
+}
+
 /// One kind in full: the typed defaults, then the prose.
 #[must_use]
-pub(crate) fn playbook_kind(project: &Project, pb: &Playbook, kind: TaskKind) -> String {
+pub(crate) fn playbook_kind(
+    project: &Project,
+    pb: &Playbook,
+    kind: TaskKind,
+    gaps: &[Gap],
+    now: u64,
+) -> String {
     let mut out = playbook_header(project, pb);
     let Some(k) = pb.for_kind(kind) else {
         out.push_str(&format!(
             "\n  no [{}] section — this project has no guidance for that kind\n",
             kind.as_str()
         ));
+        // Shown even here. "There is no section" is the strongest reason for a gap
+        // to have been recorded against this kind, so it is the last place to hide
+        // one.
+        out.push_str(&gaps_against(kind, gaps, now));
         return out;
     };
     out.push_str(&format!(
@@ -532,6 +559,121 @@ pub(crate) fn playbook_kind(project: &Project, pb: &Playbook, kind: TaskKind) ->
             out.push_str(&format!("  {line}\n"));
         }
     }
+    // After the prose, because that is the order they were learned in: the guidance
+    // is what the project decided, a gap is what it has since found out and not yet
+    // written down.
+    out.push_str(&gaps_against(kind, gaps, now));
+    out
+}
+
+/// The gaps a reader of one kind's guidance should see: the ones filed against that
+/// kind, plus the ones filed against no kind at all, which are about how this project
+/// is planned and therefore apply to all of them.
+fn gaps_against(kind: TaskKind, gaps: &[Gap], now: u64) -> String {
+    let mine: Vec<&Gap> = gaps.iter().filter(|g| g.applies_to(kind)).collect();
+    if mine.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n  gaps found in this guidance and not folded in yet:\n\n{}",
+        gap_entries(&mine, now)
+    )
+}
+
+/// Every gap on a project, for `wecode playbook gaps`.
+#[must_use]
+pub(crate) fn gaps(
+    project: &Project,
+    gaps: &[Gap],
+    now: u64,
+    playbook: &Path,
+    file: &Path,
+) -> String {
+    if gaps.is_empty() {
+        return format!(
+            "  no gaps recorded against {}'s playbook\n  \
+             wecode playbook gap \"<what the guidance does not say>\" --kind <kind>\n",
+            project.id
+        );
+    }
+    let list: Vec<&Gap> = gaps.iter().collect();
+    format!(
+        "  {} gap{} against {}'s playbook, oldest first\n\n{}{}",
+        gaps.len(),
+        if gaps.len() == 1 { "" } else { "s" },
+        project.id,
+        gap_entries(&list, now),
+        folding("each", playbook, file)
+    )
+}
+
+/// How one stops being a gap. Printed wherever they are, because the file will not
+/// empty itself and nothing else in wecode will empty it either.
+fn folding(subject: &str, playbook: &Path, file: &Path) -> String {
+    format!(
+        "  Fold {subject} into {}\n  then delete it from {}\n",
+        playbook.display(),
+        file.display()
+    )
+}
+
+/// One block per gap: where it belongs, who found it and when, then the note itself.
+fn gap_entries(gaps: &[&Gap], now: u64) -> String {
+    let mut out = String::new();
+    for g in gaps {
+        let mut head = format!(
+            "    {}",
+            // A gap filed against no kind is about the project's planning as a
+            // whole, and saying "—" here would read as missing data.
+            g.kind.map_or("every kind", TaskKind::as_str)
+        );
+        head.push_str(&format!("  ·  {} ago", ago(now.saturating_sub(g.at))));
+        if !g.by.is_empty() {
+            head.push_str(&format!("  ·  {}", g.by));
+        }
+        if let Some(task) = &g.task {
+            head.push_str(&format!("  ·  found on {task}"));
+        }
+        out.push_str(&format!("{head}\n"));
+        for line in g.note.lines() {
+            out.push_str(&format!("      {line}\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// What `playbook gap` says once a finding is on the record.
+#[must_use]
+pub(crate) fn gap_recorded(g: &Gap, fresh: bool, playbook: &Path, file: &Path) -> String {
+    let mut out = if fresh {
+        format!("  recorded a gap in {}'s playbook\n\n", g.project)
+    } else {
+        // Not an error, and not silence either: something that records in a loop
+        // needs to know the finding is held without being told it failed.
+        format!(
+            "  already recorded against {}'s playbook — nothing was added\n\n",
+            g.project
+        )
+    };
+    for line in g.note.lines() {
+        out.push_str(&format!("    {line}\n"));
+    }
+    out.push_str(&format!(
+        "\n  {}{}\n",
+        match g.kind {
+            Some(k) => format!("against [{}]", k.as_str()),
+            None => "against the project, so every kind shows it".to_string(),
+        },
+        g.task
+            .as_ref()
+            .map_or_else(String::new, |t| format!(", found on {t}"))
+    ));
+    out.push_str(
+        "\n  It is a note, not a change: nothing acts on it, and it stays here until\n\
+         \x20 a person has done something about it.\n\n",
+    );
+    out.push_str(&folding("it", playbook, file));
     out
 }
 
@@ -668,7 +810,9 @@ pub(crate) fn brief(
             "  1  wecode playbook <kind>      read the project's guidance FIRST\n\
              \x20 2  wecode task add ...         one atomic task per outcome\n\
              \x20 3  wecode assign <t> --to <p>  admit it to the queue\n\
-             \x20 4  wecode start <t>            worktree + envelope for the worker\n",
+             \x20 4  wecode start <t>            worktree + envelope for the worker\n\
+             \x20 5  wecode playbook gap \"...\"   when step 1 did not tell you something\n\
+             \x20                                it should have. It reaches the next planner.\n",
         );
     } else {
         out.push_str(
@@ -1606,6 +1750,12 @@ pub(crate) fn available_commands(grant: &Grant) -> Vec<(&'static str, String)> {
     ];
     if grant.define.contains(&WorkKind::Project) {
         out.push(("project add", "define a project".to_string()));
+        // Listed off the same capability that gates it, so a seat is never told it
+        // may record one and then refused.
+        out.push((
+            "playbook gap \"<...>\"",
+            "write down what the guidance did not say".to_string(),
+        ));
     }
     if grant.define.contains(&WorkKind::Task) {
         out.push(("task add", "define a task".to_string()));
@@ -2184,6 +2334,59 @@ mod tests {
         assert!(out.contains("source"), "the column is headed: {out}");
         assert!(out.contains("harness"), "{out}");
         assert!(out.contains("1540t/42s"), "{out}");
+    }
+
+    // ------------------------------------------------------------- gaps ------
+
+    fn a_gap(kind: Option<TaskKind>, note: &str) -> Gap {
+        Gap {
+            project: "export".into(),
+            kind,
+            task: None,
+            by: "chief".into(),
+            at: 1_000,
+            note: note.into(),
+        }
+    }
+
+    #[test]
+    fn a_kind_shows_its_own_gaps_and_the_ones_filed_against_no_kind() {
+        let pb = Playbook::parse("[bug]\nguidance = \"reproduce first\"\n").unwrap();
+        let found = [
+            a_gap(Some(TaskKind::Bug), "declare the test file"),
+            a_gap(None, "no integration branch is set"),
+            a_gap(Some(TaskKind::Docs), "say where the reference is generated"),
+        ];
+        let out = playbook_kind(
+            &Project::new("export", "cut export p99 below 500ms", "api"),
+            &pb,
+            TaskKind::Bug,
+            &found,
+            2_000,
+        );
+        assert!(out.contains("reproduce first"), "the guidance stays: {out}");
+        assert!(out.contains("declare the test file"), "{out}");
+        assert!(
+            out.contains("no integration branch"),
+            "applies to all: {out}"
+        );
+        assert!(!out.contains("where the reference is generated"), "{out}");
+        // After the prose, in the order the two were learned in.
+        assert!(
+            out.find("reproduce first") < out.find("declare the test file"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn guidance_with_nothing_recorded_against_it_says_nothing_about_gaps() {
+        // The silent case is the common one, and a heading with nothing under it
+        // would be noise on every read.
+        let pb = Playbook::parse("[bug]\nguidance = \"reproduce first\"\n").unwrap();
+        let project = Project::new("export", "cut export p99 below 500ms", "api");
+        let out = playbook_kind(&project, &pb, TaskKind::Bug, &[], 2_000);
+        assert!(!out.contains("gap"), "{out}");
+        assert!(!playbook_all(&project, &pb, &[]).contains("gap"), "{out}");
     }
 
     #[test]

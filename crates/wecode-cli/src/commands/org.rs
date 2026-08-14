@@ -1,8 +1,9 @@
 //! Commands about the company itself: scaffolding it, connecting to it, and
 //! orienting whoever just did.
 
-use wecode_core::TaskKind;
-use wecode_org::{Workspace, playbook, workspace};
+use wecode_core::{TaskId, TaskKind};
+use wecode_gov::{Action, WorkKind};
+use wecode_org::{Company, Workspace, gap, playbook, workspace};
 
 use crate::args::Args;
 use crate::commands::ctx::*;
@@ -34,36 +35,156 @@ pub(crate) fn init(a: &Args) -> Res {
 /// Prints a project's guidance. This is what an orchestrator reads before it
 /// decomposes a request into tasks.
 pub(crate) fn playbook_show(a: &Args) -> Res {
-    let (_, store, company) = open_full(a)?;
+    let (ws, store, company) = open_full(a)?;
     let plan = store.load_plan()?;
     let project = which_project(a, &plan)?;
     let path = repo_path(&company, &project)?;
+    let found = gaps_on(ws.root(), &project)?;
 
     let Some(pb) = playbook_of(&company, &project)? else {
+        // The gaps still count here — "there is no playbook" is the largest gap a
+        // project can have, and whatever was recorded against it is what the starter
+        // should be filled in with.
         return Ok(format!(
-            "project {} has no playbook\n  {}\n  wecode playbook init --project {}  writes a starter\n",
+            "project {} has no playbook\n  {}\n  wecode playbook init --project {}  writes a starter\n{}",
             project.id,
             path.join(playbook::PLAYBOOK_PATH).display(),
-            project.id
+            project.id,
+            render::gap_count(&found),
         ));
     };
 
+    let now = wecode_store::now_secs();
     match a.cmd(1) {
-        "" => Ok(render::playbook_all(&project, &pb)),
+        "" => Ok(render::playbook_all(&project, &pb, &found)),
         want => {
-            let kind = TaskKind::parse(want).ok_or_else(|| {
-                format!(
-                    "unknown kind `{want}` — have: {}",
-                    TaskKind::all()
-                        .iter()
-                        .map(|k| k.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?;
-            Ok(render::playbook_kind(&project, &pb, kind))
+            let kind = parse_kind(want)?;
+            Ok(render::playbook_kind(&project, &pb, kind, &found, now))
         }
     }
+}
+
+// ------------------------------------------------------------------ gaps ------
+
+/// Records what a playbook did not say.
+///
+/// The gate is `define project`, not `write`. A gap is not a change to the
+/// repository — the chief, which holds `define` and no write scope at all, is exactly
+/// the seat that finds these, and the engineer that holds `crates/**` is exactly the
+/// seat that must not be able to annotate the guidance it was handed. Asking the
+/// Broker about a file write would have had it backwards on both counts.
+pub(crate) fn playbook_gap(a: &Args) -> Res {
+    let (ws, store, company) = open_full(a)?;
+    let plan = store.load_plan()?;
+
+    // Attribution first, because it decides the rest: a task names its own project and
+    // its own kind, so `--task <id>` alone is usually the whole invocation.
+    let task = match a.get("task") {
+        Some(id) => Some(
+            plan.task(&TaskId::new(id))
+                .ok_or_else(|| format!("no such task: {id}"))?
+                .clone(),
+        ),
+        None => None,
+    };
+    let project = match (&task, a.get("project")) {
+        // Both given and disagreeing is a mistake worth stopping on: the note would
+        // be filed against guidance the task was never planned from, where the next
+        // reader of the *right* playbook will never see it.
+        (Some(t), Some(p)) if p != t.project.as_str() => {
+            return Err(format!("{} is in project {}, not {p}", t.id, t.project).into());
+        }
+        (Some(t), _) => plan
+            .project(&t.project)
+            .cloned()
+            .ok_or_else(|| format!("no such project: {}", t.project))?,
+        (None, _) => which_project(a, &plan)?,
+    };
+    let kind = match a.get("kind") {
+        Some(want) => Some(parse_kind(want)?),
+        None => task.as_ref().map(|t| t.kind),
+    };
+
+    let note = require(a.cmd(2), "the gap — say what the guidance does not")?;
+    let who = actor(a, &store, &company)?;
+    require_allowed(
+        &store,
+        &company,
+        &who,
+        (
+            Some(project.id.to_string()),
+            task.as_ref().map(|t| t.id.to_string()),
+        ),
+        &Action::Define {
+            kind: WorkKind::Project,
+        },
+        "recording a playbook gap",
+    )?;
+
+    let found = gap::Gap {
+        project: project.id.to_string(),
+        kind,
+        task: task.map(|t| t.id.to_string()),
+        by: who.post.clone(),
+        at: wecode_store::now_secs(),
+        note: note.to_string(),
+    };
+    let fresh = gap::record(ws.root(), &found)?;
+    Ok(render::gap_recorded(
+        &found,
+        fresh,
+        &playbook_file(&company, &project),
+        &gap::path(ws.root()),
+    ))
+}
+
+/// What has been found and not folded in.
+pub(crate) fn playbook_gaps(a: &Args) -> Res {
+    let (ws, store, company) = open_full(a)?;
+    let plan = store.load_plan()?;
+    let project = which_project(a, &plan)?;
+    Ok(render::gaps(
+        &project,
+        &gaps_on(ws.root(), &project)?,
+        wecode_store::now_secs(),
+        &playbook_file(&company, &project),
+        &gap::path(ws.root()),
+    ))
+}
+
+/// The file a gap is folded into, named in full so it can be opened without
+/// looking anything up.
+///
+/// A project whose repo is not registered has no such path, and falls back to the
+/// name of the file inside whatever repo it acquires. That defect is reported by
+/// `check`; telling somebody where to write a note is not the place to raise it.
+fn playbook_file(company: &Company, project: &wecode_core::Project) -> std::path::PathBuf {
+    repo_path(company, project)
+        .map(|r| r.join(playbook::PLAYBOOK_PATH))
+        .unwrap_or_else(|_| std::path::PathBuf::from(playbook::PLAYBOOK_PATH))
+}
+
+/// One project's gaps, oldest first.
+fn gaps_on(
+    root: &std::path::Path,
+    project: &wecode_core::Project,
+) -> Result<Vec<gap::Gap>, Box<dyn std::error::Error>> {
+    let mut all = gap::at(root)?;
+    all.retain(|g| g.project == project.id.as_str());
+    Ok(all)
+}
+
+fn parse_kind(want: &str) -> Result<TaskKind, String> {
+    TaskKind::parse(want).ok_or_else(|| {
+        format!(
+            "unknown kind `{want}` — have: {}",
+            TaskKind::all()
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
 }
 
 /// Writes a starter playbook into the project's repo.

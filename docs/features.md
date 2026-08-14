@@ -12,6 +12,7 @@ The inventory, including what is weak. Anything not here is not built — see
 | **Seven kinds** | feature, bug, refactor, chore, spike, design, docs |
 | **Admission gate** | deterministic defect checks, each carrying a fixed question |
 | **Playbooks** | per-project guidance, in the project's own repo |
+| **Playbook gaps** | a planner records what the guidance did not say; the next one reads it |
 | **Templated decomposition** | `--expand` emits the subtasks a playbook declares |
 | **Design gate** | `design_required` refuses a kind with no design task behind it |
 | **Dispatch gate** | `dispatch = "approved"` refuses to start a task nobody signed for |
@@ -47,6 +48,19 @@ judged before it can land, which is what makes it safe to leave `auto` where `me
 prose for how to break work down, plus a few typed fields wecode acts on: whether the
 kind needs a worktree, the default acceptance commands, assignee and budget, and the
 merge policy. They live in the repo because they describe that code.
+
+**Playbook gaps** close the loop the other way. A playbook is hand-edited and in no
+role's write scope, which is right and left the planner that discovered the guidance was
+short with nowhere to put that; the finding died with the session and the next planner
+paid for it again. `wecode playbook gap "<what it did not say>"` records one, and it is
+shown at the end of `wecode playbook <kind>` — after the guidance, because that is the
+order the two were learned in. It is a note and not a change: nothing branches on one,
+which is what makes it safe for an agent to write, and it goes away only when a person
+folds it into the playbook and deletes it. The gate is `define project`, so the seat
+that plans work may record one and the seat that writes the code may not. It is kept in
+the workspace rather than beside the playbook because the repository is what
+verification diffs, and a file dropped there would be reported as some other task's
+scope violation.
 
 A kind may also declare its **decomposition**, which `wecode task add --expand` emits as
 ordinary tasks — chained, scoped, and with `{{task}}` substituted — instead of one
