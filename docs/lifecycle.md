@@ -54,8 +54,9 @@ one that matters: the agent finished cleanly and *we declined what it produced*.
 ## What `wecode run` does, in order
 
 1. Resolve the task, its assignee post, and that post's agent template.
-2. **Prepare** — refuse a draft or a blocked task; create or reset the worktree the
-   playbook asks for; render the envelope.
+2. **Prepare** — refuse a draft or a blocked task; refuse it where the project asks for a
+   signature and the ledger has none; create or reset the worktree the playbook asks for;
+   render the envelope.
 3. **Charter check** on the launch command. Everything refusable is refused before
    anything starts.
 4. Mark the task `running` and open an execution row, so a crash leaves a trace.
@@ -79,6 +80,22 @@ first would leave it nothing to check.
 
 Committing a **failure** is the point rather than the cost. The failed diff is what a
 retry learns from; uncommitted, the next attempt's reset destroys it.
+
+## Starting it
+
+Two gates stand before a task runs, and they ask different questions:
+
+- the **admission gate** asks whether the task is well-formed, and answers deterministically
+- the **playbook's** `dispatch = "auto" | "approved"` asks whether anyone agreed to it
+
+Both are checked in `prepare`, which `start` and `run` share, so a task cannot be walked
+around the gate by taking it by hand. Where a signature is required it must be a recorded
+one — `wecode approve admission --task <id>` — and it must be *later* than the last
+`define` record for that task, so amending a scope after signing asks again rather than
+inheriting the earlier answer.
+
+The refusal happens before the worktree is cut. A tree made for work nobody signed for is
+a tree left standing.
 
 ## Worktrees
 
@@ -160,3 +177,9 @@ collapsing them would lose the first — the one that explains why the second ha
 Concurrency comes from `max_open_items`, the operator's attention, not from cores. The
 loop stops dispatching entirely while anything needs a human, because more work in
 flight does not help an unanswered question.
+
+A task waiting for a dispatch signature is reported as `⏸ <id> needs your signature` and
+passed over, not dispatched into a refusal — waiting for a person is not a failure, and
+printing it as one sends the operator looking for a bug. It is passed over *before* the
+concurrency cap is applied, too, so one unsigned task at the head of the queue cannot hold
+a slot the work behind it could use.

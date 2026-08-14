@@ -6,14 +6,14 @@
 use std::path::PathBuf;
 
 use wecode_core::{Plan, Task, TaskId, TaskStatus, admission};
-use wecode_gov::{Action, Broker, Session, glob};
-use wecode_org::{Company, Workspace};
+use wecode_gov::{Action, ActionKind, Broker, Session, glob};
+use wecode_org::{Company, Playbook, Workspace};
 
 use wecode_store::Store;
 
 use crate::args::Args;
 use crate::commands::ctx::*;
-use crate::{git, render, scheduler, spawn, teardown, verify, work};
+use crate::{git, ledger, render, scheduler, spawn, teardown, verify, work};
 
 /// Begins work on a task: prepares the worktree its playbook asks for, marks it
 /// running, and prints the envelope for whoever does the work.
@@ -103,6 +103,12 @@ pub(crate) fn prepare(
         return Err(msg.into());
     }
 
+    // Before the worktree, not after: preparation has side effects on the repository,
+    // and a tree cut for work nobody has signed for is a tree left standing.
+    if let Some(why) = unsigned(store, pb.as_ref(), task)? {
+        return Err(why.into());
+    }
+
     // The worktree belongs to the main task, so a subtask joins its parent's tree
     // rather than opening a second checkout of the same work.
     let owner = work::owner(plan, &id).expect("task is in the plan");
@@ -178,6 +184,80 @@ pub(crate) fn prepare(
         cwd,
         notes,
     })
+}
+
+/// Why this task may not be dispatched yet, when its project asks for a signature and
+/// the ledger does not hold a current one.
+///
+/// Returned rather than raised, so the loop can report it as a pause instead of an
+/// error: a task waiting for a person is not a failure, and printing it as one sends the
+/// operator looking for a bug that is not there.
+///
+/// A signature older than the last change to the task does not count. `task scope`
+/// records a `define`, so widening signed work retracts the signature it was given —
+/// otherwise the gate is walked past by signing something small and then changing it.
+///
+/// A project with no playbook, or one that says nothing, is ungated. The gate is a
+/// project's own decision, in the file that describes that project's work.
+fn unsigned(
+    store: &Store,
+    pb: Option<&Playbook>,
+    task: &Task,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if !pb.is_some_and(|p| p.project.dispatch.needs_a_signature()) {
+        return Ok(None);
+    }
+    let id = &task.id;
+    let sign = format!("  a holder signs it: wecode approve admission --task {id} --as <post>");
+    let signed = ledger::signed_at(store, id, ActionKind::Admission)?;
+    let defined = ledger::defined_at(store, id)?;
+    Ok(match (signed, defined) {
+        (None, _) => Some(format!(
+            "{id} has not been signed for — this project dispatches by approval\n\
+             {sign}\n  then: wecode run {id}\n"
+        )),
+        // The signature is on the record and is for a task that no longer exists in
+        // that shape. Saying which is the point: "sign it again" without a reason
+        // reads as a bug in the gate.
+        (Some(s), Some(d)) if s < d => Some(format!(
+            "{id} was changed after it was signed — the signature covered the earlier task\n\
+             {sign}\n  what changed: wecode audit --task {id}\n"
+        )),
+        _ => None,
+    })
+}
+
+/// Splits the queue into what may be dispatched now and what is waiting for a
+/// signature.
+///
+/// The cap is applied *after* the gate rather than before, because an unsigned task must
+/// not hold a slot: one of them at the head of the queue would otherwise stall
+/// everything behind it for as long as nobody signed.
+///
+/// A playbook that cannot be read counts as ungated here, and the task goes on to
+/// `prepare`, which reads it again and refuses properly. Two accounts of the same broken
+/// file would be worse than one, and this is not the place that reports it.
+fn triage(
+    store: &Store,
+    company: &Company,
+    plan: &Plan,
+    slots: usize,
+) -> Result<(Vec<TaskId>, Vec<TaskId>), Box<dyn std::error::Error>> {
+    let (mut go, mut waiting) = (Vec::new(), Vec::new());
+    if slots == 0 {
+        return Ok((go, waiting));
+    }
+    for t in scheduler::dispatchable(plan, usize::MAX) {
+        let pb = plan
+            .project(&t.project)
+            .and_then(|p| playbook_of(company, p).ok().flatten());
+        if unsigned(store, pb.as_ref(), t)?.is_some() {
+            waiting.push(t.id.clone());
+        } else if go.len() < slots {
+            go.push(t.id.clone());
+        }
+    }
+    Ok((go, waiting))
 }
 
 /// Begins work on a task by hand: prepares it and hands you the envelope.
@@ -315,10 +395,13 @@ pub(crate) fn serve(a: &Args) -> Res {
             }
         } else {
             let slots = scheduler::free_slots(&plan, limit);
-            let ready: Vec<TaskId> = scheduler::dispatchable(&plan, slots)
-                .iter()
-                .map(|t| t.id.clone())
-                .collect();
+            let (ready, awaiting_a_signature) = triage(&store, &company, &plan, slots)?;
+            // Named every pass, like the tasks that need an answer: the queue standing
+            // still because nobody has signed is the operator's business, and a silent
+            // idle loop looks like a loop with nothing to do.
+            for id in awaiting_a_signature.iter().take(3) {
+                println!("  ⏸ {id} needs your signature — wecode approve admission --task {id}");
+            }
             for id in ready {
                 println!("  ▶ {id}");
                 // Serially, and one failure does not stop the loop: the next pass

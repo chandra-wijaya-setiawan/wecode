@@ -105,6 +105,7 @@ gitignored; the playbook should not be.
 language = "rust"
 merge_to = "dev"                  # the integration branch: branch from it, merge to it
 merge = "approved"                # approved | auto — the charter still outranks this
+dispatch = "approved"             # auto | approved — sign each task before it runs
 
 [feature]
 worktree  = true
@@ -138,6 +139,28 @@ An `accept` line whose program is not on this machine — an `sh` builtin, or a 
 program as "command not found" only after the work is done.
 
 See [../guides/playbooks.md](../guides/playbooks.md) for what to write in it.
+
+### The dispatch gate
+
+`dispatch` decides who may start work, and it is the last door before any budget is
+spent. `auto`, the default, leaves the admission gate as the only check — what wecode has
+always done. `approved` means nothing is prepared for a task, by hand or by the loop,
+until `wecode approve admission --task <id>` is on the ledger.
+
+It defaults to `auto` where `merge` defaults to `approved`, and the difference is
+reversibility. A dispatched run happens in its own worktree under a budget and is judged
+before it can reach a shared branch; a merge is the step that cannot be un-decided
+quietly. A strict default here would also stop `wecode loop` — which exists to run
+unattended — on every task in every project that had never heard of the setting.
+
+Turn it on where the *plan* is written by an agent rather than by a person. That is the
+case it is for: the admission gate checks that a task is well-formed, and no
+deterministic check can say whether it is the work you wanted done.
+
+A signature covers one task, not its subtasks — each is dispatched on its own budget, so
+each is signed on its own. And a signature older than the last `define` record for that
+task is stale: amending a scope after signing asks for the signature again, so the gate
+cannot be walked past by signing something small and then changing it.
 
 ### Subtasks
 

@@ -14,6 +14,7 @@ The inventory, including what is weak. Anything not here is not built — see
 | **Playbooks** | per-project guidance, in the project's own repo |
 | **Templated decomposition** | `--expand` emits the subtasks a playbook declares |
 | **Design gate** | `design_required` refuses a kind with no design task behind it |
+| **Dispatch gate** | `dispatch = "approved"` refuses to start a task nobody signed for |
 | **Archiving** | park a project: hidden *and* not scheduled |
 
 The **admission gate** is the part most worth knowing. A task is refused, with a
@@ -30,6 +31,17 @@ creates. The relation is the entire check: a design finishes only through a reco
 signature, and nothing dispatches while its predecessors are unfinished, so the ordering
 machinery is what holds the work back until someone signs. Whether the design is any
 good stays a human judgement; the gate does not pretend to check it.
+
+The **dispatch gate** is the same idea one step down. A project whose playbook says
+`dispatch = "approved"` starts nothing — by hand or by the loop — until a holder has
+signed that task: `wecode approve admission --task <id>`. It exists because the admission
+gate is deterministic, and a deterministic check can say a task is vague or unscoped but
+never that it is the wrong task; that judgement is a person's, and this is where it fits.
+The signature is read from the ledger, so it names the post that gave it and the person in
+that seat, and it goes stale if the task is redefined afterwards — amending a scope asks
+for it again. Off by default: a run is bounded by a budget, confined to a worktree and
+judged before it can land, which is what makes it safe to leave `auto` where `merge` is
+`approved`.
 
 **Playbooks** are guidance for whoever decomposes work, read before creating tasks. Free
 prose for how to break work down, plus a few typed fields wecode acts on: whether the
@@ -189,6 +201,11 @@ guard, the scopes and the charter are advisory in that mode.
 `wecode task scope` can widen a declaration after the work is done, and while the
 amendment is recorded, nothing correlates it with a verification that passed
 immediately afterwards. The ledger holds both facts and joins neither.
+
+The dispatch gate joins them at the one point it can: a signature earlier than the last
+amendment does not count, so widening signed work asks for the signature again. That
+covers the window *before* a run and says nothing about the one after it, which is where
+`verify` still needs to look.
 
 ## No retry, and no crash recovery
 

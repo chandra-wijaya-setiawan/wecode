@@ -15,6 +15,8 @@ pub mod template;
 pub mod workspace;
 
 pub use company::{AgentTemplate, Attention, Company, OrgError, Post, Repo, Templates, User};
-pub use playbook::{KindPlaybook, MergePolicy, Playbook, PlaybookError, Subtask, SubtaskTemplate};
+pub use playbook::{
+    DispatchPolicy, KindPlaybook, MergePolicy, Playbook, PlaybookError, Subtask, SubtaskTemplate,
+};
 pub use template::Template;
 pub use workspace::{Workspace, WorkspaceError, expand_home, init, resolve};

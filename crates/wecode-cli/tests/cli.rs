@@ -3560,6 +3560,184 @@ fn an_independent_task_still_starts_from_the_base() {
     );
 }
 
+// ------------------------------------------------------ dispatch signature ----
+
+/// A workspace whose project will not dispatch a task until someone signs for it.
+fn signs_first(name: &str, script: &str) -> Org {
+    let (org, repo) = with_agent(name, script);
+    org.playbook(
+        &repo,
+        &PLAYBOOK.replace(
+            "language = \"rust\"",
+            "language = \"rust\"\ndispatch = \"approved\"",
+        ),
+    );
+    org
+}
+
+/// A task inside the engineer's own write scope, so naming the post actually hands it
+/// over: `a_task`'s narrower globs leave it a draft, and the scheduler never offers a
+/// draft to anything.
+fn a_task_in_src(org: &Org, id: &str, glob: &str, accept: &str) {
+    org.run(&[
+        "task",
+        "add",
+        id,
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "append a marker comment to the source",
+        "--write",
+        glob,
+        "--accept-cmd",
+        accept,
+        "--tokens",
+        "100",
+        "--wall",
+        "30",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("task add");
+}
+
+#[test]
+fn a_task_nobody_signed_for_is_not_dispatched() {
+    let org = signs_first("dispatch-unsigned", "echo done >> src/app.txt");
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+
+    // Both, because they are one door. A gate `start` walks around is not a gate — and
+    // `start` is how a person takes the work themselves, which is still dispatch.
+    for cmd in [["start", "t"], ["run", "t"]] {
+        let r = org.run(&cmd);
+        assert!(!r.ok(), "{cmd:?} should refuse");
+        r.assert_contains("has not been signed for")
+            .assert_contains("wecode approve admission --task t");
+    }
+    // Refused before anything was prepared: no worktree cut, and the task did not move.
+    assert!(
+        org.recorded().is_empty(),
+        "a tree was cut for work nobody signed for"
+    );
+    org.run(&["show", "t"])
+        .assert_contains("status     waiting");
+
+    org.run(&["approve", "admission", "--task", "t"])
+        .assert_ok("sign")
+        .assert_contains("may be dispatched");
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed");
+}
+
+#[test]
+fn changing_a_task_after_it_was_signed_retracts_the_signature() {
+    // The hole a present/absent check would leave: sign something small, then widen it.
+    // The ledger is ordered, so "signed before the last change" is a fact about it.
+    let org = signs_first("dispatch-restated", "echo done >> src/app.txt");
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+    org.run(&["approve", "admission", "--task", "t"])
+        .assert_ok("sign");
+
+    org.run(&[
+        "task", "scope", "t", "--write", "src/**", "--write", "tests/**",
+    ])
+    .assert_ok("widen the scope");
+    let r = org.run(&["run", "t"]);
+    assert!(!r.ok(), "the signature was for the narrower task");
+    r.assert_contains("was changed after it was signed")
+        .assert_contains("wecode approve admission --task t");
+
+    org.run(&["approve", "admission", "--task", "t"])
+        .assert_ok("sign what it is now");
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed");
+}
+
+#[test]
+fn the_post_doing_the_work_cannot_sign_for_it() {
+    let org = signs_first("dispatch-self", "echo done >> src/app.txt");
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+
+    let r = org.run(&["approve", "admission", "--task", "t", "--as", "impl"]);
+    assert!(!r.ok(), "an engineer holds no approvals");
+    r.assert_contains("approving refused for `impl`");
+    // The attempt is on the record and is not a signature: the gate reads allowed
+    // decisions, not the fact that someone tried.
+    org.run(&["audit", "--denied", "--task", "t"])
+        .assert_contains("approve");
+    org.run(&["run", "t"])
+        .assert_contains("has not been signed for");
+}
+
+#[test]
+fn a_signature_cannot_be_attributed_to_a_task_that_does_not_exist() {
+    // A typo would otherwise record as authority, and the gate would go on refusing
+    // the real task while the operator held what looked like a signature for it.
+    let (org, _) = with_playbook("dispatch-ghost");
+    let r = org.run(&["approve", "admission", "--task", "ghost"]);
+    assert!(!r.ok(), "should refuse");
+    r.assert_contains("no such task: ghost");
+    org.run(&["audit", "--task", "ghost"])
+        .assert_lacks("approve");
+}
+
+#[test]
+fn signing_a_task_whose_project_asks_for_no_signature_says_so() {
+    // Recorded either way — a holder may sign whatever they like — but silence would
+    // let it be read as a gate that is now satisfied.
+    let (org, _) = with_playbook("dispatch-ungated");
+    a_task_in_src(&org, "t", "src/**", "true");
+    org.run(&["approve", "admission", "--task", "t"])
+        .assert_ok("sign")
+        .assert_contains("nothing was waiting on it");
+    org.run(&["start", "t"]).assert_ok("dispatches as before");
+}
+
+#[test]
+fn the_loop_pauses_on_an_unsigned_task_rather_than_failing_it() {
+    let org = signs_first("dispatch-loop", "echo done >> src/app.txt");
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+
+    let r = org.run(&["loop", "--once"]);
+    r.assert_ok("one pass")
+        // Promoted, then held: the task is startable and waiting on a person, which are
+        // two different facts and both true.
+        .assert_contains("waiting → ready")
+        .assert_contains("⏸ t needs your signature")
+        .assert_lacks("▶ t");
+    org.run(&["show", "t"]).assert_contains("status     ready");
+
+    org.run(&["approve", "admission", "--task", "t"])
+        .assert_ok("sign");
+    org.run(&["loop", "--once"])
+        .assert_ok("second pass")
+        .assert_contains("▶ t")
+        .assert_contains("passed");
+}
+
+#[test]
+fn an_unsigned_task_does_not_hold_the_slot_behind_it() {
+    // The queue is taken in id order, so `aaa` is offered first. If the gate were
+    // applied after the concurrency cap, one unsigned task at the head would stall
+    // everything behind it for as long as nobody signed.
+    let org = signs_first(
+        "dispatch-slot",
+        "mkdir -p src/bbb && echo done >> src/bbb/x.txt",
+    );
+    a_task_in_src(&org, "aaa", "src/aaa/**", "true");
+    a_task_in_src(&org, "bbb", "src/bbb/**", "grep -q done src/bbb/x.txt");
+    org.run(&["approve", "admission", "--task", "bbb"])
+        .assert_ok("sign the second one only");
+
+    org.run(&["loop", "--once"])
+        .assert_ok("one pass")
+        .assert_contains("⏸ aaa needs your signature")
+        .assert_contains("▶ bbb");
+}
+
 // ----------------------------------------------------------------- merge ------
 
 /// A workspace whose repo has a `dev` branch and the given merge policy.

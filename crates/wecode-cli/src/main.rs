@@ -4,6 +4,7 @@ mod args;
 mod board;
 mod commands;
 mod git;
+mod ledger;
 mod record;
 mod render;
 mod scheduler;
@@ -101,7 +102,9 @@ WORK
   wecode worktree remove <task|path>   take one down (--force if dirty)
         a path reaches the trees no task can: an orphan's, and the merge scratch
   wecode approve <merge|admission|design|budget|measure> [<what>] --as <post>
-        approve design --task <id>   signs a design off: needs-approval → done
+        approve design --task <id>      signs a design off: needs-approval → done
+        approve admission --task <id>   signs a task for dispatch, where its playbook
+                                        says dispatch = \"approved\"
   wecode guard <post> <verb> <target>  authorise an action; records the decision
         verbs: read write run merge spend        --tokens <n> for spend
         --task <id> / --project <id> attributes the record
