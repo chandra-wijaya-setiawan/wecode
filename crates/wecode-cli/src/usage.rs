@@ -35,6 +35,24 @@
 //! rate, and pretending otherwise would be its own lie. It is reported beside the
 //! spend on the run line, where a person can see what a long conversation cost
 //! without a budget having to be denominated in it.
+//!
+//! # One report per message
+//!
+//! The turn total is summed from lines, and a line is not a turn. `claude-stream-json`
+//! announces one `assistant` line per content block, so a turn that thought and then
+//! called a tool arrives two or three times over — same message id, same `usage`
+//! object, restated. Added up line by line, one turn's tokens are counted once per
+//! block it happened to be split into.
+//!
+//! That figure is thrown away the moment the run states its own total, which is why
+//! the ledger never showed it: the `result` line supersedes the sum, and the number a
+//! person reads afterwards is right. The supervisor is not reading afterwards. It
+//! checks the budget against this same meter *while* the run is going, when the only
+//! figure that exists is the sum — so a task was killed for a spend it had not made,
+//! against a count nothing that survived the run agreed with. See [`Meter::line`] for
+//! what makes a restatement recognisable.
+
+use std::collections::BTreeSet;
 
 use serde_json::Value;
 
@@ -92,6 +110,13 @@ pub(crate) struct Meter {
     total: Option<Usage>,
     /// Per-turn usage added up, for output that never states a total.
     turns: Option<Usage>,
+    /// The message ids already in `turns`, so a turn restated across several lines is
+    /// added once — see the module docs on one report per message.
+    ///
+    /// Ids, not a count of lines: the same turn can be announced three times with
+    /// other turns' lines interleaved between them, which nothing positional could
+    /// tell from three turns in a row.
+    counted: BTreeSet<String>,
 }
 
 impl Meter {
@@ -100,6 +125,7 @@ impl Meter {
             protocol: Protocol::parse(protocol),
             total: None,
             turns: None,
+            counted: BTreeSet::new(),
         }
     }
 
@@ -123,9 +149,25 @@ impl Meter {
                     self.total = Some(u);
                 }
             }
+            // One turn, however many lines it took to announce itself. A message
+            // already counted is that same turn restated — a second content block,
+            // not a second call — and adding it again charges a turn once per block
+            // it was split into. Only a line that was actually counted claims its id,
+            // so a first announcement carrying no usage does not silence the one that
+            // does.
             Some("assistant") => {
+                let id = v.pointer("/message/id").and_then(Value::as_str);
+                if id.is_some_and(|id| self.counted.contains(id)) {
+                    return;
+                }
                 if let Some(u) = v.pointer("/message/usage").and_then(usage_in) {
                     self.turns = Some(self.turns.unwrap_or_default().add(u));
+                    // An unidentified message is counted and not remembered: there is
+                    // nothing to recognise it by later, and dropping every anonymous
+                    // turn after the first would lose a real conversation's spend.
+                    if let Some(id) = id {
+                        self.counted.insert(id.to_string());
+                    }
                 }
             }
             _ => {}
@@ -308,6 +350,65 @@ mod tests {
                 r#"{"type":"assistant","message":{"usage":{"input_tokens":30,"output_tokens":40}}}"#,
             ]),
             Some(100)
+        );
+    }
+
+    #[test]
+    fn a_turn_announced_once_per_content_block_is_counted_once() {
+        // What `claude-stream-json` actually emits when a turn thinks and then calls a
+        // tool: the same message, same id, same usage, restated per block. Summed line
+        // by line it is a turn charged three times — and while the run is going, that
+        // inflated sum is the only figure the budget has to check against.
+        let dup = r#"{"type":"assistant","message":{"id":"msg_1","usage":{"input_tokens":30,
+            "output_tokens":30}}}"#;
+        assert_eq!(claude(&[dup, dup, dup]), Some(60));
+    }
+
+    #[test]
+    fn two_turns_are_two_turns_however_alike_they_look() {
+        // The other half of it: identical usage under different ids is a conversation
+        // doing the same amount of work twice, and dropping the second would report a
+        // run as half what it cost.
+        assert_eq!(
+            claude(&[
+                r#"{"type":"assistant","message":{"id":"msg_1","usage":{"input_tokens":30,"output_tokens":30}}}"#,
+                r#"{"type":"assistant","message":{"id":"msg_2","usage":{"input_tokens":30,"output_tokens":30}}}"#,
+            ]),
+            Some(120)
+        );
+    }
+
+    #[test]
+    fn a_restated_turn_does_not_replay_its_cache_reads_either() {
+        // Both halves of the report come off the same line, so both were multiplied by
+        // however many blocks the turn arrived in.
+        let dup = r#"{"type":"assistant","message":{"id":"msg_1","usage":{"input_tokens":10,
+            "output_tokens":5,"cache_read_input_tokens":4000}}}"#;
+        assert_eq!(claude(&[dup, dup]), Some(15));
+        assert_eq!(claude_replayed(&[dup, dup]), Some(4000));
+    }
+
+    #[test]
+    fn a_harness_that_names_no_message_is_taken_at_its_word_every_line() {
+        // Nothing to recognise a restatement by, so every line is a turn. The wrong
+        // guess here is the expensive one: dropping unidentified turns after the first
+        // reports a whole conversation as one call.
+        let line =
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":20}}}"#;
+        assert_eq!(claude(&[line, line, line]), Some(90));
+    }
+
+    #[test]
+    fn a_first_line_with_no_usage_does_not_silence_the_one_that_has_it() {
+        // An id is claimed by the line that was counted, not by the first line to
+        // mention it — otherwise a message announced empty and then reported would be
+        // metered as free.
+        assert_eq!(
+            claude(&[
+                r#"{"type":"assistant","message":{"id":"msg_1","content":"thinking"}}"#,
+                r#"{"type":"assistant","message":{"id":"msg_1","usage":{"input_tokens":10,"output_tokens":20}}}"#,
+            ]),
+            Some(30)
         );
     }
 

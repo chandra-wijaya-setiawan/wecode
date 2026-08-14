@@ -3912,6 +3912,37 @@ fn a_conversation_is_not_billed_for_the_context_it_re_read() {
 }
 
 #[test]
+fn a_turn_announced_once_per_block_does_not_spend_the_budget_four_times() {
+    // A coding CLI announces one `assistant` line per content block, so a turn that
+    // thought and then called a tool says the same thing — same message, same usage —
+    // three or four times over. Added up line by line, this 60-token run reads as 240
+    // against a 100-token budget, and the supervisor kills it while it is still
+    // working. Nothing that survives the run agrees: the total the harness states at
+    // the end, and every figure read off it afterwards, says 60.
+    let turn = "echo '{\"type\":\"assistant\",\"message\":{\"id\":\"msg_1\",\"usage\":\
+                {\"input_tokens\":40,\"output_tokens\":20}}}'; sleep 0.15";
+    let (org, _) = with_agent(
+        "run-blocks",
+        &format!(
+            "echo done >> a.txt; {turn}; {turn}; {turn}; {turn}; \
+             echo '{{\"type\":\"result\",\"usage\":\
+             {{\"input_tokens\":40,\"output_tokens\":20}}}}'"
+        ),
+    );
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_lacks("token budget")
+        .assert_contains("spent    60 tokens");
+
+    org.run(&["board", "caching"])
+        .assert_ok("board")
+        .assert_contains("60/100")
+        .assert_lacks("over budget");
+}
+
+#[test]
 fn a_run_killed_on_its_limit_still_reports_what_it_burned() {
     // The case a spend recorded only on success would hide, and the expensive one:
     // an agent that ran away with the budget and had to be killed.

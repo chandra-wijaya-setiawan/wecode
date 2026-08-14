@@ -257,6 +257,19 @@ reported beside the spend on the `wecode run` line — `spent 163400 tokens, as 
 reported them (+4812000 re-read from cache, not budgeted)` — where a long conversation's
 cost is visible without a budget having to be denominated in it.
 
+**A turn is counted once, however many lines it took to announce itself.** A coding CLI
+emits one `assistant` line per content block, so a turn that thought and then called a
+tool restates the same message — same id, same usage — three or four times over. Summed
+line by line, a 60-token turn reads as 240. The run's own total, stated at the end,
+supersedes that sum and is what the ledger keeps, so the figure a person read afterwards
+was always right; the supervisor is not reading afterwards. It checks the budget against
+the running sum, and killed runs at four times the spend they had made, for a number
+nothing that survived the run agreed with. Restatements are now recognised by their
+message id and counted once, so the count that stops a run is the count that is recorded
+for it. A harness that names no message is taken at its word every line — there is
+nothing to recognise a restatement by, and the wrong guess in that direction would
+report a whole conversation as a single call.
+
 **A budget is a limit, not a label.** Both figures a task declares now reach the process
 it was written for. The wall is the *tighter* of the task's and the harness template's:
 the template is the backstop under every run this harness makes, and a task must not
