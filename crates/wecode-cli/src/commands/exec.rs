@@ -125,12 +125,16 @@ pub(crate) fn prepare(
         .is_some_and(|k| k.worktree);
 
     let mut notes = String::new();
-    let mut cwd = repo_path(company, project)?;
+    // The project's own checkout, kept apart from `cwd` rather than shadowed by it: a
+    // task with a worktree works somewhere else, and the handoff still has to be able to
+    // read what a predecessor left here — a design asks for no worktree, so this is
+    // where its document was written.
+    let repo = repo_path(company, project)?;
+    let mut cwd = repo.clone();
 
     if wants_worktree {
         let branch = work::branch_for(&owner.id);
         let path = work::worktree_for(&work::org_name(ws.root()), &owner.id);
-        let repo = cwd.clone();
         if !git::is_repo(&repo) {
             return Err(format!("{} is not a git repository", repo.display()).into());
         }
@@ -193,6 +197,7 @@ pub(crate) fn prepare(
         project,
         plan,
         &cwd,
+        &repo,
         runs,
     );
     Ok(Prepared {

@@ -3950,6 +3950,115 @@ fn a_successor_is_shown_what_its_predecessor_produced() {
         .assert_contains("+groundwork");
 }
 
+/// A design and the task built on it, with the design signed and closed.
+///
+/// The design asks for no worktree — no playbook here gives it one — so its document is
+/// written into the repository itself and never committed by wecode, which is exactly
+/// the arrangement the handoff has to cope with.
+fn a_signed_design(org: &Org, doc: &str) {
+    org.run(&[
+        "task",
+        "add",
+        "d",
+        "decide the cache key format",
+        "--project",
+        "caching",
+        "--kind",
+        "design",
+        "--write",
+        doc,
+        "--accept-cmd",
+        &format!("test -f {doc}"),
+        "--tokens",
+        "1000",
+        "--wall",
+        "30",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("add design");
+    org.run(&["run", "d"]).assert_contains("passed");
+    org.run(&["approve", "design", "--task", "d"])
+        .assert_ok("sign the design");
+
+    org.run(&[
+        "task",
+        "add",
+        "build",
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "build what the design decided",
+        "--after",
+        "d",
+        "--write",
+        "src/**",
+        "--accept-cmd",
+        "true",
+        "--tokens",
+        "100",
+        "--wall",
+        "30",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("add build");
+}
+
+#[test]
+fn a_design_predecessor_is_handed_over_as_its_document() {
+    // The one kind whose output is not code. Its deliverable is a file, wecode never
+    // commits it — a design asks for no worktree — and the successor's branch is cut
+    // from a base that may not have it either. Read out of the repository instead, or
+    // the kind the design gate exists to protect is the one kind whose handoff is empty.
+    let (org, _) = with_agent(
+        "handoff-design",
+        "mkdir -p docs/wecode/d && printf 'The key is the url and the vary header.\\n' \
+         > docs/wecode/d/design.md",
+    );
+    a_signed_design(&org, "docs/wecode/d/design.md");
+
+    org.run(&["start", "build"])
+        .assert_ok("start")
+        .assert_contains("docs/wecode/d/design.md")
+        .assert_contains("The key is the url and the vary header.")
+        // The decision itself, not a diff of it.
+        .assert_lacks("+The key is the url");
+}
+
+#[test]
+fn a_design_document_is_found_wherever_the_task_declared_it() {
+    // The convention is `docs/wecode/<task>/design.md`, but a playbook that templates
+    // its steps names its own path. The write scope is where the task says which.
+    let (org, _) = with_agent(
+        "handoff-design-path",
+        "mkdir -p src/design && printf 'Hash the url, not the body.\\n' > src/design/keys.md",
+    );
+    a_signed_design(&org, "src/design/keys.md");
+
+    org.run(&["start", "build"])
+        .assert_ok("start")
+        .assert_contains("src/design/keys.md")
+        .assert_contains("Hash the url, not the body.");
+}
+
+#[test]
+fn a_design_whose_document_cannot_be_found_says_where_it_looked() {
+    // "(no commits)" would read as a signed design that produced nothing, which is a
+    // far more alarming fact than one this process could not locate.
+    let (org, _) = with_agent(
+        "handoff-design-gone",
+        "mkdir -p docs/wecode/d && printf 'decided\\n' > docs/wecode/d/design.md",
+    );
+    a_signed_design(&org, "docs/wecode/d/design.md");
+    std::fs::remove_file(org.dir.join("repo/docs/wecode/d/design.md")).unwrap();
+
+    org.run(&["start", "build"])
+        .assert_ok("start")
+        .assert_contains("no design document at docs/wecode/d/design.md");
+}
+
 #[test]
 fn the_instruction_is_also_available_as_a2a_json() {
     // Why adopting the protocol is worth anything: a caller that can parse gets the

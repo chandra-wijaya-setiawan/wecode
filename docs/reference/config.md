@@ -409,9 +409,10 @@ deletes one.
 `{{task_id}}` `{{project_id}}` `{{objective}}` `{{title}}` `{{acceptance}}`
 `{{write_scope}}` `{{context}}`
 
-`{{context}}` carries the handoff — what predecessors produced. If the template omits
-it, the handoff is **appended** rather than dropped: losing it silently would be worse
-than putting it somewhere unexpected.
+`{{context}}` carries the handoff — what predecessors produced: a capped diff per
+predecessor, or the whole document when the predecessor was a `design`. If the template
+omits it, the handoff is **appended** rather than dropped: losing it silently would be
+worse than putting it somewhere unexpected.
 
 Previous attempts are appended after the template, always.
 

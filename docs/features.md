@@ -43,6 +43,10 @@ signature, and nothing dispatches while its predecessors are unfinished, so the 
 machinery is what holds the work back until someone signs. Whether the design is any
 good stays a human judgement; the gate does not pretend to check it.
 
+What was decided then reaches whoever builds it: the same `depends_on` edge the gate
+counts is the edge the handoff travels, and a design predecessor arrives as its document
+rather than as a diff — see **Execution** below.
+
 The **dispatch gate** is the same idea one step down. A project whose playbook says
 `dispatch = "approved"` starts nothing — by hand or by the loop — until a holder has
 signed that task: `wecode approve admission --task <id>`. It exists because the admission
@@ -119,7 +123,7 @@ which is how you check a scope before assigning work to a seat that cannot reach
 | **Verification** | the diff against the declared scope, then the acceptance commands |
 | **Commits** | every attempt, pass or fail, authored by wecode |
 | **Spend** | tokens read out of the agent's own output, per attempt and on the ledger |
-| **Handoff** | assembled from git and the execution record, never from the agent |
+| **Handoff** | a predecessor's diff — or its design document — never the agent's account |
 | **Merge** | `--no-ff`, configurable policy, with a report that is committed |
 | **Rollback** | revert, not reset |
 | **Scheduler** | a tick that promotes, a loop that dispatches |
@@ -149,6 +153,23 @@ attempt — is an `Artifact`. The text prompt is `wecode start <task>`, the same
 JSON is `wecode start <task> --json`, and neither can drift from the other because there
 is only one. The structured half never reaches the prompt: a coding CLI reads a JSON
 blob on argv as part of its instruction.
+
+**A design predecessor is handed over as its document, not as a diff.** Every other kind
+produces code, where the diff is the answer. A design produces a file, and the decision
+is the whole of it — a diff would say what changed since the last draft, which is a
+different question and usually an empty one. It is also the one kind wecode never
+commits: a design asks for no worktree, so it is written into the repository the operator
+is standing in, and the successor's branch is cut from a base that may not carry it yet.
+Read out of the file system for that reason — the design's own tree, then this task's,
+then the project's checkout — at whatever path the design's **write scope** declared,
+because a playbook that templates its steps names its own (`src/design/{{task}}.md` is as
+valid as the convention). A scope that names a directory rather than a file falls back to
+`docs/wecode/<task>/design.md`, which is what the starter guidance writes down. The cap
+is four times the diff cap, since a design is read rather than skimmed and the part
+naming what it costs is written last. When no copy can be found, the handoff says which
+path it looked at: a signed design that produced nothing and one this process could not
+locate are very different facts, and `(no commits in this worktree)` — which is what the
+handoff used to say — claimed the first while meaning the second.
 
 **Nothing reads `.wecode/result.json`.** The diff is ground truth and an agent's account
 of its own work is inadmissible, so the file is written and ignored.
