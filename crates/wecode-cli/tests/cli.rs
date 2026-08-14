@@ -5356,6 +5356,25 @@ fn the_message_carries_what_the_run_produced() {
 }
 
 #[test]
+fn the_message_carries_the_change_and_not_only_the_shape_of_it() {
+    // What the names alone cannot answer. `1 a.txt` says the same thing whether the
+    // attempt rewrote the file or corrected a letter in it, so an operator who can now
+    // sign from a phone could sign without ever being shown what they were signing —
+    // and the way to see it was `git -C $WECODE_WORKTREE diff`, which is a terminal,
+    // which is the trip the whole hook exists to save.
+    let (org, _) = with_agent("notify-diff", "echo done >> a.txt");
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+    let log = notified(&org, "echo \\\"$WECODE_DIFF\\\"");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed");
+    let said = announcements(&log).join("\n");
+    assert!(said.contains("a.txt"), "the file is not named: {said}");
+    assert!(said.contains("+done"), "the change itself is missing: {said}");
+}
+
+#[test]
 fn the_names_are_capped_where_the_operator_says_and_the_count_never_is() {
     // Why the count is its own variable. The bound is on what an environment should
     // carry to a channel with one line in it; a message that answered "how much
