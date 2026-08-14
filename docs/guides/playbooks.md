@@ -116,6 +116,12 @@ Two rules worth knowing before you write one:
 - **It is all or nothing.** One refused subtask means none are created — a half-built
   expansion leaves the rest waiting on tasks that do not exist. The main task is
   unaffected; it was admitted on its own merits.
+- **A step that passes is `done`, and the main task is what lands.** Every step works in
+  the main task's tree, on its branch, so none of them has a landing decision of its
+  own — `wecode merge <step>` is refused and names the task that does. That is what lets
+  the next step start: readiness follows `done`, and a step parked at `needs-approval`
+  would hold up the rest of its own expansion. The exception is a `design` step, which
+  waits for its signature at any depth, for the reason below.
 
 Ceremony on small work is the real risk. Three tasks for a two-line change is absurd,
 which is why `--expand` is opt-in and per kind: `bug` should get no design step here —

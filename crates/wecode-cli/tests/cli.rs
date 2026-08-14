@@ -1161,6 +1161,66 @@ fn a_design_that_passes_waits_for_a_signature_rather_than_finishing() {
 }
 
 #[test]
+fn a_design_step_waits_for_its_signature_even_though_it_is_a_subtask() {
+    // The exception to a step finishing when it passes, and it is there for the other
+    // reason: a step has nothing of its own to land, but a design has nothing landing
+    // would settle. The document exists — all a command can check — and whether it is
+    // the right design is exactly the part no command can. The steps built on it must
+    // not start on the strength of a file being present.
+    let (org, _) = with_agent("design-step", "mkdir -p docs && echo proposal > docs/d.md");
+    org.run(&[
+        "task",
+        "add",
+        "threading",
+        "reconstruct threading in the export writer",
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "--accept-cmd",
+        "true",
+        "--write",
+        "src/**",
+        "--tokens",
+        "1000",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("main task");
+    org.run(&[
+        "task",
+        "add",
+        "threading-design",
+        "propose how threading is reconstructed",
+        "--project",
+        "caching",
+        "--kind",
+        "design",
+        "--parent",
+        "threading",
+        "--accept-cmd",
+        "test -f docs/d.md",
+        "--write",
+        "docs/**",
+        "--tokens",
+        "1000",
+        "--to",
+        "impl",
+    ])
+    .assert_ok("design step");
+
+    org.run(&["run", "threading-design"])
+        .assert_ok("run")
+        .assert_contains("passed")
+        .assert_contains("passing is not approval");
+    org.run(&["show", "threading-design"])
+        .assert_contains("status     needs-approval");
+    org.run(&["approve", "design", "--task", "threading-design"])
+        .assert_ok("sign")
+        .assert_contains("needs-approval → done");
+}
+
+#[test]
 fn only_a_design_is_signed_off_that_way() {
     let (org, _) = with_agent("design-wrong-kind", "true");
     a_task(&org, "t", "src/**", "true");
@@ -4721,6 +4781,116 @@ fn a_tree_a_subtask_still_works_in_survives_the_merge() {
         .assert_ok("remove")
         .assert_contains("removed");
     assert!(!wt.exists());
+}
+
+// ------------------------------------------------------------ the steps ---------
+
+/// One main task and two ordered steps beneath it — the shape `--expand` emits.
+///
+/// Every one of them writes `src/**`, which the admission gate allows here for two
+/// separate reasons: a subtask is nested in its parent, and the second step is
+/// declared after the first, so the two can never run at once.
+fn with_steps(org: &Org, main: &str) {
+    let add = |id: &str, extra: &[&str]| {
+        let mut argv = vec![
+            "task",
+            "add",
+            id,
+            "--project",
+            "caching",
+            "--kind",
+            "chore",
+            "append a marker comment to the source",
+            "--write",
+            "src/**",
+            "--accept-cmd",
+            "grep -q landed src/app.txt",
+            "--tokens",
+            "100",
+            "--wall",
+            "30",
+            "--to",
+            "impl",
+        ];
+        argv.extend_from_slice(extra);
+        org.run(&argv)
+    };
+    add(main, &[]).assert_ok("main task");
+    add(&format!("{main}-one"), &["--parent", main]).assert_ok("first step");
+    add(
+        &format!("{main}-two"),
+        &["--parent", main, "--after", &format!("{main}-one")],
+    )
+    .assert_ok("second step");
+}
+
+#[test]
+fn a_step_that_passes_finishes_instead_of_parking_at_approval() {
+    // The gap this closes. A subtask that passed went to `needs-approval` and waited
+    // for a landing decision that could not be taken about it: its commits are on the
+    // main task's branch, so merging it would have put every step of the expansion on
+    // the integration branch, including the ones that had not run. Nothing could
+    // correctly grant that approval — and while it stood there the sibling declared
+    // after it stayed `waiting`, because readiness follows `done`, and the loop stops
+    // dispatching entirely while anything needs a human. One passing step held up the
+    // rest of its own plan.
+    let (org, _) = mergeable("step-lands", "auto");
+    with_steps(&org, "t");
+
+    org.run(&["run", "t-one"])
+        .assert_ok("first step")
+        .assert_contains("passed")
+        // And it says where the work went, because the status word cannot: `done`
+        // here does not mean landed, it means there is nothing left of this task to
+        // land separately.
+        .assert_contains("its commits are on t's branch");
+    org.run(&["show", "t-one"])
+        .assert_contains("status     done");
+
+    // Which is the whole point: the next step is startable now, with no signature in
+    // between.
+    org.run(&["tick"]).assert_ok("tick");
+    org.run(&["show", "t-two"])
+        .assert_contains("status     ready");
+}
+
+#[test]
+fn a_step_cannot_be_merged_on_its_own_and_the_main_task_lands_them_all() {
+    // The other half. `merge` on a step used to land the whole shared branch and mark
+    // one task done; now it is refused and says which task does land it.
+    let (org, repo) = mergeable("step-merge", "auto");
+    with_steps(&org, "t");
+    org.run(&["run", "t-one"]).assert_ok("first step");
+
+    let r = org.run(&["merge", "t-one"]);
+    assert!(!r.ok(), "a step lands nothing on its own");
+    r.assert_contains("t-one is part of t")
+        .assert_contains("wecode merge t");
+
+    // The main task owns the tree and the branch, so it is what lands. Its own run
+    // commits on top of the step's, and the merge takes both.
+    org.run(&["run", "t"]).assert_ok("main task");
+    org.run(&["show", "t"])
+        .assert_contains("status     needs-approval");
+    org.run(&["merge", "t"])
+        .assert_ok("the main task lands")
+        .assert_contains("MERGED  t → dev")
+        // t-two never ran, so the directory is still somebody's.
+        .assert_contains("t-two still working");
+
+    let on_dev = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["show", "dev:src/app.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&on_dev.stdout)
+            .matches("landed")
+            .count(),
+        2,
+        "the step's commit and the main task's both landed"
+    );
 }
 
 #[test]

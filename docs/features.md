@@ -124,7 +124,7 @@ which is how you check a scope before assigning work to a seat that cannot reach
 | **Commits** | every attempt, pass or fail, authored by wecode |
 | **Spend** | tokens read out of the agent's own output, per attempt and on the ledger |
 | **Handoff** | a predecessor's diff — or its design document — never the agent's account |
-| **Merge** | `--no-ff`, configurable policy, with a report that is committed |
+| **Merge** | `--no-ff`, configurable policy, with a report that is committed — by the main task, which is the only thing that owns a branch |
 | **Rollback** | revert, not reset |
 | **Scheduler** | a tick that promotes, a loop that dispatches |
 | **A2A** | the instruction *is* an A2A task; the prompt is one rendering of it |
