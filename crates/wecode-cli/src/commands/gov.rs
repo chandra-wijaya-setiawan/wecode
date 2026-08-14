@@ -3,12 +3,12 @@
 
 use wecode_core::{TaskId, TaskStatus};
 use wecode_gov::{Action, ActionKind, glob};
-use wecode_store::AuditQuery;
+use wecode_store::{AuditQuery, Store};
 
 use crate::args::Args;
 use crate::commands::ctx::*;
 use crate::render;
-use crate::{git, ledger, notify, record, teardown, work};
+use crate::{git, ledger, notify, record, teardown, telegram, work};
 
 pub(crate) fn parse_action(a: &Args) -> Result<Action, String> {
     let verb = a.cmd(2);
@@ -87,11 +87,62 @@ pub(crate) fn approve(a: &Args) -> Res {
     let who = actor(a, &store, &company)?;
     let on = attribution(a, &plan);
 
-    require_allowed(
+    sign(
         &store,
         &company,
+        &plan,
         &who,
+        &Signature {
+            kind,
+            task: task.as_ref(),
+            note: a.cmd(2),
+            on,
+        },
+    )
+}
+
+/// What is being signed: the kind, the task it is about, the note the signer left, and
+/// what the record is attributed to.
+///
+/// Attribution travels beside the task rather than being derived from it, because the
+/// two come apart: a budget increase can be signed for a project with no task named at
+/// all, and the record still has to be findable.
+pub(crate) struct Signature<'a> {
+    pub(crate) kind: ActionKind,
+    pub(crate) task: Option<&'a wecode_core::Task>,
+    pub(crate) note: &'a str,
+    pub(crate) on: (Option<String>, Option<String>),
+}
+
+/// One signature: past the Broker, onto the ledger, and whatever signing that kind
+/// *is* beyond the record.
+///
+/// Extracted from [`approve`] so a signature given from a chat reply is the same act
+/// as one typed at a terminal — the same Broker call, the same design transition, the
+/// same words back. A second implementation of this is a second answer to "is this
+/// signed", and the two would disagree the first time either changed.
+///
+/// `who` is resolved by the caller because that is exactly what differs between them:
+/// a session or `--as` at a terminal, the account a message came from over a channel.
+pub(crate) fn sign(
+    store: &Store,
+    company: &wecode_org::Company,
+    plan: &wecode_core::Plan,
+    who: &Actor,
+    what: &Signature,
+) -> Res {
+    let Signature {
+        kind,
+        task,
+        note,
         on,
+    } = what;
+    let (kind, task, note) = (*kind, *task, *note);
+    require_allowed(
+        store,
+        company,
+        who,
+        on.clone(),
         &Action::Approve { kind },
         "approving",
     )?;
@@ -99,10 +150,10 @@ pub(crate) fn approve(a: &Args) -> Res {
         "  {} approved {}{}\n",
         who.describe(),
         kind.as_str(),
-        if a.cmd(2).is_empty() {
+        if note.is_empty() {
             String::new()
         } else {
-            format!(": {}", a.cmd(2))
+            format!(": {note}")
         }
     );
 
@@ -111,12 +162,12 @@ pub(crate) fn approve(a: &Args) -> Res {
     // ledger and is read at the door by `start` and `run`. Said out loud all the same —
     // the other thing an operator could take from silence is that nothing happened.
     if kind == ActionKind::Admission
-        && let Some(t) = &task
+        && let Some(t) = task
     {
         out.push_str(&format!("  {}  may be dispatched\n", t.id));
         let gated = plan
             .project(&t.project)
-            .and_then(|p| playbook_of(&company, p).ok().flatten())
+            .and_then(|p| playbook_of(company, p).ok().flatten())
             .is_some_and(|pb| pb.project.dispatch.needs_a_signature());
         if !gated {
             out.push_str(
@@ -129,7 +180,7 @@ pub(crate) fn approve(a: &Args) -> Res {
     // read later by `merge`, which does its own work afterwards; a design has no
     // later step to read it, so signing is the last thing that happens to it.
     if kind == ActionKind::Design
-        && let Some(task) = &task
+        && let Some(task) = task
     {
         let id = &task.id;
         if !task.kind.needs_a_signature() {
@@ -150,6 +201,22 @@ pub(crate) fn approve(a: &Args) -> Res {
         out.push_str(&format!("  {id}  needs-approval → done\n"));
     }
     Ok(out)
+}
+
+/// Reads the replies waiting in the chat channel, and signs what they approved.
+///
+/// The other end of the notify hook. `wecode loop` does this every pass on its own
+/// when `[telegram] fetch` is set, so typing it is for reading the channel once by
+/// hand — and for `--dry-run`, which says what the messages would sign while moving
+/// neither a signature nor the cursor.
+pub(crate) fn inbox(a: &Args) -> Res {
+    let (ws, store, company) = open_full(a)?;
+    if company.telegram.fetch.is_none() {
+        let mut why = String::from("no [telegram] fetch in company.toml — nothing reads replies\n");
+        why.push_str("  docs/reference/config.md has the getUpdates line to put there\n");
+        return Err(why.into());
+    }
+    telegram::drain_channel(&ws, &store, &company, a.has("dry-run"))
 }
 
 pub(crate) fn audit(a: &Args) -> Res {

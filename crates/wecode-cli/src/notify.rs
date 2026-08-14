@@ -183,13 +183,18 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
     }
 }
 
-/// Waits for the hook, killing it at the limit.
+/// Waits for a hook, killing it at the limit.
 ///
 /// `Ok(None)` means it was killed. Only the hook itself is signalled, not a process
 /// group: a notifier that backgrounds children of its own has decided to outlive its
 /// own exit, and that is the hook author's business rather than something wecode
 /// should undo.
-fn wait_for(child: &mut Child, limit: Duration) -> Result<Option<i32>, String> {
+///
+/// Shared with the reply fetch in [`crate::telegram`], which is the same bargain in
+/// the other direction: an operator-written command line that `wecode loop` runs, and
+/// that must not be able to hold the loop open. One implementation, so a bound the
+/// notify side has cannot go missing from the side that polls every pass.
+pub(crate) fn wait_for(child: &mut Child, limit: Duration) -> Result<Option<i32>, String> {
     let start = Instant::now();
     loop {
         match child.try_wait() {

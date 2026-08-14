@@ -184,6 +184,13 @@ only push in the system: everything else here has to be looked at. It fires on t
 transition rather than the state, so the loop's per-pass report and the notification are
 not the same thing and the second does not become noise.
 
+If `[telegram] fetch` is set, each pass then reads the replies to those notifications and
+signs what they approved — after promotion, so a bare `approve` is read against a task
+the queue has already settled, and before dispatch, so the signature releases the work on
+this pass rather than the next. The signature is an ordinary ledger record given by the
+replier's post; the gates below cannot tell it apart from a typed one, which is why
+nothing below mentions it again.
+
 A task waiting for a dispatch signature is reported as `⏸ <id> needs your signature` and
 passed over, not dispatched into a refusal — waiting for a person is not a failure, and
 printing it as one sends the operator looking for a bug. It is passed over *before* the

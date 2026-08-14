@@ -226,6 +226,23 @@ impl Actor {
         }
     }
 
+    /// A person acting over a channel rather than from a seat at a terminal.
+    ///
+    /// The channel is both the session and the agent, because it is both: it is how the
+    /// act arrived, and it is what typed it. [`Self::of`] would name the post's agent
+    /// instead, and a signature the ledger attributes to `claude-code` because a person
+    /// replied to a message on their phone is a record that says the wrong thing about
+    /// who was at the keyboard.
+    pub(crate) fn over(company: &Company, post: &Post, channel: &str, human: String) -> Self {
+        Self {
+            post: post.name.clone(),
+            agent: channel.to_string(),
+            human: Some(human),
+            session: channel.to_string(),
+            effective: company.effective(post),
+        }
+    }
+
     pub(crate) fn of(company: &Company, post: &Post, session: &str, human: Option<String>) -> Self {
         Self {
             post: post.name.clone(),

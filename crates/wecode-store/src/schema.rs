@@ -15,7 +15,8 @@ use rusqlite::Connection;
 ///
 /// 2 adds `projects.archived`. 3 adds `task_executions`. 4 adds
 /// `task_executions.spent_tokens`, once something wrote it. 5 adds `worktrees`.
-pub const VERSION: i64 = 5;
+/// 6 adds `inbox_cursor`.
+pub const VERSION: i64 = 6;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -178,6 +179,20 @@ CREATE TABLE worktrees (
 
 CREATE UNIQUE INDEX worktrees_live    ON worktrees(path) WHERE removed IS NULL;
 CREATE INDEX        worktrees_by_task ON worktrees(task_id);
+
+-- How far a reply channel has been read. One row per channel; `telegram` is the
+-- only one today.
+--
+-- Not derivable from the ledger, which is why it is a table. A signature records
+-- that a holder approved something; it cannot record that a particular *message*
+-- has been looked at, and a message that says `no` leaves no signature at all yet
+-- must still not be read a second time. `last_id` is the highest update the channel
+-- has handed over, whatever came of it.
+CREATE TABLE inbox_cursor (
+    channel TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL,
+    at      INTEGER NOT NULL
+) STRICT;
 ";
 
 /// The `task_executions` table, as an upgrade for a database that predates it.
@@ -226,6 +241,22 @@ CREATE TABLE worktrees (
 
 CREATE UNIQUE INDEX worktrees_live    ON worktrees(path) WHERE removed IS NULL;
 CREATE INDEX        worktrees_by_task ON worktrees(task_id);
+";
+
+/// The `inbox_cursor` table, as an upgrade for a database that predates it.
+///
+/// Frozen at the shape version 5 had, like the two above. Nothing backfills, and here
+/// that is load-bearing rather than merely honest: an invented cursor would be a claim
+/// about which replies have already been read, and the two ways of getting it wrong
+/// are acting on a month of chat or silently dropping the reply that is waiting. An
+/// absent row means "nothing read yet", which the fetch turns into an offset of 0 —
+/// whatever the channel still holds.
+const ADD_INBOX: &str = "
+CREATE TABLE inbox_cursor (
+    channel TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL,
+    at      INTEGER NOT NULL
+) STRICT;
 ";
 
 /// What `migrate` should do about a file at `current`.
@@ -279,6 +310,7 @@ const UPGRADES: &[(i64, &str)] = &[
         "ALTER TABLE task_executions ADD COLUMN spent_tokens INTEGER",
     ),
     (4, ADD_WORKTREES),
+    (5, ADD_INBOX),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -402,6 +434,30 @@ mod tests {
             .query_row("SELECT count(*) FROM worktrees", [], |r| r.get(0))
             .expect("worktrees exists after 4→5");
         assert_eq!(trees, 0);
+        let read: i64 = c
+            .query_row("SELECT count(*) FROM inbox_cursor", [], |r| r.get(0))
+            .expect("inbox_cursor exists after 5→6");
+        assert_eq!(read, 0);
+    }
+
+    #[test]
+    fn a_database_that_predates_the_inbox_gains_it_having_read_nothing() {
+        // The upgrade a workspace in use takes to reach this build. A cursor invented
+        // for it would be a claim about which replies have already been handled, and
+        // both ways of guessing are bad: too low re-reads a month of chat, too high
+        // swallows the reply that is waiting. Absent means "read nothing", which the
+        // fetch turns into an offset of 0.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("DROP TABLE inbox_cursor").unwrap();
+        c.pragma_update(None, "user_version", 5i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let rows: i64 = c
+            .query_row("SELECT count(*) FROM inbox_cursor", [], |r| r.get(0))
+            .expect("the cursor table exists");
+        assert_eq!(rows, 0, "no channel is claimed to have been read");
     }
 
     #[test]
@@ -411,7 +467,8 @@ mod tests {
         // put a creation date in the database that nobody observed.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("DROP TABLE worktrees").unwrap();
+        c.execute_batch("DROP TABLE worktrees; DROP TABLE inbox_cursor;")
+            .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
              VALUES ('p','wecode','an objective','active');
@@ -455,10 +512,12 @@ mod tests {
         // token count and must read as unmetered rather than as free.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        // Back to the shape version 3 really had: no spend column, no worktrees.
+        // Back to the shape version 3 really had: no spend column, no worktrees, no
+        // inbox cursor.
         c.execute_batch(
             "ALTER TABLE task_executions DROP COLUMN spent_tokens;
-             DROP TABLE worktrees;",
+             DROP TABLE worktrees;
+             DROP TABLE inbox_cursor;",
         )
         .unwrap();
         c.execute_batch(

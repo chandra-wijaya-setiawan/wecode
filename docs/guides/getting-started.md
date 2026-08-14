@@ -134,6 +134,36 @@ variables is in [config.md](../reference/config.md#the-notify-hook). Anything th
 in a shell works, and a hook that fails is reported rather than allowed to affect the
 task.
 
+## Signing from your phone
+
+Being told at 02:14 only helps if you can answer. Send the notification to a Telegram bot
+of your own, and let wecode read the replies:
+
+```toml
+[notify]
+command = "curl -sS -m 10 -d chat_id=$TG_CHAT --data-urlencode text=\"$WECODE_TASK needs you: $WECODE_WAITING_FOR\" https://api.telegram.org/bot$TG_TOKEN/sendMessage"
+
+[telegram]
+fetch = "curl -sS -m 20 \"https://api.telegram.org/bot$TG_TOKEN/getUpdates?offset=$WECODE_TELEGRAM_OFFSET\""
+
+[[users]]
+name = "you"
+post = "chief"
+telegram = "48210934"     # your numeric account id
+```
+
+Now reply `approve` to that message. `wecode loop` reads the channel every pass and signs
+what the task was waiting for — the merge, the design, the dispatch signature — as a
+ledger record given by your post, checked the way a typed one is. `no` signs nothing and
+leaves it waiting; anything else is treated as chat.
+
+Two things worth knowing before you point it at a real bot. Only an account named in
+`[[users]]` can sign anything, so a stranger who finds your bot cannot; and the bot token
+is a credential — keep it in the environment, as above, rather than in the file. Set it
+up with `wecode telegram --dry-run`, which says what the waiting replies would sign
+without signing them. The rest is in
+[config.md](../reference/config.md#signing-from-a-reply).
+
 ## Working through an agent
 
 wecode is meant to be driven by your coding agent rather than typed. One line in

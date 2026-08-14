@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod execution;
+pub mod inbox;
 mod int;
 pub mod plan;
 pub mod schema;
