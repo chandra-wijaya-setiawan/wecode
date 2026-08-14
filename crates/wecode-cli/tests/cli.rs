@@ -4669,3 +4669,219 @@ fn merging_twice_is_refused_rather_than_silently_doing_nothing() {
     assert!(!r.ok(), "a no-op merge must not read as success");
     r.assert_contains("already merged");
 }
+
+// ---------------------------------------------------------------- notify ------
+
+/// Points the workspace's notify hook at a file, and returns where it will write.
+///
+/// A file rather than a real notifier: what is being proved is that a command runs
+/// with the task in its environment, and `notify-send` would prove the same thing
+/// only on a machine with a desktop on it.
+fn notified(org: &Org, body: &str) -> PathBuf {
+    let log = org.path("notified.txt");
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        format!(
+            "{text}\n[notify]\ncommand = \"{body} >> {}\"\ntimeout = \"30s\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    log
+}
+
+/// Every line the hook has written, in order.
+fn announcements(log: &Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn a_task_that_stops_for_a_person_runs_the_hook() {
+    // The gap using wecode on itself kept finding. Everything up to the moment a task
+    // needs a signature happens unattended; the notification that it does was the
+    // operator remembering to look at a terminal.
+    let org = Org::new("notify-stops", "solo");
+    org.seed();
+    let log = notified(
+        &org,
+        "echo $WECODE_TASK $WECODE_WAITING_FOR $WECODE_TASK_STATUS $WECODE_PROJECT",
+    );
+
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("stop it for a person");
+    assert_eq!(
+        announcements(&log),
+        vec!["cache-tests approval needs-approval caching"]
+    );
+}
+
+#[test]
+fn work_that_does_not_stop_announces_nothing() {
+    // The control, and the whole reason this is edge-triggered: a hook that fired on
+    // every status change would be one the operator silences within a day.
+    let org = Org::new("notify-quiet", "solo");
+    org.seed();
+    let log = notified(&org, "echo $WECODE_TASK");
+
+    for status in ["running", "verifying", "done"] {
+        org.run(&["status", "cache-tests", status])
+            .assert_ok(status);
+    }
+    assert!(announcements(&log).is_empty(), "{:?}", announcements(&log));
+}
+
+#[test]
+fn one_wait_is_announced_once_however_it_is_renamed() {
+    // `failed` → `needs-input` is a person who is already holding this task being
+    // told about it again. The wait began once, and that is what is announced.
+    let org = Org::new("notify-once", "solo");
+    org.seed();
+    let log = notified(&org, "echo $WECODE_WAITING_FOR");
+
+    for status in ["failed", "needs-input", "needs-approval"] {
+        org.run(&["status", "cache-tests", status])
+            .assert_ok(status);
+    }
+    assert_eq!(announcements(&log), vec!["failed"]);
+
+    // Released, then stuck again: a second wait, and a second announcement.
+    org.run(&["status", "cache-tests", "ready"]).assert_ok("go");
+    org.run(&["status", "cache-tests", "failed"])
+        .assert_ok("stuck again");
+    assert_eq!(announcements(&log), vec!["failed", "failed"]);
+}
+
+#[test]
+fn a_run_that_ends_in_front_of_a_person_announces_it() {
+    // The path that matters most: nobody is watching when this happens, which is the
+    // entire premise of `wecode loop`.
+    let (org, _) = with_agent("notify-run", "echo done >> a.txt");
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+    let log = notified(&org, "echo $WECODE_TASK $WECODE_WAITING_FOR");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed");
+    assert_eq!(announcements(&log), vec!["t approval"]);
+}
+
+#[test]
+fn a_run_that_fails_its_acceptance_announces_that_instead() {
+    let (org, _) = with_agent("notify-run-fail", "echo nothing >> a.txt");
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+    let log = notified(&org, "echo $WECODE_TASK $WECODE_WAITING_FOR");
+
+    org.run(&["run", "t"]).assert_ok("run");
+    assert_eq!(announcements(&log), vec!["t failed"]);
+}
+
+#[test]
+fn the_loop_announces_a_task_it_is_holding_for_a_signature() {
+    // The one wait with no status change behind it: the task is `ready` and stays
+    // ready. Without this the dispatch gate is a queue that stops silently.
+    let org = signs_first("notify-signature", "echo done >> src/app.txt");
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+    let log = notified(
+        &org,
+        "echo $WECODE_TASK $WECODE_WAITING_FOR $WECODE_TASK_STATUS",
+    );
+
+    org.run(&["loop", "--once"])
+        .assert_ok("one pass")
+        .assert_contains("⏸ t needs your signature");
+    assert_eq!(announcements(&log), vec!["t signature ready"]);
+}
+
+#[test]
+fn a_hook_that_fails_is_reported_without_touching_the_verdict() {
+    // A notification is not part of judging the work. The task stopped for a person
+    // whether or not anything managed to tell them, and a command that failed because
+    // its notifier did would send the operator hunting in the wrong place.
+    let org = Org::new("notify-broken", "solo");
+    org.seed();
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(&conf, format!("{text}\n[notify]\ncommand = \"exit 7\"\n")).unwrap();
+
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("the status change still succeeds")
+        .assert_contains("⚠ notify")
+        .assert_contains("exited 7");
+    org.run(&["show", "cache-tests"])
+        .assert_contains("status     needs-approval");
+}
+
+#[test]
+fn a_workspace_with_no_hook_runs_nothing() {
+    // The default. Every workspace that has never heard of the setting is one of
+    // these, and none of them may start a process because a task stopped.
+    let org = Org::new("notify-absent", "solo");
+    org.seed();
+    org.run(&["status", "cache-tests", "failed"])
+        .assert_ok("stop it")
+        .assert_lacks("notify");
+}
+
+#[test]
+fn a_notify_command_the_charter_forbids_is_refused_rather_than_run() {
+    // An invariant outranks every grant, and company.toml does not get to be the
+    // exception because the line happens to be in a different block of it.
+    let org = Org::new("notify-forbidden", "solo");
+    org.seed();
+    // Written relative, because the hook runs in the workspace: an absolute path in
+    // the command line would put a `/` in it, and `*` stays inside one segment.
+    let log = org.path("notified.txt");
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    let charter = text.replace(
+        "never_run = [\"git push --force*\", \"npm publish*\"]",
+        "never_run = [\"git push --force*\", \"curl *\"]",
+    );
+    assert_ne!(charter, text, "the template's never_run was not replaced");
+    std::fs::write(
+        &conf,
+        format!("{charter}\n[notify]\ncommand = \"curl -so notified.txt example.invalid\"\n"),
+    )
+    .unwrap();
+
+    org.run(&["status", "cache-tests", "failed"])
+        .assert_ok("the task still stops")
+        .assert_contains("never_run");
+    assert!(!log.exists(), "the hook must not have run");
+}
+
+#[test]
+fn the_profile_says_whether_anything_will_tell_you() {
+    // Both ways round, because "why did nothing tell me" is answered by the absence
+    // as much as by the command, and a line only printed when a hook exists answers
+    // it with the same silence being complained about.
+    let org = Org::new("notify-shown", "solo");
+    org.run(&["company", "show"])
+        .assert_ok("show")
+        .assert_contains("notify:    nothing");
+
+    notified(&org, "echo $WECODE_TASK");
+    org.run(&["company", "show"])
+        .assert_ok("show")
+        .assert_contains("when a task starts waiting, killed after 30s");
+}
+
+#[test]
+fn a_notify_block_with_nothing_to_run_is_refused_at_load() {
+    // The failure a gate must not have: a setting that reads as configured and
+    // behaves as absent. Refused where every other bad value in this file is.
+    let org = Org::new("notify-blank", "solo");
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(&conf, format!("{text}\n[notify]\ncommand = \"\"\n")).unwrap();
+
+    let r = org.run(&["company", "show"]);
+    assert!(!r.ok(), "should refuse");
+    r.assert_contains("[notify] command");
+}

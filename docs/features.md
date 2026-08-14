@@ -194,6 +194,29 @@ the run ended — a killed agent still burned what it burned.
 | **`wecode board`** | the same view as a one-shot snapshot |
 | **`wecode brief`** | orients an agent, derived from its grant rather than stored |
 | **`wecode tree` / `ready`** | the plan, and what is startable |
+| **Notify hook** | a command wecode runs when a task starts waiting on a person |
+
+**The notify hook is the only thing here that does not wait to be looked at.** Every
+view above answers a question the operator thought to ask; a task that stopped at 02:14
+for a signature sat there until somebody next opened a terminal, which is the one part
+of running unattended that was still manual. `[notify] command` runs when a task
+*starts* waiting — the transition, not the state, so a task waiting a week fires once —
+and the operator decides what telling them means: a desktop notification, a message, a
+line in a file. The task arrives in the environment rather than substituted into the
+command line, since a title is prose and a shell would read it as syntax.
+
+`WECODE_WAITING_FOR` is what the hook branches on, and it has four values where the
+board has three: `approval`, `input` and `failed` restate a status, and `signature` is
+the dispatch gate holding a task that is otherwise `ready` — a wait with no status to
+express it, which is exactly why the loop had to print it every pass. That one is
+announced by the loop that computes it, once per task while it stays unsigned.
+
+A hook cannot fail the work: a non-zero exit, a hang, a command that is not there are
+all reported as a warning beside the verdict and stepped over, because a task is not
+less finished for a notification going astray. It is killed at `[notify] timeout`, since
+`wecode loop` runs for days. And it is checked against `never_run` like any other
+command wecode executes — an invariant outranks every grant, and a config is not an
+exception.
 
 Health is **computed** from the ledger, the budget and the defect checks — never
 reported. It is the colour of the needs-you cell rather than a column of its own:

@@ -178,6 +178,12 @@ Concurrency comes from `max_open_items`, the operator's attention, not from core
 loop stops dispatching entirely while anything needs a human, because more work in
 flight does not help an unanswered question.
 
+Whenever a task *starts* waiting on a person — verified and unlanded, failed, or held by
+the dispatch gate — the `[notify] command` runs, if the workspace has one. That is the
+only push in the system: everything else here has to be looked at. It fires on the
+transition rather than the state, so the loop's per-pass report and the notification are
+not the same thing and the second does not become noise.
+
 A task waiting for a dispatch signature is reported as `⏸ <id> needs your signature` and
 passed over, not dispatched into a refusal — waiting for a person is not a failure, and
 printing it as one sends the operator looking for a bug. It is passed over *before* the

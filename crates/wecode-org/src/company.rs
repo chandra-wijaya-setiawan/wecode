@@ -93,6 +93,8 @@ struct Wire {
     #[serde(default)]
     session: SessionBlock,
     #[serde(default)]
+    notify: NotifyBlock,
+    #[serde(default)]
     repos: Vec<Repo>,
     #[serde(default)]
     roles: BTreeMap<String, RoleBlock>,
@@ -180,6 +182,35 @@ fn eight_hours() -> String {
 impl Default for SessionBlock {
     fn default() -> Self {
         Self { ttl: eight_hours() }
+    }
+}
+
+/// The hook run when a task starts waiting on a person.
+///
+/// `command` is an `Option` rather than a defaulted string so that writing it empty
+/// can be refused: a `[notify]` block with nothing to run means to notify and does
+/// not, and the whole point of the block is to be believed.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct NotifyBlock {
+    command: Option<String>,
+    #[serde(default = "ten_seconds")]
+    timeout: String,
+}
+
+fn ten_seconds() -> String {
+    "10s".to_string()
+}
+
+// Hand-written, like `SessionBlock`'s: a derived `Default` would take the empty
+// string rather than the `#[serde(default)]` function, and an absent block would
+// then fail to parse the timeout it never named.
+impl Default for NotifyBlock {
+    fn default() -> Self {
+        Self {
+            command: None,
+            timeout: ten_seconds(),
+        }
     }
 }
 
@@ -279,6 +310,20 @@ pub struct Attention {
     pub digest_interval_mins: u64,
 }
 
+/// What to run when a task stops for a person, and how long to let it take.
+///
+/// The other half of the attention budget. `max_open_items` bounds what may be in
+/// flight; this is how the operator finds out that one of those things now needs
+/// them, without having to be watching when it happens.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Notify {
+    /// `None` — the default — is no hook, and nothing is run.
+    pub command: Option<String>,
+    /// How long the hook may take before it is killed. A notifier that hangs must
+    /// not take the loop with it.
+    pub timeout: Duration,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Company {
     pub name: String,
@@ -286,6 +331,7 @@ pub struct Company {
     pub profile: String,
     pub vision: String,
     pub attention: Attention,
+    pub notify: Notify,
     pub charter: Charter,
     pub repos: Vec<Repo>,
     pub roles: BTreeMap<String, Grant>,
@@ -365,6 +411,7 @@ impl Company {
                 max_interrupts_per_hour: w.attention.max_interrupts_per_hour,
                 digest_interval_mins: w.attention.digest_interval_mins,
             },
+            notify: notify_of(&w.notify)?,
             charter: charter_of(&w.invariants),
             session_ttl: parse_duration(&w.session.ttl).ok_or_else(|| OrgError::BadValue {
                 at: "[session] ttl".into(),
@@ -432,6 +479,31 @@ impl Company {
         }
         Ok(())
     }
+}
+
+/// The notify hook as configured, with the two ways of writing it wrong refused.
+///
+/// A blank command and a zero timeout are both a block that reads as configured and
+/// behaves as absent — the first announces nothing, the second kills the hook before
+/// it can run. Neither is a shape anyone means, and both are silent.
+fn notify_of(b: &NotifyBlock) -> Result<Notify, OrgError> {
+    let command = match b.command.as_deref().map(str::trim) {
+        None => None,
+        Some("") => {
+            return Err(OrgError::BadValue {
+                at: "[notify] command".into(),
+                value: b.command.clone().unwrap_or_default(),
+            });
+        }
+        Some(cmd) => Some(cmd.to_string()),
+    };
+    let timeout = parse_duration(&b.timeout)
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| OrgError::BadValue {
+            at: "[notify] timeout".into(),
+            value: b.timeout.clone(),
+        })?;
+    Ok(Notify { command, timeout })
 }
 
 fn charter_of(b: &InvariantBlock) -> Charter {
@@ -604,6 +676,52 @@ agent = "claude-code"
                 assert_eq!(value, "whenever");
             }
             other => panic!("expected BadValue, got {other}"),
+        }
+    }
+
+    #[test]
+    fn no_notify_block_is_no_hook() {
+        // The default has to be silence: a workspace that has never heard of the
+        // setting must not try to run anything when a task stops.
+        let c = Company::parse(MINIMAL).unwrap();
+        assert_eq!(c.notify.command, None);
+        assert_eq!(c.notify.timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_notify_command_is_taken_with_its_own_timeout() {
+        let text = format!("{MINIMAL}\n[notify]\ncommand = \"say hello\"\ntimeout = \"2m\"\n");
+        let c = Company::parse(&text).unwrap();
+        assert_eq!(c.notify.command.as_deref(), Some("say hello"));
+        assert_eq!(c.notify.timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn a_blank_notify_command_is_refused_rather_than_read_as_off() {
+        // The failure a gate must not have, in its quiet form: a block that says a
+        // notification will happen, and a value that means none ever will.
+        for blank in ["\"\"", "\"   \""] {
+            let text = format!("{MINIMAL}\n[notify]\ncommand = {blank}\n");
+            match Company::parse(&text).unwrap_err() {
+                OrgError::BadValue { at, .. } => assert!(at.contains("[notify] command"), "{at}"),
+                other => panic!("expected BadValue, got {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_notify_timeout_that_could_never_finish_is_refused() {
+        // Zero kills the hook before it runs, which is a hook that silently never
+        // fires; an unparseable one would default to something nobody asked for.
+        for bad in ["0s", "later"] {
+            let text = format!("{MINIMAL}\n[notify]\ncommand = \"true\"\ntimeout = \"{bad}\"\n");
+            match Company::parse(&text).unwrap_err() {
+                OrgError::BadValue { at, value } => {
+                    assert!(at.contains("[notify] timeout"), "{at}");
+                    assert_eq!(value, bad);
+                }
+                other => panic!("expected BadValue, got {other}"),
+            }
         }
     }
 
