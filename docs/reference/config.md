@@ -104,6 +104,12 @@ is the truth and not a zero.
 In the repository, committed. `.wecode/run/` is the worker-writable area and should be
 gitignored; the playbook should not be.
 
+`wecode playbook init` writes the first one. Where the language is known — read off
+`Cargo.toml`, `go.mod`, `pyproject.toml` or `package.json`, or given with `--language` —
+the file arrives with that toolchain's acceptance commands, its shared build cache, and
+the lock file a build rewrites named in the write scope; everything below is then an
+edit rather than a blank.
+
 ```toml
 [project]
 language = "rust"

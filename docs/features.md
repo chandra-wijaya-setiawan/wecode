@@ -12,6 +12,7 @@ The inventory, including what is weak. Anything not here is not built — see
 | **Seven kinds** | feature, bug, refactor, chore, spike, design, docs |
 | **Admission gate** | deterministic defect checks, each carrying a fixed question |
 | **Playbooks** | per-project guidance, in the project's own repo |
+| **Starters that know a toolchain** | `playbook init` reads the repo's manifest and writes real commands |
 | **Playbook gaps** | a planner records what the guidance did not say; the next one reads it |
 | **Templated decomposition** | `--expand` emits the subtasks a playbook declares |
 | **Design gate** | `design_required` refuses a kind with no design task behind it |
@@ -48,6 +49,20 @@ judged before it can land, which is what makes it safe to leave `auto` where `me
 prose for how to break work down, plus a few typed fields wecode acts on: whether the
 kind needs a worktree, the default acceptance commands, assignee and budget, and the
 merge policy. They live in the repo because they describe that code.
+
+**A starter knows its toolchain.** `wecode playbook init` used to write the same TODO
+template whatever `--language` said — the word landed in one field and changed nothing
+else — so every project began with `accept = []`, no shared build cache, and a subtask
+example scoped to `src/**` and nothing a build touches. Each of those was paid for by
+the project's first task, and one repo acquired `python -m pytest` on a machine with no
+`python`. The language is now read off the repository's own manifest, and it decides the
+acceptance commands, the `[project.build_cache]` block, and the lock file named in the
+write scope and in the guidance of every kind that changes code. The table is consulted
+once, while the file is written; nothing at run time branches on a language, so being
+wrong about one costs an edit. wecode writes for rust, go, python and node, and a
+language it does not have still gets the file it always got. What was decided is printed
+rather than left in the file, including whether this machine can run what was written —
+a starter naming an absent program is a warning there and a refusal everywhere else.
 
 **Playbook gaps** close the loop the other way. A playbook is hand-edited and in no
 role's write scope, which is right and left the planner that discovered the guidance was

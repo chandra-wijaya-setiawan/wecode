@@ -1526,19 +1526,102 @@ fn playbook_init_writes_a_file_that_then_parses() {
 
     org.run(&["playbook", "init", "--language", "rust"])
         .assert_ok("playbook init")
-        .assert_contains("playbook.toml");
+        .assert_contains("playbook.toml")
+        // Every decision the starter made on the project's behalf is reported, not
+        // left in the file for whoever thinks to open it.
+        .assert_contains("cargo test --workspace")
+        .assert_contains("CARGO_TARGET_DIR = ~/.cache/wecode/repo/target");
     assert!(repo.join(".wecode/playbook.toml").is_file());
 
-    // The starter must be valid, or adoption fails at the first step.
+    // The starter must be valid, or adoption fails at the first step — and the
+    // commands it wrote are the ones the project now runs.
     org.run(&["playbook"])
         .assert_ok("playbook")
         .assert_contains("rust")
-        .assert_contains("bug");
+        .assert_contains("bug")
+        .assert_contains("cargo test --workspace");
 
     // And it refuses to overwrite.
     let again = org.run(&["playbook", "init"]);
     assert!(!again.ok());
     again.assert_contains("already exists");
+}
+
+#[test]
+fn playbook_init_reads_the_toolchain_off_the_repository() {
+    // The flag that gets left off. A project scaffolded without `--language` used to
+    // get `accept = []` and a TODO for every kind, and the first task paid for it.
+    let org = Org::new("pb-init-detect", "solo");
+    let repo = org.repo_without_playbook();
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"toy\"\n").unwrap();
+    org.run(&[
+        "project",
+        "add",
+        "p",
+        "add response caching to the export endpoint",
+        "--repo",
+        "app",
+        "--measure-cmd",
+        "true",
+        "--tokens",
+        "10",
+        "--wall",
+        "1",
+    ])
+    .assert_ok("project");
+
+    org.run(&["playbook", "init"])
+        .assert_ok("playbook init")
+        .assert_contains("read off Cargo.toml")
+        .assert_contains("cargo clippy --all-targets -- -D warnings");
+
+    let text = std::fs::read_to_string(repo.join(".wecode/playbook.toml")).unwrap();
+    assert!(text.contains("language = \"rust\""), "{text}");
+    assert!(text.contains("[project.build_cache]"), "{text}");
+    // And the trap that cost a task: the file a build rewrites, said where a planner
+    // reads it rather than left to be discovered by a scope violation.
+    assert!(text.contains("Cargo.lock"), "{text}");
+}
+
+#[test]
+fn playbook_init_says_when_this_machine_cannot_run_what_it_wrote() {
+    // A starter names a real test command, so it can name one this machine does not
+    // have — the mistake wemail made with `python -m pytest`. The file is still
+    // written: it is right for the repository and wrong only here.
+    let org = Org::new("pb-init-absent", "solo");
+    org.repo_without_playbook();
+    org.run(&[
+        "project",
+        "add",
+        "p",
+        "add response caching to the export endpoint",
+        "--repo",
+        "app",
+        "--measure-cmd",
+        "true",
+        "--tokens",
+        "10",
+        "--wall",
+        "1",
+    ])
+    .assert_ok("project");
+
+    let out = org.run(&["playbook", "init", "--language", "python"]);
+    out.assert_ok("playbook init");
+    if which("uv").is_none() {
+        out.assert_contains("not on this machine")
+            .assert_contains("uv");
+    }
+}
+
+/// Whether `sh` could start this program here. The same question the playbook's
+/// load-time check asks, asked by a test that must pass on either kind of machine.
+fn which(program: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(program))
+            .find(|p| p.is_file())
+    })
 }
 
 #[test]

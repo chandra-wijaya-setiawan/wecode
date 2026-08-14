@@ -49,7 +49,11 @@ PLAN
         replace a scope after the fact; recorded violations are not erased
 
   wecode playbook [<kind>]             this project's guidance for that kind
-        --project <p>   init            `init` writes a starter into the repo
+        --project <p>
+  wecode playbook init [--language <l>]   writes a starter into the repo; the language
+                                        decides its accept commands, its shared build
+                                        cache and the globs a build dirties, and is
+                                        read off the repo's manifest when omitted
   wecode playbook gap "<what the guidance does not say>"
         --kind <k> --task <id>          record a gap you found while planning;
                                         shown to whoever reads that kind next
@@ -102,6 +106,20 @@ discovered — is a line in your `~/.claude/CLAUDE.md`: *if I say "use wecode", 
 
 **`wecode playbook <kind>`** is what an orchestrator reads before decomposing a request
 into tasks. See [../guides/playbooks.md](../guides/playbooks.md).
+
+**`wecode playbook init`** writes that file. The language decides what goes in it — the
+acceptance commands for every kind that changes code, the `[project.build_cache]` the
+worktrees share, and the globs a build dirties in the subtask example — and it is read
+off the repository's own manifest (`Cargo.toml`, `go.mod`, `pyproject.toml`,
+`package.json`) unless `--language` says otherwise. wecode writes starters for rust, go,
+python and node; any other language gets the prompts-and-TODO file, which is what every
+language used to get.
+
+What it decided is printed rather than left in the file, because those are the lines you
+are expected to disagree with. If the commands it wrote name a program this machine does
+not have, it says so and still writes the file: the playbook is right for the repository
+and wrong only here, and every command that reads it will refuse it until that line is
+changed. See [../guides/playbooks.md](../guides/playbooks.md).
 
 **`wecode playbook gap "<...>"`** is the way back in. An orchestrator that plans against
 the guidance and finds out afterwards that it was short records the finding, and it is
