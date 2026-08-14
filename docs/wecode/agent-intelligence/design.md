@@ -143,7 +143,13 @@ ceiling, and a `min` there would be a branch no input can enter. Resolution is s
 own step, because that is where a clamp would belong the day a level can be *asked for*
 rather than written down — a per-task override, which is the piece below.
 
-**`--intelligence` on a task is not built.** The seat is the main lever and it works;
+**`--intelligence` on a task is not built _in this slice_.** Superseded — `task-intelligence`
+builds it. Left here because the reasoning still holds for why it was not built *first*;
+read it as history rather than as an instruction. An agent picking up that task read this
+paragraph as a decision to honour and produced nothing, which is what a design record
+looks like when it ages into guidance.
+
+**Originally:** The seat is the main lever and it works;
 the override is for the exception, and it needs to freeze with the acceptance and the
 scope to be worth having, which is a change to the task record rather than to this
 slice. Recorded as an absence in [features.md](../../features.md) rather than left as a
