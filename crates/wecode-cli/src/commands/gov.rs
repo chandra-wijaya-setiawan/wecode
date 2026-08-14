@@ -1,7 +1,7 @@
 //! Commands over the governance plane: authorising an action, signing one off, and
 //! reading the ledger afterwards.
 
-use wecode_core::{TaskId, TaskStatus};
+use wecode_core::TaskStatus;
 use wecode_gov::{Action, ActionKind, glob};
 use wecode_store::{AuditQuery, Store};
 
@@ -77,11 +77,7 @@ pub(crate) fn approve(a: &Args) -> Res {
     // Checked before the Broker is asked, so a mistyped id costs a message rather than
     // a record that looks like authority.
     let task = match a.get("task") {
-        Some(id) => Some(
-            plan.task(&TaskId::new(id))
-                .ok_or_else(|| format!("no such task: {id}"))?
-                .clone(),
-        ),
+        Some(id) => Some(the_task(&plan, id)?.clone()),
         None => None,
     };
     let who = actor(a, &store, &company)?;
@@ -221,13 +217,26 @@ pub(crate) fn inbox(a: &Args) -> Res {
 
 pub(crate) fn audit(a: &Args) -> Res {
     let (store, _) = open(a)?;
+    // The ledger is keyed on ids, so a number has to become one before it reaches the
+    // query. Resolved here rather than through `attribution`, which would also fill the
+    // project in from the task and silently narrow a filter nobody asked to narrow.
+    //
+    // Left as typed when nothing in the plan answers to it: a removed task's records
+    // outlive the task, and naming it by id is how they stay reachable.
+    let plan = store.load_plan()?;
+    let by_id = |flag: &str, found: fn(&wecode_core::Plan, &str) -> Option<String>| {
+        a.get(flag)
+            .map(|typed| found(&plan, typed).unwrap_or_else(|| typed.to_string()))
+    };
     // Filtering happens in SQL where the index is; only the glob, which SQLite
     // cannot express, is applied afterwards.
     let q = AuditQuery {
         denied_only: a.has("denied"),
         alarms_only: a.has("alarms"),
-        project: a.get("project").map(str::to_string),
-        task: a.get("task").map(str::to_string),
+        project: by_id("project", |p, t| {
+            p.project_ref(t).map(|x| x.id.to_string())
+        }),
+        task: by_id("task", |p, t| p.task_ref(t).map(|x| x.id.to_string())),
         // A limit larger than this machine can index is a limit of "everything".
         limit: a
             .num("limit")
@@ -253,12 +262,9 @@ pub(crate) fn audit(a: &Args) -> Res {
 /// `--no-ff` commit, and the report says what undoes it.
 pub(crate) fn merge_task(a: &Args) -> Res {
     let (ws, store, company) = open_full(a)?;
-    let id = TaskId::new(require(a.cmd(1), "task id")?);
     let plan = store.load_plan()?;
-    let task = plan
-        .task(&id)
-        .ok_or_else(|| format!("no such task: {id}"))?
-        .clone();
+    let task = the_task(&plan, require(a.cmd(1), "task id")?)?.clone();
+    let id = task.id.clone();
     let project = plan
         .project(&task.project)
         .ok_or_else(|| format!("no such project: {}", task.project))?;
@@ -409,12 +415,9 @@ pub(crate) fn merge_task(a: &Args) -> Res {
 /// which is the honest record — it did happen.
 pub(crate) fn rollback_task(a: &Args) -> Res {
     let (ws, store, company) = open_full(a)?;
-    let id = TaskId::new(require(a.cmd(1), "task id")?);
     let plan = store.load_plan()?;
-    let task = plan
-        .task(&id)
-        .ok_or_else(|| format!("no such task: {id}"))?
-        .clone();
+    let task = the_task(&plan, require(a.cmd(1), "task id")?)?.clone();
+    let id = task.id.clone();
     let project = plan
         .project(&task.project)
         .ok_or_else(|| format!("no such project: {}", task.project))?;

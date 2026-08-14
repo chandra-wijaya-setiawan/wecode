@@ -10,6 +10,7 @@ use std::fmt;
 use crate::common::TaskStatus;
 use crate::id::{ProjectId, TaskId};
 use crate::project::Project;
+use crate::short::{self, Number};
 use crate::task::Task;
 
 /// Structural rejections. These make the plan incoherent, so they are errors
@@ -102,6 +103,42 @@ impl Plan {
     #[must_use]
     pub fn task(&self, id: &TaskId) -> Option<&Task> {
         self.tasks.get(id)
+    }
+
+    /// The project a reference an operator typed names — its id, or its short number.
+    ///
+    /// The one resolver for `--project` and for every command that takes a project
+    /// positionally. Two of these would be two answers to *what does `4` mean*.
+    #[must_use]
+    pub fn project_ref(&self, typed: &str) -> Option<&Project> {
+        short::resolve(
+            typed,
+            |name| self.project(&ProjectId::new(name)),
+            |n| self.project_numbered(n),
+        )
+    }
+
+    /// The task a reference an operator typed names — its id, or its short number.
+    #[must_use]
+    pub fn task_ref(&self, typed: &str) -> Option<&Task> {
+        short::resolve(
+            typed,
+            |name| self.task(&TaskId::new(name)),
+            |n| self.task_numbered(n),
+        )
+    }
+
+    /// A scan, not an index. The number of projects and tasks a workspace holds is
+    /// bounded by what one operator can oversee, and an index would be a second copy
+    /// of the mapping to keep in step with the first.
+    #[must_use]
+    pub fn project_numbered(&self, n: Number) -> Option<&Project> {
+        self.projects.values().find(|p| p.number == Some(n))
+    }
+
+    #[must_use]
+    pub fn task_numbered(&self, n: Number) -> Option<&Task> {
+        self.tasks.values().find(|t| t.number == Some(n))
     }
 
     /// Projects the cockpit shows — archived ones omitted.
@@ -664,6 +701,40 @@ mod tests {
         live.archived = false;
         p.update_project(live).unwrap();
         assert_eq!(p.ready_tasks().count(), 1);
+    }
+
+    #[test]
+    fn a_project_or_task_is_reachable_by_its_number() {
+        let mut p = plan();
+        let mut proj = p.project(&"caching".into()).unwrap().clone();
+        proj.number = Some(Number::new(1));
+        p.update_project(proj).unwrap();
+        let mut t = task("layer");
+        t.number = Some(Number::new(2));
+        p.add_task(t).unwrap();
+
+        assert_eq!(p.project_ref("1").map(|x| x.id.as_str()), Some("caching"));
+        assert_eq!(p.project_ref("#1").map(|x| x.id.as_str()), Some("caching"));
+        assert_eq!(p.task_ref("2").map(|x| x.id.as_str()), Some("layer"));
+        assert_eq!(p.task_ref("layer").map(|x| x.id.as_str()), Some("layer"));
+
+        // The sequence spans both levels, so a number is never both. A project
+        // reference that names a task's number finds nothing rather than the project
+        // that shares the digit — there is no such project.
+        assert!(p.project_ref("2").is_none());
+        assert!(p.task_ref("1").is_none());
+        assert!(p.task_ref("99").is_none());
+    }
+
+    #[test]
+    fn an_unnumbered_plan_still_resolves_by_name() {
+        // Every in-memory plan is this: nothing has minted numbers, so `None` must not
+        // be reachable by typing a number at it.
+        let mut p = plan();
+        p.add_task(task("layer")).unwrap();
+        assert_eq!(p.task_ref("layer").map(|x| x.id.as_str()), Some("layer"));
+        assert!(p.task_ref("1").is_none());
+        assert!(p.project_ref("1").is_none());
     }
 
     #[test]

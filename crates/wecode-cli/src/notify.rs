@@ -126,6 +126,13 @@ pub(crate) fn on_signature_wait(company: &Company, org: &Path, task: &Task) -> S
     fire(company, org, task, task.status, Waiting::Signature)
 }
 
+/// The task's short number for the hook's environment, or empty when it has none.
+fn number_env(task: &Task) -> String {
+    task.number
+        .map(|n| n.get().to_string())
+        .unwrap_or_default()
+}
+
 /// Runs the hook. Returns what the caller should print: nothing when it ran or when
 /// none is configured, a warning when it did not. Never an error — see the module note.
 fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Waiting) -> String {
@@ -154,6 +161,15 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
         // was configured in — DISPLAY, DBUS_SESSION_BUS_ADDRESS, an API token. There is
         // nothing to confine here; the hook is the operator, not a worker.
         .env("WECODE_TASK", task.id.as_str())
+        // The short handle, so the message that reaches a phone can carry the thing the
+        // operator has to type back. Without it the notification names a slug and the
+        // only way to answer is to spell it out exactly, which is what kept the answer
+        // waiting until somebody reached a terminal.
+        //
+        // The digits alone, no `#`: a hook that wants the sigil writes `#$…` and a hook
+        // that wants a bare number cannot portably strip one. Empty when the task has no
+        // number, which no task loaded from a workspace does.
+        .env("WECODE_TASK_NUMBER", number_env(task))
         .env("WECODE_TASK_TITLE", &task.title)
         .env("WECODE_TASK_STATUS", status.as_str())
         .env("WECODE_PROJECT", task.project.as_str())

@@ -11,6 +11,7 @@
 
 use crate::common::{Budget, Measure, Scope, TaskStatus};
 use crate::id::{ProjectId, TaskId};
+use crate::short::Number;
 
 /// What kind of work this is. Affects reporting and routing, never authority.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
@@ -96,6 +97,9 @@ impl TaskKind {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Task {
     pub id: TaskId,
+    /// The short number this task also answers to — the handle that fits on a phone
+    /// keyboard. `None` until something mints one; see [`crate::short`].
+    pub number: Option<Number>,
     pub project: ProjectId,
     pub title: String,
     pub kind: TaskKind,
@@ -120,6 +124,7 @@ impl Task {
     ) -> Self {
         Self {
             id: id.into(),
+            number: None,
             project: project.into(),
             title: title.into(),
             kind: TaskKind::Feature,

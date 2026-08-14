@@ -1,7 +1,7 @@
 //! Commands about the company itself: scaffolding it, connecting to it, and
 //! orienting whoever just did.
 
-use wecode_core::{TaskId, TaskKind};
+use wecode_core::TaskKind;
 use wecode_gov::{Action, WorkKind};
 use wecode_org::{Company, Workspace, gap, playbook, workspace};
 
@@ -80,11 +80,7 @@ pub(crate) fn playbook_gap(a: &Args) -> Res {
     // Attribution first, because it decides the rest: a task names its own project and
     // its own kind, so `--task <id>` alone is usually the whole invocation.
     let task = match a.get("task") {
-        Some(id) => Some(
-            plan.task(&TaskId::new(id))
-                .ok_or_else(|| format!("no such task: {id}"))?
-                .clone(),
-        ),
+        Some(id) => Some(the_task(&plan, id)?.clone()),
         None => None,
     };
     let project = match (&task, a.get("project")) {

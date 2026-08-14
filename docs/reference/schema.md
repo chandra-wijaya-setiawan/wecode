@@ -4,7 +4,7 @@ One file per workspace, `wecode.db`. Everything machine-written lives here; ever
 hand-edited lives in `company.toml` (see [config.md](config.md)), because a binary blob
 cannot be diffed, reviewed or opened in an editor.
 
-Currently **schema version 6**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`.
+Currently **schema version 7**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
 
 ## Shape
 
@@ -19,6 +19,7 @@ sessions       who is connected
 audit_log      every decision and observation
 worktrees      the checkouts wecode made, and which are still standing
 inbox_cursor   how far each reply channel has been read
+short_numbers  the number each project and task also answers to
 ```
 
 `tasks.parent_id` is a self-reference: at most one parent, hence a column.
@@ -37,11 +38,20 @@ deletion of the task it describes. Everything under `projects` cascades away.
 the directory, and a row that cascaded away would turn one of wecode's own checkouts back
 into a stranger — which is the exact confusion the table exists to end.
 
+`short_numbers.id` is unreferenced for a third variant of it: the row has to outlive the
+task so the number it held is never handed to anything else. See below.
+
 ## Two properties worth knowing
 
 `audit_log.seq` is `AUTOINCREMENT`, which is what makes the ledger monotonic across
 every process that writes to it — a per-process counter got this wrong once, and every
 record claimed to be first.
+
+`short_numbers.n` is `AUTOINCREMENT` for the mirror reason. Without it SQLite reuses the
+highest free rowid, so deleting the newest task would hand its number to the next one
+created — and a notification sent six hours ago saying `#7 needs your signature` would
+then sign something nobody had looked at. `sqlite_sequence` remembers the high-water mark,
+so a number is never handed out twice however much is deleted.
 
 The database runs in **WAL** mode, so the cockpit can read while a scheduler writes.
 
@@ -68,6 +78,14 @@ The 5→6 step creates `inbox_cursor` empty for the same reason, and there it is
 load-bearing: a guessed cursor is a claim about which chat replies have already been
 handled. Too low re-reads a month of conversation, too high swallows the reply that is
 waiting. Absent means "read nothing", which the fetch asks for as offset 0.
+
+**The 6→7 step is the exception, and deliberately.** It creates `short_numbers` and then
+backfills every project and task already in the file. Nothing about that is a claim about
+the past: a short number is a name being minted now, and minting it during the upgrade is
+exactly as valid as minting it at `task add`. Not backfilling would leave a workspace
+where the only things without handles are the things already in it — which is every
+workspace that has been used. Projects first, then tasks, each in id order, so the same
+file restored on another machine is numbered the same way.
 
 ## Full DDL
 
@@ -249,7 +267,54 @@ CREATE TABLE inbox_cursor (
     last_id INTEGER NOT NULL,
     at      INTEGER NOT NULL
 ) STRICT;
+
+-- The short number each project and task also answers to, so an operator can type `4`
+-- where `cache-warm-on-deploy` was wanted. One sequence for both levels: a number names
+-- exactly one thing, and `wecode show 4` never has to ask which kind of 4 was meant.
+--
+-- `AUTOINCREMENT` rather than `max(n) + 1`, and that is the whole design. Without it
+-- SQLite reuses the highest free rowid, so deleting the newest task would hand its
+-- number to the next one created — and a notification sent six hours ago saying `#7
+-- needs your signature` would then sign something nobody had looked at. AUTOINCREMENT
+-- keeps the high-water mark in `sqlite_sequence`, so a number is never handed out
+-- twice however much is deleted. `audit_log.seq` is monotonic for the mirror reason.
+--
+-- No foreign key, for the same reason `worktrees.task_id` has none: the row has to
+-- outlive the task. A cascade would free the number, which is exactly what must not
+-- happen. What it does mean is that `wecode task rm` followed by re-adding the same id
+-- gets the same number back — the number names the id, permanently, which is a simpler
+-- promise than one depending on what has been deleted since.
+CREATE TABLE short_numbers (
+    n    INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,                     -- 'project' | 'task'
+    id   TEXT NOT NULL,
+    UNIQUE (kind, id)
+) STRICT;
 ```
+
+## A number is a name, not a position
+
+`short_numbers` is a second name for something that already has one, which normally
+earns a column rather than a table. It has a table for two reasons.
+
+The first is the sequence. A number has to be **unique across projects and tasks
+together**, or `wecode show 4` has to ask what kind of 4 was meant — and the operator
+reading a board that draws both levels has no way to know either. One `AUTOINCREMENT`
+rowid is that sequence; two columns on two tables is two sequences and a join to keep them
+apart.
+
+The second is that the row must **outlive what it names**. A number is only worth having
+if the number in a message an hour old still means what it meant, so it can never be
+recycled — and a column on `tasks` would go away with the task, freeing it. `wecode task
+rm` therefore leaves the row standing, and re-adding a task with the same id gets its old
+number back. That is the honest promise: the number names the *id*, permanently, and never
+a particular row.
+
+What is stored elsewhere is always the id. The CLI resolves a number before anything is
+written, so `audit_log.task_id`, the branch names and `docs/wecode/<task>/report.md` are
+keyed exactly as they were — the number is a way of typing, never a way of storing. See
+[commands.md](commands.md) for the resolution rules, including why a bare `7` loses to a
+task genuinely called `7`.
 
 ## Which worktrees are ours
 

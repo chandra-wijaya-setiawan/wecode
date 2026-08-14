@@ -24,7 +24,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{DefaultTerminal, Frame};
-use wecode_core::{Plan, Project, ProjectId, Task, TaskId, TaskStatus};
+use wecode_core::{Number, Plan, Project, ProjectId, Task, TaskId, TaskStatus};
 use wecode_org::Company;
 use wecode_store::{AuditLine, AuditQuery, Store};
 
@@ -83,6 +83,10 @@ impl Fold {
 /// One visible line: a subject at a depth, with its derived vitals.
 struct RowItem {
     subject: Subject,
+    /// The short number, in its own column. Not folded into `label` for the same
+    /// reason as on the snapshot board: the label carries the indent and truncates,
+    /// and a handle that moves and disappears is not a handle.
+    number: Option<Number>,
     /// Already carries its own indentation and tree glyph, so a separate depth
     /// field would be a second source of truth for the same thing.
     label: String,
@@ -393,6 +397,7 @@ impl Tree<'_> {
         let roots = sorted(self.plan.roots_of(&p.id));
         let fold = self.fold_of(&subject, !roots.is_empty());
         rows.push(RowItem {
+            number: p.number,
             label: format!(
                 "{}PROJECT {}  [{}]{}",
                 fold.glyph(),
@@ -430,6 +435,7 @@ impl Tree<'_> {
             )
         };
         rows.push(RowItem {
+            number: t.number,
             label: format!(
                 "{connector}{}{} {}",
                 fold.glyph(),
@@ -536,7 +542,7 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn table(f: &mut Frame, area: Rect, app: &mut App) {
-    let header = Row::new(vec!["what", "status", "spend", "needs you"])
+    let header = Row::new(vec!["#", "what", "status", "spend", "needs you"])
         .style(Style::new().fg(Color::DarkGray));
 
     let rows: Vec<Row> = app
@@ -565,7 +571,14 @@ fn table(f: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 Line::from(Span::raw(r.label.clone()))
             };
+            // Dim, because it is a handle rather than information: the operator reads
+            // it only when they are about to type it somewhere else.
+            let number = match r.number {
+                Some(n) => Span::styled(n.to_string(), Style::new().fg(Color::DarkGray)),
+                None => Span::raw(""),
+            };
             Row::new(vec![
+                Line::from(number),
                 what,
                 Line::from(Span::styled(r.status.clone(), status_style(r))),
                 Line::from(spend_text(&r.vitals)),
@@ -575,6 +588,7 @@ fn table(f: &mut Frame, area: Rect, app: &mut App) {
         .collect();
 
     let widths = [
+        Constraint::Length(5),
         Constraint::Min(30),
         Constraint::Length(11),
         Constraint::Length(12),

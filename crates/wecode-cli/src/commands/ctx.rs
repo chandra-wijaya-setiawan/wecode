@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use wecode_core::{Plan, ProjectId, Task, TaskId, TaskKind};
+use wecode_core::{Plan, Task, TaskId, TaskKind};
 use wecode_gov::{Action, Broker, Effective, Grant, Session, glob};
 use wecode_org::{Company, Playbook, Post, Workspace, workspace};
 use wecode_store::Store;
@@ -31,6 +31,34 @@ pub(crate) fn open_full(
     Ok((ws, store, company))
 }
 
+/// The task a reference names — its id or its short number — or a refusal that says
+/// where to find both.
+///
+/// Every command that takes an existing task goes through here, so `4` works wherever
+/// `cache-tests` does. A helper rather than a habit: the resolution order lives in
+/// [`wecode_core::short`], and a call site that reached for `TaskId::new` directly would
+/// be one place a number silently stopped working.
+pub(crate) fn the_task<'a>(plan: &'a Plan, typed: &str) -> Result<&'a Task, String> {
+    plan.task_ref(typed)
+        .ok_or_else(|| not_found("task", typed))
+}
+
+/// The same for a project.
+pub(crate) fn the_project<'a>(
+    plan: &'a Plan,
+    typed: &str,
+) -> Result<&'a wecode_core::Project, String> {
+    plan.project_ref(typed)
+        .ok_or_else(|| not_found("project", typed))
+}
+
+/// Names what was typed and where the answer is. A number that resolves to nothing is
+/// worth saying so about — it is usually one digit off, and `wecode tree` is where the
+/// right one is printed.
+fn not_found(what: &str, typed: &str) -> String {
+    format!("no such {what}: {typed} — `wecode tree` lists ids and numbers")
+}
+
 /// Resolves which project is meant, the way sessions resolve: one is unambiguous,
 /// several need naming.
 pub(crate) fn which_project(
@@ -38,10 +66,7 @@ pub(crate) fn which_project(
     plan: &Plan,
 ) -> Result<wecode_core::Project, Box<dyn std::error::Error>> {
     if let Some(id) = a.get("project") {
-        return plan
-            .project(&ProjectId::new(id))
-            .cloned()
-            .ok_or_else(|| format!("no such project: {id}").into());
+        return Ok(the_project(plan, id)?.clone());
     }
     let all: Vec<&wecode_core::Project> = plan.projects().collect();
     match all.len() {
@@ -396,13 +421,29 @@ pub(crate) fn require_allowed(
 
 /// What a record is attributed to. A task implies its project, so naming the task
 /// alone is enough — the project is looked up rather than typed twice.
+/// A short number is resolved to the id before anything is recorded. The ledger is
+/// keyed on ids — `wecode audit --task cache-tests`, the branch names, the report paths
+/// — and a record filed under `4` would be a record nothing can find. The number is a
+/// way of typing, never a way of storing.
+///
+/// A reference that resolves to nothing is still attributed as typed, so a mistyped
+/// flag shows up in the audit trail rather than vanishing from it.
 pub(crate) fn attribution(a: &Args, plan: &Plan) -> (Option<String>, Option<String>) {
-    let task = a.get("task").map(str::to_string);
-    let project = a.get("project").map(str::to_string).or_else(|| {
-        task.as_ref()
-            .and_then(|t| plan.task(&TaskId::new(t)))
-            .map(|t| t.project.to_string())
+    let named = |flag: &str| a.get(flag).map(str::to_string);
+    let task = named("task").map(|t| {
+        plan.task_ref(&t)
+            .map_or(t.clone(), |found| found.id.to_string())
     });
+    let project = named("project")
+        .map(|p| {
+            plan.project_ref(&p)
+                .map_or(p.clone(), |found| found.id.to_string())
+        })
+        .or_else(|| {
+            task.as_ref()
+                .and_then(|t| plan.task(&TaskId::new(t)))
+                .map(|t| t.project.to_string())
+        });
     (project, task)
 }
 
@@ -435,5 +476,25 @@ mod tests {
         let (p, t) = attribution(&parse(&["--task", "ghost"]), &Plan::new());
         assert_eq!(p, None);
         assert_eq!(t.as_deref(), Some("ghost"));
+    }
+
+    #[test]
+    fn a_number_is_recorded_as_the_id_it_names() {
+        // The ledger is queried by id. A record filed under `2` is a record nothing
+        // can correlate, so the number is resolved before it is written down.
+        let mut plan = Plan::new();
+        let mut project = Project::new("export", "an objective sentence", "api");
+        project.number = Some(wecode_core::Number::new(1));
+        plan.add_project(project).unwrap();
+        let mut task = Task::new("cache", "export", "add a cache");
+        task.number = Some(wecode_core::Number::new(2));
+        plan.add_task(task).unwrap();
+
+        let (p, t) = attribution(&parse(&["--task", "2"]), &plan);
+        assert_eq!(p.as_deref(), Some("export"));
+        assert_eq!(t.as_deref(), Some("cache"));
+
+        let (p, _) = attribution(&parse(&["--project", "#1"]), &plan);
+        assert_eq!(p.as_deref(), Some("export"));
     }
 }

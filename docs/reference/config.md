@@ -171,6 +171,7 @@ default, nothing is run and waits are silent.
 | variable | |
 |---|---|
 | `WECODE_TASK` | the task id |
+| `WECODE_TASK_NUMBER` | its [short number](commands.md), digits only — `4`, not `#4` |
 | `WECODE_TASK_TITLE` | its title, as written |
 | `WECODE_TASK_STATUS` | the status being set — `needs-approval`, `failed`, … |
 | `WECODE_WAITING_FOR` | `approval` \| `input` \| `failed` \| `signature` |
@@ -181,6 +182,17 @@ default, nothing is run and waits are silent.
 `WECODE_WAITING_FOR` is the one to branch on. `signature` is the dispatch gate holding a
 task that is otherwise `ready`, which no status can express — the other three restate
 the status in one word.
+
+**Put `WECODE_TASK_NUMBER` in the message.** It is what makes the notification answerable
+from wherever it arrives: the reply that signs it has to name the task, and `#4` is four
+characters where `cache-warm-on-deploy` is twenty spelled exactly. The variable holds the
+digits alone so the hook decides how to write them — a hook that wants the sigil writes
+`#$WECODE_TASK_NUMBER`, and one that wants a bare number cannot portably strip one.
+
+```toml
+[notify]
+command = "notify-send 'wecode' \"#$WECODE_TASK_NUMBER $WECODE_TASK: $WECODE_WAITING_FOR\""
+```
 
 The line runs through `sh -c`, in the workspace, with your environment: it is your own
 command, and a desktop notifier needs the session it was configured in. The task is
@@ -236,12 +248,20 @@ What a reply does:
 | `approve` / `yes` / `ok` / `lgtm` | signs what that task is waiting for |
 | `approve merge` | signs that kind, whatever the task is waiting for |
 | `approve cache-tests` | signs that task, rather than the one the message names |
+| `approve #4` | the same, by [short number](commands.md) |
 | `no` / `reject` / `hold` | nothing is signed; the task stays where it is |
 | anything else | chat; left alone |
 
 The task is the one named in the message being replied to — the notification wecode
 sent — unless the reply names one itself. A text naming two known tasks is refused
-rather than resolved.
+rather than resolved; the id and the number of one task are one task, so a hook printing
+`cache-tests (#4)` is not ambiguous.
+
+**A number must wear its `#` here**, and this is the one place that is true. On the
+command line an argv position where a task is wanted has nothing else it could be; a word
+in a chat message has everything else it could be, and `approve 2` is as likely to mean
+*two of them look fine*. Getting that wrong signs something nobody signed for, so a bare
+number in a reply names no task at all.
 
 A bare yes signs what the task is actually waiting for: `merge` at `needs-approval`,
 `design` for a design task there, `admission` for one the dispatch gate is holding. A

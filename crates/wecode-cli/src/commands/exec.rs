@@ -288,12 +288,9 @@ fn triage(
 /// The counterpart to `run`, for when the operator is the worker.
 pub(crate) fn start(a: &Args) -> Res {
     let (ws, store, company) = open_full(a)?;
-    let id = TaskId::new(require(a.cmd(1), "task id")?);
     let plan = store.load_plan()?;
-    let task = plan
-        .task(&id)
-        .ok_or_else(|| format!("no such task: {id}"))?
-        .clone();
+    let task = the_task(&plan, require(a.cmd(1), "task id")?)?.clone();
+    let id = task.id.clone();
 
     // The envelope carries what earlier attempts did, so a retry can see its own
     // failure rather than starting blind.
@@ -515,12 +512,9 @@ pub(crate) fn forbidden_by_charter(company: &Company, line: &str) -> Option<Stri
 /// its authority. Presenting nothing removes that class of escalation entirely.
 pub(crate) fn run_task(a: &Args) -> Res {
     let (ws, store, company) = open_full(a)?;
-    let id = TaskId::new(require(a.cmd(1), "task id")?);
     let plan = store.load_plan()?;
-    let task = plan
-        .task(&id)
-        .ok_or_else(|| format!("no such task: {id}"))?
-        .clone();
+    let task = the_task(&plan, require(a.cmd(1), "task id")?)?.clone();
+    let id = task.id.clone();
 
     let post_name = task
         .assignee
@@ -740,12 +734,9 @@ pub(crate) fn verify_task(a: &Args) -> Res {
 /// where "grep -q V2 exited 1" tells it everything.
 fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
     let (ws, store, company) = open_full(a)?;
-    let id = TaskId::new(require(a.cmd(1), "task id")?);
     let plan = store.load_plan()?;
-    let task = plan
-        .task(&id)
-        .ok_or_else(|| format!("no such task: {id}"))?
-        .clone();
+    let task = the_task(&plan, require(a.cmd(1), "task id")?)?.clone();
+    let id = task.id.clone();
     let project = plan
         .project(&task.project)
         .ok_or_else(|| format!("no such project: {}", task.project))?;
@@ -1066,10 +1057,8 @@ pub(crate) fn worktree_remove(a: &Args) -> Res {
             branch,
         }
     } else {
-        let id = TaskId::new(named);
-        let task = plan
-            .task(&id)
-            .ok_or_else(|| format!("no such task: {id}"))?;
+        let task = the_task(&plan, named)?;
+        let id = task.id.clone();
         let project = plan
             .project(&task.project)
             .ok_or_else(|| format!("no such project: {}", task.project))?;
