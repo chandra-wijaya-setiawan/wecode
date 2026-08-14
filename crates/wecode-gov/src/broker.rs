@@ -7,6 +7,10 @@ use crate::glob;
 use crate::grant::{ActionKind, Effective, Introspect, WorkKind};
 
 /// Something a post wants to do.
+///
+/// `Spend` carries tokens in the unit [`crate::grant::Grant::tokens`] names, which
+/// is the whole of what makes a cap mean anything: a count and a cap in different
+/// units compare cleanly and answer nothing.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Action {
     Read { path: String },

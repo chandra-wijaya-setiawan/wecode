@@ -304,6 +304,13 @@ token count to record rather than that none were spent. `task_executions.spent_t
 is where that difference is kept, because a nullable column can hold it and a `u64`
 cannot.
 
+Both figures are in one unit: tokens the run **added**, cache writes included, cache
+*reads* excluded. That is the unit `tasks.budget_tokens` is compared against, and the
+comparison is the reason the column holds only one of the two numbers a harness reports.
+Neither table stores the replayed count — it is printed on the run line and nothing
+rolls it up, so a query that wants what a long conversation cost in cache reads will not
+find it here.
+
 Both are written however the run ended. A run killed on its wall limit spent what it
 spent, and a cost recorded only for clean exits would hide exactly the expensive
 failures.

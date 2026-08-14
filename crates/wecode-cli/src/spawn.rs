@@ -91,8 +91,12 @@ pub(crate) struct Outcome {
     /// Tokens the agent's own output reported, and `None` when it reported none.
     ///
     /// A report, not a measurement — see [`crate::usage`] for why nothing else could
-    /// know this, and why the two cases are kept apart rather than both being zero.
+    /// know this, why the two cases are kept apart rather than both being zero, and
+    /// what unit the number is in.
     pub(crate) spent: Option<u64>,
+    /// Context the run re-read from the cache. Reported, never budgeted: it is the
+    /// same tokens once per turn, at a scale no budget is written in.
+    pub(crate) replayed: Option<u64>,
 }
 
 /// The argv this template will actually run, with `{{prompt}}` filled in.
@@ -208,15 +212,19 @@ pub(crate) fn run(
         let _ = r.join();
     }
 
+    // The readers have joined, so nothing else holds this lock. A poisoned one means
+    // a reader panicked mid-line, and the count it had reached is still the best
+    // evidence there is. Taken once: the two figures are one report read two ways,
+    // and locking twice invites them to come from different states of it.
+    let metered = meter.lock().unwrap_or_else(|e| e.into_inner());
+
     Ok(Outcome {
         ended,
         output: buf.lock().map(|b| b.clone()).unwrap_or_default(),
         took: started.elapsed(),
         truncated: *truncated.lock().unwrap_or_else(|e| e.into_inner()),
-        // The readers have joined, so nothing else holds this lock. A poisoned one
-        // means a reader panicked mid-line, and the count it had reached is still
-        // the best evidence there is.
-        spent: meter.lock().unwrap_or_else(|e| e.into_inner()).tokens(),
+        spent: metered.tokens(),
+        replayed: metered.replayed(),
     })
 }
 

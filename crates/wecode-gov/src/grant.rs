@@ -113,6 +113,17 @@ pub struct Grant {
     pub run: Vec<String>,
     pub network: Network,
     pub hosts: Vec<String>,
+    /// A cap on **tokens a session adds**: what it sends and what the model
+    /// produces, cache writes included. Context re-read from a cache is not in this
+    /// unit and must not be counted into it.
+    ///
+    /// Stated here because a cap is a number a person writes, and the two units are
+    /// an order of magnitude apart. A long conversation replays its whole context
+    /// every turn, so a figure that includes cache reads grows with turns *times*
+    /// context — nobody estimates a task in that, and every task metered that way
+    /// blew its budget before the agent had written a line. Whoever feeds
+    /// [`crate::broker::Action::Spend`] owes it a number in this unit; wecode's own
+    /// meter is where that is enforced in practice.
     pub tokens: Option<u64>,
     pub wall_secs: Option<u64>,
     pub merge_to: Vec<String>,

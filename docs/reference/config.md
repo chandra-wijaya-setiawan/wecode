@@ -108,6 +108,16 @@ not an error — the run still happens, is still timed, and still lands its wall
 the ledger. It only means the token half of the spend column has nothing to show, which
 is the truth and not a zero.
 
+Every `tokens` number in this file — the `max_tokens` invariant, a role's cap, a
+playbook's default — counts the tokens a run **adds**: its prompts, what it writes to a
+prompt cache, and everything the model produces. Context re-read out of that cache is
+counted separately and is never checked against a budget. It is the same context on
+every turn, so it grows with turns times context while the work grows with the
+conversation; a cap written in the one scale and checked in the other is over on the
+first turn and says nothing thereafter. `wecode run` prints the replayed figure beside
+the spend, because cache reads are billed — at a tenth of the rate — and a number left
+out of a budget should not also be left off the screen.
+
 ### The notify hook
 
 `[notify] command` runs when a task **starts** waiting on a person. Absent, which is the
