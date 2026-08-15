@@ -50,16 +50,16 @@ pub(crate) fn playbook_show(a: &Args) -> Res {
             project.id,
             path.join(playbook::PLAYBOOK_PATH).display(),
             project.id,
-            render::gap_count(&found),
+            render::playbook::gap_count(&found),
         ));
     };
 
     let now = wecode_store::now_secs();
     match a.cmd(1) {
-        "" => Ok(render::playbook_all(&project, &pb, &found)),
+        "" => Ok(render::playbook::all_kinds(&project, &pb, &found)),
         want => {
             let kind = parse_kind(want)?;
-            Ok(render::playbook_kind(&project, &pb, kind, &found, now))
+            Ok(render::playbook::one_kind(&project, &pb, kind, &found, now))
         }
     }
 }
@@ -126,7 +126,7 @@ pub(crate) fn playbook_gap(a: &Args) -> Res {
         note: note.to_string(),
     };
     let fresh = gap::record(ws.root(), &found)?;
-    Ok(render::gap_recorded(
+    Ok(render::playbook::gap_recorded(
         &found,
         fresh,
         &playbook_file(&company, &project),
@@ -139,7 +139,7 @@ pub(crate) fn playbook_gaps(a: &Args) -> Res {
     let (ws, store, company) = open_full(a)?;
     let plan = store.load_plan()?;
     let project = which_project(a, &plan)?;
-    Ok(render::gaps(
+    Ok(render::playbook::gaps(
         &project,
         &gaps_on(ws.root(), &project)?,
         wecode_store::now_secs(),
@@ -209,7 +209,7 @@ pub(crate) fn playbook_init(a: &Args) -> Res {
     }
     let written = playbook::init(&repo, a.get("language").unwrap_or(""))?;
     let refusal = playbook::Playbook::at(&repo).err().map(|e| e.to_string());
-    Ok(render::playbook_written(
+    Ok(render::playbook::written(
         &project,
         &written,
         refusal.as_deref(),
@@ -248,7 +248,7 @@ pub(crate) fn brief(a: &Args) -> Res {
         playbooks.push((p.clone(), kinds));
     }
 
-    Ok(render::brief(
+    Ok(render::org::brief(
         &company,
         s,
         &post,
@@ -296,7 +296,7 @@ pub(crate) fn login(a: &Args) -> Res {
     let grant = company.grant_of(&post);
 
     let mut out = format!("  session {}  ({})\n\n", s.id, s.who());
-    out.push_str(&render::whoami(&company, &s, &post, grant));
+    out.push_str(&render::org::whoami(&company, &s, &post, grant));
     Ok(out)
 }
 
@@ -333,7 +333,7 @@ pub(crate) fn logout(a: &Args) -> Res {
 
 pub(crate) fn who(a: &Args) -> Res {
     let (store, company) = open(a)?;
-    Ok(render::who(
+    Ok(render::org::who(
         &store.sessions_all()?,
         company.session_ttl,
         wecode_store::now_secs(),
@@ -351,5 +351,5 @@ pub(crate) fn whoami(a: &Args) -> Res {
         .and_then(|id| live.iter().find(|x| x.id == id))
         .unwrap_or(s);
     let post = find_post(&company, &s.post)?;
-    Ok(render::whoami(&company, s, &post, company.grant_of(&post)))
+    Ok(render::org::whoami(&company, s, &post, company.grant_of(&post)))
 }

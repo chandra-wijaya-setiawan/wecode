@@ -23,10 +23,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use wecode_core::{Measure, Scope, TaskId};
+use wecode_core::{Measure, Scope, Task, TaskId, TaskStatus};
 use wecode_gov::glob;
 
 use crate::git;
+use crate::render::{kind_tag, truncate_cmd};
 
 /// One acceptance command, run.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -264,6 +265,119 @@ pub(crate) fn run_acceptance(
         }
     }
     v
+}
+
+/// What verification observed, and what it concluded.
+///
+/// `owner` is the task whose worktree and branch this one worked in — itself, unless
+/// it is a subtask. A pass means different things to the two, and the difference is
+/// the one thing a reader cannot get from the status word alone: a main task that
+/// passed is waiting to be landed, a step of one has already put its commits where
+/// they land from.
+#[must_use]
+pub(crate) fn verdict(
+    task: &Task,
+    owner: &TaskId,
+    dir: &std::path::Path,
+    v: &Verdict,
+    next: TaskStatus,
+) -> String {
+    let mut out = format!(
+        "{} {}  {}\n  in       {}\n",
+        kind_tag(task.kind),
+        task.id,
+        task.title,
+        dir.display()
+    );
+
+    out.push_str(&format!(
+        "\ndiff — {} file{}\n",
+        v.changed.len(),
+        if v.changed.len() == 1 { "" } else { "s" }
+    ));
+    if v.changed.is_empty() {
+        // Not neutral: a task that declared a write scope and changed nothing did
+        // not do its work, whatever its acceptance says.
+        out.push_str("  nothing changed\n");
+    }
+    for path in &v.changed {
+        let bad = v.violations.contains(path);
+        out.push_str(&format!(
+            "  {} {}{}\n",
+            if bad { "✗" } else { "✓" },
+            path,
+            if bad { "   outside scope" } else { "" }
+        ));
+    }
+
+    if !v.checks.is_empty() {
+        out.push_str("\nacceptance\n");
+        for c in &v.checks {
+            out.push_str(&format!(
+                "  {} {:<44} {}\n",
+                if c.passed() { "✓" } else { "✗" },
+                truncate_cmd(&c.cmd, 44),
+                c.describe()
+            ));
+        }
+    }
+    for u in &v.unjudgeable {
+        out.push_str(&format!("  ? {u}   no command can settle this\n"));
+    }
+
+    out.push('\n');
+    if v.passed() {
+        out.push_str("  ✓ passed\n");
+        // Three things a pass can mean, and the status word distinguishes only two of
+        // them. Said here because the next command differs in each case, and the
+        // wrong guess is expensive: `merge` on a step is refused, and waiting for a
+        // signature on one that will never be asked for is worse.
+        match next {
+            TaskStatus::NeedsApproval if task.kind.needs_a_signature() => out.push_str(
+                "    passing is not approval — a holder signs it before anything builds on it\n",
+            ),
+            TaskStatus::NeedsApproval => out.push_str(&format!(
+                "    the branch is not merged — wecode merge {} lands it\n",
+                task.id
+            )),
+            _ if owner != &task.id => out.push_str(&format!(
+                "    its commits are on {owner}'s branch — that task is what lands them\n"
+            )),
+            _ => {}
+        }
+    } else {
+        if !v.violations.is_empty() {
+            out.push_str(&format!(
+                "  ✗ {} write{} outside scope — recorded against this task\n",
+                v.violations.len(),
+                if v.violations.len() == 1 { "" } else { "s" }
+            ));
+        }
+        let missing = v.unrunnable();
+        let failed = v
+            .checks
+            .iter()
+            .filter(|c| !c.passed() && !c.missing())
+            .count();
+        if failed > 0 {
+            out.push_str(&format!("  ✗ {failed} acceptance check(s) failed\n"));
+        }
+        if !missing.is_empty() {
+            // Not a verdict about the work — say so, or a missing toolchain reads as
+            // a broken change.
+            out.push_str(&format!(
+                "  ⚠ {} check(s) could not run — the command was not found.\n\
+                 \x20   wecode runs acceptance through `sh -c` with its own environment;\n\
+                 \x20   this is a PATH problem, not a verdict on the work.\n",
+                missing.len()
+            ));
+        }
+        if v.checks.is_empty() && v.violations.is_empty() {
+            out.push_str("  ✗ nothing to judge by\n");
+        }
+    }
+    out.push_str(&format!("  {}\n", next.as_str()));
+    out
 }
 
 #[cfg(test)]

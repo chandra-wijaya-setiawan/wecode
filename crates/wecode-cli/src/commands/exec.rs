@@ -15,7 +15,7 @@ use wecode_store::{Store, execution::Spend};
 use crate::args::Args;
 use crate::commands::ctx::*;
 use crate::{
-    cache, git, ledger, notify, render, scheduler, spawn, teardown, telegram, verify, work,
+    cache, git, handoff, ledger, notify, render, scheduler, spawn, teardown, telegram, verify, work,
 };
 
 /// Begins work on a task: prepares the worktree its playbook asks for, marks it
@@ -131,7 +131,7 @@ pub(crate) fn prepare(
     if !defects.is_empty() {
         return Err(format!(
             "{}\n  a draft cannot be worked on",
-            render::admission(&render::task_heading(task), &defects, None)
+            render::plan::admission(&render::plan::task_heading(task), &defects, None)
         )
         .into());
     }
@@ -236,7 +236,7 @@ pub(crate) fn prepare(
         notes.push_str(&format!("  cache    {var}={}\n", dir.display()));
     }
 
-    let a2a = render::a2a_task(
+    let a2a = handoff::a2a_task(
         &company.templates.task_envelope,
         task,
         project,
@@ -246,7 +246,7 @@ pub(crate) fn prepare(
         runs,
     );
     Ok(Prepared {
-        envelope: render::envelope(&a2a),
+        envelope: handoff::envelope(&a2a),
         a2a,
         cwd,
         cache: shared,
@@ -716,7 +716,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
     );
     store.append_records(broker.ledger())?;
 
-    let mut out = render::ran(
+    let mut out = spawn::ran(
         &task,
         &post,
         model.as_deref(),
@@ -792,7 +792,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
 
 /// Both halves of what the run reported, for the row that outlives the terminal.
 ///
-/// The replay used to end here: `render::ran` printed it once, on a line the operator
+/// The replay used to end here: `spawn::ran` printed it once, on a line the operator
 /// may or may not have been looking at, and nothing wrote it down. That was defensible
 /// while the figure was only a caveat on the spend — it is not budgeted, so nothing
 /// needed to query it. But cache reads are billed, at a tenth of the rate, and a
@@ -989,7 +989,7 @@ fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error
     Ok((
         format!(
             "{}{announced}",
-            render::verdict(&task, &owner.id, &dir, &v, next)
+            verify::verdict(&task, &owner.id, &dir, &v, next)
         ),
         reason,
     ))
@@ -1044,18 +1044,18 @@ pub(crate) fn worktree_list(a: &Args) -> Res {
         }
         let rows = git::worktree_list(&repo)?
             .into_iter()
-            .map(|path| render::WorktreeRow {
+            .map(|path| work::WorktreeRow {
                 tenant: tenant_of(&plan, &org, &ours, &merge, &path),
                 path,
             })
             .collect();
-        groups.push(render::RepoTrees {
+        groups.push(work::RepoTrees {
             repo: repo_name,
             path: repo.to_string_lossy().into_owned(),
             rows,
         });
     }
-    Ok(render::worktrees(&groups))
+    Ok(work::worktrees(&groups))
 }
 
 /// Who the tree at `path` belongs to.
@@ -1074,7 +1074,7 @@ fn tenant_of(
     ours: &[wecode_store::Worktree],
     merge: &str,
     path: &str,
-) -> render::Tenant {
+) -> work::Tenant {
     // Across the whole plan, not one project's tasks: the tree is found via the repo now,
     // and the path names its owning task without saying which project that task is in.
     // Matching a computed path also covers a tree made before the registry existed.
@@ -1087,7 +1087,7 @@ fn tenant_of(
                 .and_then(|w| plan.task(&TaskId::new(&w.task)))
         });
     if let Some(t) = owner {
-        return render::Tenant::Task {
+        return work::Tenant::Task {
             id: t.id.to_string(),
             project: t.project.to_string(),
             status: t.status,
@@ -1096,14 +1096,14 @@ fn tenant_of(
     if let Some(w) = ours.iter().find(|w| w.path == path) {
         // Ours, and the task it was made for is gone from the plan. The registry outlives
         // the task deliberately, which is what lets this say whose tree it was.
-        return render::Tenant::Orphan {
+        return work::Tenant::Orphan {
             task: w.task.clone(),
         };
     }
     if path == merge {
-        return render::Tenant::Merge;
+        return work::Tenant::Merge;
     }
-    render::Tenant::Stranger
+    work::Tenant::Stranger
 }
 
 /// Which worktree a removal was aimed at: where it is, which repository it belongs to,
@@ -1208,7 +1208,7 @@ pub(crate) fn worktree_remove(a: &Args) -> Res {
     };
 
     let torn = teardown::take_down(&store, aim.repo.as_deref(), &aim.path, a.has("force"))?;
-    let report = render::torn(&aim.path, aim.branch.as_deref(), &torn);
+    let report = teardown::torn(&aim.path, aim.branch.as_deref(), &torn);
     match torn {
         // A refusal, not a report. The exit code is what stops a script carrying on as
         // though the tree were gone.

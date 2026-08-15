@@ -14,7 +14,7 @@ use wecode_store::Store;
 
 use crate::args::Args;
 use crate::commands::ctx::*;
-use crate::{notify, render};
+use crate::{notify, render, usage};
 
 pub(crate) fn parse_metric(spec: &str, flag: &str) -> Result<Measure, String> {
     let parts: Vec<&str> = spec.split(':').collect();
@@ -92,7 +92,7 @@ pub(crate) fn project_add(a: &Args) -> Res {
     let plan = store.load_plan()?;
     let defects = admission::check_project(&p, &plan, &repo_names(&company));
     let verdict = Admission::decide(defects.clone(), "operator", Vec::new());
-    let mut out = render::admission(&render::project_heading(&p), &defects, Some(&verdict));
+    let mut out = render::plan::admission(&render::plan::project_heading(&p), &defects, Some(&verdict));
 
     if defects.is_empty() || a.has("force") {
         let mut probe = plan;
@@ -348,7 +348,7 @@ pub(crate) fn task_add(a: &Args) -> Res {
         defects.retain(|d| *d != wecode_core::Defect::DesignMissing);
     }
     let verdict = Admission::decide(defects.clone(), "operator", Vec::new());
-    let mut out = render::admission(&render::task_heading(&t), &defects, Some(&verdict));
+    let mut out = render::plan::admission(&render::plan::task_heading(&t), &defects, Some(&verdict));
     for line in &from_playbook {
         out.push_str(&format!("  {line}  (from playbook)\n"));
     }
@@ -512,7 +512,7 @@ fn expand(
             if tasks.len() == 1 { "" } else { "s" }
         );
         for (t, d) in &defects {
-            out.push_str(&render::admission(&render::task_heading(t), d, None));
+            out.push_str(&render::plan::admission(&render::plan::task_heading(t), d, None));
         }
 
         // A step of a kind the project has written nothing about gets no budget and
@@ -559,7 +559,7 @@ fn expand(
         .filter_map(|t| plan_now.task(&t.id).cloned())
         .collect();
 
-    let mut out = render::expansion(main, &saved);
+    let mut out = render::plan::expansion(main, &saved);
     if !defects.is_empty() {
         out.push_str("  forced — defects recorded as waivers\n");
     }
@@ -680,7 +680,7 @@ pub(crate) fn task_scope(a: &Args) -> Res {
         .filter(|d| matches!(d, wecode_core::Defect::ScopeOverlaps { .. }))
         .collect();
     if !blocking.is_empty() && !a.has("force") {
-        let mut out = render::admission(&render::task_heading(&task), &defects, None);
+        let mut out = render::plan::admission(&render::plan::task_heading(&task), &defects, None);
         out.push_str("\n  not changed — narrow it, sequence the tasks, or pass --force\n");
         return Ok(out);
     }
@@ -785,8 +785,8 @@ pub(crate) fn task_budget(a: &Args) -> Res {
     let defects = admission::check_task(&amended, &probe, &gate);
     if !defects.is_empty() {
         out.push('\n');
-        out.push_str(&render::admission(
-            &render::task_heading(&amended),
+        out.push_str(&render::plan::admission(
+            &render::plan::task_heading(&amended),
             &defects,
             None,
         ));
@@ -916,7 +916,7 @@ pub(crate) fn task_amend(a: &Args) -> Res {
         .any(|d| matches!(d, wecode_core::Defect::ScopeOverlaps { .. }))
         && !a.has("force")
     {
-        let mut out = render::admission(&render::task_heading(&now), &defects, None);
+        let mut out = render::plan::admission(&render::plan::task_heading(&now), &defects, None);
         out.push_str("\n  not moved — keep the ordering, narrow a scope, or pass --force\n");
         return Ok(out);
     }
@@ -948,8 +948,8 @@ pub(crate) fn task_amend(a: &Args) -> Res {
     ));
     if !defects.is_empty() {
         out.push('\n');
-        out.push_str(&render::admission(
-            &render::task_heading(&now),
+        out.push_str(&render::plan::admission(
+            &render::plan::task_heading(&now),
             &defects,
             None,
         ));
@@ -1013,15 +1013,15 @@ pub(crate) fn show(a: &Args) -> Res {
 
     if let Some(p) = plan.project_ref(id) {
         let pid = p.id.clone();
-        return Ok(render::project_detail(&plan, &pid));
+        return Ok(render::plan::project_detail(&plan, &pid));
     }
     if let Some(t) = plan.task_ref(id) {
         let tid = t.id.clone();
         let runs = store.executions(&tid)?;
         return Ok(format!(
             "{}{}",
-            render::task_detail(&plan, &tid),
-            render::executions(&runs)
+            render::plan::task_detail(&plan, &tid),
+            usage::executions(&runs)
         ));
     }
     Err(format!("no project or task `{id}` — `wecode tree` lists both").into())
@@ -1034,8 +1034,8 @@ pub(crate) fn check(a: &Args) -> Res {
 
     if let Some(p) = plan.project_ref(id) {
         let defects = admission::check_project(p, &plan, &repo_names(&company));
-        return Ok(render::admission(
-            &render::project_heading(p),
+        return Ok(render::plan::admission(
+            &render::plan::project_heading(p),
             &defects,
             None,
         ));
@@ -1046,7 +1046,7 @@ pub(crate) fn check(a: &Args) -> Res {
             .map(|p| design_gate(&company, p))
             .unwrap_or_default();
         let defects = admission::check_task(t, &plan, &gate);
-        return Ok(render::admission(&render::task_heading(t), &defects, None));
+        return Ok(render::plan::admission(&render::plan::task_heading(t), &defects, None));
     }
     Err(format!("no project or task `{id}`").into())
 }
@@ -1394,7 +1394,7 @@ pub(crate) fn assign(a: &Args) -> Res {
         .unwrap_or_default();
     let defects = admission::check_task(task, &plan, &gate);
     if !defects.is_empty() {
-        let mut out = render::admission(&render::task_heading(task), &defects, None);
+        let mut out = render::plan::admission(&render::plan::task_heading(task), &defects, None);
         out.push_str("\n  not assigned — a draft cannot be dispatched\n");
         return Ok(out);
     }

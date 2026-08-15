@@ -242,6 +242,57 @@ fn usage_in(usage: &Value) -> Option<Usage> {
     found.then_some(Usage { fresh, replayed })
 }
 
+/// Every run of a task, so a retry does not erase what happened last time.
+#[must_use]
+pub(crate) fn executions(runs: &[wecode_store::Execution]) -> String {
+    if runs.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\nruns ({})\n", runs.len());
+    for r in runs {
+        out.push_str(&format!(
+            "  #{}  {:<10} {:<18} {:<20} {}\n",
+            r.attempt,
+            r.status.as_str(),
+            match r.wall_secs {
+                Some(w) => format!("{w}s"),
+                // No end time means it never closed — wecode died mid-run, and the
+                // pid is the only handle left on whatever it started.
+                None => match r.pid {
+                    Some(p) => format!("unfinished, pid {p}"),
+                    None => "unfinished".to_string(),
+                },
+            },
+            cost(r),
+            r.detail
+        ));
+    }
+    out
+}
+
+/// What one attempt cost, in the two units it was reported in.
+///
+/// Per attempt rather than only in total: a task that cost too much usually cost it on
+/// one try, and the total cannot say which. The replay rides in the same cell because
+/// it answers the same question about a different bill — three attempts that each added
+/// ninety tokens are not three alike runs if one of them re-read two million — and it is
+/// marked `+` rather than added, since the two are different scales and only the first
+/// is what a budget is checked against.
+///
+/// Silent when a run re-read nothing, and silent for every attempt recorded before the
+/// column existed. Those are different facts and the column keeps them apart; neither
+/// is worth a cell on a line an operator is scanning for the expensive try.
+fn cost(r: &wecode_store::Execution) -> String {
+    let spent = match r.spent_tokens {
+        Some(n) => format!("{n}t"),
+        None => "—".to_string(),
+    };
+    match r.replayed_tokens {
+        Some(n) if n > 0 => format!("{spent} +{n} re-read"),
+        _ => spent,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,5 +507,51 @@ mod tests {
         let line = r#"{"type":"result","usage":{"input_tokens":1200,"output_tokens":340}}"#;
         assert_eq!(meter("generic-jsonl", &[line]), None);
         assert_eq!(meter("", &[line]), None);
+    }
+
+    /// One closed attempt, so a test can vary what it reported and nothing else.
+    fn attempt(n: i64, spent: Option<u64>, replayed: Option<u64>) -> wecode_store::Execution {
+        wecode_store::Execution {
+            id: n,
+            task: "cache".into(),
+            session: "s-1".into(),
+            attempt: n,
+            status: wecode_core::ExecutionStatus::Completed,
+            worktree: None,
+            pid: None,
+            started: 0,
+            ended: Some(12),
+            wall_secs: Some(12),
+            spent_tokens: spent,
+            replayed_tokens: replayed,
+            detail: "exit 0".into(),
+        }
+    }
+
+    #[test]
+    fn the_attempt_that_held_the_long_conversation_is_visible_beside_the_one_that_paid() {
+        // Two tries that added the same ninety tokens are not two alike runs when one
+        // of them re-read two million, and the spend column alone cannot say which was
+        // which. The reader wanting the expensive attempt is asking about a bill, and
+        // half of that bill is cache reads.
+        let out = executions(&[
+            attempt(1, Some(90), Some(0)),
+            attempt(2, Some(90), Some(2_340_000)),
+        ]);
+        assert!(out.contains("90t +2340000 re-read"), "{out}");
+        // The cheap turn says nothing rather than `+0`: a cell an operator scans for
+        // the outlier should not be full of zeroes.
+        assert!(!out.contains("+0 re-read"), "{out}");
+    }
+
+    #[test]
+    fn an_attempt_from_before_the_count_says_nothing_rather_than_nothing_re_read() {
+        // NULL is an attempt nobody asked, and a run on a cold cache reports 0. Both
+        // are silent here — but they are silent in the same way a missing spend is,
+        // and the column behind them keeps them apart for anything that queries it.
+        let out = executions(&[attempt(1, Some(90), None), attempt(2, None, None)]);
+        assert!(out.contains("90t "), "{out}");
+        assert!(!out.contains("re-read"), "{out}");
+        assert!(out.contains('—'), "an unmetered attempt still reads as such: {out}");
     }
 }
