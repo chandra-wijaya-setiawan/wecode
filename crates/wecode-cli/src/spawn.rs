@@ -5,7 +5,7 @@
 //! controls left are the clock, what the agent says it has spent, and a signal — so
 //! those are what this module provides.
 //!
-//! Six details are load-bearing:
+//! Seven details are load-bearing:
 //!
 //! - **The environment is built, not inherited.** A coding CLI inherits every secret
 //!   in the shell otherwise. Absent a container this is the only network control
@@ -14,6 +14,9 @@
 //!   leaves them orphaned and still running.
 //! - **Idle, not just wall.** An agent that has stopped producing output has usually
 //!   stopped working, and the wall limit is far too generous to catch it.
+//! - **The clock bounds the supervisor, not just the child.** Killing the group ends the
+//!   agent; a process that left the group is still holding the pipe, and reading it to
+//!   the end would spend exactly the hours the limit exists to prevent. See [`drain`].
 //! - **Metered as it streams.** The output buffer is capped, and the line stating what
 //!   the run cost is the last one — so spend is counted on the way past rather than
 //!   read back out of a buffer that may have dropped it.
@@ -51,6 +54,16 @@ const OUTPUT_CAP: usize = 256 * 1024;
 
 /// How often to check whether the child has finished or overrun.
 const POLL: Duration = Duration::from_millis(100);
+
+/// How long the readers get to finish once the group has been reaped. Enough for the
+/// tail of a closing pipe; a stream still open past it is held by something the reap
+/// could not reach, and see [`drain`] for why that is not worth waiting on.
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// How often to look at a reader while waiting for it. Finer than [`POLL`], because this
+/// is the tail of every run rather than a limit being watched, and rounding each one up
+/// to a tenth of a second would be paid by all of them.
+const DRAIN_POLL: Duration = Duration::from_millis(5);
 
 /// How much of the harness's last line to quote. It goes on the execution record, and
 /// every view of a run prints that on one line beside four other columns.
@@ -311,19 +324,18 @@ pub(crate) fn run(
 
     let ended = supervise(&mut child, pid, started, limits, &tick_rx, &meter);
 
-    // However it ended, nothing the agent spawned outlives it. A backgrounded child
-    // holds the pipe open, and the reader joins below would then block on a process
-    // the supervisor has already reported as finished — for as long as it cared to
-    // run. Reaping the group is what makes the join bounded.
+    // However it ended, nothing the agent spawned outlives it — as far as a signal can
+    // reach. A backgrounded child holds the pipe open, and a reader would then block on
+    // a process the supervisor has already reported as finished, for as long as it
+    // cared to run. Reaping the group is most of what bounds that; `drain` is the rest.
     reap_group(pid);
-    for r in readers {
-        let _ = r.join();
-    }
+    drain(readers);
 
-    // The readers have joined, so nothing else holds this lock. A poisoned one means
-    // a reader panicked mid-line, and the count it had reached is still the best
-    // evidence there is. Taken once: the two figures are one report read two ways,
-    // and locking twice invites them to come from different states of it.
+    // A reader detached by `drain` may still be alive and take this for a moment, which
+    // is a lock held across one line of parsing. A poisoned one means a reader panicked
+    // mid-line, and the count it had reached is still the best evidence there is. Taken
+    // once: the two figures are one report read two ways, and locking twice invites them
+    // to come from different states of it.
     let metered = meter.lock().unwrap_or_else(|e| e.into_inner());
 
     Ok(Outcome {
@@ -368,6 +380,38 @@ fn reader<R: Read + Send + 'static>(
             }
         }
     })
+}
+
+/// Waits for the readers to finish, and stops waiting if they will not.
+///
+/// This is where the wall limit stops being advice. A reader blocks until the write end
+/// of its pipe closes, which is normally the moment the group dies — but a process that
+/// called `setsid` belongs to no group this can name, and it inherited that pipe when the
+/// agent started it. So the supervisor kills the group on the minute it was told to,
+/// reports `Wall`, and then waits on a thread held open by a daemon nothing here can
+/// reach. The limit was thirty minutes; the run took nine hours, held a seat for all nine,
+/// and its own record said it had been stopped. A limit that only bounds the process is
+/// not a limit on the run.
+///
+/// So the wait is bounded. [`DRAIN_GRACE`] covers the ordinary case, where a pipe closing
+/// still has a little in it, and anything reading past that is left to itself: the thread
+/// keeps its handles on the buffer and the meter and may go on writing into them, which
+/// is why what follows still takes the locks rather than assuming it is alone. What is
+/// given up is whatever that stream had not said yet — a stream belonging to a process
+/// that outlived the run it was spawned for, which is the right thing to give up. What is
+/// kept is the clock.
+fn drain(readers: Vec<thread::JoinHandle<()>>) {
+    let deadline = Instant::now() + DRAIN_GRACE;
+    for r in readers {
+        while !r.is_finished() && Instant::now() < deadline {
+            thread::sleep(DRAIN_POLL);
+        }
+        // Only when it can complete: `join` on a blocked reader is the wait this exists
+        // to avoid, and dropping the handle instead simply detaches the thread.
+        if r.is_finished() {
+            let _ = r.join();
+        }
+    }
 }
 
 /// The head of a line, with an ellipsis when there was more of it.
@@ -481,6 +525,10 @@ fn kill_group(pid: u32, child: &mut Child) {
         thread::sleep(Duration::from_millis(50));
     }
     signal_group(pid, "-KILL");
+    // And the leader by its own pid, which is the one name it cannot shed. A harness
+    // that daemonised itself is in no group the line above can address, and the wait
+    // below would then be a wait on a process nothing had asked to stop.
+    let _ = child.kill();
     let _ = child.wait();
 }
 
@@ -901,6 +949,57 @@ mod tests {
             "an orphaned child kept it alive for {:?}",
             o.took
         );
+    }
+
+    /// Whether this machine can stage an escape from the process group at all. Linux
+    /// ships `setsid(1)`; where it is missing the test below has nothing to prove.
+    fn has_setsid() -> bool {
+        Command::new("setsid")
+            .arg("true")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    #[test]
+    fn a_process_that_escaped_the_group_does_not_outlast_the_wall() {
+        // The whole defect. `setsid` puts that sleep in a session no signal from here can
+        // name, and it inherits the agent's stdout on the way out — which is what a
+        // language server or a dev server an agent leaves running looks like from the
+        // supervisor's side. The group dies on the minute it was told to and the run is
+        // recorded as `Wall`; what used to happen next was a `join` on a reader whose pipe
+        // that survivor still held. Thirty minutes of limit, nine hours of run, a seat
+        // held for all nine, and a record saying it had been stopped.
+        if !has_setsid() {
+            return;
+        }
+        let mut t = agent("setsid sleep 20 & echo working; sleep 20", None, None);
+        // The environment is built, so `setsid` is on this PATH or it is on none.
+        t.env_allowlist = vec!["PATH".to_string()];
+        let o = run(
+            &t,
+            "",
+            "",
+            None,
+            &cwd(),
+            &[],
+            Limits {
+                wall: Some(Duration::from_millis(300)),
+                idle: None,
+                tokens: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(o.ended, Ended::Wall);
+        assert!(
+            o.took < Duration::from_secs(10),
+            "the survivor held the run open for {:?}",
+            o.took
+        );
+        // And giving up on the reader is not the same as discarding it: everything said
+        // before the kill is still on the record.
+        assert!(o.output.contains("working"), "{}", o.output);
     }
 
     #[test]
