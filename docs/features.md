@@ -121,6 +121,7 @@ which is how you check a scope before assigning work to a seat that cannot reach
 | **Shared build cache** | directories a project's worktrees share, so a task is not a cold build |
 | **Spawning** | environment from an allowlist, new process group, wall and idle timeouts |
 | **Budgets that bite** | the wall and the token figure a task declared stop the run, not just describe it |
+| **Why it failed** | the harness's own last words, on the record the next attempt reads |
 | **Intelligence** | a seat declares how clever its occupant is, 1–10, and the model is derived |
 | **Verification** | the branch's diff against the declared scope, then the acceptance commands |
 | **Commits** | every attempt, pass or fail, authored by wecode |
@@ -290,6 +291,32 @@ harness's alone — a budget says how long the work may take, not how long it ma
 in the middle of it — and so does the whole of an unmetered run: an agent whose protocol
 wecode cannot read reports no count, and a budget checked against a number nobody has
 would be a kill nobody could account for.
+
+**A failed run records why, not only that it failed.** The record used to say `exit 1`,
+which is a fact about a process and not a reason: an agent that gave up, a harness that
+crashed on a bad config and a machine with no credential on it left the same mark, and
+`exit 1` says exactly as much as `killed by a signal` does. The sentence telling them
+apart had been captured all along — it is in the output wecode buffers, and the last
+lines of it are printed at the end of `wecode run` — and then it was dropped, so the
+durable copy kept the exit code alone. That is the copy that matters: it is what the
+retry's envelope hands the next attempt under **YOUR PREVIOUS ATTEMPTS**, what `wecode
+show` prints against the run, and what the failed attempt's own commit carries in its
+message. All three read `exit 1 — Error: invalid x-api-key` now, and a run stopped by a
+limit says what it was in the middle of saying when the clock ran out.
+
+The **last plain line**, and three things are deliberately not quoted. Nothing from a run
+that overflowed its 256 KB buffer: the cap keeps the *beginning*, so the end of that
+string is the middle of the run, and quoting it as the reason would be an invention —
+those runs fall back to the bare ending, which is what every run used to get. (The same
+cap is why the `last output` block at the foot of `wecode run` shows a capped run's
+*first* lines under that heading; the `output was capped` line above it is the only
+warning, and the record is now the more careful of the two.) Nothing that begins as JSON,
+since a metered agent narrates itself into the same buffer its errors land in and 200
+characters of a `result` object explains nothing — recognised by its first character and
+skipped, not parsed. And nothing more than twenty lines back, so the answer is the run's
+ending rather than the last prose it happened to emit. A clean run is left alone
+entirely: its last line is a warning or a progress note, and hanging that off `exit 0`
+would put a cause on every record that has none.
 
 ## Watching
 

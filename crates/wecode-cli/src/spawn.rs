@@ -5,7 +5,7 @@
 //! controls left are the clock, what the agent says it has spent, and a signal — so
 //! those are what this module provides.
 //!
-//! Four details are load-bearing:
+//! Six details are load-bearing:
 //!
 //! - **The environment is built, not inherited.** A coding CLI inherits every secret
 //!   in the shell otherwise. Absent a container this is the only network control
@@ -22,6 +22,10 @@
 //!   spent past the budget its task declared. It is the same count the ledger records
 //!   afterwards, and it has to be: a kill the surviving figure cannot account for is
 //!   indistinguishable from a bug — see [`crate::usage`] on one report per message.
+//! - **How a run ended is not why it ended.** The first is an exit code and the second
+//!   is a sentence the harness wrote, and only the second is any use to whoever tries
+//!   again. Both leave here together, so the record can carry the one that helps. See
+//!   [`Outcome::cause`].
 //!
 //! No `unsafe`, which the workspace forbids: `process_group` is safe, and signalling
 //! shells out to `kill` the way the rest of the tree shells out to `git`.
@@ -45,6 +49,15 @@ const OUTPUT_CAP: usize = 256 * 1024;
 
 /// How often to check whether the child has finished or overrun.
 const POLL: Duration = Duration::from_millis(100);
+
+/// How much of the harness's last line to quote. It goes on the execution record, and
+/// every view of a run prints that on one line beside four other columns.
+const LAST_WORDS_CAP: usize = 200;
+
+/// How far back to look for it. The run's *ending*, not the last plain sentence
+/// anywhere in it: a harness that narrates itself in JSON for a thousand lines after
+/// its last prose line did not fail because of that line.
+const LAST_WORDS_SEARCH: usize = 20;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Ended {
@@ -114,6 +127,66 @@ pub(crate) struct Outcome {
     /// Context the run re-read from the cache. Reported, never budgeted: it is the
     /// same tokens once per turn, at a scale no budget is written in.
     pub(crate) replayed: Option<u64>,
+}
+
+impl Outcome {
+    /// How the run ended, and — when it failed and left an explanation — why.
+    ///
+    /// This is the line that goes on the record, and the reason it exists is that the
+    /// old one said `exit 1`. That is a fact about a process and tells whoever tries
+    /// again exactly nothing: it is the same nothing as `killed by a signal`, so an
+    /// agent that gave up, a harness that crashed on a bad config and a machine with no
+    /// credential on it all left the same mark. The sentence that told them apart was
+    /// written by the harness, captured here, printed once to a terminal — and then
+    /// dropped, while the durable copy, the one a retry reads out of its envelope and
+    /// the one an operator reads from somewhere else entirely, kept the exit code
+    /// alone. `exit 1 — Error: invalid x-api-key` is a cause, and it is the difference
+    /// between a retry that fixes something and a retry that burns the budget again.
+    ///
+    /// Only for a run that failed. A clean run's last line is a warning or a progress
+    /// note, and hanging it off `exit 0` would put noise on every record that worked. A
+    /// killed run keeps its words: what the harness was saying when the clock ran out is
+    /// the best evidence anyone has about where it got stuck.
+    pub(crate) fn cause(&self) -> String {
+        match self.last_words() {
+            Some(words) if !self.ended.ok() => format!("{} — {words}", self.ended.describe()),
+            _ => self.ended.describe(),
+        }
+    }
+
+    /// The last thing the harness said in its own words.
+    ///
+    /// Three rules, and each of them is about not quoting something that would mislead:
+    ///
+    /// - **Nothing from a run that overflowed.** The buffer keeps the *first*
+    ///   [`OUTPUT_CAP`] and discards what comes after, so a flooded run's final lines
+    ///   are not in it — the end of the string is the middle of the run. Quoting that as
+    ///   the reason it failed would be an invention, and an invention on the record is
+    ///   worse than a bare exit code. The count survives a flood because the meter reads
+    ///   the stream as it passes; this reads the buffer afterwards, and says so.
+    /// - **Nothing that is the harness's own protocol.** A metered agent narrates itself
+    ///   in JSON on stdout, mixed into the same buffer as its errors, and 200 characters
+    ///   of a `result` object explains nothing to anybody. Recognised by its first
+    ///   character and skipped — this reads none of it and only declines to quote it.
+    /// - **Nothing from far back.** Twenty lines, so the answer is the run's ending
+    ///   rather than whatever the last plain sentence anywhere in it happened to be.
+    ///
+    /// What is left is the last plain line the run printed, on either stream: a tool's
+    /// `Error:`, a shell's `not found`, the exception a traceback ends on. A harness
+    /// whose stack frames come last gives up a little to that, and no rule short of
+    /// parsing somebody else's output format does better.
+    fn last_words(&self) -> Option<String> {
+        if self.truncated {
+            return None;
+        }
+        self.output
+            .lines()
+            .rev()
+            .take(LAST_WORDS_SEARCH)
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with(['{', '[']))
+            .map(|l| clip(l, LAST_WORDS_CAP))
+    }
 }
 
 /// The argv this template will actually run, with `{{prompt}}` filled in.
@@ -293,6 +366,20 @@ fn reader<R: Read + Send + 'static>(
             }
         }
     })
+}
+
+/// The head of a line, with an ellipsis when there was more of it.
+///
+/// By characters rather than bytes: a harness may complain in any language, and a cut
+/// through the middle of one is a panic in the supervisor over a detail of somebody
+/// else's error message.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
 }
 
 /// Polls until the child finishes or overruns.
@@ -707,6 +794,109 @@ mod tests {
         assert!(o.output.len() <= OUTPUT_CAP, "{}", o.output.len());
         // The point of draining past the cap: the child still gets to finish.
         assert_eq!(o.ended, Ended::Exited(0));
+    }
+
+    #[test]
+    fn a_failed_run_is_recorded_with_the_reason_it_gave_not_just_its_exit() {
+        // The whole defect. `exit 1` is what a crashed harness, a refused agent and a
+        // machine with no credential on it all look like from outside; the sentence
+        // that tells them apart was captured here and thrown away, and the retry read
+        // the exit code.
+        let t = agent("echo 'Error: invalid x-api-key' >&2; exit 1", None, None);
+        let o = run(&t, "", "", None, &cwd(), &[], Limits::default()).unwrap();
+        assert_eq!(o.cause(), "exit 1 — Error: invalid x-api-key");
+    }
+
+    #[test]
+    fn a_run_that_ended_cleanly_is_not_annotated_with_its_last_line() {
+        // A working run's last line is a warning or a progress note. Hung off `exit 0`
+        // it would put a reason on every record that has none.
+        let t = agent("echo 'warning: deprecated flag' >&2; exit 0", None, None);
+        let o = run(&t, "", "", None, &cwd(), &[], Limits::default()).unwrap();
+        assert_eq!(o.cause(), "exit 0");
+    }
+
+    #[test]
+    fn a_failure_that_said_nothing_is_still_recorded_by_how_it_ended() {
+        // No invention when there is nothing to quote: the exit code alone is what
+        // this run left behind, and it is the whole of what the record claims.
+        let t = agent("exit 5", None, None);
+        let o = run(&t, "", "", None, &cwd(), &[], Limits::default()).unwrap();
+        assert_eq!(o.cause(), "exit 5");
+    }
+
+    #[test]
+    fn a_killed_run_says_what_it_was_saying_when_the_clock_ran_out() {
+        // Not a reason it chose — it did not choose to stop — but the best evidence
+        // anyone has about where it got stuck, and the operator reading this from
+        // somewhere else has nothing better.
+        let t = agent("echo 'resolving dependencies'; sleep 30", None, None);
+        let o = run(
+            &t,
+            "",
+            "",
+            None,
+            &cwd(),
+            &[],
+            Limits {
+                wall: Some(Duration::from_millis(300)),
+                idle: None,
+                tokens: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(o.cause(), "killed — wall limit — resolving dependencies");
+    }
+
+    #[test]
+    fn the_harness_s_own_protocol_is_not_quoted_back_as_a_reason() {
+        // A metered agent narrates itself in JSON on the same buffer its errors land
+        // in, and it is usually the last thing said. Two hundred characters of a
+        // `result` object explains nothing to anybody; the line above it does.
+        let t = metered_agent(
+            "echo 'Error: overloaded' >&2; sleep 0.2; \
+             echo '{\"type\":\"result\",\"usage\":{\"input_tokens\":5,\"output_tokens\":5}}'; \
+             exit 1",
+        );
+        let o = run(&t, "", "", None, &cwd(), &[], Limits::default()).unwrap();
+        assert_eq!(o.cause(), "exit 1 — Error: overloaded");
+        // Skipped, not parsed: the count still comes from the meter reading the stream.
+        assert_eq!(o.spent, Some(10));
+    }
+
+    #[test]
+    fn a_run_that_overflowed_its_buffer_is_not_quoted_from_its_own_middle() {
+        // The cap keeps the *first* 256 KB, so the end of a flooded buffer is the
+        // middle of the run. The last line in it is not the last thing that happened,
+        // and quoting it as the reason would be an invention on the record — which is
+        // worse than the bare exit code this falls back to.
+        let t = agent(
+            "i=0; while [ $i -lt 40000 ]; do echo aaaaaaaaaaaaaaaaaaaa; i=$((i+1)); done; \
+             echo 'Error: ran out of disk' >&2; exit 1",
+            None,
+            None,
+        );
+        let o = run(&t, "", "", None, &cwd(), &[], Limits::default()).unwrap();
+        assert!(o.truncated, "the cap should have been hit");
+        assert_eq!(o.cause(), "exit 1");
+    }
+
+    #[test]
+    fn a_long_complaint_is_clipped_rather_than_dropped() {
+        // It shares a line with four other columns wherever a run is shown, and half
+        // an explanation is worth more than none.
+        let t = agent(
+            "i=0; s=; while [ $i -lt 40 ]; do s=\"${s}0123456789\"; i=$((i+1)); done; \
+             echo \"Error: $s\" >&2; exit 1",
+            None,
+            None,
+        );
+        let c = run(&t, "", "", None, &cwd(), &[], Limits::default())
+            .unwrap()
+            .cause();
+        assert!(c.starts_with("exit 1 — Error: 0123456789"), "{c}");
+        assert!(c.ends_with('…'), "{c}");
+        assert!(c.chars().count() <= "exit 1 — ".chars().count() + LAST_WORDS_CAP);
     }
 
     /// The same stand-in, speaking a protocol whose usage lines wecode can read.

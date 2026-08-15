@@ -764,7 +764,14 @@ pub(crate) fn run_task(a: &Args) -> Res {
                 | spawn::Ended::Signalled => wecode_core::ExecutionStatus::Canceled,
                 spawn::Ended::Exited(_) => wecode_core::ExecutionStatus::Failed,
             },
-            &outcome.ended.describe(),
+            // Why it ended, not only how — the same principle as the rejected branch
+            // above, applied to the half of it that had no verdict to borrow one from.
+            // `exit 1` is what a crash, a refusal and a machine with no credential on
+            // it all look like from outside, and the sentence telling them apart was
+            // written by the harness and printed to a terminal nobody was watching.
+            // This is the copy that reaches the retry's envelope and the operator's
+            // phone. See [`spawn::Outcome::cause`].
+            &outcome.cause(),
             outcome.spent,
         )?;
         out.push_str("\n  not verified — the agent did not finish cleanly\n");
@@ -806,7 +813,11 @@ fn commit_attempt(
     }
     // `next_attempt` is what the *next* run would be, so this run is one below it.
     let attempt = store.next_attempt(id)?.saturating_sub(1).max(1);
-    let message = format!("{id}: attempt {attempt}\n\n{}", outcome.ended.describe());
+    // The cause in the body, and the subject untouched: `attempts_on` matches attempts
+    // by their first line, and the handoff and the scope check both read that match.
+    // A failed attempt's commit is the thing a retry is handed as a diff — the reason
+    // it failed belongs beside the diff rather than only in the database next door.
+    let message = format!("{id}: attempt {attempt}\n\n{}", outcome.cause());
     Ok(match git::commit_all(cwd, &message)? {
         Some(sha) => format!("  committed {sha} — attempt {attempt}\n"),
         None => "  nothing to commit — the agent changed no files\n".to_string(),
