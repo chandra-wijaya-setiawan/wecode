@@ -101,6 +101,40 @@ The last row is different in kind. Whether a slice delivers value is not checkab
 a gate that pretended otherwise would be the rubber-stamp risk in another costume. That
 one stays advice on purpose.
 
+## The third place: checked, but afterwards
+
+Two categories were one too few. A rule can also be enforced by a project's **acceptance
+commands**, which is neither of the above: it is a check, so nobody has to remember it,
+but it runs after the budget is spent rather than before the action. It refuses the
+*result*, not the plan.
+
+That is a worse gate than admission and a better one than a paragraph, and it is the
+only place available for a rule about the code rather than about the work. Admission
+sees a task; it has never seen the tree.
+
+wecode's own file-size ratchet is the worked example. `scripts/max-lines.sh` fails when
+a source file grows past the number in `.max-lines`, and every kind in
+`.wecode/playbook.toml` that changes code now runs it in `accept`. The rule it enforces
+is the one the second table above cannot reach from the other end: **isolate a hub
+file**. Counting how many tasks touch one file would name a hub after the fact; keeping
+any single file from growing without bound is the pressure that stops one forming, and
+it is a check a `wc -l` can carry today.
+
+Two properties come with the position, and both are constraints rather than caveats:
+
+- **The threshold may only follow the tree, never lead it.** Acceptance runs against the
+  whole worktree while a task may write only inside its scope, so a limit under the
+  tallest file fails tasks that are forbidden from fixing it. The number comes down in
+  the commit that lands a split.
+- **A check nothing runs is not in this category at all.** The ratchet shipped wired to
+  nothing, which was the right call — turning it on before the splits it argued for
+  would have failed every queued task for a debt none of them created — and it is still
+  what the interval demonstrates. Within a day its test limit went from correct to five
+  thousand lines clear of the largest test file, because the suite it was measured
+  against was split into seven and no number followed. The line in `accept` is the whole
+  difference, which is the first table's point restated: the enforcement is the rule,
+  and the prose beside it is a description that may already be false.
+
 ## What this does not change
 
 No new task kind for a sprint. A sprint is a *shape* — a parent with subtasks — not a

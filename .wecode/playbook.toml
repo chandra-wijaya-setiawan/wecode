@@ -30,11 +30,23 @@ language = "rust"
 #
 #   A task that changes a crate's public API changes the crate defining it, its
 #   Cargo.toml, and every caller. Declare the crates, not the files.
+#
+#   A task that pushes a file past the limit in `.max-lines` fails acceptance, and the
+#   ratchet reads the whole worktree rather than the diff — so a task can be failed by
+#   a file it never opened. Neither shape is repaired by widening the scope. Growing a
+#   file that is already near the limit is a task that should have split it, and the
+#   split is worth declaring up front, because acceptance is frozen and the run cannot
+#   be repaired afterwards. Run `bash scripts/max-lines.sh` before planning: it prints
+#   the tallest file in each half and how much room is left under the number.
 
 [feature]
 worktree  = true
 assign_to = "impl"
-accept    = ["cargo test --workspace", "cargo clippy --all-targets -- -D warnings"]
+accept    = [
+  "cargo test --workspace",
+  "cargo clippy --all-targets -- -D warnings",
+  "bash scripts/max-lines.sh",
+]
 tokens    = 150000
 wall_secs = 5400
 subtasks  = ["design", "build", "test"]
@@ -138,19 +150,19 @@ title     = "{{title}}"
 # the subtask collides with everything else in the crate. Fixing that properly means a
 # subtask inheriting its parent's declared scope; see advisory-checks.
 write     = ["crates/**", "docs/**"]
-accept    = ["cargo clippy --all-targets -- -D warnings"]
+accept    = ["cargo clippy --all-targets -- -D warnings", "bash scripts/max-lines.sh"]
 
 [feature.test]
 after     = ["build"]
 title     = "cover {{title}} with tests"
 write     = ["crates/wecode-cli/tests/**", "crates/**"]
-accept    = ["cargo test --workspace"]
+accept    = ["cargo test --workspace", "bash scripts/max-lines.sh"]
 
 
 [bug]
 worktree  = true
 assign_to = "impl"
-accept    = ["cargo test --workspace"]
+accept    = ["cargo test --workspace", "bash scripts/max-lines.sh"]
 tokens    = 150000
 wall_secs = 2700
 guidance  = """
@@ -193,7 +205,11 @@ which is why it is the right shape for "find out why".
 [refactor]
 worktree  = true
 assign_to = "impl"
-accept    = ["cargo test --workspace", "cargo clippy --all-targets -- -D warnings"]
+accept    = [
+  "cargo test --workspace",
+  "cargo clippy --all-targets -- -D warnings",
+  "bash scripts/max-lines.sh",
+]
 tokens    = 150000
 wall_secs = 3600
 guidance  = """
@@ -204,12 +220,20 @@ means behaviour changed and this is a feature or a bug, not a refactor. That is 
 whole distinction from a chore.
 
 Renaming a public item is a refactor; changing what it returns is not.
+
+A split is the one task that lowers the ratchet, and it is the only kind that should.
+`.max-lines` may only come down to the tallest file left standing, so the number moves
+in the commit that lands the split and not before it — put `.max-lines` in the write
+scope of a splitting task, and run `bash scripts/max-lines.sh` to read off what the
+tree now allows. Leaving it where it was is not a failure; it is the next split's
+opportunity, and a task that lowers the number without splitting anything has only
+armed a gate against work that cannot answer it.
 """
 
 [chore]
 worktree  = true
 assign_to = "impl"
-accept    = ["cargo test --workspace"]
+accept    = ["cargo test --workspace", "bash scripts/max-lines.sh"]
 tokens    = 150000
 wall_secs = 1800
 guidance  = """
