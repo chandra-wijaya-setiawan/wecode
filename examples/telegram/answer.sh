@@ -18,15 +18,17 @@ SAID=${WECODE_TELEGRAM_ANSWER:-decided}
 curl -sS -m 10 -d callback_query_id="$WECODE_TELEGRAM_CALLBACK" \
   --data-urlencode "text=recorded" "$API/answerCallbackQuery" >/dev/null 2>&1
 
-task=""; mid=""
+task=""; mid=""; num=""
 for f in ~/.wecode/msg/*; do
   [ -f "$f" ] || continue
   name=$(basename "$f")
-  case "$SAID" in *"$name"*) task="$name"; mid=$(cat "$f"); break ;; esac
+  case "$SAID" in *"$name"*) task="$name"; read -r mid num < "$f"; break ;; esac
 done
 [ -n "$mid" ] || exit 0
 
-BODY=$(printf '<b>%s</b>\n\nrecorded: %s' "$task" "$SAID")
+# The number as well as the name: the notification led with #N, and a record that
+# drops it cannot be matched back to the thing that was decided.
+BODY=$(printf '<b>#%s %s</b>\n\nrecorded: %s' "$num" "$task" "$SAID")
 # No reply_markup on the edit: omitting it removes the keyboard, so the message stops
 # offering a decision already made.
 curl -sS -m 15 -X POST "$API/editMessageCaption" \

@@ -68,4 +68,5 @@ esac
 # the answer hook a callback id and the outcome, not the message it came from — this is
 # how the two are joined until it does.
 mkdir -p ~/.wecode/msg
-printf '%s' "$resp" | sed -n 's/.*"message_id":\([0-9]*\).*/\1/p' | head -1 > ~/.wecode/msg/"$WECODE_TASK"
+mid=$(printf '%s' "$resp" | sed -n 's/.*"message_id":\([0-9]*\).*/\1/p' | head -1)
+printf '%s %s' "$mid" "$WECODE_TASK_NUMBER" > ~/.wecode/msg/"$WECODE_TASK"
