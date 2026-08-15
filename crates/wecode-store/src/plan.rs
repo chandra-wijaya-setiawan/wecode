@@ -462,6 +462,25 @@ impl Store {
         Ok(())
     }
 
+    /// Sets a task's budget without rewriting the rest of it.
+    ///
+    /// Two columns rather than a whole [`Self::save_task`], for the reason
+    /// [`Self::set_task_status`] is also narrow: a save replaces acceptance, scope and
+    /// dependencies from whatever the caller happened to be holding. Acceptance is
+    /// frozen once a task has been dispatched, and a command that amends a budget must
+    /// not be able to move it — not even by writing back a plan read a moment earlier.
+    pub fn set_task_budget(&self, id: &TaskId, budget: Budget) -> Result<(), StoreError> {
+        self.conn().execute(
+            "UPDATE tasks SET budget_tokens = ?2, budget_wall = ?3 WHERE id = ?1",
+            params![
+                id.as_str(),
+                crate::int::opt_to_db(budget.tokens),
+                crate::int::opt_to_db(budget.wall_secs),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Erases a task and everything hanging off it.
     ///
     /// Only ever for a task that never ran — the caller checks that, because the
@@ -681,6 +700,38 @@ mod tests {
             s.load_plan().unwrap().task(&"cache-layer".into()),
             Some(&expected)
         );
+    }
+
+    #[test]
+    fn a_budget_moves_without_disturbing_anything_else_about_the_task() {
+        // The whole reason this is not a `save_task`: the task it amends has usually
+        // run, and acceptance is frozen at dispatch. A save would carry the caller's
+        // whole idea of the task back into the database beside the two figures.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        let t = task("layer").after("keys");
+        s.save_task(&task("keys")).unwrap();
+        s.save_task(&t).unwrap();
+        s.set_task_status(&"layer".into(), TaskStatus::Failed)
+            .unwrap();
+
+        s.set_task_budget(
+            &"layer".into(),
+            Budget {
+                tokens: Some(400_000),
+                wall_secs: Some(900),
+            },
+        )
+        .unwrap();
+
+        let back = s.load_plan().unwrap().task(&"layer".into()).unwrap().clone();
+        assert_eq!(back.budget.tokens, Some(400_000));
+        assert_eq!(back.budget.wall_secs, Some(900));
+        assert_eq!(back.acceptance, t.acceptance, "acceptance is frozen");
+        assert_eq!(back.scope, t.scope);
+        assert_eq!(back.depends_on, vec![TaskId::new("keys")]);
+        assert_eq!(back.status, TaskStatus::Failed, "status untouched");
+        assert_eq!(back.number, Some(Number::new(3)), "not renumbered");
     }
 
     #[test]

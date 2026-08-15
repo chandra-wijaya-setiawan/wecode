@@ -51,6 +51,9 @@ PLAN
   wecode task rm <id>                  erase a task that never ran
   wecode task scope <id> --write <glob> [--read <glob>]
         replace a scope after the fact; recorded violations are not erased
+  wecode task budget <id> [--tokens <n>] [--wall <secs>]
+        raise a budget a run proved short, on the task that ran; each figure
+        is amended on its own, and the next run is the one held to it
 
   wecode playbook [<kind>]             this project's guidance for that kind
         --project <p>
@@ -143,6 +146,31 @@ this build opens its `wecode.db`.
 `[notify] command` is handed `WECODE_TASK_NUMBER`, the digits with no `#`, so the message
 that reaches a phone can carry the thing the operator has to type back. See
 [config](config.md).
+
+**`wecode task budget <id>`** changes what a task may spend without recreating it. The
+way out before it was `wecode task rm` followed by `task add` again, and that stops
+working at the moment it is wanted: a task that has run is history and refuses to be
+removed, and a budget is rarely known to be wrong until a run has proved it short. The
+extra room then had to come from a new id, and what was recorded against the old one —
+the spend, the refusals, the design signed off on it — stayed behind under a task nobody
+was looking at.
+
+`--tokens` and `--wall` are amended one at a time, unlike `task scope`, which replaces
+read and write together. An unstated wall is not a wall of zero: it is the agent
+template's, which is usually far longer, so a `--tokens` raise that quietly dropped the
+wall would hand the task hours nobody granted it. Whichever figure is not named is left
+as it was, and both are printed back before and after.
+
+A budget is what **one run** may spend, not what the task has cost so far — each attempt
+starts the count again. Raising one does not reach a run already in flight, because the
+limits of a run are read once, when the process starts; the command says so when the
+task is running, and points at `wecode status <id> waiting` when it has failed, since
+nothing moves a failed task on its own.
+
+Amending a budget records a `define`, exactly as `task scope` does, so a task in a
+project that dispatches by approval has to be signed for again: a signature given to a
+task budgeted at 100k did not cover the same task at 400k. What it spent already stays
+in the ledger either way — `wecode audit --task <id>`.
 
 **`wecode archive task <id>`** files a task away *with its subtasks*, and
 `wecode unarchive task <id>` brings the group back. A bare id — `wecode archive caching` —

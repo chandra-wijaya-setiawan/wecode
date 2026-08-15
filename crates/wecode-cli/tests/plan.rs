@@ -7,7 +7,7 @@
 
 mod support;
 
-use support::agent::{a_task, with_agent};
+use support::agent::{a_task, a_task_in_src, signs_first, with_agent};
 use support::{Org, Run};
 
 // ----------------------------------------------------------------- plan --------
@@ -664,6 +664,116 @@ fn a_task_that_ran_is_history_and_cannot_be_removed() {
     let r = org.run(&["task", "rm", "t"]);
     assert!(!r.ok(), "a task with an execution must not be removable");
     r.assert_contains("it ran, so it is history");
+}
+
+// ----------------------------------------------------------- task budget -------
+
+#[test]
+fn a_budget_is_raised_on_the_task_that_ran_rather_than_on_a_new_one() {
+    // The whole point. `task rm` is the way a task used to be re-declared, and it is
+    // refused once anything real has happened — which is exactly when a budget turns
+    // out to have been short.
+    let (org, _) = with_agent("budget-amend", "true");
+    a_task(&org, "t", "src/**", "true");
+    org.run(&["run", "t"]).assert_ok("run");
+
+    let r = org.run(&["task", "rm", "t"]);
+    assert!(!r.ok(), "the old way out is closed once a task has run");
+    r.assert_contains("it ran, so it is history");
+
+    org.run(&["task", "budget", "t", "--tokens", "400000", "--wall", "900"])
+        .assert_ok("raise")
+        .assert_contains("was  100 tokens, 30s wall")
+        .assert_contains("now  400000 tokens, 900s wall");
+
+    org.run(&["show", "t"])
+        .assert_ok("show")
+        .assert_contains("budget     400000 tokens")
+        .assert_contains("wall       900s");
+
+    // Still the same task, so what the earlier run spent is still filed under it.
+    org.run(&["audit", "--task", "t"])
+        .assert_ok("audit")
+        .assert_contains("spend");
+}
+
+#[test]
+fn each_figure_is_amended_on_its_own() {
+    // Unlike a scope, which is replaced whole. An unstated wall is the agent
+    // template's, not zero, so a --tokens raise that dropped it would be a second
+    // change nobody asked for.
+    let org = Org::new("budget-one-figure", "solo");
+    org.seed();
+
+    org.run(&["task", "budget", "cache-tests", "--wall", "900"])
+        .assert_ok("state a wall where there was none")
+        .assert_contains("was  50000 tokens, — wall")
+        .assert_contains("now  50000 tokens, 900s wall");
+    org.run(&["task", "budget", "cache-tests", "--tokens", "400000"])
+        .assert_ok("raise the tokens alone")
+        .assert_contains("now  400000 tokens, 900s wall");
+
+    org.run(&["show", "cache-tests"])
+        .assert_ok("show")
+        .assert_contains("budget     400000 tokens")
+        .assert_contains("wall       900s");
+}
+
+#[test]
+fn a_figure_that_is_not_a_number_is_refused_rather_than_ignored() {
+    // The silent failure this guards: a budget left exactly as it was, under a message
+    // saying it had been raised.
+    let org = Org::new("budget-bad-figure", "solo");
+    org.seed();
+
+    let nothing = org.run(&["task", "budget", "cache-tests"]);
+    assert!(!nothing.ok(), "an amendment that says nothing is not one");
+    nothing.assert_contains("--tokens");
+
+    let bad = org.run(&["task", "budget", "cache-tests", "--tokens", "200k"]);
+    assert!(!bad.ok(), "`200k` is not a number of tokens");
+    bad.assert_contains("wants a number");
+
+    org.run(&["show", "cache-tests"])
+        .assert_contains("budget     50000 tokens");
+}
+
+#[test]
+fn raising_a_budget_after_a_signature_asks_for_it_again() {
+    // A signature given to a task budgeted at 100 tokens did not cover the same task
+    // with four hundred thousand to spend, so the amendment has to retract it — the
+    // same rule `task scope` is held to, through the same `define` record.
+    let org = signs_first("budget-signed", "echo done >> src/app.txt");
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+    org.run(&["approve", "admission", "--task", "t"])
+        .assert_ok("sign");
+
+    org.run(&["task", "budget", "t", "--tokens", "400000"])
+        .assert_ok("raise");
+    let r = org.run(&["run", "t"]);
+    assert!(!r.ok(), "the signature was for the cheaper task");
+    r.assert_contains("was changed after it was signed")
+        .assert_contains("wecode approve admission --task t");
+
+    org.run(&["approve", "admission", "--task", "t"])
+        .assert_ok("sign what it is now");
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed");
+}
+
+#[test]
+fn a_failed_task_is_told_what_puts_it_back_in_the_queue() {
+    // Nothing moves a failed task on its own, so a raised budget sitting on one is a
+    // command that looks like it worked and changes nothing.
+    let org = Org::new("budget-failed", "solo");
+    org.seed();
+    org.run(&["status", "cache-tests", "failed"])
+        .assert_ok("fail it");
+
+    org.run(&["task", "budget", "cache-tests", "--tokens", "400000"])
+        .assert_ok("raise")
+        .assert_contains("wecode status cache-tests waiting");
 }
 
 // --------------------------------------------------------------- assign --------
