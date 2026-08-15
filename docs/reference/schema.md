@@ -74,6 +74,12 @@ checkouts already on disk: wecode made them and cannot prove when, and inventing
 creation date would put a fact in the database that nobody observed. They are recorded
 the next time `wecode start` prepares them.
 
+The 8→9 step adds `task_executions.replayed_tokens` and leaves it NULL on every attempt
+already in the file, which is the same rule read one more time. Those runs re-read
+whatever they re-read; the figure was printed on a run line and kept nowhere. `DEFAULT 0`
+would replace *nobody wrote this down* with *this conversation had no cache behind it*,
+and the second is a claim about the past.
+
 The 5→6 step creates `inbox_cursor` empty for the same reason, and there it is
 load-bearing: a guessed cursor is a claim about which chat replies have already been
 handled. Too low re-reads a month of conversation, too high swallows the reply that is
@@ -207,20 +213,28 @@ CREATE INDEX audit_by_outcome ON audit_log(outcome);
 -- `spent_tokens` is the agent's own report, and the ledger row for the same run
 -- carries that provenance.
 --
+-- `replayed_tokens` is the same report's other half: context the run re-read out of
+-- the cache. Its own column rather than part of the spend, because the two are
+-- different scales — a forty-turn conversation replays millions while adding
+-- thousands — and only one of them is what `tasks.budget_tokens` is compared
+-- against. Nullable on the same terms, and for a further reason: a run recorded
+-- before this column existed did not re-read nothing, it was never asked.
+--
 -- No foreign key on session_id: the ledger and its executions outlive sessions.
 CREATE TABLE task_executions (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    session_id   TEXT NOT NULL,
-    attempt      INTEGER NOT NULL,
-    status       TEXT NOT NULL,         -- A2A's eight states
-    worktree     TEXT,
-    pid          INTEGER,
-    started      INTEGER NOT NULL,
-    ended        INTEGER,
-    wall_secs    INTEGER,               -- measured by wecode
-    spent_tokens INTEGER,               -- reported by the agent; NULL if unmetered
-    detail       TEXT NOT NULL DEFAULT '',
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    session_id      TEXT NOT NULL,
+    attempt         INTEGER NOT NULL,
+    status          TEXT NOT NULL,      -- A2A's eight states
+    worktree        TEXT,
+    pid             INTEGER,
+    started         INTEGER NOT NULL,
+    ended           INTEGER,
+    wall_secs       INTEGER,            -- measured by wecode
+    spent_tokens    INTEGER,            -- reported by the agent; NULL if unmetered
+    replayed_tokens INTEGER,            -- cache reads, reported; not budgeted
+    detail          TEXT NOT NULL DEFAULT '',
     UNIQUE (task_id, attempt)
 ) STRICT;
 
@@ -371,10 +385,23 @@ cannot.
 
 Both figures are in one unit: tokens the run **added**, cache writes included, cache
 *reads* excluded. That is the unit `tasks.budget_tokens` is compared against, and the
-comparison is the reason the column holds only one of the two numbers a harness reports.
-Neither table stores the replayed count — it is printed on the run line and nothing
-rolls it up, so a query that wants what a long conversation cost in cache reads will not
-find it here.
+comparison is the reason `spent_tokens` holds only one of the two numbers a harness
+reports.
+
+The other one is `task_executions.replayed_tokens`, in its own column beside it. A
+harness reports two figures and they are different scales — a forty-turn conversation
+over a growing context replays millions of tokens while adding a couple of hundred
+thousand — so adding them together produces a number in no unit at all, and the unit it
+most resembles is the one budgets are checked in. Keeping the replay out of the spend is
+what stops every task's row from going red on its first turn. Keeping it in a column is
+what stops that decision from hiding real money: cache reads are billed, at a tenth of
+the rate, and until this column existed the figure was printed on one run line and kept
+nowhere. `wecode show` prints it per attempt, so three tries that each added ninety
+tokens can still say which one held the long conversation.
+
+Nothing rolls the replay up and nothing checks it against anything. It is recorded, not
+enforced — the ledger's `Action::Spend` row still carries only the budgeted count, since
+that is what the board compares.
 
 Both are written however the run ended. A run killed on its wall limit spent what it
 spent, and a cost recorded only for clean exits would hide exactly the expensive

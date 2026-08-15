@@ -30,7 +30,33 @@ pub struct Execution {
     /// the agent and the model. The ledger row for the same run records that
     /// provenance; this column is the number, kept beside the attempt it belongs to.
     pub spent_tokens: Option<u64>,
+    /// Context the run re-read out of the cache, on the same terms as `spent_tokens`:
+    /// `None` said nothing wecode could read, `Some(0)` re-read nothing.
+    ///
+    /// Kept apart from the spend rather than added to it. These tokens were counted
+    /// on the turn that wrote them, and a long conversation replays them once per
+    /// turn — a figure in the millions where the spend is in the thousands, which is
+    /// why no budget is written in it. Recorded all the same, because cache reads are
+    /// billed: the run line printed this figure and then threw it away, so a task
+    /// that cost real money in replay left no trace of it anywhere.
+    pub replayed_tokens: Option<u64>,
     pub detail: String,
+}
+
+/// What a run reported spending, in the two units a harness reports.
+///
+/// One argument rather than two `Option<u64>` side by side. They are the same type
+/// and mean opposite things — one is checked against a budget, the other is
+/// deliberately not — so a swapped pair would compile, and file a conversation's
+/// replay as the spend that turns a board red.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Spend {
+    /// Tokens the run added: prompt, cache writes, and everything produced. The unit
+    /// `tasks.budget_tokens` is written in.
+    pub tokens: Option<u64>,
+    /// Context re-read from the cache, which is the same context again rather than
+    /// more of it.
+    pub replayed: Option<u64>,
 }
 
 impl Store {
@@ -63,15 +89,15 @@ impl Store {
 
     /// Closes a row with what happened, and what it cost.
     ///
-    /// `spent` is `None` when the agent reported no token count, which is not the
-    /// same as reporting none: an unmetered agent leaves the column NULL rather than
-    /// claiming to have run for free.
+    /// Either half of `spend` is `None` when the agent reported no count, which is not
+    /// the same as reporting none: an unmetered agent leaves the columns NULL rather
+    /// than claiming to have run for free, or to have re-read nothing.
     pub fn finish_execution(
         &self,
         id: i64,
         status: ExecutionStatus,
         detail: &str,
-        spent: Option<u64>,
+        spend: Spend,
     ) -> Result<(), StoreError> {
         let started: i64 = self.conn().query_row(
             "SELECT started FROM task_executions WHERE id = ?1",
@@ -81,14 +107,16 @@ impl Store {
         let ended = crate::int::to_db(now_secs());
         self.conn().execute(
             "UPDATE task_executions
-                SET status = ?2, ended = ?3, wall_secs = ?4, spent_tokens = ?5, detail = ?6
+                SET status = ?2, ended = ?3, wall_secs = ?4, spent_tokens = ?5,
+                    replayed_tokens = ?6, detail = ?7
               WHERE id = ?1",
             params![
                 id,
                 status.as_str(),
                 ended,
                 ended - started,
-                crate::int::opt_to_db(spent),
+                crate::int::opt_to_db(spend.tokens),
+                crate::int::opt_to_db(spend.replayed),
                 detail
             ],
         )?;
@@ -110,7 +138,7 @@ impl Store {
         let c = self.conn();
         let mut stmt = c.prepare(
             "SELECT id, task_id, session_id, attempt, status, worktree, pid,
-                    started, ended, wall_secs, spent_tokens, detail
+                    started, ended, wall_secs, spent_tokens, replayed_tokens, detail
                FROM task_executions WHERE task_id = ?1 ORDER BY attempt",
         )?;
         let rows = stmt.query_map(params![task.as_str()], |r| {
@@ -126,7 +154,8 @@ impl Store {
                 r.get::<_, Option<i64>>(8)?,
                 r.get::<_, Option<i64>>(9)?,
                 r.get::<_, Option<i64>>(10)?,
-                r.get::<_, String>(11)?,
+                r.get::<_, Option<i64>>(11)?,
+                r.get::<_, String>(12)?,
             ))
         })?;
 
@@ -144,6 +173,7 @@ impl Store {
                 ended,
                 wall,
                 spent,
+                replayed,
                 detail,
             ) = row?;
             out.push(Execution {
@@ -161,6 +191,7 @@ impl Store {
                 ended: crate::int::opt_from_db(ended, "execution end")?,
                 wall_secs: crate::int::opt_from_db(wall, "execution wall")?,
                 spent_tokens: crate::int::opt_from_db(spent, "execution spend")?,
+                replayed_tokens: crate::int::opt_from_db(replayed, "execution replay")?,
                 detail,
             });
         }
@@ -230,15 +261,82 @@ mod tests {
         assert_eq!(open.worktree.as_deref(), Some("/wt/t"));
         assert!(open.ended.is_none());
         assert_eq!(open.spent_tokens, None, "nothing spent before it ran");
+        assert_eq!(open.replayed_tokens, None, "and nothing re-read");
 
-        s.finish_execution(id, ExecutionStatus::Completed, "exit 0", Some(1540))
-            .unwrap();
+        s.finish_execution(
+            id,
+            ExecutionStatus::Completed,
+            "exit 0",
+            Spend {
+                tokens: Some(1540),
+                replayed: Some(500_000),
+            },
+        )
+        .unwrap();
         let done = &s.executions(&TaskId::new("t")).unwrap()[0];
         assert_eq!(done.status, ExecutionStatus::Completed);
         assert!(done.ended.is_some());
         assert!(done.wall_secs.is_some());
         assert_eq!(done.spent_tokens, Some(1540));
+        assert_eq!(done.replayed_tokens, Some(500_000));
         assert_eq!(done.detail, "exit 0");
+    }
+
+    #[test]
+    fn what_a_run_re_read_is_recorded_beside_what_it_spent_and_not_inside_it() {
+        // The two figures are different units and one of them is what a budget is
+        // checked against. A conversation that replays half a million tokens of its
+        // own context while adding ninety is a cheap run, and the row has to be able
+        // to say both things at once — otherwise the choice is a red board or a lost
+        // number, which is the choice this column removes.
+        let s = store();
+        let id = s
+            .start_execution(&TaskId::new("t"), "s-1", None, None)
+            .unwrap();
+        s.finish_execution(
+            id,
+            ExecutionStatus::Completed,
+            "exit 0",
+            Spend {
+                tokens: Some(90),
+                replayed: Some(500_000),
+            },
+        )
+        .unwrap();
+
+        let run = &s.executions(&TaskId::new("t")).unwrap()[0];
+        assert_eq!(run.spent_tokens, Some(90), "the budgeted unit is untouched");
+        assert_eq!(run.replayed_tokens, Some(500_000));
+    }
+
+    #[test]
+    fn re_reading_nothing_and_reporting_nothing_are_told_apart() {
+        // The same distinction `spent_tokens` keeps, for the same reason: a harness
+        // wecode cannot read leaves this NULL, and a run on a cold cache reports 0.
+        // Collapsing them would make every unmetered agent look like a first turn.
+        let s = store();
+        let quiet = s
+            .start_execution(&TaskId::new("t"), "s-1", None, None)
+            .unwrap();
+        s.finish_execution(quiet, ExecutionStatus::Completed, "exit 0", Spend::default())
+            .unwrap();
+        let cold = s
+            .start_execution(&TaskId::new("t"), "s-1", None, None)
+            .unwrap();
+        s.finish_execution(
+            cold,
+            ExecutionStatus::Completed,
+            "exit 0",
+            Spend {
+                tokens: Some(90),
+                replayed: Some(0),
+            },
+        )
+        .unwrap();
+
+        let runs = s.executions(&TaskId::new("t")).unwrap();
+        assert_eq!(runs[0].replayed_tokens, None);
+        assert_eq!(runs[1].replayed_tokens, Some(0));
     }
 
     #[test]
@@ -249,7 +347,7 @@ mod tests {
         let id = s
             .start_execution(&TaskId::new("t"), "s-1", None, None)
             .unwrap();
-        s.finish_execution(id, ExecutionStatus::Completed, "exit 0", None)
+        s.finish_execution(id, ExecutionStatus::Completed, "exit 0", Spend::default())
             .unwrap();
         assert_eq!(
             s.executions(&TaskId::new("t")).unwrap()[0].spent_tokens,
@@ -260,8 +358,16 @@ mod tests {
         let second = s
             .start_execution(&TaskId::new("t"), "s-1", None, None)
             .unwrap();
-        s.finish_execution(second, ExecutionStatus::Completed, "exit 0", Some(0))
-            .unwrap();
+        s.finish_execution(
+            second,
+            ExecutionStatus::Completed,
+            "exit 0",
+            Spend {
+                tokens: Some(0),
+                replayed: Some(0),
+            },
+        )
+        .unwrap();
         assert_eq!(
             s.executions(&TaskId::new("t")).unwrap()[1].spent_tokens,
             Some(0)
@@ -275,8 +381,16 @@ mod tests {
         let a = s
             .start_execution(&TaskId::new("t"), "s", None, None)
             .unwrap();
-        s.finish_execution(a, ExecutionStatus::Failed, "exit 1", Some(90))
-            .unwrap();
+        s.finish_execution(
+            a,
+            ExecutionStatus::Failed,
+            "exit 1",
+            Spend {
+                tokens: Some(90),
+                replayed: Some(4000),
+            },
+        )
+        .unwrap();
         assert_eq!(s.next_attempt(&TaskId::new("t")).unwrap(), 2);
 
         s.start_execution(&TaskId::new("t"), "s", None, None)
@@ -288,6 +402,7 @@ mod tests {
         // Failing is not free. What the first try burned stays on its own row, so a
         // task's cost is the sum of its attempts rather than only the one that worked.
         assert_eq!(all[0].spent_tokens, Some(90));
+        assert_eq!(all[0].replayed_tokens, Some(4000), "and what it re-read");
     }
 
     #[test]
@@ -309,8 +424,16 @@ mod tests {
         let id = s
             .start_execution(&TaskId::new("t"), "s", None, None)
             .unwrap();
-        s.finish_execution(id, ExecutionStatus::Canceled, "wall limit", Some(400))
-            .unwrap();
+        s.finish_execution(
+            id,
+            ExecutionStatus::Canceled,
+            "wall limit",
+            Spend {
+                tokens: Some(400),
+                replayed: None,
+            },
+        )
+        .unwrap();
         assert!(s.unfinished_executions().unwrap().is_empty());
     }
 

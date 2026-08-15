@@ -16,7 +16,9 @@ use rusqlite::Connection;
 /// 2 adds `projects.archived`. 3 adds `task_executions`. 4 adds
 /// `task_executions.spent_tokens`, once something wrote it. 5 adds `worktrees`.
 /// 6 adds `inbox_cursor`. 7 adds `short_numbers`. 8 adds `tasks.archived`.
-pub const VERSION: i64 = 8;
+/// 9 adds `task_executions.replayed_tokens`, on the same rule as 4: the count was
+/// being read off the agent's output and printed, and nothing kept it.
+pub const VERSION: i64 = 9;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -138,20 +140,28 @@ CREATE INDEX audit_by_outcome ON audit_log(outcome);
 -- `spent_tokens` is the agent's own report, and the ledger row for the same run
 -- carries that provenance.
 --
+-- `replayed_tokens` is the same report's other half: context the run re-read out of
+-- the cache. Its own column rather than part of the spend, because the two are
+-- different scales — a forty-turn conversation replays millions while adding
+-- thousands — and only one of them is what `tasks.budget_tokens` is compared
+-- against. Nullable on the same terms, and for a further reason: a run recorded
+-- before this column existed did not re-read nothing, it was never asked.
+--
 -- No foreign key on session_id: the ledger and its executions outlive sessions.
 CREATE TABLE task_executions (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    session_id   TEXT NOT NULL,
-    attempt      INTEGER NOT NULL,
-    status       TEXT NOT NULL,         -- A2A's eight states
-    worktree     TEXT,
-    pid          INTEGER,
-    started      INTEGER NOT NULL,
-    ended        INTEGER,
-    wall_secs    INTEGER,               -- measured by wecode
-    spent_tokens INTEGER,               -- reported by the agent; NULL if unmetered
-    detail       TEXT NOT NULL DEFAULT '',
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    session_id      TEXT NOT NULL,
+    attempt         INTEGER NOT NULL,
+    status          TEXT NOT NULL,      -- A2A's eight states
+    worktree        TEXT,
+    pid             INTEGER,
+    started         INTEGER NOT NULL,
+    ended           INTEGER,
+    wall_secs       INTEGER,            -- measured by wecode
+    spent_tokens    INTEGER,            -- reported by the agent; NULL if unmetered
+    replayed_tokens INTEGER,            -- cache reads, reported; not budgeted
+    detail          TEXT NOT NULL DEFAULT '',
     UNIQUE (task_id, attempt)
 ) STRICT;
 
@@ -373,6 +383,15 @@ const UPGRADES: &[(i64, &str)] = &[
         7,
         "ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
     ),
+    // Nothing backfills, and here the default is *not* the truth — which is why the
+    // column is nullable rather than `DEFAULT 0`. Every attempt already in the file
+    // re-read whatever it re-read; the number was printed on a run line and dropped.
+    // Writing 0 would turn "nobody kept this" into "this conversation had no cache
+    // behind it", which is the one thing the column exists to distinguish.
+    (
+        8,
+        "ALTER TABLE task_executions ADD COLUMN replayed_tokens INTEGER",
+    ),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -508,6 +527,14 @@ mod tests {
             .query_row("SELECT count(archived) FROM tasks", [], |r| r.get(0))
             .expect("tasks.archived exists after 7→8");
         assert_eq!(filed, 0);
+        let replayed: i64 = c
+            .query_row(
+                "SELECT count(replayed_tokens) FROM task_executions",
+                [],
+                |r| r.get(0),
+            )
+            .expect("task_executions.replayed_tokens exists after 8→9");
+        assert_eq!(replayed, 0);
     }
 
     #[test]
@@ -522,7 +549,8 @@ mod tests {
         c.execute_batch(
             "DROP TABLE inbox_cursor;
              DROP TABLE short_numbers;
-             ALTER TABLE tasks DROP COLUMN archived;",
+             ALTER TABLE tasks DROP COLUMN archived;
+             ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
         )
         .unwrap();
         c.pragma_update(None, "user_version", 5i64).unwrap();
@@ -546,7 +574,8 @@ mod tests {
             "DROP TABLE worktrees;
              DROP TABLE inbox_cursor;
              DROP TABLE short_numbers;
-             ALTER TABLE tasks DROP COLUMN archived;",
+             ALTER TABLE tasks DROP COLUMN archived;
+             ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
         )
         .unwrap();
         c.execute_batch(
@@ -577,8 +606,12 @@ mod tests {
         // need handles. Leaving them out would number only what is created next.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("DROP TABLE short_numbers; ALTER TABLE tasks DROP COLUMN archived;")
-            .unwrap();
+        c.execute_batch(
+            "DROP TABLE short_numbers;
+             ALTER TABLE tasks DROP COLUMN archived;
+             ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
+        )
+        .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
              VALUES ('caching','wecode','an objective','active');
@@ -618,8 +651,11 @@ mod tests {
         // so the default *is* the history.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("ALTER TABLE tasks DROP COLUMN archived")
-            .unwrap();
+        c.execute_batch(
+            "ALTER TABLE tasks DROP COLUMN archived;
+             ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
+        )
+        .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
              VALUES ('caching','wecode','an objective','active');
@@ -640,6 +676,42 @@ mod tests {
             .expect("tasks.archived exists");
         assert_eq!(title, "write the cache layer", "the plan survived");
         assert_eq!(archived, 0, "a done task is not filed away on its behalf");
+    }
+
+    #[test]
+    fn a_database_that_predates_the_replay_count_reads_as_never_asked() {
+        // The upgrade a workspace in use takes to reach this build. Its attempts did
+        // re-read context — every one of them, if the harness had a cache — and the
+        // figure was printed on a run line and thrown away. `DEFAULT 0` would replace
+        // "nobody kept this" with "this conversation had nothing behind it", which is
+        // exactly the claim a nullable column is here to avoid making.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("ALTER TABLE task_executions DROP COLUMN replayed_tokens")
+            .unwrap();
+        c.execute_batch(
+            "INSERT INTO projects (id, repo, objective, status)
+             VALUES ('p','wecode','an objective','active');
+             INSERT INTO tasks (id, project_id, kind, title, status)
+             VALUES ('t','p','feature','x','done');
+             INSERT INTO task_executions
+                 (task_id, session_id, attempt, status, started, spent_tokens)
+             VALUES ('t','s',1,'completed',0,90);",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 8i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let (spent, replayed): (Option<i64>, Option<i64>) = c
+            .query_row(
+                "SELECT spent_tokens, replayed_tokens FROM task_executions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("task_executions.replayed_tokens exists");
+        assert_eq!(spent, Some(90), "what it added survived");
+        assert_eq!(replayed, None, "what it re-read was never recorded");
     }
 
     #[test]
@@ -668,6 +740,7 @@ mod tests {
         // inbox cursor, no numbers, nothing filed away.
         c.execute_batch(
             "ALTER TABLE task_executions DROP COLUMN spent_tokens;
+             ALTER TABLE task_executions DROP COLUMN replayed_tokens;
              DROP TABLE worktrees;
              DROP TABLE inbox_cursor;
              DROP TABLE short_numbers;
