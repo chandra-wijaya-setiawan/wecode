@@ -89,6 +89,26 @@ Within a sprint, order items with `--after` when one genuinely needs the last. D
 not chain them out of habit: siblings that touch different files still share the
 worktree, so they run one at a time regardless, and a false dependency only removes
 the option of reordering.
+
+Acceptance must be able to fail if the task did nothing. `cargo test` and a linter pass
+perfectly against a task that changed no files — one such task exited cleanly having
+written nothing at all, and the suite agreed. Name the thing being added: grep for the
+flag, run the command, assert the endpoint answers. A check that inaction satisfies is
+not acceptance, it is a formality.
+
+Shipping a capability is not the same as delivering it. A task that adds a config
+surface — an environment variable a hook can read, a field company.toml can set — has
+not changed anything an operator touches until the config uses it, and the agent cannot
+write that config by design. Say in the task what the operator must wire, and put a
+worked example in docs/reference/config.md.
+
+The test step proves the feature works in the assembled system, not that the units
+compile. A suite that passes whether or not the feature is exercised has tested
+nothing about it — three capabilities shipped in one evening whose tests were green
+and which changed nothing an operator could see. Drive the real thing: run the
+binary, call the endpoint, execute the configured hook. If the only honest proof
+needs a person or a phone, say so in the task and put the worked example in the
+reference docs rather than pretending a unit test covered it.
 """
 
 [bug]
