@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use wecode_core::{Plan, Task, TaskId, TaskStatus, admission};
+use wecode_core::{Plan, Task, TaskId, TaskStatus, WORKER_DIR, admission};
 use wecode_gov::{Action, ActionKind, Broker, Session, glob};
 use wecode_org::{AgentTemplate, Company, Playbook, Workspace};
 
@@ -58,6 +58,39 @@ pub(crate) struct Prepared {
     pub(crate) a2a: wecode_a2a::Task,
     /// What preparation did, for the operator to read.
     pub(crate) notes: String,
+}
+
+/// Makes the scratch directory the envelope names, and answers with it.
+///
+/// Every envelope ends by telling the agent to write `.wecode/run/result.json` in its
+/// working directory, and nothing made the directory. A worktree is a clean checkout,
+/// so a first attempt never had one; `git clean -fd` takes the last attempt's away
+/// before a retry, so a second attempt did not either. Every agent had to work out for
+/// itself that the parent must be created first, and the one that did not lost its
+/// report to a failed open — the run's own account of what it did and what it could
+/// not, gone for a missing directory that wecode names and wecode can make.
+///
+/// Made for the repository too, when the playbook asks for no worktree. The instruction
+/// does not change with the tree, so neither can this: an agent told to write its
+/// result somewhere is owed the somewhere. What lands in the operator's own checkout is
+/// an empty untracked directory — the playbook's standing advice is to gitignore it,
+/// git does not record an empty directory in any case, and nothing here puts a file in
+/// one. That is well short of committing on the operator's behalf, which is the line
+/// [`commit_attempt`] draws and this does not approach.
+///
+/// A hard error rather than a shrug, for the reason the build cache is one: a directory
+/// that cannot be made is otherwise found out by the agent, in the last seconds of its
+/// run, at the moment it has no way left to say so.
+fn worker_area(cwd: &std::path::Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dir = cwd.join(WORKER_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "cannot create the worker area {}: {e}\n  \
+             the envelope tells the agent to write its result there",
+            dir.display()
+        )
+    })?;
+    Ok(dir)
 }
 
 /// Everything both `start` and `run` must do before any work happens.
@@ -181,6 +214,17 @@ pub(crate) fn prepare(
             cwd.display()
         ));
     }
+
+    // After the branch above has settled what is standing in `cwd`, and after the reset
+    // in particular: `clean -fd` removes this directory along with the rest of the last
+    // attempt's untracked work, so making it any earlier would be making it twice, the
+    // second time in vain.
+    //
+    // Reported like the worktree and the cache, and for the same reason — an operator
+    // working the task by hand is reading these notes to find out where the run is
+    // laid out, and the file the envelope asks them for goes here.
+    let run_dir = worker_area(&cwd)?;
+    notes.push_str(&format!("  run dir  {}\n", run_dir.display()));
 
     // After the worktree, because that is what makes the cache worth having: this is
     // the checkout whose `target/` would otherwise start empty. Reported in the notes
@@ -1166,6 +1210,36 @@ mod tests {
             tokens: Some(1000),
             wall_secs: wall,
         })
+    }
+
+    #[test]
+    fn the_directory_the_envelope_names_is_standing_before_the_agent_is() {
+        // The whole defect: the envelope said "write .wecode/run/result.json" into a
+        // clean checkout where no such directory existed, and an agent that did not
+        // think to create the parent had nowhere to file its report.
+        let cwd = std::env::temp_dir().join("wecode-exec-worker-area");
+        let _ = std::fs::remove_dir_all(&cwd);
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let dir = worker_area(&cwd).unwrap();
+        assert_eq!(dir, cwd.join(WORKER_DIR));
+        assert!(dir.is_dir(), "{dir:?}");
+
+        // Idempotent: a retry prepares the same tree again, and the reset before it
+        // may or may not have taken this away.
+        assert!(worker_area(&cwd).is_ok());
+    }
+
+    #[test]
+    fn a_worker_area_that_cannot_be_made_says_what_it_was_for() {
+        // Left to the agent, this surfaces as a failed open in the last seconds of a
+        // run, when there is no longer any way to report it.
+        let file = std::env::temp_dir().join("wecode-exec-not-a-dir");
+        let _ = std::fs::remove_dir_all(&file);
+        std::fs::write(&file, "x").unwrap();
+        let e = worker_area(&file).unwrap_err().to_string();
+        assert!(e.contains(WORKER_DIR), "{e}");
+        assert!(e.contains("the envelope"), "{e}");
     }
 
     #[test]
