@@ -548,15 +548,6 @@ fn expand(
     Ok(out)
 }
 
-/// Replaces a task's write and read scope.
-///
-/// Re-planning, not laundering. The distinction is that the ledger is append-only:
-/// widening a scope cannot erase a violation already recorded against the old one.
-/// A later `verify` will pass, and the earlier denial stays visible in `audit`.
-///
-/// Deliberately not offered for acceptance measures. Those are frozen at dispatch —
-/// amending what counts as done, after seeing what was produced, is how criteria
-/// drift to fit the work.
 /// Erases a task that never ran.
 ///
 /// Distinct from `status <id> dropped`, and both are needed. Dropping records a
@@ -632,6 +623,15 @@ pub(crate) fn task_rm(a: &Args) -> Res {
     ))
 }
 
+/// Replaces a task's write and read scope.
+///
+/// Re-planning, not laundering. The distinction is that the ledger is append-only:
+/// widening a scope cannot erase a violation already recorded against the old one.
+/// A later `verify` will pass, and the earlier denial stays visible in `audit`.
+///
+/// Deliberately not offered for acceptance measures. Those are frozen at dispatch —
+/// amending what counts as done, after seeing what was produced, is how criteria
+/// drift to fit the work.
 pub(crate) fn task_scope(a: &Args) -> Res {
     let (store, company) = open(a)?;
     let scope = scope_from(a).ok_or("give at least one --write or --read glob")?;
@@ -686,6 +686,131 @@ pub(crate) fn task_scope(a: &Args) -> Res {
         show(&was),
         show(&task.scope)
     ))
+}
+
+/// Changes what a task may spend, on the task that has already run.
+///
+/// The way out before this was `task rm` and `task add` again, and it stops working at
+/// exactly the moment it is wanted: a task that has run is history and refuses to be
+/// removed, and a budget is rarely known to be wrong until a run has proved it short.
+/// So the extra room came from a new id, and everything recorded against the old one —
+/// what it spent, what it was refused, the design signed off on it — stayed behind
+/// under a task nobody was looking at.
+///
+/// The two figures are amended one at a time, unlike a scope, which is replaced whole.
+/// An unstated wall is not a wall of zero: it is the agent template's, which is usually
+/// far longer, so a `--tokens` raise that quietly dropped the wall would hand the task
+/// hours nobody granted it.
+///
+/// Recorded as a `define`, exactly as [`task_scope`] is, and for the same reason: a
+/// signature given to a task budgeted at 100k did not cover the same task at 400k, and
+/// the dispatch gate reads the ledger to work that out.
+pub(crate) fn task_budget(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    let (tokens, wall) = (amount(a, "tokens")?, amount(a, "wall")?);
+    if tokens.is_none() && wall.is_none() {
+        return Err("give --tokens <n>, --wall <secs>, or both".into());
+    }
+
+    let plan = store.load_plan()?;
+    let task = the_task(&plan, require(a.cmd(2), "task id")?)?.clone();
+    let id = task.id.clone();
+    let was = task.budget;
+    // Whichever was not named is carried over rather than defaulted away.
+    let now = Budget {
+        tokens: tokens.or(was.tokens),
+        wall_secs: wall.or(was.wall_secs),
+    };
+
+    let who = actor(a, &store, &company)?;
+    require_allowed(
+        &store,
+        &company,
+        &who,
+        (Some(task.project.to_string()), Some(id.to_string())),
+        &Action::Define {
+            kind: WorkKind::Task,
+        },
+        "changing a task's budget",
+    )?;
+    store.set_task_budget(&id, now)?;
+
+    let mut out = format!(
+        "  {id} may spend\n    was  {}\n    now  {}\n",
+        budget_words(&was),
+        budget_words(&now)
+    );
+    // A run is held to the figures it was dispatched with — they are read once, when
+    // the process starts. Silence here would let a raise typed at the worst possible
+    // moment read as a rescue of the run in flight.
+    match task.status {
+        TaskStatus::Running => out.push_str(&format!(
+            "\n  {id} is running — a run keeps the figures it started with, so this reaches the next one\n"
+        )),
+        // The status a budget amendment most often follows, and nothing moves a failed
+        // task on its own. Naming the command beats leaving a raised budget on a task
+        // that will never be picked up.
+        TaskStatus::Failed => out.push_str(&format!(
+            "\n  {id} is failed — `wecode status {id} waiting` puts it back in the queue\n"
+        )),
+        _ => {}
+    }
+    out.push_str(&format!(
+        "\n  What it has already spent stays in the ledger — `wecode audit --task {id}`\n"
+    ));
+
+    // Stating a budget is how the commonest defect of all is answered, so the verdict
+    // is re-run and reported when anything is still outstanding. Left unsaid, a task
+    // still sitting as a draft reads as the change not having taken.
+    let mut amended = task;
+    amended.budget = now;
+    let mut probe = plan.clone();
+    probe.update_task(amended.clone())?;
+    let gate = plan
+        .project(&amended.project)
+        .map(|p| design_gate(&company, p))
+        .unwrap_or_default();
+    let defects = admission::check_task(&amended, &probe, &gate);
+    if !defects.is_empty() {
+        out.push('\n');
+        out.push_str(&render::admission(
+            &render::task_heading(&amended),
+            &defects,
+            None,
+        ));
+    }
+    Ok(out)
+}
+
+/// A figure a flag carries, or a refusal naming what was typed.
+///
+/// [`Args::num`] answers `None` both for a flag nobody passed and for one carrying
+/// something that is not a number, and here the two must never read alike: `--tokens
+/// 200k` would otherwise leave the budget exactly as it was, under a message saying it
+/// had changed.
+fn amount(a: &Args, flag: &str) -> Result<Option<u64>, String> {
+    if !a.has(flag) {
+        return Ok(None);
+    }
+    match a.get(flag) {
+        None => Err(format!("--{flag} wants a number after it")),
+        Some(raw) => raw
+            .parse()
+            .map(Some)
+            .map_err(|_| format!("--{flag} wants a number, got `{raw}`")),
+    }
+}
+
+/// `50000 tokens, 900s wall`, with `—` where nothing is stated — which is not zero: an
+/// unstated wall is the agent template's, and an unstated token figure is no cap at all.
+fn budget_words(b: &Budget) -> String {
+    let stated =
+        |v: Option<u64>, unit: &str| v.map_or_else(|| "—".to_string(), |n| format!("{n}{unit}"));
+    format!(
+        "{} tokens, {} wall",
+        stated(b.tokens, ""),
+        stated(b.wall_secs, "s")
+    )
 }
 
 /// `show <id>` accepts either level. Ids are unique per level, not globally, so a

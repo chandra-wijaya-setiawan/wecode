@@ -77,6 +77,9 @@ PLAN
   wecode task rm <id>                  erase a task that never ran
   wecode task scope <id> --write <glob> [--read <glob>]
         replace a scope after the fact; recorded violations are not erased
+  wecode task budget <id> [--tokens <n>] [--wall <secs>]
+        raise a budget a run proved short, on the task that ran; each figure
+        is amended on its own, and the next run is the one held to it
 
   wecode playbook [<kind>]             this project's guidance for that kind
         --project <p>
@@ -163,6 +166,7 @@ fn run(a: &Args) -> Res {
         ("task", "add") => task_add(a),
         ("task", "rm") => task_rm(a),
         ("task", "scope") => task_scope(a),
+        ("task", "budget") => task_budget(a),
         ("tree", _) => {
             let (store, _) = open(a)?;
             Ok(render::tree(&store.load_plan()?, a.has("all")))
