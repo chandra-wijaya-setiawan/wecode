@@ -19,7 +19,7 @@
 //! is not a second way to sign anything. It is the same sentence, delivered without a
 //! keyboard, through the same identity check and the same Broker call.
 //!
-//! Five things are load-bearing:
+//! Six things are load-bearing:
 //!
 //! - **wecode holds no token and speaks no HTTP.** `[telegram] fetch` is a command the
 //!   operator writes — a `curl` of the Bot API's `getUpdates` — and what it prints is
@@ -34,8 +34,18 @@
 //!   terminal. A stranger messaging the bot is a stranger, and signs nothing.
 //! - **A message is read once.** Whatever came of an update — signed, refused, or not
 //!   a decision at all — the cursor moves past it. The alternative is a week-old "yes"
-//!   re-applied on every pass, and a "no" that can never be got rid of because it
-//!   leaves no signature to remember it by.
+//!   re-applied on every pass, and a "no" answered again every five seconds.
+//! - **A refusal is a decision, and goes on the ledger as one.** An operator answering
+//!   from a phone is answering for real, and the answer has to survive the pass it
+//!   arrived on. Without a record, a task nobody has looked at and a task somebody
+//!   looked at and said no to are the same task in the morning — and the person who has
+//!   to decide again is the person who already decided. So a "no" is put past the same
+//!   Broker as a "yes", against the same approval, under the same seat, and lands as a
+//!   denial of it: `wecode audit --task t --denied` says who said no, and to what.
+//!   What it is not is a status change. "No" to a merge and "no" to a design mean
+//!   different things and a one-word reply cannot pick between them; withholding the
+//!   signature is the part it *is* precise enough to say, and the task stays where it
+//!   is, in front of a person.
 //! - **A bad reply is reported, not raised.** One message that names no task must not
 //!   stop the four behind it, and a fetch that failed must not take `wecode loop` down
 //!   with it. Only a fetch that could not be believed at all is an error.
@@ -653,17 +663,11 @@ fn decide(
     let id = target(msg, &plan)?;
     let task = plan.task(&id).ok_or("no such task")?.clone();
 
-    if verdict == Verdict::Decline {
-        // Deliberately not a status change. "No" to a merge and "no" to a design mean
-        // different things, and a reply is too blunt an instrument to pick — what it
-        // is good for is saying *do not land this*, which is what withholding the
-        // signature already does. The task stays where it is, in front of a person.
-        return Ok(format!(
-            "    ⏸ {id} stays {} — nothing signed\n",
-            task.status.as_str()
-        ));
-    }
-
+    // Resolved before the verdict is looked at, because both verdicts answer the same
+    // question and a refusal has to name what it refused or it records nothing. It also
+    // makes the two answers agree about when there is nothing to answer: a task with
+    // nothing outstanding gets the same message either way, rather than a "yes" that is
+    // refused and a "no" that is politely accepted for something nobody asked.
     let kind = match named_kind(&msg.text, &plan) {
         Some(named) => named,
         None => {
@@ -684,7 +688,14 @@ fn decide(
     };
 
     if dry {
-        return Ok(format!("    · would sign {} for {id}\n", kind.as_str()));
+        return Ok(match verdict {
+            Verdict::Sign => format!("    · would sign {} for {id}\n", kind.as_str()),
+            // Said in the same shape, because it is the same weight of act: both write
+            // one row nothing takes back, and a dry run exists to show which.
+            Verdict::Decline => {
+                format!("    · would record {} refused for {id}\n", kind.as_str())
+            }
+        });
     }
 
     let post = find_post(company, &user.post)?;
@@ -692,6 +703,9 @@ fn decide(
     // ledger should say how a signature arrived, and a reply is not somebody sitting at
     // a terminal — nor is it the post's coding agent, which is what typed nothing here.
     let who = Actor::over(company, &post, CHANNEL, user.name.clone());
+    if verdict == Verdict::Decline {
+        return refuse(store, company, &who, &task, kind);
+    }
     let signed = commands::gov::sign(
         store,
         company,
@@ -713,6 +727,64 @@ fn decide(
         .lines()
         .map(|l| format!("  {l}\n"))
         .collect::<String>())
+}
+
+/// Puts a refusal on the ledger, under the authority the signature would have needed.
+///
+/// The Broker is asked rather than told. Whether a "no" decides anything is the same
+/// question as whether a "yes" would have: an account is an identity, and the post is
+/// the authority. A seat that may not sign this is not withholding it — it never held
+/// it — and that reply has to land on the record as the refusal its "yes" would have
+/// got, rather than as a holder's decision it was not entitled to make.
+///
+/// Its own Broker rather than [`crate::commands::ctx::record`], because that call asks
+/// permission for something about to happen and nothing is about to happen here. This
+/// *is* the act: the row is the whole of what a refusal does.
+fn refuse(
+    store: &Store,
+    company: &Company,
+    who: &Actor,
+    task: &Task,
+    kind: ActionKind,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let id = &task.id;
+    let mut broker = wecode_gov::Broker::new(company.charter.clone());
+    let session = wecode_gov::Session::new(
+        who.session.clone(),
+        who.post.clone(),
+        who.agent.clone(),
+        who.effective.clone(),
+    )
+    .on(Some(task.project.to_string()), Some(id.to_string()))
+    .with_human(who.human.clone());
+
+    let decision = broker.withhold(&session, kind);
+    // Appended whichever way it went — an attempt to decide something is worth knowing
+    // about even when it decided nothing, which is what the sign path does too.
+    store.append_records(broker.ledger())?;
+    if !decision.is_withheld() {
+        let why = match &decision {
+            wecode_gov::Decision::Deny { reason, .. } => reason.to_string(),
+            // An approval is never itself gated behind an approval, so there is no
+            // third answer to get here. Printed rather than assumed away: a refusal
+            // that reported nothing at all would be worse than one that reports this.
+            other => format!("{other:?}"),
+        };
+        return Err(format!(
+            "`{}` may not sign {} for {id}, so it cannot withhold it either: {why}",
+            who.post,
+            kind.as_str()
+        )
+        .into());
+    }
+
+    Ok(format!(
+        "    ⏸ {} refused {} — {id} stays {}, nothing signed\n      \
+         on the record: wecode audit --task {id} --denied\n",
+        who.describe(),
+        kind.as_str(),
+        task.status.as_str(),
+    ))
 }
 
 #[cfg(test)]

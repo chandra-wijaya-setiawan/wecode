@@ -306,7 +306,7 @@ What a reply does:
 | `approve merge` | signs that kind, whatever the task is waiting for |
 | `approve cache-tests` | signs that task, rather than the one the message names |
 | `approve #4` | the same, by [short number](commands.md) |
-| `no` / `reject` / `hold` | nothing is signed; the task stays where it is |
+| `no` / `reject` / `hold` | nothing is signed; the refusal goes on the ledger |
 | anything else | chat; left alone |
 
 The task is the one named in the message being replied to — the notification wecode
@@ -322,15 +322,35 @@ number in a reply names no task at all.
 
 A bare yes signs what the task is actually waiting for: `merge` at `needs-approval`,
 `design` for a design task there, `admission` for one the dispatch gate is holding. A
-task with nothing outstanding is refused rather than given a default.
+task with nothing outstanding is refused rather than given a default — and a `no` is
+refused the same way, because a refusal has to name what it refused.
 
-Four properties worth knowing:
+Five properties worth knowing:
 
 - **The account is an identity, not an authority.** It resolves to the `[[users]]` entry
   that names it, or to nobody — there is no fallback seat, so a stranger who finds your
   bot signs nothing. What that person may then sign is their post's `approve` list,
   checked by the Broker at the moment of signing and recorded either way. Two users
   giving the same id is refused at load.
+- **A `no` is a decision, and is recorded as one.** It goes past the same Broker as a
+  yes, against the same approval, under the same seat — and lands in the ledger as a
+  denial of it:
+
+  ```
+  $ wecode audit --task cache-tests --denied
+  seq  post        agent         verdict   source      action  target
+  12   chief       telegram      ✗ deny    broker      approve Merge
+       └─ signature withheld: merge
+  ```
+
+  Without that row, a task nobody has looked at and a task somebody looked at and said
+  no to are the same task in the morning, and the person who has to decide again is the
+  person who already decided. It changes no status: "no" to a merge and "no" to a design
+  mean different things and one word cannot pick between them, so what a refusal does is
+  withhold the signature and say who withheld it. It is also not a lock — the same holder
+  replying `approve` afterwards signs it, and the ledger keeps both. A `no` from a seat
+  whose post may not sign that kind withholds nothing, for the reason its `approve`
+  would have signed nothing.
 - **A message is acted on once.** The highest update read is kept in `wecode.db`, and
   updates at or below it are skipped even if the fetch hands them back — a `getUpdates`
   retried after a network error must not sign twice.
@@ -389,9 +409,10 @@ in the chat, in front of whoever typed them — but a tap leaves nothing: the sp
 and a button that signed a merge looks exactly like a button that is broken. Four things
 follow from that:
 
-- **Every tap is acknowledged**, whatever came of it: what was signed, that the account
-  signs nothing, that the task has nothing waiting to be signed, or that the button's
-  `callback_data` decides nothing at all. Silence is the one answer that never informs.
+- **Every tap is acknowledged**, whatever came of it: what was signed, what a *Hold* put
+  on the record, that the account signs nothing, that the task has nothing waiting to be
+  signed, or that the button's `callback_data` decides nothing at all. Silence is the one
+  answer that never informs.
 - **A typed reply is not.** It would be wecode repeating the operator back at themselves.
 - **A `--dry-run` says nothing into the chat**, because it moves nothing anywhere.
 - **A receipt that failed to send is `⚠ could not say so in the chat: …`** under the
