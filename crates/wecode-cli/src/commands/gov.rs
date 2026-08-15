@@ -49,7 +49,7 @@ pub(crate) fn guard(a: &Args) -> Res {
     let human = company.users_of(&post.name).first().map(|u| u.name.clone());
     let who = Actor::of(&company, &post, "guard", human);
     let decision = record(&store, &company, &who, on, &action)?;
-    Ok(render::decision(
+    Ok(render::gov::decision(
         &post.name,
         &post.agent,
         &action,
@@ -248,7 +248,7 @@ pub(crate) fn audit(a: &Args) -> Res {
             matches!(l.action.as_str(), "read" | "write") && glob::matches(pattern, &l.target)
         });
     }
-    Ok(render::audit(&lines))
+    Ok(render::gov::audit(&lines))
 }
 
 /// Lands a verified task on its project's integration branch.
@@ -388,7 +388,7 @@ pub(crate) fn merge_task(a: &Args) -> Res {
     // rendering a second version for the repository would give the same merge two
     // accounts that could disagree. What the terminal shows is the committed text plus
     // one line saying where it went — the only fact that postdates the file.
-    let report = render::merged(
+    let report = record::merged(
         &task,
         &plan,
         &target,
@@ -403,9 +403,9 @@ pub(crate) fn merge_task(a: &Args) -> Res {
         &target,
         &id,
         &branch,
-        &render::report_file(&id, &target, &report),
+        &record::report_file(&id, &target, &report),
     );
-    Ok(report + &render::record_line(&kept))
+    Ok(report + &record::record_line(&kept))
 }
 
 /// Undoes a merge that should not have happened.
@@ -459,6 +459,6 @@ pub(crate) fn rollback_task(a: &Args) -> Res {
     );
     Ok(format!(
         "{}{announced}",
-        render::rolled_back(&task, &target, &merge, &revert)
+        record::rolled_back(&task, &target, &merge, &revert)
     ))
 }

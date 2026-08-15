@@ -6,6 +6,7 @@ mod cache;
 mod commands;
 mod doctor;
 mod git;
+mod handoff;
 mod ledger;
 mod notify;
 mod record;
@@ -157,16 +158,16 @@ fn main() -> ExitCode {
 fn run(a: &Args) -> Res {
     match (a.cmd(0), a.cmd(1)) {
         ("init", _) => init(a),
-        ("templates", _) => Ok(render::templates()),
+        ("templates", _) => Ok(render::org::templates()),
         ("doctor", _) => doctor::run(a),
         ("company", "show") | ("org", "show") => {
             let (_, company) = open(a)?;
-            Ok(render::company(&company))
+            Ok(render::org::company(&company))
         }
         ("project", "add") => project_add(a),
         ("project", "list") | ("projects", _) => {
             let (store, _) = open(a)?;
-            Ok(render::tree(&store.load_plan()?, a.has("all")))
+            Ok(render::plan::tree(&store.load_plan()?, a.has("all")))
         }
         ("task", "add") => task_add(a),
         ("task", "rm") => task_rm(a),
@@ -174,11 +175,11 @@ fn run(a: &Args) -> Res {
         ("task", "budget") => task_budget(a),
         ("tree", _) => {
             let (store, _) = open(a)?;
-            Ok(render::tree(&store.load_plan()?, a.has("all")))
+            Ok(render::plan::tree(&store.load_plan()?, a.has("all")))
         }
         ("ready", _) => {
             let (store, _) = open(a)?;
-            Ok(render::ready(&store.load_plan()?))
+            Ok(render::plan::ready(&store.load_plan()?))
         }
         ("playbook", "init") => playbook_init(a),
         ("playbook", "gap") => playbook_gap(a),
@@ -203,7 +204,7 @@ fn run(a: &Args) -> Res {
         ("up", _) | ("cockpit", _) => cockpit(a),
         ("assign", _) => assign(a),
         ("use", _) => use_org(a),
-        ("orgs", _) => Ok(render::orgs()),
+        ("orgs", _) => Ok(render::org::orgs()),
         ("login", _) => login(a),
         ("logout", _) => logout(a),
         ("who", _) => who(a),
