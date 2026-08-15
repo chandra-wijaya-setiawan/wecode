@@ -131,19 +131,106 @@ pub(crate) fn worktree_list(repo: &Path) -> Result<Vec<String>, GitError> {
         .collect())
 }
 
-/// Commits everything in a worktree, and returns the new sha.
+/// The note a verdict leaves for the commit that follows it: one refused path per line.
+///
+/// It lives in the tree's git metadata rather than in the tree. A note about what may
+/// not be committed would otherwise be a file that could be — and `.wecode/run/` is the
+/// worker's own area, which is the last place to keep a list the worker must not set.
+const REFUSED: &str = "wecode-refused";
+
+/// Where one worktree keeps its own git metadata.
+///
+/// Per worktree, not per repository. Linked worktrees share `refs/` and `config`, so a
+/// note kept in either would be read by the task next door; each has a directory of its
+/// own under `.git/worktrees/`, and that is what this answers.
+fn admin_dir(worktree: &Path) -> Result<PathBuf, GitError> {
+    git(worktree, &["rev-parse", "--absolute-git-dir"]).map(PathBuf::from)
+}
+
+/// Records the paths a verdict refused, so the commit that follows leaves them out.
+///
+/// wecode cannot intercept a write — confinement is the worktree and the scope check
+/// runs afterwards — but it decides what enters history, and that is the half of it
+/// that is not too late. A refused write recorded and then committed anyway is on the
+/// branch, and on its way to a merge, whatever the ledger says about it.
+///
+/// Replaces the last verdict's answer, the empty list included: a run that refused
+/// nothing must not inherit a refusal from the run before it.
+pub(crate) fn refuse(worktree: &Path, paths: &[String]) -> Result<(), GitError> {
+    let note = admin_dir(worktree)?.join(REFUSED);
+    // A git failure because that is the only failure this module has, and the caller
+    // only ever prints the sentence.
+    let io = |e: std::io::Error| GitError::Failed {
+        argv: format!("record refused writes in {}", worktree.display()),
+        stderr: e.to_string(),
+    };
+    if paths.is_empty() {
+        return match std::fs::remove_file(&note) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+            _ => Ok(()),
+        };
+    }
+    std::fs::write(&note, paths.join("\n")).map_err(io)
+}
+
+/// The refused paths — taken, not read.
+///
+/// A note answers the commit it was left for and no later one. Left standing, a
+/// verdict that refused a path in one attempt would keep it out of every commit after
+/// it, including the attempt that was told to write there once the scope was widened.
+///
+/// Silent when there is no note, which is the ordinary case: a tree nobody has judged
+/// has refused nothing, and the commit is the sweep it always was.
+fn take_refused(worktree: &Path) -> Vec<String> {
+    let Ok(dir) = admin_dir(worktree) else {
+        return Vec::new();
+    };
+    let note = dir.join(REFUSED);
+    let body = std::fs::read_to_string(&note).unwrap_or_default();
+    let _ = std::fs::remove_file(&note);
+    body.lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Commits a worktree's work, minus whatever the verdict refused, and returns the sha.
 ///
 /// `Ok(None)` when there was nothing to commit — an agent that changed nothing is a
-/// fact to record, not an error to raise.
+/// fact to record, not an error to raise. A run whose *only* writes were refused ends
+/// the same way, and that is the same fact: nothing it did belongs on the branch.
+///
+/// The refused writes are left in the tree, not deleted. They are the evidence a
+/// verdict was reached on, they are what a second `wecode verify` must reach the same
+/// answer about, and the retry's `git reset --hard` is what clears them — so they last
+/// exactly as long as the attempt they belong to. What changes is that the branch never
+/// carries them: a failed attempt is committed for the retry to learn from, and the one
+/// thing it must not learn is that writing there was allowed to stand.
 ///
 /// The author is wecode, not the agent: the commit is our account of what a run
 /// produced, and attributing it to a model would make `git log` claim something the
 /// design says nowhere else — that the agent's own word is evidence.
 pub(crate) fn commit_all(worktree: &Path, message: &str) -> Result<Option<String>, GitError> {
+    let refused = take_refused(worktree);
     git(worktree, &["add", "-A"])?;
     // `--quiet` still exits non-zero with nothing staged, so ask first rather than
-    // reading failure as an outcome.
-    if git(worktree, &["diff", "--cached", "--name-only"])?.is_empty() {
+    // reading failure as an outcome. Asked by name rather than for emptiness, because
+    // what is staged is now also what has to be checked against the refusals.
+    let staged: Vec<String> = git(worktree, &["diff", "--cached", "--name-only"])?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let (left_out, keep): (Vec<String>, Vec<String>) =
+        staged.into_iter().partition(|p| refused.contains(p));
+    if !left_out.is_empty() {
+        // Unstaged rather than reverted: the index forgets them, the working tree does
+        // not. A refusal names a path the task was not allowed to touch, never a path
+        // wecode is entitled to throw away the contents of.
+        let mut argv = vec!["reset", "-q", "--"];
+        argv.extend(left_out.iter().map(String::as_str));
+        git(worktree, &argv)?;
+    }
+    if keep.is_empty() {
         return Ok(None);
     }
     git(
@@ -645,6 +732,96 @@ mod tests {
         // error — and `git commit` exits non-zero on an empty index.
         let r = repo("commit-empty");
         assert_eq!(commit_all(&r, "attempt 1").unwrap(), None);
+    }
+
+    #[test]
+    fn a_refused_write_does_not_enter_the_commit() {
+        // The whole point. The scope check happens after the writes, so the only place
+        // left to say no is the commit — and a refused write that is committed anyway
+        // is on the branch, waiting for a merge, however loudly the verdict said no.
+        let r = repo("commit-refused");
+        fs::write(r.join("a.txt"), "in scope\n").unwrap();
+        fs::write(r.join("Cargo.toml"), "[package]\n").unwrap();
+
+        refuse(&r, &["Cargo.toml".to_string()]).unwrap();
+        let sha = commit_all(&r, "t1: attempt 1").unwrap().unwrap();
+
+        let files = git(&r, &["show", "--name-only", "--format=", &sha]).unwrap();
+        assert_eq!(files, "a.txt", "the refused path is not in the commit");
+        // Still on disk, and still visible to the next verdict: the file is evidence,
+        // and only the retry's reset is entitled to clear it.
+        assert_eq!(changed_files(&r).unwrap(), vec!["Cargo.toml"]);
+    }
+
+    #[test]
+    fn a_refused_edit_to_a_tracked_file_leaves_the_branch_where_it_was() {
+        // The other shape of a refusal: not a new file, an edit to one that was already
+        // there. Unstaged, never reverted — the branch keeps what it had, the tree keeps
+        // what the agent wrote, and neither is thrown away by us.
+        let r = repo("commit-refused-tracked");
+        fs::write(r.join("a.txt"), "out of scope\n").unwrap();
+        fs::write(r.join("new.txt"), "in scope\n").unwrap();
+
+        refuse(&r, &["a.txt".to_string()]).unwrap();
+        commit_all(&r, "t1: attempt 1").unwrap().unwrap();
+
+        assert_eq!(git(&r, &["show", "HEAD:a.txt"]).unwrap(), "one");
+        assert_eq!(
+            fs::read_to_string(r.join("a.txt")).unwrap(),
+            "out of scope\n"
+        );
+    }
+
+    #[test]
+    fn an_attempt_that_wrote_nothing_but_refused_paths_commits_nothing() {
+        // Reported the same way as an agent that changed no files, because it is the
+        // same fact: nothing this run did belongs on the branch.
+        let r = repo("commit-all-refused");
+        fs::write(r.join("Cargo.toml"), "[package]\n").unwrap();
+        refuse(&r, &["Cargo.toml".to_string()]).unwrap();
+        assert_eq!(commit_all(&r, "t1: attempt 1").unwrap(), None);
+    }
+
+    #[test]
+    fn a_refusal_answers_one_commit_and_not_the_next() {
+        // Left standing, one attempt's refusal would keep that path out of every commit
+        // after it — including the attempt told to write there once the scope was widened.
+        let r = repo("commit-refused-once");
+        fs::write(r.join("Cargo.toml"), "[package]\n").unwrap();
+        refuse(&r, &["Cargo.toml".to_string()]).unwrap();
+        assert_eq!(commit_all(&r, "t1: attempt 1").unwrap(), None);
+
+        let sha = commit_all(&r, "t1: attempt 2").unwrap().unwrap();
+        let files = git(&r, &["show", "--name-only", "--format=", &sha]).unwrap();
+        assert_eq!(files, "Cargo.toml", "the note was answered, not kept");
+    }
+
+    #[test]
+    fn a_verdict_that_refused_nothing_clears_the_one_before_it() {
+        let r = repo("commit-refused-cleared");
+        fs::write(r.join("Cargo.toml"), "[package]\n").unwrap();
+        refuse(&r, &["Cargo.toml".to_string()]).unwrap();
+        refuse(&r, &[]).unwrap();
+
+        let sha = commit_all(&r, "t1: attempt 1").unwrap().unwrap();
+        let files = git(&r, &["show", "--name-only", "--format=", &sha]).unwrap();
+        assert_eq!(files, "Cargo.toml");
+    }
+
+    #[test]
+    fn a_tree_nobody_judged_is_committed_whole() {
+        // No note, no change: `commit_all` is the sweep it has always been.
+        let r = repo("commit-unjudged");
+        fs::write(r.join("a.txt"), "changed\n").unwrap();
+        fs::write(r.join("Cargo.toml"), "[package]\n").unwrap();
+        let sha = commit_all(&r, "t1: attempt 1").unwrap().unwrap();
+        let mut files = git(&r, &["show", "--name-only", "--format=", &sha])
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        files.sort();
+        assert_eq!(files, vec!["Cargo.toml", "a.txt"]);
     }
 
     #[test]
