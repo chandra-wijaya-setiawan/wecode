@@ -1047,6 +1047,113 @@ fn a_running_task_keeps_the_worktree_it_started_in() {
 }
 
 #[test]
+fn moving_a_sprint_is_refused_while_something_inside_it_is_running() {
+    // The case a status check on the named task alone walks straight past: the sprint is
+    // not running, the item in it is, and moving the sprint re-roots the item too. It
+    // matters because nothing holds a run to the path it started in — `verify` asks for
+    // the worktree by owner again when the run is done, and a task re-rooted under one
+    // nobody cut falls back to judging the project's own checkout instead of the work.
+    let org = Org::new("amend-running-child", "solo");
+    org.seed();
+    a_sprint(&org, "cache-sprint");
+    org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "--amend",
+        "--parent",
+        "cache-sprint",
+    ])
+    .assert_ok("join the sprint");
+    org.run(&["status", "cache-tests", "running"])
+        .assert_ok("mark the item running");
+    org.run(&[
+        "task",
+        "add",
+        "outer",
+        "hold the whole caching effort",
+        "--project",
+        "caching",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "docs/outer/**",
+        "--tokens",
+        "1000",
+    ])
+    .assert_ok("a sprint to move the sprint into");
+
+    let r = org.run(&[
+        "task",
+        "add",
+        "cache-sprint",
+        "--amend",
+        "--parent",
+        "outer",
+    ]);
+    assert!(!r.ok(), "the item inside it is standing in the worktree");
+    // Named by the run that holds the tree open, not by the task that was typed.
+    r.assert_contains("cache-tests")
+        .assert_contains("keeps the worktree it started in")
+        .assert_contains("wecode status cache-tests waiting");
+    org.run(&["show", "cache-sprint"])
+        .assert_lacks("part of    outer");
+}
+
+#[test]
+fn a_move_that_leaves_the_worktree_where_it_is_goes_through() {
+    // The refusal asks whose worktree would change, not who is running, so a move
+    // inside a chain is not held up by a run: the root is the same before and after,
+    // and the checkout it names never moves.
+    let org = Org::new("amend-running-within", "solo");
+    org.seed();
+    a_sprint(&org, "cache-sprint");
+    org.run(&[
+        "task",
+        "add",
+        "cache-step",
+        "one step of the sprint",
+        "--project",
+        "caching",
+        "--parent",
+        "cache-sprint",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "docs/step/**",
+        "--tokens",
+        "1000",
+    ])
+    .assert_ok("a step in the sprint");
+    org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "--amend",
+        "--parent",
+        "cache-sprint",
+    ])
+    .assert_ok("join the sprint");
+    org.run(&["status", "cache-tests", "running"])
+        .assert_ok("mark it running");
+
+    // Still owned by cache-sprint either way, so the tree under the run does not move.
+    org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "--amend",
+        "--parent",
+        "cache-step",
+    ])
+    .assert_ok("regroup within the same worktree")
+    .assert_contains("now  in cache-step, after nothing")
+    .assert_lacks("worktree");
+    org.run(&["show", "cache-tests"])
+        .assert_contains("part of    cache-sprint / cache-step / cache-tests");
+}
+
+#[test]
 fn moving_a_signed_task_asks_for_the_signature_again() {
     // A signature given to a task that was going to ship on its own did not cover the
     // same task shipping inside a sprint, on a different branch. The same rule

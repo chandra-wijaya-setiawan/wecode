@@ -200,11 +200,16 @@ relation exactly as it was rather than clearing it — the same rule `task budge
 
 Two things refuse a move, and they are worth knowing before it is wanted:
 
-- **A running task keeps the worktree it started in.** One worktree per main task, with
-  subtasks sharing their parent's, so `parent` is what decides which checkout the work
-  happens in and which branch it lands on. Moving a group under a run in flight would
-  move the tree out from under the process. The ordering may still change: it is read on
-  the next scan, not by the run standing there.
+- **A run keeps the worktree it started in.** One worktree per main task, with subtasks
+  sharing their parent's, so `parent` is what decides which checkout the work happens in
+  and which branch it lands on. Nothing holds a run to the path it was started in —
+  `verify` asks which tree the task owns all over again when the run is done — so a move
+  that re-roots a task in flight would have it judged somewhere the work never happened.
+  The question asked is *whose worktree would change*, not who is running: moving a
+  sprint is refused while an item inside it runs, and moving a task from one place in a
+  chain to another is not refused at all, because the root above it is the same either
+  way. The ordering may always change: it is read on the next scan, not by the run
+  standing there.
 - **The ordering is part of what keeps two scopes apart.** Sibling tasks may claim the
   same files precisely because one comes after the other, so dropping that ordering puts
   the collision back. It is the check `task scope` re-runs, run again here, and it names

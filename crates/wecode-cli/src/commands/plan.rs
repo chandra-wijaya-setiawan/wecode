@@ -817,6 +817,10 @@ pub(crate) fn task_budget(a: &Args) -> Res {
 /// the reason is sharper than either. `parent` decides which worktree the work happens
 /// in and which branch it lands on, so a signature given to a task that was going to
 /// ship on its own did not cover the same task shipping inside a sprint.
+///
+/// That same fact is what one of the two refusals is about: a move is refused while it
+/// would re-root a task that is running, whether that is the task named or anything
+/// beneath it.
 pub(crate) fn task_amend(a: &Args) -> Res {
     let (store, company) = open(a)?;
     let plan = store.load_plan()?;
@@ -836,15 +840,6 @@ pub(crate) fn task_amend(a: &Args) -> Res {
             "give --parent <task>, --top, --after <task> (repeatable), or --no-after".into(),
         );
     }
-    // A running task keeps the tree it started in, so the group it belongs to cannot
-    // move under it. The ordering may: it is read on the next scan, not by this run.
-    if (parent.is_some() || top) && task.status == TaskStatus::Running {
-        return Err(format!(
-            "{id} is running — a run keeps the worktree it started in, and `parent` is what \
-             decides which one that is\n  `wecode status {id} waiting` first, or wait for it"
-        )
-        .into());
-    }
 
     let mut probe = plan.clone();
     let mut now = task.clone();
@@ -861,6 +856,39 @@ pub(crate) fn task_amend(a: &Args) -> Res {
             deps.push(the_task(&plan, typed)?.id.clone());
         }
         now = probe.set_predecessors(&id, deps)?;
+    }
+
+    // A worktree belongs to the root of a chain, so re-parenting a task re-roots
+    // everything beneath it too — and a run in flight is never held to the path it was
+    // started in: `verify` and teardown ask `work::owner` for the tree again, and a
+    // task re-rooted under one nobody cut falls back to judging the project's own
+    // checkout rather than the work.
+    //
+    // Asked as *whose owner changed*, rather than whether the named task is running.
+    // A sprint is not itself running when the item inside it is, and the item is the one
+    // standing in the checkout. Asking it this way is also the narrower refusal: a move
+    // within a chain leaves the root alone, so the tree does not move and neither
+    // relation needs to wait for the run.
+    let owner_of = |p: &Plan, t: &TaskId| crate::work::owner(p, t).map(|o| o.id.clone());
+    let uprooted: Vec<&str> = plan
+        .tasks()
+        .filter(|t| t.status == TaskStatus::Running)
+        .filter(|t| owner_of(&plan, &t.id) != owner_of(&probe, &t.id))
+        .map(|t| t.id.as_str())
+        .collect();
+    if !uprooted.is_empty() {
+        return Err(format!(
+            "moving {id} would take the worktree out from under a run: {}\n  \
+             a run keeps the worktree it started in, and `parent` is what decides which one \
+             that is\n{}",
+            uprooted.join(", "),
+            uprooted
+                .iter()
+                .map(|r| format!("  `wecode status {r} waiting` first, or wait for it"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+        .into());
     }
 
     let who = actor(a, &store, &company)?;
@@ -902,9 +930,8 @@ pub(crate) fn task_amend(a: &Args) -> Res {
     // One worktree per main task, subtasks sharing their parent's: a move that changes
     // the root of the chain therefore changes the branch the work lands on, and what
     // earlier attempts committed does not follow it.
-    let owner = |p: &Plan| crate::work::owner(p, &id).map(|t| t.id.clone());
-    if let Some(to) = owner(&probe)
-        && owner(&plan) != Some(to.clone())
+    if let Some(to) = owner_of(&probe, &id)
+        && owner_of(&plan, &id) != Some(to.clone())
     {
         out.push_str(&format!(
             "\n  {id} now works in {to}'s worktree — wecode/{to}\n"
