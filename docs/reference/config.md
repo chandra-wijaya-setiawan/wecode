@@ -643,12 +643,18 @@ deletes one.
 `templates.task_envelope` is the prompt a worker receives. Placeholders:
 
 `{{task_id}}` `{{project_id}}` `{{objective}}` `{{title}}` `{{acceptance}}`
-`{{write_scope}}` `{{context}}`
+`{{write_scope}}` `{{context}}` `{{repo_map}}`
 
 `{{context}}` carries the handoff — what predecessors produced: a capped diff per
 predecessor, or the whole document when the predecessor was a `design`. If the template
 omits it, the handoff is **appended** rather than dropped: losing it silently would be
 worse than putting it somewhere unexpected.
+
+`{{repo_map}}` carries the shape of the repository the task will work in — the
+directories git is tracking, the files inside the ones this task may write to, and the
+line each of those files uses to describe itself. Same rule when the template omits it:
+appended under a `REPO MAP` heading. The shipped template has no slot for it, so most
+workspaces get it appended and need change nothing.
 
 Previous attempts are appended after the template, always.
 

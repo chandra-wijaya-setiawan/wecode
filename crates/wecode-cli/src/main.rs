@@ -8,6 +8,7 @@ mod doctor;
 mod git;
 mod handoff;
 mod ledger;
+mod map;
 mod notify;
 mod record;
 mod render;

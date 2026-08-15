@@ -98,6 +98,25 @@ pub(crate) fn worktree_add(
     Ok(())
 }
 
+/// Every file git is tracking, relative to the top of the repository.
+///
+/// The index rather than a directory walk, which is what makes this cheap enough to do
+/// on the way to dispatching a task: a walk descends into `target/` and `node_modules/`,
+/// and would have to be taught what to ignore — a thing git already knows and is asked
+/// here instead. See [`crate::map`] for what reads it.
+///
+/// `-z` because a path may contain anything a file name may, newlines included, and the
+/// default quoting would hand back a name no reader could open. `--full-name` so the
+/// answer does not depend on how far down the tree `repo` points.
+pub(crate) fn tracked_files(repo: &Path) -> Result<Vec<String>, GitError> {
+    let out = git(repo, &["ls-files", "-z", "--full-name"])?;
+    Ok(out
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// Discards everything uncommitted in a worktree, so a retry starts clean.
 pub(crate) fn reset_hard(worktree: &Path) -> Result<(), GitError> {
     git(worktree, &["reset", "--hard"])?;

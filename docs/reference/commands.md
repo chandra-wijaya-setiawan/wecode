@@ -316,6 +316,12 @@ branch, same envelope. `start` hands you the envelope and steps back; `run` spaw
 agent and supervises it. They share one code path so a task worked by hand and a task
 worked by an agent cannot land somewhere different.
 
+The envelope carries a **repo map** under that heading: the directories git tracks, the
+files inside the ones the task may write to marked `✍`, and the line each of those files
+uses to describe itself. It is there so an agent does not open with `find` and `wc -l`
+against a budget the task is held to. A template that wants it somewhere particular names
+`{{repo_map}}`; see [config.md](config.md#the-envelope).
+
 That shared path is also where the dispatch gate lives, so it holds for both. A project
 whose playbook says `dispatch = "approved"` refuses either until `wecode approve admission
 --task <id>` is on the ledger, and refuses before the worktree is cut — a tree made for

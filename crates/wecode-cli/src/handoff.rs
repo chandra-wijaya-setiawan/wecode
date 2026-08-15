@@ -2,8 +2,12 @@
 //!
 //! Nothing here is passed along by the agent that produced it. Posts do not talk to
 //! each other and an agent's account of its own work is inadmissible, so the handoff is
-//! read out of git, the working tree and the execution record instead: what came before
-//! this task, and what this task tried last time.
+//! read out of git, the working tree and the execution record instead: what the tree
+//! looks like, what came before this task, and what this task tried last time.
+//!
+//! The first of those is the same idea applied to the repository rather than to the
+//! work. An agent that has to run `find` and `wc -l` before it can start is being asked
+//! to rediscover something wecode is standing in — see [`crate::map`].
 //!
 //! A2A is the model rather than a serialisation of one. The instruction *is* a
 //! message, everything the worker is given to read *is* an artifact, and the prompt a
@@ -172,6 +176,38 @@ fn predecessor_artifacts(task: &Task, plan: &Plan, cwd: &Path, repo: &Path) -> V
         .collect()
 }
 
+/// The shape of the tree this task will work in, as an artifact.
+///
+/// An artifact like the rest, so the JSON record carries it too. It is not the output of
+/// a run — nothing produced it, it is simply what is there — but it is one of the things
+/// the worker is given to read, and the record of an instruction that leaves out half of
+/// what the instruction said is not a record of it.
+///
+/// `None` when there is nothing to map, which is a tree that is not a git checkout or is
+/// empty. A heading over "could not read the repository" would be an apology; the agent
+/// can look for itself, which is what it would have done anyway.
+fn repo_map_artifact(task: &Task, cwd: &Path) -> Option<a2a::Artifact> {
+    let body = crate::map::of(cwd, &task.scope.write)?;
+    Some(
+        a2a::Artifact::new("repo-map", "repo map", vec![a2a::Part::text(body)])
+            .described("the tree as git tracked it when this attempt was prepared"),
+    )
+}
+
+/// The text of a map artifact — the one part it has.
+///
+/// Read back out of the artifact rather than kept beside it, so the prompt and the JSON
+/// cannot come from two different strings.
+fn map_body(a: &a2a::Artifact) -> String {
+    a.parts
+        .iter()
+        .find_map(|p| match p {
+            a2a::Part::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// What this task tried last time — the artifacts of its own earlier executions.
 ///
 /// Empty on a first attempt, which is the common case and should read as such rather
@@ -219,8 +255,11 @@ fn indent_block(s: &str) -> String {
 /// Everything the worker is told is **assembled here from what wecode observed**,
 /// never passed along by the agent that produced it. Posts do not talk to each other,
 /// and an agent's account of its own work is inadmissible — so the handoff is read out
-/// of git, the working tree and the execution record instead. Two payloads, answering
+/// of git, the working tree and the execution record instead. Three payloads, answering
 /// different questions:
+///
+/// - **what the tree is**, from the index, because an agent that begins by listing a
+///   repository is spending a budget on an answer wecode is standing in
 ///
 /// - **what came before you**, following `depends_on`, because that relation already
 ///   means "must come after" and is therefore exactly the edge a handoff travels —
@@ -265,6 +304,7 @@ pub(crate) fn a2a_task(
 
     let context = predecessor_artifacts(task, plan, cwd, repo);
     let attempts = attempt_artifacts(task, runs, cwd);
+    let shape = repo_map_artifact(task, cwd);
     let attempt = runs.iter().map(|r| r.attempt).max().unwrap_or(0) + 1;
 
     let context_text = if context.is_empty() {
@@ -282,6 +322,18 @@ pub(crate) fn a2a_task(
         format!("\n\nCONTEXT FROM COMPLETED WORK\n{context_text}")
     };
 
+    let map_text = shape.as_ref().map(map_body).unwrap_or_default();
+
+    // The same arrangement as the context above, and for the same reason: a template
+    // that names the slot decides where the map goes, and one that does not still gets
+    // it. Unlike the context it is appended *before* the previous attempts — what the
+    // tree is now comes before what an earlier run did to it.
+    let orphaned_map = if template.contains("{{repo_map}}") || map_text.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nREPO MAP\n{map_text}")
+    };
+
     let filled = template
         .replace("{{task_id}}", task.id.as_str())
         .replace("{{project_id}}", project.id.as_str())
@@ -289,7 +341,8 @@ pub(crate) fn a2a_task(
         .replace("{{title}}", &task.title)
         .replace("{{acceptance}}", &acceptance_text)
         .replace("{{write_scope}}", &write_scope)
-        .replace("{{context}}", &context_text);
+        .replace("{{context}}", &context_text)
+        .replace("{{repo_map}}", &map_text);
 
     let prior = if attempts.is_empty() {
         String::new()
@@ -307,9 +360,10 @@ pub(crate) fn a2a_task(
         )
     } else {
         format!(
-            "{}{}{}\nWorking directory: {}\n",
+            "{}{}{}{}\nWorking directory: {}\n",
             filled.trim(),
             orphaned_context,
+            orphaned_map,
             prior,
             cwd.display()
         )
@@ -337,7 +391,9 @@ pub(crate) fn a2a_task(
 
     let mut out = a2a::Task::new(execution, task.id.as_str(), a2a::TaskState::Submitted);
     out.history.push(message);
-    out.artifacts = context.into_iter().chain(attempts).collect();
+    // The map first: it is the tree as it stands, and everything after it is something
+    // that already happened to that tree.
+    out.artifacts = shape.into_iter().chain(context).chain(attempts).collect();
     out
 }
 

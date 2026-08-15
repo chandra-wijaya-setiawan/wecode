@@ -242,6 +242,46 @@ fn the_instruction_is_also_available_as_a2a_json() {
 }
 
 #[test]
+fn a_worker_is_told_the_shape_of_the_tree_it_lands_in() {
+    // Otherwise the first thing every agent does in a repository it has never seen is
+    // run `find` and `wc -l` — against a budget the task is held to, for an answer
+    // wecode is standing in when it writes the envelope.
+    let (org, _) = with_agent("handoff-map", "true");
+    a_task(&org, "t", "src/**", "true");
+
+    org.run(&["start", "t"])
+        .assert_ok("start")
+        .assert_contains("REPO MAP")
+        // The directory this task may write to, opened up file by file.
+        .assert_contains("src ✍")
+        .assert_contains("✍ app.txt")
+        // One it may not, as a count and in its own words — the mark is not on it, and
+        // the description is the README's own heading rather than one wecode invented.
+        .assert_contains("toy — the repository the tests drive")
+        .assert_lacks("✍ README.md");
+}
+
+#[test]
+fn the_map_reaches_a_remote_agent_as_an_artifact() {
+    // The prompt and the JSON are two renderings of one record, and a map that existed
+    // only in the prose would be the first thing to prove otherwise.
+    let (org, _) = with_agent("handoff-map-json", "true");
+    a_task(&org, "t", "src/**", "true");
+
+    let r = org.run(&["start", "t", "--json"]);
+    r.assert_ok("start --json");
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid JSON");
+    let map = v["artifacts"]
+        .as_array()
+        .expect("artifacts")
+        .iter()
+        .find(|a| a["artifactId"] == "repo-map")
+        .expect("the repo map is an artifact of the instruction");
+    let text = map["parts"][0]["text"].as_str().expect("a text part");
+    assert!(text.contains("app.txt"), "{text}");
+}
+
+#[test]
 fn a_task_with_no_predecessors_says_so_plainly() {
     let (org, _) = with_agent("handoff-none", "true");
     a_task(&org, "t", "src/**", "true");
