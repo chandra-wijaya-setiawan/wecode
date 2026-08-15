@@ -133,6 +133,10 @@ tokens    = 200000
 [feature.build]
 after     = ["design"]
 title     = "{{title}}"
+# Crate-wide, which this playbook tells you not to write — and a template cannot know
+# which files a task will touch. Narrow it on the emitted task before dispatching, or
+# the subtask collides with everything else in the crate. Fixing that properly means a
+# subtask inheriting its parent's declared scope; see advisory-checks.
 write     = ["crates/**", "docs/**"]
 accept    = ["cargo clippy --all-targets -- -D warnings"]
 
