@@ -90,6 +90,15 @@ pub enum DenyReason {
     CapabilityMissing {
         what: &'static str,
     },
+    /// A holder who could have signed said no.
+    ///
+    /// The one denial here that is not a failure of authority but an exercise of it.
+    /// Nothing is misconfigured and nobody overreached: the seat entitled to sign was
+    /// asked and declined. It is a denial all the same, because the action did not
+    /// happen and the reason it did not is a decision somebody made.
+    SignatureWithheld {
+        kind: ActionKind,
+    },
     /// A charter invariant. Always raises an alarm — intermediate levels may be
     /// the thing that misconfigured the grant.
     InvariantViolated {
@@ -112,6 +121,9 @@ impl fmt::Display for DenyReason {
                 write!(f, "wall budget exhausted: {would_be}s would exceed {cap}s")
             }
             Self::CapabilityMissing { what } => write!(f, "capability missing: {what}"),
+            Self::SignatureWithheld { kind } => {
+                write!(f, "signature withheld: {}", kind.as_str())
+            }
             Self::InvariantViolated { invariant } => write!(f, "invariant violated: {invariant}"),
         }
     }
@@ -139,6 +151,23 @@ impl Decision {
     #[must_use]
     pub fn raises_alarm(&self) -> bool {
         matches!(self, Self::Deny { alarm: true, .. })
+    }
+
+    /// Whether this is a holder's own refusal rather than a refusal *of* a holder.
+    ///
+    /// Both are denials of the same action, and the difference is who the authority in
+    /// the row is: a seat that may not sign is being told no, and a seat that may sign
+    /// is the one saying it. A caller that reported them alike would tell an operator
+    /// their configuration is broken when what happened is that they said no.
+    #[must_use]
+    pub fn is_withheld(&self) -> bool {
+        matches!(
+            self,
+            Self::Deny {
+                reason: DenyReason::SignatureWithheld { .. },
+                ..
+            }
+        )
     }
 }
 
@@ -281,6 +310,49 @@ impl Broker {
     /// recording.
     pub fn authorize(&mut self, session: &Session, action: &Action) -> Decision {
         let decision = self.decide(session, action);
+        self.file(session, action.clone(), decision.clone(), Source::Broker);
+        decision
+    }
+
+    /// A holder who was asked to sign, and said no.
+    ///
+    /// The other half of [`Self::authorize`] for approvals, and here rather than at the
+    /// call site because a refusal has to be *decided* before it can be recorded. A "no"
+    /// from a seat that could not have said yes is not a refusal — it is an opinion — so
+    /// the same grant question is asked first, and a seat that would have been refused
+    /// its signature is recorded as refused, exactly as its "yes" would have been.
+    ///
+    /// Filed as a denial of `Approve`, which is what it is: the approval did not happen,
+    /// and the authority that stopped it is the holder's own. The alternative — an
+    /// `Allow` with a note on it — would put a row on the record that every gate asking
+    /// "is this signed" reads as a signature.
+    ///
+    /// What it is not is a status change or a lock. Nothing about the work moved, and a
+    /// later signature is a later row: this says who said no and when, and that is the
+    /// whole of it.
+    pub fn withhold(&mut self, session: &Session, kind: ActionKind) -> Decision {
+        let action = Action::Approve { kind };
+        let decision = match self.decide(session, &action) {
+            Decision::Allow => Decision::Deny {
+                reason: DenyReason::SignatureWithheld { kind },
+                // Regimented: there is no "afterwards" to sanction in, because the thing
+                // being refused is the permission and not the deed.
+                mode: ControlMode::Regimented,
+                alarm: false,
+            },
+            // The seat may not sign this. Passed through untouched, so the refusal it
+            // gets is word for word the one its signature would have got.
+            refused => refused,
+        };
+        self.file(session, action, decision.clone(), Source::Broker);
+        decision
+    }
+
+    /// One line onto the ledger.
+    ///
+    /// Every path that records goes through here — deciding, withholding, observing — so
+    /// a record cannot be written with a field left off it by the newest caller.
+    fn file(&mut self, session: &Session, action: Action, decision: Decision, source: Source) {
         self.seq += 1;
         self.ledger.push(Record {
             seq: self.seq,
@@ -290,11 +362,10 @@ impl Broker {
             human: session.human.clone(),
             project: session.project.clone(),
             task: session.task.clone(),
-            action: action.clone(),
-            decision: decision.clone(),
-            source: Source::Broker,
+            action,
+            decision,
+            source,
         });
-        decision
     }
 
     /// Charter invariants are checked before grants, because a grant that permits
@@ -484,19 +555,7 @@ impl Broker {
         decision: Decision,
         source: Source,
     ) {
-        self.seq += 1;
-        self.ledger.push(Record {
-            seq: self.seq,
-            session: session.id.clone(),
-            post: session.post.clone(),
-            occupant: session.occupant.clone(),
-            human: session.human.clone(),
-            project: session.project.clone(),
-            task: session.task.clone(),
-            action,
-            decision,
-            source,
-        });
+        self.file(session, action, decision, source);
     }
 
     #[must_use]
@@ -505,6 +564,11 @@ impl Broker {
     }
 
     /// Denied actions, for `wecode audit --denied`.
+    ///
+    /// A withheld signature is one of them. It is not a breach and nobody overreached,
+    /// but an approval was refused and the refusal is the answer to "why did this not
+    /// land" — which is the question this list is read to answer. The reason on the row
+    /// says which of the two it was.
     pub fn denials(&self) -> impl Iterator<Item = &Record> {
         self.ledger.iter().filter(|r| {
             !r.decision.is_allowed() && !matches!(r.decision, Decision::RequireApproval { .. })
@@ -857,6 +921,76 @@ mod tests {
         assert_eq!(b.ledger()[0].post, "impl-api");
         assert_eq!(b.ledger()[0].occupant, "claude-code");
         assert_eq!(b.denials().count(), 1);
+    }
+
+    #[test]
+    fn a_holder_who_says_no_leaves_a_record_of_saying_it() {
+        // The point of recording it at all: without this row, "nobody has looked at
+        // this yet" and "somebody looked and said no" are the same silence.
+        let mut b = Broker::new(Charter::default());
+        let s = session(Effective::of(vec![
+            Grant::writer(&["src/**"]).with_approve(&[ActionKind::Merge]),
+        ]));
+        let d = b.withhold(&s, ActionKind::Merge);
+        assert!(d.is_withheld(), "got {d:?}");
+        assert!(!d.raises_alarm(), "a holder saying no is not an incident");
+
+        let r = &b.ledger()[0];
+        // Filed against the approval it refused, under the seat that refused it — so
+        // the row is findable by the same task and kind the signature would have been.
+        assert_eq!(
+            r.action,
+            Action::Approve {
+                kind: ActionKind::Merge
+            }
+        );
+        assert_eq!(r.post, "impl-api");
+        assert_eq!(r.task.as_deref(), Some("cache-layer"));
+        assert_eq!(r.source, Source::Broker);
+        assert_eq!(b.denials().count(), 1);
+    }
+
+    #[test]
+    fn a_seat_that_could_not_have_signed_cannot_withhold_either() {
+        // An account says who somebody is; the post is what says whether their answer
+        // decides anything. A "no" from a seat with no `approve` is not a refusal that
+        // holds the work — it is the same nothing its "yes" would have been, and it
+        // reaches the ledger saying so rather than as a holder's decision.
+        let mut b = Broker::new(Charter::default());
+        let s = confined(); // approves nothing
+        let d = b.withhold(&s, ActionKind::Merge);
+        assert!(!d.is_withheld(), "got {d:?}");
+        assert!(matches!(
+            d,
+            Decision::Deny {
+                reason: DenyReason::CapabilityMissing { what: "approve" },
+                ..
+            }
+        ));
+        assert_eq!(b.ledger().len(), 1, "the attempt is still on the record");
+    }
+
+    #[test]
+    fn a_withheld_signature_is_not_a_signature() {
+        // The failure that would matter most. Every gate asks the ledger whether an
+        // approval of this kind was *allowed*; a refusal recorded as anything else
+        // would land the very work somebody said no to.
+        let mut b = Broker::new(Charter::default());
+        let s = session(Effective::of(vec![
+            Grant::writer(&["src/**"]).with_approve(&[ActionKind::Merge]),
+        ]));
+        b.withhold(&s, ActionKind::Merge);
+        assert!(!b.ledger()[0].decision.is_allowed());
+
+        // And it locks nothing: the same holder signing afterwards is a later row, and
+        // that one is allowed. A refusal is a record of a moment, not a state.
+        let d = b.authorize(
+            &s,
+            &Action::Approve {
+                kind: ActionKind::Merge,
+            },
+        );
+        assert_eq!(d, Decision::Allow);
     }
 
     #[test]

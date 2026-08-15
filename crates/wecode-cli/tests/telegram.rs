@@ -408,11 +408,149 @@ fn a_reply_that_says_no_signs_nothing_and_leaves_the_task_in_front_of_a_person()
 
     org.run(&["telegram"])
         .assert_ok("read the channel")
+        .assert_contains("refused merge")
         .assert_contains("t stays needs-approval")
         .assert_lacks("approved");
     org.run(&["show", "t"])
         .assert_contains("status     needs-approval");
     assert!(!org.run(&["merge", "t"]).ok(), "nothing was signed");
+}
+
+#[test]
+fn a_refusal_is_on_the_record_the_way_a_signature_is() {
+    // The gap this closes, and the one an operator answering from a phone feels first:
+    // the reply scrolls away, and in the morning a task nobody has looked at and a task
+    // somebody looked at and said no to are the same task. The decision was made — it
+    // has to survive the pass it arrived on.
+    let (org, _) = mergeable("tg-no-record", "approved");
+    landed_task(&org, "t");
+    let replies = chatting(&org, "48210934");
+    holding(
+        &replies,
+        &[reply(3, "48210934", "no", "t needs you: approval")],
+    );
+    org.run(&["telegram"]).assert_ok("read the channel");
+
+    // Against the same approval, under the same seat, and saying how it arrived — the
+    // whole of what makes it answerable later. Not "someone somewhere declined".
+    org.run(&["audit", "--task", "t", "--denied"])
+        .assert_ok("audit")
+        .assert_contains("approve")
+        .assert_contains("chief       telegram")
+        .assert_contains("signature withheld: merge");
+
+    // And it is a record, not a lock: the same holder changing their mind signs it, and
+    // the work lands. What the ledger keeps is that they said no first.
+    holding(
+        &replies,
+        &[reply(4, "48210934", "approve", "t needs you: approval")],
+    );
+    org.run(&["telegram"])
+        .assert_ok("second read")
+        .assert_contains("approved merge");
+    org.run(&["merge", "t"])
+        .assert_ok("merge")
+        .assert_contains("MERGED  t → dev");
+}
+
+#[test]
+fn a_no_from_a_seat_that_may_not_approve_withholds_nothing() {
+    // The mirror of the same reply saying yes. Naming an account says who somebody is;
+    // whether their answer decides anything is the post's business either way. A seat
+    // that never held the signature cannot withhold it, and recording that as a
+    // holder's refusal would put a decision on the ledger nobody was entitled to make.
+    let (org, _) = mergeable("tg-no-ungranted", "approved");
+    landed_task(&org, "t");
+    let replies = chatting(&org, "48210934");
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        format!("{text}\n[[users]]\nname = \"dev\"\npost = \"impl\"\ntelegram = \"777\"\n"),
+    )
+    .unwrap();
+    holding(&replies, &[reply(1, "777", "no", "t needs you: approval")]);
+
+    org.run(&["telegram"])
+        .assert_ok("a refused reply is a report, not a crash")
+        .assert_contains("may not sign merge for t")
+        .assert_lacks("refused merge");
+    // Recorded all the same, as the attempt it was rather than as a decision.
+    org.run(&["audit", "--task", "t", "--denied"])
+        .assert_ok("audit")
+        .assert_contains("capability missing")
+        .assert_lacks("signature withheld");
+}
+
+#[test]
+fn a_tap_that_says_no_is_told_what_it_put_on_the_record() {
+    // The *Hold* button beside *Approve*, and the reason it needs answering at all: a
+    // spinner that stops says nothing, and a refusal that decided nothing looks from a
+    // phone exactly like one that did.
+    let (org, _) = mergeable("tg-tap-no", "approved");
+    landed_task(&org, "t");
+    let replies = chatting(&org, "48210934");
+    let said = acknowledging(&org);
+    holding(
+        &replies,
+        &[tapped(6, "48210934", "no", "t needs you: approval")],
+    );
+
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        .assert_contains("refused merge");
+
+    let back = std::fs::read_to_string(&said).expect("the tap was acknowledged");
+    assert!(back.contains("cb6"), "{back}");
+    assert!(back.contains("refused merge"), "{back}");
+    assert!(!org.run(&["merge", "t"]).ok(), "nothing was signed");
+}
+
+#[test]
+fn a_dry_run_records_no_refusal_either() {
+    // "Moves nothing" has to include the ledger. A refusal is one row nothing takes
+    // back, so a dry run that wrote one would be the same mistake as one that signed.
+    let (org, _) = mergeable("tg-no-dry", "approved");
+    landed_task(&org, "t");
+    let replies = chatting(&org, "48210934");
+    holding(
+        &replies,
+        &[reply(7, "48210934", "no", "t needs you: approval")],
+    );
+
+    org.run(&["telegram", "--dry-run"])
+        .assert_ok("dry run")
+        .assert_contains("would record merge refused for t");
+    org.run(&["audit", "--task", "t", "--denied"])
+        .assert_ok("audit")
+        .assert_contains("no matching audit records");
+
+    // And the reply is still there to be acted on for real.
+    org.run(&["telegram"])
+        .assert_ok("for real")
+        .assert_contains("refused merge");
+}
+
+#[test]
+fn a_no_to_a_task_with_nothing_outstanding_refuses_nothing() {
+    // A refusal has to name what it refused or it records nothing, which makes the two
+    // verdicts agree about when there is nothing to answer: the reply that would be
+    // told "nothing is waiting to be signed" for saying yes is told it for saying no.
+    let (org, _) = mergeable("tg-no-idle", "approved");
+    // Added and not run: nothing has been produced, so there is nothing to refuse.
+    a_task_in_src(&org, "t", "src/**", "grep -q landed src/app.txt");
+    let replies = chatting(&org, "48210934");
+    holding(
+        &replies,
+        &[reply(2, "48210934", "no", "t needs you: approval")],
+    );
+
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        .assert_contains("nothing is waiting to be signed");
+    org.run(&["audit", "--task", "t", "--denied"])
+        .assert_ok("audit")
+        .assert_contains("no matching audit records");
 }
 
 #[test]
