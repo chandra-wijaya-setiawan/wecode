@@ -216,6 +216,40 @@ Two things to know before turning it on:
   rebuilding is a good trade in nearly every project, and one that would rather have
   parallel cold builds simply declares nothing.
 
+## Where a house rule gets teeth
+
+`accept` is the only field in a playbook that runs anything, so it is the only place a
+standard about the *code* — file size, formatting, a banned import, a coverage floor —
+becomes a check rather than a paragraph. A script in `scripts/` that nothing calls is a
+convention with a shebang: read by whoever happens to read it, and overtaken by the tree
+it describes without saying so. wecode's own file-size ratchet spent its first day that
+way, deliberately — enforcing it before the splits it argued for would have failed every
+queued task for a debt none of them created — and in that one day its test limit went
+from correct to five thousand lines clear of the largest test file, because the suite it
+was written against was split into seven and nothing was watching the number.
+
+Adding one is one line — `accept = [..., "bash scripts/max-lines.sh"]` on each kind that
+changes code — and the load-time check above covers the typo case, because `bash` is a
+program this machine either has or does not. Four things are worth knowing before you
+do it:
+
+- **It runs against the worktree, not the diff.** Everything in the tree is judged, and
+  a task may only write inside its declared scope. So a whole-tree check has to pass on
+  the tree *as it is today*, or it fails tasks that are not permitted to fix what broke
+  it — and a gate that fails work at random is removed rather than satisfied. Set the
+  threshold from the current worst case and tighten it behind the work that earns it,
+  never in front of it.
+- **Put it only on the kinds it can speak about.** A ratchet over `crates/**` says
+  nothing about a `docs` task or a `spike`, and adding it there buys no enforcement and
+  one more thing that can fail for an unrelated reason.
+- **Make it print what it would allow.** A threshold that may only follow the tree moves
+  only when somebody can see that it has room to, and nobody audits a tree on the chance
+  that it does. The ratchet prints the tallest file in each half every time it passes,
+  which is what turns tightening it into a one-line edit.
+- **Say it in `guidance` too.** Acceptance is checked after the budget is spent, so a
+  planner who learns about the ratchet from a failed run learns it in the most expensive
+  place there is. The trap list is what makes the check cheap.
+
 ## Writing a good one
 
 Say things that are **true of this project and not of projects in general**. Generic

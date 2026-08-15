@@ -1,2 +1,19 @@
+# The file-size ratchet. Read by scripts/max-lines.sh, which every kind in
+# .wecode/playbook.toml that changes code now runs as an acceptance command.
+#
+# One rule sets both numbers: the tallest file in that half of the tree, rounded up
+# to the next hundred. Run `bash scripts/max-lines.sh` and it prints what the rule
+# allows today.
+#
+# The rule only rounds up, never down, and that is not slack. Acceptance runs against
+# the whole worktree while a task may only write inside its declared scope, so a limit
+# below the tallest file fails tasks that are not allowed to fix it — including tasks
+# that touched nothing near it. The number comes down in the commit that lands a
+# split, never in the one before it.
+#
+# The two move independently, and one of them being unchanged is a result rather than
+# an oversight: a half whose tallest file has not moved under the next hundred has no
+# room to give, however much was split beneath it.
+
 src=1500
-tests=6500
+tests=1300
