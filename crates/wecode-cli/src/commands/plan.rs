@@ -254,12 +254,31 @@ enum Assignment {
 }
 
 pub(crate) fn task_add(a: &Args) -> Res {
+    // `--amend` re-declares a task that is already in the plan, and shares this
+    // command because `--parent` and `--after` are declared here: one place that knows
+    // how to read them beats two that could read them differently.
+    if a.has("amend") {
+        return task_amend(a);
+    }
     let (store, company) = open(a)?;
     // Loaded before the task is assembled, because `--project`, `--parent` and `--after`
     // are resolved against it.
     let plan = store.load_plan()?;
     let mut t = build_task(a, &plan)?;
     let mut from_playbook = Vec::new();
+
+    // Refused here rather than by `Plan::add_task` below, which knows the id is taken
+    // and not what to do about it. Retyping the declaration under a new id is how the
+    // work already recorded against this one gets left behind.
+    if plan.task(&t.id).is_some() {
+        return Err(format!(
+            "task `{id}` already exists\n  \
+             `wecode task add {id} --amend --parent <task> --after <task>` moves it\n  \
+             `wecode task scope {id}` and `wecode task budget {id}` amend the rest",
+            id = t.id
+        )
+        .into());
+    }
 
     if !store.project_exists(&t.project)? {
         return Err(format!(
@@ -579,23 +598,16 @@ pub(crate) fn task_rm(a: &Args) -> Res {
     // A dangling prerequisite would leave dependents permanently unschedulable, and
     // silently rewriting someone else's dependencies to fix that is worse than
     // refusing. Naming them lets the operator decide the order.
-    let dependents: Vec<&str> = plan
-        .tasks()
-        .filter(|t| t.depends_on.contains(&id))
-        .map(|t| t.id.as_str())
-        .collect();
+    let dependents: Vec<&str> = plan.dependents(&id).map(|t| t.id.as_str()).collect();
     if !dependents.is_empty() {
         return Err(format!(
-            "{id} is waited on by {} — remove those first, or re-point them.",
+            "{id} is waited on by {} — remove those first, or re-point them with \
+             `wecode task add <id> --amend --after <other>`.",
             dependents.join(", ")
         )
         .into());
     }
-    let children: Vec<&str> = plan
-        .tasks()
-        .filter(|t| t.parent.as_ref() == Some(&id))
-        .map(|t| t.id.as_str())
-        .collect();
+    let children: Vec<&str> = plan.subtasks(&id).map(|t| t.id.as_str()).collect();
     if !children.is_empty() {
         return Err(format!(
             "{id} is the parent of {} — remove those first.",
@@ -782,6 +794,157 @@ pub(crate) fn task_budget(a: &Args) -> Res {
     Ok(out)
 }
 
+/// Re-declares where a task sits: what it is part of, and what it must come after.
+///
+/// The two relations are the shape of the plan, and until now neither could be changed
+/// once a task existed. The way out was `task rm` and `task add` again, which is refused
+/// the moment a task has run — and a grouping is rarely known to be wrong until
+/// something in it has run. So work that belonged in a sprint got a new id, and its
+/// spend, its refusals and the design signed off on it stayed behind under a task nobody
+/// was looking at. An ordering was worse: nothing has ever been able to add one after
+/// the fact, so a dependency discovered late meant retyping both tasks.
+///
+/// Each relation is amended on its own, and an ordering is replaced whole — an unnamed
+/// `--parent` leaves the group as it was rather than lifting the task out of it, which
+/// is the same rule [`task_budget`] follows and for the same reason: silence is not a
+/// value. `--top` and `--no-after` are how the clearing is said out loud.
+///
+/// Scope and budget have their own commands, and acceptance deliberately has none:
+/// amending what counts as done, after seeing what was produced, is how criteria drift
+/// to fit the work.
+///
+/// Recorded as a `define`, exactly as [`task_scope`] and [`task_budget`] are, and here
+/// the reason is sharper than either. `parent` decides which worktree the work happens
+/// in and which branch it lands on, so a signature given to a task that was going to
+/// ship on its own did not cover the same task shipping inside a sprint.
+pub(crate) fn task_amend(a: &Args) -> Res {
+    let (store, company) = open(a)?;
+    let plan = store.load_plan()?;
+    let task = the_task(&plan, require(a.cmd(2), "task id")?)?.clone();
+    let id = task.id.clone();
+
+    let (parent, top) = (a.get("parent"), a.has("top"));
+    let (after, no_after) = (a.all("after"), a.has("no-after"));
+    if parent.is_some() && top {
+        return Err("--parent and --top say opposite things".into());
+    }
+    if !after.is_empty() && no_after {
+        return Err("--after and --no-after say opposite things".into());
+    }
+    if parent.is_none() && !top && after.is_empty() && !no_after {
+        return Err(
+            "give --parent <task>, --top, --after <task> (repeatable), or --no-after".into(),
+        );
+    }
+    // A running task keeps the tree it started in, so the group it belongs to cannot
+    // move under it. The ordering may: it is read on the next scan, not by this run.
+    if (parent.is_some() || top) && task.status == TaskStatus::Running {
+        return Err(format!(
+            "{id} is running — a run keeps the worktree it started in, and `parent` is what \
+             decides which one that is\n  `wecode status {id} waiting` first, or wait for it"
+        )
+        .into());
+    }
+
+    let mut probe = plan.clone();
+    let mut now = task.clone();
+    if parent.is_some() || top {
+        let to = match parent {
+            Some(typed) => Some(the_task(&plan, typed)?.id.clone()),
+            None => None,
+        };
+        now = probe.set_parent(&id, to)?;
+    }
+    if !after.is_empty() || no_after {
+        let mut deps = Vec::with_capacity(after.len());
+        for typed in &after {
+            deps.push(the_task(&plan, typed)?.id.clone());
+        }
+        now = probe.set_predecessors(&id, deps)?;
+    }
+
+    let who = actor(a, &store, &company)?;
+    require_allowed(
+        &store,
+        &company,
+        &who,
+        (Some(task.project.to_string()), Some(id.to_string())),
+        &Action::Define {
+            kind: WorkKind::Task,
+        },
+        "moving a task in the plan",
+    )?;
+
+    // The ordering is part of what makes two overlapping scopes safe, so dropping one
+    // can put a collision back that was settled when the tasks were written down. The
+    // same check `task scope` re-runs, for the same reason.
+    let gate = plan
+        .project(&task.project)
+        .map(|p| design_gate(&company, p))
+        .unwrap_or_default();
+    let defects = admission::check_task(&now, &probe, &gate);
+    if defects
+        .iter()
+        .any(|d| matches!(d, wecode_core::Defect::ScopeOverlaps { .. }))
+        && !a.has("force")
+    {
+        let mut out = render::admission(&render::task_heading(&now), &defects, None);
+        out.push_str("\n  not moved — keep the ordering, narrow a scope, or pass --force\n");
+        return Ok(out);
+    }
+    store.set_task_shape(&id, now.parent.as_ref(), &now.depends_on)?;
+
+    let mut out = format!(
+        "  {id} sits\n    was  {}\n    now  {}\n",
+        place_words(task.parent.as_ref(), &task.depends_on),
+        place_words(now.parent.as_ref(), &now.depends_on)
+    );
+    // One worktree per main task, subtasks sharing their parent's: a move that changes
+    // the root of the chain therefore changes the branch the work lands on, and what
+    // earlier attempts committed does not follow it.
+    let owner = |p: &Plan| crate::work::owner(p, &id).map(|t| t.id.clone());
+    if let Some(to) = owner(&probe)
+        && owner(&plan) != Some(to.clone())
+    {
+        out.push_str(&format!(
+            "\n  {id} now works in {to}'s worktree — wecode/{to}\n"
+        ));
+        if !store.executions(&id)?.is_empty() {
+            out.push_str("  what its earlier runs committed stays on the branch they landed on\n");
+        }
+    }
+    for b in probe.blockers(&id) {
+        out.push_str(&format!("  waiting: {}\n", blocker_note(&b)));
+    }
+    out.push_str(&format!(
+        "\n  When it moved is in the ledger — `wecode audit --task {id}`\n"
+    ));
+    if !defects.is_empty() {
+        out.push('\n');
+        out.push_str(&render::admission(
+            &render::task_heading(&now),
+            &defects,
+            None,
+        ));
+    }
+    Ok(out)
+}
+
+/// `in sprint-2, after keys` — with the empty cases spelled out, because a plan reads
+/// `top level` and `after nothing` as facts and a blank as a bug in the renderer.
+fn place_words(parent: Option<&TaskId>, after: &[TaskId]) -> String {
+    let names: Vec<&str> = after.iter().map(TaskId::as_str).collect();
+    format!(
+        "{}, after {}",
+        parent.map_or_else(|| "top level".to_string(), |p| format!("in {p}")),
+        if names.is_empty() {
+            "nothing".to_string()
+        } else {
+            names.join(", ")
+        }
+    )
+}
+
 /// A figure a flag carries, or a refusal naming what was typed.
 ///
 /// [`Args::num`] answers `None` both for a flag nobody passed and for one carrying
@@ -965,13 +1128,14 @@ pub(crate) fn set_status(a: &Args) -> Res {
     // is stranded right now — said here, rather than left for the board to notice.
     if status.is_dead_end() {
         let stranded: Vec<&str> = plan
-            .tasks()
-            .filter(|d| !d.status.is_closed() && d.depends_on.contains(&id))
+            .dependents(&id)
+            .filter(|d| !d.status.is_closed())
             .map(|d| d.id.as_str())
             .collect();
         if !stranded.is_empty() {
             out.push_str(&format!(
-                "  now stuck behind it: {} — reopen {id}, or re-point them\n",
+                "  now stuck behind it: {} — reopen {id}, or re-point them with \
+                 `wecode task add <id> --amend --after <other>`\n",
                 stranded.join(", ")
             ));
         }
