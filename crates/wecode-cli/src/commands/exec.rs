@@ -10,7 +10,7 @@ use wecode_core::{Plan, Task, TaskId, TaskStatus, WORKER_DIR, admission};
 use wecode_gov::{Action, ActionKind, Broker, Session, glob};
 use wecode_org::{AgentTemplate, Company, Playbook, Workspace};
 
-use wecode_store::Store;
+use wecode_store::{Store, execution::Spend};
 
 use crate::args::Args;
 use crate::commands::ctx::*;
@@ -747,7 +747,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
             // Why it was rejected, not how the process exited. A retry reading
             // "exit 0" learns nothing; the failing check is the whole message.
             &why.unwrap_or_else(|| outcome.ended.describe()),
-            outcome.spent,
+            spend_of(&outcome),
         )?;
         out.push_str(&verdict);
         out.push_str(&commit_attempt(&store, &id, &prepared.cwd, &outcome)?);
@@ -772,7 +772,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
             // This is the copy that reaches the retry's envelope and the operator's
             // phone. See [`spawn::Outcome::cause`].
             &outcome.cause(),
-            outcome.spent,
+            spend_of(&outcome),
         )?;
         out.push_str("\n  not verified — the agent did not finish cleanly\n");
         // The other way a run ends in front of a person: no verdict was reached at
@@ -788,6 +788,26 @@ pub(crate) fn run_task(a: &Args) -> Res {
         out.push_str(&commit_attempt(&store, &id, &prepared.cwd, &outcome)?);
     }
     Ok(out)
+}
+
+/// Both halves of what the run reported, for the row that outlives the terminal.
+///
+/// The replay used to end here: `render::ran` printed it once, on a line the operator
+/// may or may not have been looking at, and nothing wrote it down. That was defensible
+/// while the figure was only a caveat on the spend — it is not budgeted, so nothing
+/// needed to query it. But cache reads are billed, at a tenth of the rate, and a
+/// forty-turn conversation replays enough of them to be the larger bill. What was
+/// missing was not a budget for it, only a record: `wecode show` can now say which
+/// attempt of three was the long conversation, and not just which one added the most.
+///
+/// Kept in two columns rather than summed, for the reason [`crate::usage`] gives at
+/// length: added together they make a number in no unit, and the one it most resembles
+/// is the one budgets are checked against.
+fn spend_of(outcome: &spawn::Outcome) -> Spend {
+    Spend {
+        tokens: outcome.spent,
+        replayed: outcome.replayed,
+    }
 }
 
 /// Commits whatever the attempt produced, pass or fail.

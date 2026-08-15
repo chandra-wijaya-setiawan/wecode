@@ -334,6 +334,13 @@ fn an_agent_that_reports_nothing_leaves_the_column_empty_rather_than_zero() {
         .assert_contains("spend")
         .assert_contains("supervisor")
         .assert_lacks("harness");
+
+    // Neither half is invented. An unreadable protocol says nothing about what the
+    // run added and nothing about what it re-read, and a `+0` here would be the
+    // second claim being made on the first one's behalf.
+    org.run(&["show", "t"])
+        .assert_ok("show")
+        .assert_lacks("re-read");
 }
 
 #[test]
@@ -379,6 +386,14 @@ fn a_conversation_is_not_billed_for_the_context_it_re_read() {
         .assert_ok("board")
         .assert_contains("90/100")
         .assert_lacks("over budget");
+
+    // And it survives the terminal it was printed to. Cache reads are billed, at a
+    // tenth of the rate, so the figure that is deliberately kept out of the budget is
+    // still money — and until it was written to the attempt, the only place it had
+    // ever existed was one line of output nobody was necessarily watching.
+    org.run(&["show", "t"])
+        .assert_ok("show")
+        .assert_contains("90t +500000 re-read");
 }
 
 #[test]
@@ -419,7 +434,8 @@ fn a_run_killed_on_its_limit_still_reports_what_it_burned() {
     let (org, _) = with_agent(
         "run-killed",
         "echo '{\"type\":\"assistant\",\"message\":{\"usage\":\
-         {\"input_tokens\":40,\"output_tokens\":10}}}'; sleep 60",
+         {\"input_tokens\":40,\"output_tokens\":10,\
+         \"cache_read_input_tokens\":120000}}}'; sleep 60",
     );
     let conf = org.path("company.toml");
     let text = std::fs::read_to_string(&conf).unwrap();
@@ -431,6 +447,12 @@ fn a_run_killed_on_its_limit_still_reports_what_it_burned() {
         .assert_contains("no output")
         .assert_contains("spent    50 tokens");
     org.run(&["board", "caching"]).assert_contains("50/100");
+    // Both halves, and on the branch that had no verdict to record: a run killed
+    // mid-conversation is exactly the one whose replay is worth having, since a long
+    // conversation is how it got to the limit.
+    org.run(&["show", "t"])
+        .assert_ok("show")
+        .assert_contains("50t +120000 re-read");
 }
 
 #[test]
