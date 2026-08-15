@@ -172,12 +172,20 @@ mis-scoped one can be put away without first being dropped.
 
 Filing is a display decision, not a judgement about the work, so it is reversible and
 says nothing about status: `wecode archive task 4` twice reports *already archived* rather
-than failing. What it changes is the cockpit — `board` and `up` — where a filed-away group
-is one hidden row rather than four. `board --all` and the cockpit's `a` bring them back,
-greyed on the snapshot board and marked `archived` in the cockpit; naming a filed-away
-task directly (`wecode board 4`) shows its group in full, there being no `--all` at that
-level. `wecode tree`, `show` and `check` are plan listings rather than cockpit views and
-report every task whatever its filing.
+than failing. What it changes is every view that lists work — `board`, `up` and `tree` —
+where a filed-away group is one hidden row rather than four. `board --all`, `tree --all`
+and the cockpit's `a` bring them back, greyed on the snapshot board and marked `archived`
+in the cockpit and in `tree`. Naming a filed-away task directly (`wecode board 4`) shows
+its group in full, there being no `--all` at that level.
+
+`--all` is one flag for both levels on purpose. A `tree` that hid an archived *project*
+but printed an archived *task* unchanged made the filing read as having failed, and left
+the row uncounted as well as unmarked — the footer names projects and filed-away task
+groups as one number.
+
+`wecode show` and `check` are the exception: they are reached by naming their subject and
+have no `--all`, so hiding there would put a row out of reach. They report every task
+whatever its filing, and mark the filed ones.
 
 **`wecode brief`** is how an agent learns what it is. Run it once at the start of a
 session; everything in it is derived from the seat's grant, so it cannot promise
@@ -291,5 +299,5 @@ before the registry existed reads as a task row anyway, since its path is still 
 wecode computes for that task.
 
 **`--all`** widens a narrowed default: `tree --all` and `board --all` include archived
-projects, and `board --all` archived tasks as well. Put it last — the argument parser takes
-the next token as a flag's value, so `board --all migration` loses the positional.
+projects and archived tasks alike. Put it last — the argument parser takes the next token
+as a flag's value, so `board --all migration` loses the positional.
