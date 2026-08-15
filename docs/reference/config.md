@@ -273,6 +273,13 @@ A `[notify]` block with an empty `command`, or a zero `timeout`, is refused at l
 read as configured and behave as absent, which is the one failure mode a notification
 must not have. `wecode company show` prints the hook, or says there is none.
 
+**Run it before you depend on it.** Everything above is checked when the line is
+*loaded*; whether the line *works* is a question about a network, a daemon and a token,
+and until a task stops for a person nothing asks it. `wecode doctor` asks it now — it
+fires this hook for real, against a task that does not exist, and reports what came back
+under the same rule the loop uses. The drill's message carries no short number, so a
+reply to it signs nothing. See [commands](commands.md#the-ones-worth-explaining).
+
 ### Signing from a reply
 
 The notify hook is half a loop: it says a task has stopped for you, and the signature
@@ -366,6 +373,21 @@ sign and moves neither a signature nor the cursor.
 
 An empty `fetch` or a zero `timeout` is refused at load, for the reason `[notify]`'s are.
 `wecode company show` prints the fetch and who may sign by reply, or says there is none.
+
+**`wecode doctor` runs it.** A `fetch` that cannot resolve the host fails loudly; a token
+that has been revoked does not — the command exits `0`, having done exactly what it was
+asked, and prints `{"ok":false,"description":"Unauthorized"}`, which reads as an empty
+channel to everything except the parser. So the drill runs the line *and* parses what it
+printed, and reports the second as the failure it is. It also says whether anybody could
+answer at all: a `fetch` that works with no `telegram` id in `[[users]]` resolves every
+reply to nobody, which is correct, deliberate, and completely silent from where the
+operator is standing.
+
+It asks from offset `0` — everything Telegram still holds — because an offset is an
+acknowledgement, and a drill that confirmed the operator's unread replies as a side
+effect of checking that it could read them would be worse than no drill. `[telegram]
+answer` is checked against the charter and deliberately not run: `answerCallbackQuery`
+wants a callback id that only a real tap has.
 
 ### Signing by tapping a button
 
