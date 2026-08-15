@@ -175,6 +175,52 @@ pub(crate) fn on_signature_wait(company: &Company, org: &Path, task: &Task) -> S
     fire(company, org, task, task.status, Waiting::Signature)
 }
 
+/// The task the drill announces. Named rather than inlined so the one place that has
+/// to know it — the report telling an operator what they are about to receive — cannot
+/// disagree with the message they actually get.
+pub(crate) const DRILL: &str = "doctor-drill";
+
+/// Fires the hook on purpose, so an operator can find out what it does before a task
+/// depends on it. Returns what [`fire`] returns: nothing when it ran clean, a warning
+/// when it did not.
+///
+/// Here rather than in [`crate::doctor`] because the whole value of the drill is that it
+/// is not a second implementation. A rehearsal that assembled its own environment would
+/// be a test of the rehearsal — the point is that this goes out through the call the
+/// loop makes, past the same charter check, under the same timeout, read back under the
+/// same rule about a hook that had nothing to say.
+///
+/// The task is invented and stands for nothing, which costs two things worth stating.
+/// It carries **no number**: `WECODE_TASK_NUMBER` is the handle a reply is typed
+/// against, and a drill that put a live number into a real chat message would be one
+/// `approve` away from signing work nobody had looked at. And it has no worktree, so
+/// the four artifact variables arrive empty — the shape a `signature` wait has anyway.
+/// What the operator receives is therefore a thinner message than a real one, in
+/// exactly the fields that could do damage.
+///
+/// The id it does carry names no task in any plan, so a reply to the drill resolves to
+/// nothing and signs nothing. A workspace that genuinely has a task called
+/// `doctor-drill` is the exception, and it costs a message naming it rather than
+/// anything being decided: the drill writes no status and takes no signature itself.
+///
+/// `needs-approval` and [`Waiting::Approval`], because that is the wait an operator
+/// actually answers from a phone. A drill should exercise the branch the hook will be
+/// asked for at 02:14 rather than the quietest one it has.
+pub(crate) fn rehearse(company: &Company, org: &Path) -> String {
+    let task = Task::new(
+        DRILL,
+        DRILL,
+        "wecode doctor — a drill. Nothing is waiting, and nothing can be signed.",
+    );
+    fire(
+        company,
+        org,
+        &task,
+        TaskStatus::NeedsApproval,
+        Waiting::Approval,
+    )
+}
+
 /// The task's short number for the hook's environment, or empty when it has none.
 fn number_env(task: &Task) -> String {
     task.number

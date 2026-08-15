@@ -682,6 +682,19 @@ impl Company {
             .find(|u| u.telegram.as_deref() == Some(id))
     }
 
+    /// Everyone who can answer from a chat, in the order the file names them.
+    ///
+    /// The other direction of [`Self::user_by_telegram`], and it answers a question
+    /// that one cannot: *is there anybody at all*. A workspace that reads the channel
+    /// and gives no account an entry here resolves every reply to nobody — which is
+    /// correct, deliberate, and completely silent, since the refusal is printed on the
+    /// machine the operator is not at. Something has to be able to ask before that
+    /// arrangement is depended on.
+    #[must_use]
+    pub fn telegram_users(&self) -> Vec<&User> {
+        self.users.iter().filter(|u| u.telegram.is_some()).collect()
+    }
+
     /// The people in a seat. Empty means the seat is agent-only.
     #[must_use]
     pub fn users_of(&self, post: &str) -> Vec<&User> {

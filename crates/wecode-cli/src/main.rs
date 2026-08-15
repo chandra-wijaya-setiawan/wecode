@@ -4,6 +4,7 @@ mod args;
 mod board;
 mod cache;
 mod commands;
+mod doctor;
 mod git;
 mod ledger;
 mod notify;
@@ -48,6 +49,9 @@ SETUP
         a bare name lands in ~/.wecode/workspaces/<name>
   wecode templates                        list available templates
   wecode company show                     profile, posts, invariants
+  wecode doctor                           run the hooks that reach you, now
+        fires [notify] command for real and reads [telegram] fetch back; signs
+        nothing, consumes no reply, and exits non-zero if what is set is broken
 
   Commands find the workspace by walking up from the working directory, or via
   --org <name|dir> / $WECODE_ORG / the default set by `wecode use`.
@@ -154,6 +158,7 @@ fn run(a: &Args) -> Res {
     match (a.cmd(0), a.cmd(1)) {
         ("init", _) => init(a),
         ("templates", _) => Ok(render::templates()),
+        ("doctor", _) => doctor::run(a),
         ("company", "show") | ("org", "show") => {
             let (_, company) = open(a)?;
             Ok(render::company(&company))

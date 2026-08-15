@@ -22,6 +22,9 @@ SETUP
         a bare name lands in ~/.wecode/workspaces/<name>
   wecode templates                        list available templates
   wecode company show                     profile, posts, invariants
+  wecode doctor                           run the hooks that reach you, now
+        fires [notify] command for real and reads [telegram] fetch back; signs
+        nothing, consumes no reply, and exits non-zero if what is set is broken
 
   Commands find the workspace by walking up from the working directory, or via
   --org <name|dir> / $WECODE_ORG / the default set by `wecode use`.
@@ -379,3 +382,35 @@ wecode computes for that task.
 **`--all`** widens a narrowed default: `tree --all` and `board --all` include archived
 projects and archived tasks alike. Put it last — the argument parser takes the next token
 as a flag's value, so `board --all migration` loses the positional.
+
+**`wecode doctor`** runs the two commands that carry a wait to a person and an answer
+back, so the operator finds out what they do before a task depends on them. `[notify]
+command` and `[telegram] fetch` are lines written by hand into `company.toml`, and
+nothing ran either of them until a real task stopped for a real person — both the worst
+moment to discover a wrong chat id and the moment the failure is invisible, since a hook
+that never fired and a queue with nothing in it are the same silence.
+
+It sends a real notification, for a task that does not exist, and reads the channel back.
+The exit status is the verdict: non-zero when what is configured does not work, so
+`wecode doctor && wecode loop` refuses to start on a broken hook. What is *not* set is
+reported and passes — an operator who watches a terminal is configured for a terminal,
+not misconfigured.
+
+Four lines, named as `company.toml` names them:
+
+| | |
+|---|---|
+| `[notify] command` | fired, and read under the rule the loop reads it by: a hook that delivered has no reason to speak, so anything it printed is reported as a failure |
+| `[telegram] fetch` | run **and parsed**, because a revoked token exits `0` with `{"ok":false}` in the body — indistinguishable from a quiet channel to everything but the parser |
+| `[telegram] answer` | checked against the charter and not run: `answerCallbackQuery` needs a live callback id, and a made-up one is refused whatever the token is |
+| `who may answer` | whether any `[[users]]` gives a `telegram` id, and what that person's post may sign — a channel that resolves every reply to nobody is read every pass and answered from never |
+
+Three things it will not do. It **signs nothing and consumes nothing**: no ledger record,
+no status write, and the fetch is asked from offset `0` — everything Telegram still holds,
+confirming none of it — because `getUpdates` treats an offset as an acknowledgement, and a
+drill that swallowed the reply it was checking for would be the failure it exists to find.
+The drill's message carries **no short number**, since that is the handle a reply is typed
+against and a live one in a real chat message is one `approve` away from signing work
+nobody looked at. And it **cannot say the message arrived**: wecode holds no chat and sees
+no phone, so *exited 0 and said nothing* is the strongest thing knowable from this side.
+The last line of the report is the half only the operator can answer.

@@ -329,6 +329,7 @@ would put a cause on every record that has none.
 | **Short numbers** | every project and task also answers to a number you can type from a phone |
 | **Notify hook** | a command wecode runs when a task starts waiting on a person |
 | **`wecode telegram`** | signs what the replies to those notifications approved |
+| **`wecode doctor`** | runs both of those now, so neither is trusted untested |
 
 **The notify hook is the only thing here that does not wait to be looked at.** Every
 view above answers a question the operator thought to ask; a task that stopped at 02:14
@@ -373,6 +374,29 @@ rather than given a default. `no` signs nothing and leaves the task in front of 
 which is what withholding a signature already means. Anything else is chat and is left
 alone. Every message is acted on once: the update read is kept in `wecode.db`, so a
 `getUpdates` retried after a network error cannot sign twice.
+
+**And both halves are run before anything depends on them.** The way out and the way back
+are command lines the operator writes by hand, and nothing executed either of them until
+a real task stopped for a real person — the worst moment to find out the chat id is one
+digit out, and the moment the failure is invisible. Every way this breaks arrives as
+*silence*, which is also what a quiet queue looks like: the board says a task is waiting
+and nothing anywhere says whether anybody was told.
+
+`wecode doctor` fires `[notify] command` for real, against a task that does not exist,
+and reads `[telegram] fetch` back — the command *and* the JSON, because a revoked token
+exits `0` with `{"ok":false}` in the body and reads as an empty channel to everything but
+the parser. It also asks the question neither line can: whether any `[[users]]` gives a
+`telegram` id, and what that person's post may sign, since a channel that resolves every
+reply to nobody is read every pass and answered from never.
+
+It signs nothing and consumes nothing — no ledger record, no status write, and the fetch
+is asked from offset `0`, which is everything Telegram still holds and confirms none of
+it. The drill's message carries no short number, because that is the handle a reply is
+typed against and a live one in a real chat message would be one `approve` away from
+signing work nobody looked at. What it cannot do is say the message arrived: wecode holds
+no chat and sees no phone, so the report ends by naming the half only the operator can
+answer. The exit status carries the rest, which is what puts `wecode doctor && wecode
+loop` in front of a day's unattended work.
 
 **Every level shows the whole tree beneath it.** The portfolio used to stop at root
 tasks, so a plan that broke its work down showed only the tops of the breakdowns — and
