@@ -37,6 +37,8 @@ assign_to = "impl"
 accept    = ["cargo test --workspace", "cargo clippy --all-targets -- -D warnings"]
 tokens    = 150000
 wall_secs = 5400
+subtasks  = ["design", "build", "test"]
+
 guidance  = """
 One main task per behaviour that changes. Subtasks only when the work spans crates —
 each must be independently reviewable.
@@ -109,7 +111,37 @@ and which changed nothing an operator could see. Drive the real thing: run the
 binary, call the endpoint, execute the configured hook. If the only honest proof
 needs a person or a phone, say so in the task and put the worked example in the
 reference docs rather than pretending a unit test covered it.
+
+Three steps here, not four: a docs step earns its place in a project whose plan file
+tracks slices, and this one keeps its documentation beside the code the same task
+changes.
+
+Expand when the decision outlives the code. A schema, an algorithm, a protocol, a
+scale someone will read back in a year — those want a design signed before anything is
+built against them. A one-command fix does not, and four agent runs for it is ceremony
+with a bill attached. `--expand` is opt-in and the emitted subtasks are ordinary tasks:
+drop the design step when the title already says the decision.
 """
+
+[feature.design]
+kind      = "design"
+title     = "decide how to {{title}}"
+write     = ["docs/wecode/{{task}}/design.md"]
+accept    = ["test -f docs/wecode/{{task}}/design.md"]
+tokens    = 200000
+
+[feature.build]
+after     = ["design"]
+title     = "{{title}}"
+write     = ["crates/**", "docs/**"]
+accept    = ["cargo clippy --all-targets -- -D warnings"]
+
+[feature.test]
+after     = ["build"]
+title     = "cover {{title}} with tests"
+write     = ["crates/wecode-cli/tests/**", "crates/**"]
+accept    = ["cargo test --workspace"]
+
 
 [bug]
 worktree  = true
