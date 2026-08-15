@@ -134,16 +134,38 @@ passed by the agent that produced it. Posts do not talk to each other, and an ag
 account of its own work is inadmissible — so it is read out of git, the working tree and
 the execution record.
 
-Both payloads are [A2A](design/decisions.md#a2a) **artifacts**, because that is what
-they are — the output of a run that already happened:
+All three payloads are [A2A](design/decisions.md#a2a) **artifacts**, because that is
+what they are — something the worker is given to read:
 
+- **what the tree is** — the repository as git tracks it, right now
 - **what came before you** — follows `depends_on`, since that relation already means
   "must come after"
 - **what you tried last time** — this task's own earlier attempts, with the reason each
   was rejected
 
-Both carry the real diff, capped, because an envelope is a prompt and an unbounded diff
-would crowd out the instruction.
+The last two carry the real diff, capped, because an envelope is a prompt and an
+unbounded diff would crowd out the instruction.
+
+**The repo map** is the same principle turned on the repository rather than on the work.
+An agent dropped into a checkout it has never seen begins by running `find` and `wc -l`,
+against a budget the task is held to, for an answer wecode is standing in when it writes
+the envelope — so it answers first. What it says:
+
+- every directory git tracks a file in, with how many files are in it
+- **the files inside the directories this task may write to**, one by one, with their
+  length and a `✍`. The scope already says which part of the tree the run is about, and
+  naming every file of a large repository would spend the instruction on code the agent
+  will never open
+- what each of those files says about itself: the first line of a Rust module's `//!`, a
+  document's first heading, a config file's first comment. Lifted rather than invented,
+  so a description is wrong only when the file is
+
+It is read from the **index**, not by walking directories — a walk finds `target/`, which
+was 890 MB in one worktree here and no part of the shape of anything. Two counts bound
+it: twenty directories named, sixty files named, and three directories per family, since
+this repository keeps one directory per finished task under `docs/wecode/` and
+thirty-eight of them would take every row a crate wanted. Whatever is cut is still
+counted — a map that stopped quietly would read as a tree that ends there.
 
 **Except a design.** A design's output is not code, so its handoff is not a diff: the
 predecessor's document is handed over whole, at whatever path its write scope declared,
@@ -158,8 +180,8 @@ tried instead of implying nothing was written.
 The instruction itself is an A2A `Message`, and the two together are one A2A `Task` —
 wecode's *execution*, in state `submitted` until something is spawned. `wecode start
 <task>` renders it as the prompt; `--json` emits the record. Where the artifacts land in
-the prompt is the template's call: inline at `{{context}}`, or appended when it has no
-such slot.
+the prompt is the template's call: inline at `{{context}}` and `{{repo_map}}`, or
+appended when it has no such slot.
 
 ## Landing it
 

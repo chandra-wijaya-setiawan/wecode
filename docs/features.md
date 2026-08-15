@@ -127,6 +127,7 @@ which is how you check a scope before assigning work to a seat that cannot reach
 | **Commits** | every attempt, pass or fail, authored by wecode |
 | **Spend** | tokens read out of the agent's own output, per attempt and on the ledger |
 | **Handoff** | a predecessor's diff — or its design document — never the agent's account |
+| **Repo map** | the shape of the tree, from the index, so the first thing an agent does is not `find` |
 | **Merge** | `--no-ff`, configurable policy, with a report that is committed — by the main task, which is the only thing that owns a branch |
 | **Rollback** | revert, not reset |
 | **Scheduler** | a tick that promotes, a loop that dispatches |
@@ -171,6 +172,23 @@ attempt — is an `Artifact`. The text prompt is `wecode start <task>`, the same
 JSON is `wecode start <task> --json`, and neither can drift from the other because there
 is only one. The structured half never reaches the prompt: a coding CLI reads a JSON
 blob on argv as part of its instruction.
+
+**The envelope carries the shape of the repository.** An agent that has never seen the
+checkout spends its opening minutes — and a measurable slice of the budget the task is
+held to — running `find`, `wc -l` and `head` on a tree wecode is standing in as it writes
+the instruction, so it writes the answer down instead: every directory git tracks a file
+in, the files inside the ones **this task may write to**, and the line each of those
+files uses to describe itself — a Rust module's `//!`, a document's heading, a config's
+first comment. Lifted rather than invented, because a summary wecode composed would be
+one more thing that can quietly stop being true. Read from the index rather than by
+walking, since a walk finds `target/` — 890 MB in one worktree of this repo — and would
+have to be taught everything git already knows. It is bounded by counts rather than by a
+byte cap, so what gets cut is the least informative part: twenty directories, sixty
+files, three directories per family (this repository keeps one per finished task under
+`docs/wecode/`, and thirty-eight of them would take every row a crate wanted). What is
+left out is counted rather than dropped silently. It is an artifact like the rest, so
+`--json` carries it too, and a template may place it at `{{repo_map}}` instead of taking
+it appended.
 
 **A design predecessor is handed over as its document, not as a diff.** Every other kind
 produces code, where the diff is the answer. A design produces a file, and the decision
@@ -538,6 +556,15 @@ hard piece of work is to assign it to a seat that carries the level — which th
 already does per subtask, and which is the case worth optimising for anyway. The
 per-task override would have to freeze with the acceptance and the scope to be worth
 anything, and a number that lives only on the command line is a number nobody can audit.
+
+**The repo map is a photograph, and it only knows four conventions.** It is taken once,
+when the attempt is prepared, and nothing refreshes it — an agent that spends an hour
+adding files is working against a map that predates them, which is right for orientation
+and wrong for anything an agent might treat as an inventory. It describes a file by a
+Rust `//!`, a markdown heading or a leading `#` comment, so a Python docstring, a Go
+package comment and a JSDoc block all come back blank; the name and the length still
+land, and a wrong description would be worse than none. And it maps what git *tracks*,
+so a repository whose files are not committed maps as empty.
 
 `protocol` is now matched on, but for one thing and one value: `claude-stream-json`,
 to read a token count. It is still not validated at load, so a typo in `company.toml`
