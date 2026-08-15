@@ -13,8 +13,14 @@
 //! Post-hoc rather than intercepted, because wecode cannot hook another process's
 //! writes. Confinement is the worktree; this is the check afterwards. It is why a
 //! write outside scope is *sanctioned* — recoverable — rather than prevented.
+//!
+//! Recovered here, and not only recorded. The write has already happened by the time
+//! anything looks, but nothing has *landed*: wecode decides what the attempt commits,
+//! and a refused path is left out of it. That is the half of enforcement that is not
+//! too late, and without it a denial was a sentence in the ledger about a file already
+//! sitting on the branch.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use wecode_core::{Measure, Scope, TaskId};
@@ -55,10 +61,46 @@ impl Check {
     }
 }
 
+/// What a task's work touched, and the tree it touched it in.
+///
+/// The tree travels with the paths because the next question asked of them — which of
+/// them the scope refuses — is also the last moment anything holds both halves at once.
+/// A refusal that cannot name the tree it happened in can be recorded and nothing more;
+/// one that can is a refusal the commit afterwards is able to honour. Returning bare
+/// strings is what made the finding un-actable, and the finding was already true.
+#[derive(Clone, PartialEq, Eq, Default, Debug)]
+pub(crate) struct Changed {
+    dir: PathBuf,
+    paths: Vec<String>,
+}
+
+impl Changed {
+    pub(crate) fn paths(&self) -> &[String] {
+        &self.paths
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+}
+
+impl<'a> IntoIterator for &'a Changed {
+    type Item = &'a String;
+    type IntoIter = std::slice::Iter<'a, String>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.paths.iter()
+    }
+}
+
 /// Everything observed about one finished task.
 #[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub(crate) struct Verdict {
-    pub(crate) changed: Vec<String>,
+    pub(crate) changed: Changed,
     /// Changed paths the task's write scope does not cover.
     pub(crate) violations: Vec<String>,
     pub(crate) checks: Vec<Check>,
@@ -115,7 +157,7 @@ fn is_worker_area(path: &str) -> bool {
 /// so a branch carrying more than that behind the current attempt is read from the last
 /// twenty. That is the same history `wecode show` and the handoff already read, and
 /// widening it belongs there rather than in one caller's copy of the question.
-pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Vec<String>, git::GitError> {
+pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Changed, git::GitError> {
     let mut all = git::changed_files(dir)?;
     let mine = format!("{id}: attempt");
     for (sha, subject) in git::attempts_on(dir)? {
@@ -128,20 +170,55 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Vec<String>, git::GitEr
     }
     all.sort();
     all.dedup();
-    Ok(all)
+    Ok(Changed {
+        dir: dir.to_path_buf(),
+        paths: all,
+    })
 }
 
-/// Changed paths the scope does not permit.
+/// Changed paths the scope does not permit — named, and kept out of the commit.
 ///
 /// An empty write scope means the task claimed it would change nothing, so *any*
 /// change is a violation — not a free pass. A spike is the kind that legitimately
 /// has no scope, and a spike that edited files did something it did not declare.
-pub(crate) fn violations(changed: &[String], scope: &Scope) -> Vec<String> {
-    changed
+///
+/// Naming a refused write and stopping it from landing are one act, which is why they
+/// are one function. Sanctioned means *recoverable*, and until now nothing recovered:
+/// wecode commits every attempt, pass or fail, so the file the verdict had just refused
+/// went onto the branch in the same breath — and a branch that carries it is a branch
+/// that merges it, since a later attempt can pass while the refused write sits behind
+/// `HEAD` in an attempt commit nobody re-reads. The record said no and the repository
+/// said yes. [`git::refuse`] is the note that settles it, left for the commit that
+/// follows this verdict; the writes themselves stay in the tree, where the next verdict
+/// can still see them and the retry's reset is what clears them.
+///
+/// Only in a worktree wecode made — the same line `commit_attempt` draws, and for the
+/// same reason. A task the playbook gave no worktree is judged in the operator's own
+/// checkout, where wecode commits nothing and therefore has nothing to hold back.
+///
+/// A note that cannot be written changes nothing about the verdict, which is why the
+/// failure is dropped rather than raised: the refusal has already been recorded against
+/// the task by the time anything is committed, and the ledger is the half that must not
+/// be lost.
+pub(crate) fn violations(changed: &Changed, scope: &Scope) -> Vec<String> {
+    let refused: Vec<String> = changed
+        .paths()
         .iter()
         .filter(|p| !is_worker_area(p) && !glob::any_matches(&scope.write, p))
         .cloned()
-        .collect()
+        .collect();
+    if commits_here(&changed.dir) {
+        let _ = git::refuse(&changed.dir, &refused);
+    }
+    refused
+}
+
+/// Whether wecode is the one that commits in this tree.
+///
+/// The same line `commit_attempt` draws, named rather than repeated as a path test: a
+/// verdict holds back only what it would otherwise have committed itself.
+fn commits_here(dir: &Path) -> bool {
+    dir.starts_with(crate::work::run_root())
 }
 
 /// Runs the acceptance commands in `dir`.
@@ -200,6 +277,16 @@ mod tests {
 
     fn paths(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// A diff read from nowhere. The scope half of a verdict is a question about names,
+    /// so most of these tests have no tree to point at — and one that is not under the
+    /// run root is one wecode never commits in, which is exactly the guard.
+    fn touched(list: &[&str]) -> Changed {
+        Changed {
+            dir: PathBuf::new(),
+            paths: paths(list),
+        }
     }
 
     /// Acceptance with no shared cache — what a project that declares none gets.
@@ -283,10 +370,7 @@ mod tests {
         retry(&dir);
 
         let changed = changed(&dir, &TaskId::new("t1")).unwrap();
-        assert_eq!(
-            changed,
-            vec!["Cargo.toml".to_string(), "src/a.rs".to_string()]
-        );
+        assert_eq!(changed.paths(), ["Cargo.toml", "src/a.rs"]);
         assert_eq!(
             violations(&changed, &scope(&["src/**"])),
             vec!["Cargo.toml".to_string()]
@@ -311,12 +395,8 @@ mod tests {
         write(&dir, "src/b.rs", "fn b() {}\n");
 
         assert_eq!(
-            changed(&dir, &TaskId::new("t1")).unwrap(),
-            vec![
-                "docs/note.md".to_string(),
-                "src/a.rs".to_string(),
-                "src/b.rs".to_string()
-            ]
+            changed(&dir, &TaskId::new("t1")).unwrap().paths(),
+            ["docs/note.md", "src/a.rs", "src/b.rs"]
         );
     }
 
@@ -331,8 +411,8 @@ mod tests {
         retry(&dir);
 
         assert_eq!(
-            changed(&dir, &TaskId::new("step-two")).unwrap(),
-            vec!["src/two.rs".to_string()]
+            changed(&dir, &TaskId::new("step-two")).unwrap().paths(),
+            ["src/two.rs"]
         );
         assert!(
             violations(
@@ -360,15 +440,44 @@ mod tests {
         let dir = worktree("first-attempt");
         write(&dir, "src/a.rs", "fn a() {}\n");
         assert_eq!(
-            changed(&dir, &TaskId::new("t1")).unwrap(),
+            changed(&dir, &TaskId::new("t1")).unwrap().paths(),
             git::changed_files(&dir).unwrap()
         );
     }
 
     #[test]
+    fn only_a_tree_wecode_commits_in_is_held_back() {
+        // Which trees those are, stated once. The worktrees wecode cuts live under the
+        // run root and nothing else does — a repository the operator keeps anywhere
+        // else is theirs, and wecode neither commits there nor withholds anything.
+        let ours = crate::work::run_root().join("an-org").join("t1");
+        assert!(commits_here(&ours));
+        assert!(!commits_here(&std::env::temp_dir().join("their-checkout")));
+        assert!(!commits_here(Path::new("")));
+    }
+
+    #[test]
+    fn a_verdict_in_the_operators_own_checkout_holds_nothing_back() {
+        // The line `commit_attempt` draws, seen from this side. A task the playbook
+        // gave no worktree is judged where the operator is standing, and wecode commits
+        // nothing there — so there is nothing to hold back, and a note left in their
+        // repository would be one nothing ever reads.
+        let dir = worktree("no-worktree");
+        write(&dir, "src/a.rs", "fn a() {}\n");
+        write(&dir, "Cargo.toml", "[package]\n");
+
+        let c = changed(&dir, &TaskId::new("t1")).unwrap();
+        assert_eq!(violations(&c, &scope(&["src/**"])), ["Cargo.toml"]);
+
+        let sha = git::commit_all(&dir, "t1: attempt 1").unwrap().unwrap();
+        let (files, _) = git::commit_summary(&dir, &sha, 0).unwrap();
+        assert_eq!(files, ["Cargo.toml", "src/a.rs"], "nothing was withheld");
+    }
+
+    #[test]
     fn a_change_inside_the_declared_scope_is_clean() {
         let v = violations(
-            &paths(&["crates/wecode-cli/src/main.rs"]),
+            &touched(&["crates/wecode-cli/src/main.rs"]),
             &scope(&["crates/wecode-cli/src/**"]),
         );
         assert!(v.is_empty(), "{v:?}");
@@ -379,7 +488,7 @@ mod tests {
         // The exact case this module exists for: a task scoped to the cli crate that
         // quietly edited core.
         let v = violations(
-            &paths(&[
+            &touched(&[
                 "crates/wecode-cli/src/render.rs",
                 "crates/wecode-core/src/plan.rs",
             ]),
@@ -392,7 +501,7 @@ mod tests {
     fn an_empty_scope_permits_nothing_rather_than_everything() {
         // A spike declares no write scope. One that edited files did something it
         // never said it would, so the fail-closed reading is the correct one.
-        let v = violations(&paths(&["src/a.rs"]), &Scope::default());
+        let v = violations(&touched(&["src/a.rs"]), &Scope::default());
         assert_eq!(v.len(), 1);
     }
 
@@ -401,7 +510,7 @@ mod tests {
         // The envelope tells the agent to write .wecode/run/result.json. Counting that
         // against it would fail every task for following instructions.
         let v = violations(
-            &paths(&[".wecode/run/result.json", "src/a.rs"]),
+            &touched(&[".wecode/run/result.json", "src/a.rs"]),
             &scope(&["src/**"]),
         );
         assert!(v.is_empty(), "{v:?}");
@@ -411,13 +520,13 @@ mod tests {
     fn the_playbook_itself_is_still_guarded() {
         // Only the run directory is exempt. A task quietly rewriting the guidance it
         // was given is exactly what the split of .wecode/ exists to prevent.
-        let v = violations(&paths(&[".wecode/playbook.toml"]), &scope(&["src/**"]));
+        let v = violations(&touched(&[".wecode/playbook.toml"]), &scope(&["src/**"]));
         assert_eq!(v, vec![".wecode/playbook.toml".to_string()]);
     }
 
     #[test]
     fn touching_nothing_is_always_in_scope() {
-        assert!(violations(&[], &Scope::default()).is_empty());
+        assert!(violations(&touched(&[]), &Scope::default()).is_empty());
     }
 
     #[test]
