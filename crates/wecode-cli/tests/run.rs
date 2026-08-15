@@ -143,6 +143,66 @@ fn a_failing_agent_is_not_verified() {
 }
 
 #[test]
+fn a_failed_run_leaves_the_reason_on_the_record_and_not_only_in_the_terminal() {
+    // `exit 1` is what a crashed harness, an agent that gave up and a machine with no
+    // credential on it all look like from outside. The sentence that tells them apart
+    // was captured, printed once to whoever was standing at the machine, and dropped —
+    // so the retry read an exit code, and so did the operator who was somewhere else.
+    let (org, _) = with_agent(
+        "run-cause",
+        "echo half >> a.txt; echo 'Error: invalid x-api-key' >&2; exit 1",
+    );
+    a_task(&org, "t", "a.txt", "true");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("not verified");
+
+    // The durable half. `show` reads the execution record, which is what is left once
+    // the terminal that ran it has scrolled away or belongs to a machine nobody is at.
+    org.run(&["show", "t"])
+        .assert_contains("exit 1 — Error: invalid x-api-key");
+
+    // And on the attempt's own commit, beside the diff it explains. The database and
+    // the branch travel separately — one of them is what somebody clones — and a
+    // half-finished change with `exit 1` under it is a puzzle either way.
+    let tree = org
+        .recorded()
+        .into_iter()
+        .find(|w| w.task == "t")
+        .expect("the task's worktree");
+    let message = support::git_out(Path::new(&tree.path), &["log", "-1", "--format=%B"]);
+    assert!(
+        message.contains("exit 1 — Error: invalid x-api-key"),
+        "the commit says only how it ended: {message}"
+    );
+
+    // And the next attempt is handed it, which is the whole point of keeping it: a
+    // retry that cannot see why the last one failed pays for the same failure again.
+    org.run(&["start", "t"])
+        .assert_ok("start")
+        .assert_contains("YOUR PREVIOUS ATTEMPTS")
+        .assert_contains("exit 1 — Error: invalid x-api-key");
+}
+
+#[test]
+fn a_clean_run_is_not_given_a_reason_it_does_not_have() {
+    // The other half of the rule. A working agent's last line is a warning or a
+    // progress note, and hanging it off `exit 0` would put a cause on every record
+    // that has none — including the ones that passed.
+    let (org, _) = with_agent(
+        "run-clean-cause",
+        "echo 'warning: deprecated flag' >&2; echo done >> a.txt",
+    );
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed");
+    org.run(&["show", "t"]).assert_lacks("deprecated flag");
+}
+
+#[test]
 fn work_outside_the_declared_scope_fails_a_run_that_exited_cleanly() {
     // The case the whole design turns on: the agent says it succeeded, and the diff
     // says it went somewhere it was not allowed.
