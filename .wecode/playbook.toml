@@ -202,7 +202,7 @@ Time-box it. A spike that turns into an implementation should have been a featur
 """
 
 [design]
-worktree  = false
+worktree  = true   # so the document lands on a branch, and a notification can carry it
 assign_to = "impl"
 tokens    = 150000
 wall_secs = 1800
