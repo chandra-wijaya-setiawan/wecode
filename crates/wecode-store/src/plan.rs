@@ -481,6 +481,42 @@ impl Store {
         Ok(())
     }
 
+    /// Sets where a task sits — what it is part of, and what it comes after — without
+    /// rewriting the rest of it.
+    ///
+    /// Narrow for the reason [`Self::set_task_budget`] is narrow, and for a sharper
+    /// version of it: the task being moved has usually run, and a [`Self::save_task`]
+    /// would carry the caller's whole idea of the task back into the database beside
+    /// the two relations. Acceptance is frozen once a task has been dispatched, so a
+    /// command that reshapes a plan must not be able to move it — not even by writing
+    /// back a plan it read a moment earlier.
+    ///
+    /// The dependency rows are replaced rather than merged: the caller passes the list
+    /// it wants, which is the only way to say that a prerequisite has gone away.
+    pub fn set_task_shape(
+        &self,
+        id: &TaskId,
+        parent: Option<&TaskId>,
+        after: &[TaskId],
+    ) -> Result<(), StoreError> {
+        let c = self.conn();
+        c.execute(
+            "UPDATE tasks SET parent_id = ?2 WHERE id = ?1",
+            params![id.as_str(), parent.map(TaskId::as_str)],
+        )?;
+        c.execute(
+            "DELETE FROM task_depends_on WHERE task_id = ?1",
+            [id.as_str()],
+        )?;
+        for dep in after {
+            c.execute(
+                "INSERT INTO task_depends_on (task_id, prerequisite_id) VALUES (?1, ?2)",
+                params![id.as_str(), dep.as_str()],
+            )?;
+        }
+        Ok(())
+    }
+
     /// Erases a task and everything hanging off it.
     ///
     /// Only ever for a task that never ran — the caller checks that, because the
@@ -732,6 +768,54 @@ mod tests {
         assert_eq!(back.depends_on, vec![TaskId::new("keys")]);
         assert_eq!(back.status, TaskStatus::Failed, "status untouched");
         assert_eq!(back.number, Some(Number::new(3)), "not renumbered");
+    }
+
+    #[test]
+    fn a_move_disturbs_nothing_else_about_the_task() {
+        // The same reason `set_task_budget` is not a save: by the time a plan is
+        // reshaped the task has usually run, and acceptance is frozen at dispatch.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("sprint")).unwrap();
+        s.save_task(&task("keys")).unwrap();
+        let t = task("layer").after("keys");
+        s.save_task(&t).unwrap();
+        s.set_task_status(&"layer".into(), TaskStatus::Failed)
+            .unwrap();
+
+        s.set_task_shape(&"layer".into(), Some(&"sprint".into()), &[])
+            .unwrap();
+
+        let back = s
+            .load_plan()
+            .unwrap()
+            .task(&"layer".into())
+            .unwrap()
+            .clone();
+        assert_eq!(back.parent, Some(TaskId::new("sprint")));
+        assert!(back.depends_on.is_empty(), "the stale edge is gone");
+        assert_eq!(back.acceptance, t.acceptance, "acceptance is frozen");
+        assert_eq!(back.scope, t.scope);
+        assert_eq!(back.budget, t.budget);
+        assert_eq!(back.status, TaskStatus::Failed, "status untouched");
+        assert_eq!(back.number, Some(Number::new(4)), "not renumbered");
+    }
+
+    #[test]
+    fn a_move_out_of_a_group_and_a_new_ordering_both_persist() {
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("sprint")).unwrap();
+        s.save_task(&task("first")).unwrap();
+        s.save_task(&task("layer").under("sprint")).unwrap();
+
+        s.set_task_shape(&"layer".into(), None, &[TaskId::new("first")])
+            .unwrap();
+        let plan = s.load_plan().unwrap();
+        let back = plan.task(&"layer".into()).unwrap();
+        assert!(back.parent.is_none(), "lifted out of the group");
+        assert_eq!(back.depends_on, vec![TaskId::new("first")]);
+        assert_eq!(plan.dependents(&"first".into()).count(), 1);
     }
 
     #[test]

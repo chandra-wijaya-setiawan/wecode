@@ -172,6 +172,56 @@ project that dispatches by approval has to be signed for again: a signature give
 task budgeted at 100k did not cover the same task at 400k. What it spent already stays
 in the ledger either way — `wecode audit --task <id>`.
 
+**`wecode task add <id> --amend`** reshapes the plan without taking anything out of it.
+It changes where a task *sits* — `--parent <task>` puts it inside a sprint, `--top` lifts
+it back out, `--after <task>` (repeatable) says what it must come after, and `--no-after`
+clears the ordering. Nothing else about the task moves: scope and budget have their own
+commands, and acceptance deliberately has none.
+
+It shares `task add` because `--parent` and `--after` are already declared there, and one
+place that knows how to read them beats two that could read them differently. Typing
+`task add` with an id that is already taken now says so and points here, which is where
+the amendment is usually discovered: retyping the declaration is the wall an operator
+hits. (`wecode help` does not list `--amend` yet — the usage text is a constant in
+`main.rs`, and adding the two lines to the `task add` stanza is all it needs.)
+
+Before it, neither relation could be changed once a task existed. The way out was
+`wecode task rm` and `task add` again, which is refused the moment a task has run — and a
+grouping is rarely known to be wrong until something in it has run. So the work that
+belonged in a sprint got a new id, and the spend, the refusals and the design signed off
+on it stayed behind under a task nobody was looking at. An ordering was worse: `--after`
+was readable only at creation, so a dependency discovered late meant retyping both tasks,
+and the refusals that told an operator to *re-point* a stranded chain named no command
+that could do it. They name this one now.
+
+Each relation is amended on its own, and an ordering is replaced whole. Silence leaves a
+relation exactly as it was rather than clearing it — the same rule `task budget` follows
+— which is why emptying one has a flag of its own to say it out loud.
+
+Two things refuse a move, and they are worth knowing before it is wanted:
+
+- **A run keeps the worktree it started in.** One worktree per main task, with subtasks
+  sharing their parent's, so `parent` is what decides which checkout the work happens in
+  and which branch it lands on. Nothing holds a run to the path it was started in —
+  `verify` asks which tree the task owns all over again when the run is done — so a move
+  that re-roots a task in flight would have it judged somewhere the work never happened.
+  The question asked is *whose worktree would change*, not who is running: moving a
+  sprint is refused while an item inside it runs, and moving a task from one place in a
+  chain to another is not refused at all, because the root above it is the same either
+  way. The ordering may always change: it is read on the next scan, not by the run
+  standing there.
+- **The ordering is part of what keeps two scopes apart.** Sibling tasks may claim the
+  same files precisely because one comes after the other, so dropping that ordering puts
+  the collision back. It is the check `task scope` re-runs, run again here, and it names
+  the overlap and refuses unless `--force` says otherwise.
+
+A move that changes which task owns the worktree says so, and says that what earlier
+attempts committed stays on the branch they landed on — a task carries its history, not
+its checkout. Moving one records a `define`, exactly as `task scope` and `task budget` do,
+so a task in a project that dispatches by approval has to be signed for again: a signature
+given to a task that was going to ship on its own did not cover the same task shipping
+inside a sprint, on a different branch.
+
 **`wecode archive task <id>`** files a task away *with its subtasks*, and
 `wecode unarchive task <id>` brings the group back. A bare id — `wecode archive caching` —
 is a project, as it always was.

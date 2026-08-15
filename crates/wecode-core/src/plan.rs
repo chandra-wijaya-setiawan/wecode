@@ -179,6 +179,18 @@ impl Plan {
             .filter(move |t| t.parent.as_ref() == Some(id))
     }
 
+    /// Tasks that wait on this one — the inverse of `depends_on`.
+    ///
+    /// A scan, for the reason [`Self::project_numbered`] is one. It exists because
+    /// three commands need the same answer — what would be left stranded by removing a
+    /// task, by dropping it, or by moving it — and three filters written by hand are
+    /// three chances for one of them to disagree with the others.
+    pub fn dependents(&self, id: &TaskId) -> impl Iterator<Item = &Task> {
+        self.tasks
+            .values()
+            .filter(move |t| t.depends_on.contains(id))
+    }
+
     /// Tasks of a project that have no parent — the top of its hierarchy.
     pub fn roots_of(&self, project: &ProjectId) -> impl Iterator<Item = &Task> {
         self.tasks
@@ -237,6 +249,48 @@ impl Plan {
                 Err(e)
             }
         }
+    }
+
+    /// Re-declares what a task is part of, leaving everything else about it alone.
+    ///
+    /// `None` lifts it to the top of its project. Every rule [`Self::add_task`]
+    /// enforces is enforced again — a parent in another project, a chain that loops
+    /// back through the task itself — and a rejected move leaves the plan exactly as
+    /// it was, which is [`Self::update_task`]'s guarantee rather than a second
+    /// implementation of it.
+    ///
+    /// Moving a task is not making it wait: the two relations stay independent here as
+    /// everywhere else, so joining a group does not acquire the group's ordering.
+    pub fn set_parent(&mut self, id: &TaskId, parent: Option<TaskId>) -> Result<Task, PlanError> {
+        let mut t = self.the(id)?;
+        t.parent = parent;
+        self.update_task(t.clone())?;
+        Ok(t)
+    }
+
+    /// Re-declares what a task must come after, replacing the list whole.
+    ///
+    /// Wholesale rather than an edge at a time, because an ordering is read as a set:
+    /// a task that came after two things and should now come after one has had a
+    /// prerequisite *removed*, and an additive API has no spelling for that. Repeats
+    /// collapse for the same reason — naming a prerequisite twice is one edge, not two.
+    pub fn set_predecessors(&mut self, id: &TaskId, after: Vec<TaskId>) -> Result<Task, PlanError> {
+        let mut t = self.the(id)?;
+        let mut seen = BTreeSet::new();
+        t.depends_on = after
+            .into_iter()
+            .filter(|d| seen.insert(d.clone()))
+            .collect();
+        self.update_task(t.clone())?;
+        Ok(t)
+    }
+
+    /// A copy of a task to amend, or the refusal that names it.
+    fn the(&self, id: &TaskId) -> Result<Task, PlanError> {
+        self.tasks
+            .get(id)
+            .cloned()
+            .ok_or_else(|| PlanError::NoSuchTask(id.clone()))
     }
 
     pub fn update_project(&mut self, p: Project) -> Result<(), PlanError> {
@@ -521,6 +575,134 @@ mod tests {
             p.update_task(a).unwrap_err(),
             PlanError::DependencyCycle(_)
         ));
+    }
+
+    #[test]
+    fn a_task_joins_a_group_and_leaves_it_again_without_being_recreated() {
+        // The plan is reshaped by moving what is in it. Nothing here creates or
+        // destroys a task, so everything already recorded against it stays where it is.
+        let mut p = plan();
+        p.add_task(task("sprint")).unwrap();
+        p.add_task(task("item")).unwrap();
+
+        let moved = p.set_parent(&"item".into(), Some("sprint".into())).unwrap();
+        assert_eq!(moved.parent, Some("sprint".into()));
+        assert_eq!(p.subtasks(&"sprint".into()).count(), 1);
+        assert!(
+            p.is_ready(&"item".into()),
+            "joining a group is not waiting for it"
+        );
+
+        let lifted = p.set_parent(&"item".into(), None).unwrap();
+        assert!(lifted.parent.is_none());
+        assert_eq!(p.roots_of(&"caching".into()).count(), 2);
+    }
+
+    #[test]
+    fn a_move_that_would_loop_is_refused_and_changes_nothing() {
+        let mut p = plan();
+        p.add_task(task("sprint")).unwrap();
+        p.add_task(task("item").under("sprint")).unwrap();
+
+        assert!(matches!(
+            p.set_parent(&"sprint".into(), Some("item".into()))
+                .unwrap_err(),
+            PlanError::ParentCycle(_)
+        ));
+        assert!(
+            p.task(&"sprint".into()).unwrap().parent.is_none(),
+            "the rejected move must not have been applied"
+        );
+        assert!(matches!(
+            p.set_parent(&"ghost".into(), None).unwrap_err(),
+            PlanError::NoSuchTask(_)
+        ));
+    }
+
+    #[test]
+    fn a_move_across_projects_is_refused() {
+        let mut p = plan();
+        p.add_project(Project::new("other", "something else", "wecode"))
+            .unwrap();
+        p.add_task(task("item")).unwrap();
+        p.add_task(Task::new("elsewhere", "other", "x")).unwrap();
+
+        assert!(matches!(
+            p.set_parent(&"item".into(), Some("elsewhere".into()))
+                .unwrap_err(),
+            PlanError::ParentInAnotherProject { .. }
+        ));
+    }
+
+    #[test]
+    fn an_ordering_can_be_replaced_after_the_task_exists() {
+        // The gap this closes: `after` could only ever be declared at creation, so a
+        // sequence discovered later meant a new task.
+        let mut p = plan();
+        p.add_task(task("first")).unwrap();
+        p.add_task(task("second")).unwrap();
+        p.add_task(task("third")).unwrap();
+
+        p.set_predecessors(&"third".into(), vec!["first".into(), "first".into()])
+            .unwrap();
+        assert_eq!(
+            p.task(&"third".into()).unwrap().depends_on,
+            vec![TaskId::from("first")],
+            "one edge, however many times it was named"
+        );
+        assert!(!p.is_ready(&"third".into()));
+
+        // Replaced whole, so a prerequisite can be dropped as well as added.
+        p.set_predecessors(&"third".into(), vec!["second".into()])
+            .unwrap();
+        assert_eq!(
+            p.task(&"third".into()).unwrap().depends_on,
+            vec![TaskId::from("second")]
+        );
+        p.set_predecessors(&"third".into(), Vec::new()).unwrap();
+        assert!(p.is_ready(&"third".into()), "and cleared entirely");
+    }
+
+    #[test]
+    fn an_ordering_that_would_loop_is_refused() {
+        let mut p = plan();
+        p.add_task(task("first")).unwrap();
+        p.add_task(task("second").after("first")).unwrap();
+
+        assert!(matches!(
+            p.set_predecessors(&"first".into(), vec!["second".into()])
+                .unwrap_err(),
+            PlanError::DependencyCycle(_)
+        ));
+        assert!(matches!(
+            p.set_predecessors(&"first".into(), vec!["first".into()])
+                .unwrap_err(),
+            PlanError::SelfDependency(_)
+        ));
+        assert!(
+            p.task(&"first".into()).unwrap().depends_on.is_empty(),
+            "neither refusal may leave half of itself behind"
+        );
+    }
+
+    #[test]
+    fn dependents_are_the_inverse_of_depends_on() {
+        let mut p = plan();
+        p.add_task(task("first")).unwrap();
+        p.add_task(task("second").after("first")).unwrap();
+        p.add_task(task("third").after("first")).unwrap();
+        p.add_task(task("part").under("first")).unwrap();
+
+        let waiting: Vec<&str> = p
+            .dependents(&"first".into())
+            .map(|t| t.id.as_str())
+            .collect();
+        assert_eq!(
+            waiting,
+            vec!["second", "third"],
+            "being part of something is not waiting for it"
+        );
+        assert_eq!(p.dependents(&"second".into()).count(), 0);
     }
 
     #[test]

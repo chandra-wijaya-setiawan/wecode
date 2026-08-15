@@ -776,6 +776,407 @@ fn a_failed_task_is_told_what_puts_it_back_in_the_queue() {
         .assert_contains("wecode status cache-tests waiting");
 }
 
+// ------------------------------------------------------- task add --amend ------
+
+/// A task to group the seeded work under. Written by hand rather than through
+/// [`Org::seed`] because a sprint is exactly what nobody thinks of until the items
+/// already exist.
+fn a_sprint(org: &Org, id: &str) {
+    org.run(&[
+        "task",
+        "add",
+        id,
+        "land the caching work on one branch",
+        "--project",
+        "caching",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "docs/sprint/**",
+        "--tokens",
+        "1000",
+    ])
+    .assert_ok("add the sprint");
+}
+
+#[test]
+fn a_task_joins_a_sprint_and_leaves_it_again_without_being_recreated() {
+    // Sprint planning as it actually happens: the items are written down first, and
+    // what belongs together is noticed afterwards.
+    let org = Org::new("amend-join", "solo");
+    org.seed();
+    a_sprint(&org, "cache-sprint");
+
+    org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "--amend",
+        "--parent",
+        "cache-sprint",
+    ])
+    .assert_ok("join the sprint")
+    .assert_contains("was  top level, after nothing")
+    .assert_contains("now  in cache-sprint, after nothing")
+    // Being part of something is not waiting for it, here as everywhere else.
+    .assert_lacks("waiting:");
+    org.run(&["show", "cache-tests"])
+        .assert_ok("show")
+        .assert_contains("part of    cache-sprint");
+
+    org.run(&["task", "add", "cache-tests", "--amend", "--top"])
+        .assert_ok("leave the sprint")
+        .assert_contains("now  top level, after nothing");
+    org.run(&["show", "cache-tests"]).assert_lacks("part of");
+}
+
+#[test]
+fn an_ordering_can_be_declared_after_both_tasks_exist() {
+    // Nothing could do this before: `--after` was readable only at creation, so a
+    // sequence discovered later meant retyping the task under a new id.
+    let org = Org::new("amend-after", "solo");
+    org.seed();
+    org.run(&[
+        "task",
+        "add",
+        "cache-docs",
+        "write up the cache eviction rules",
+        "--project",
+        "caching",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "docs/cache/**",
+        "--tokens",
+        "1000",
+    ])
+    .assert_ok("a task nobody sequenced");
+    org.run(&["show", "cache-docs"])
+        .assert_lacks("must come after");
+
+    org.run(&["task", "add", "cache-docs", "--amend", "--after", "bench"])
+        .assert_ok("sequence it")
+        .assert_contains("now  top level, after bench")
+        .assert_contains("waiting: bench is not done");
+    org.run(&["show", "cache-docs"])
+        .assert_contains("must come after")
+        .assert_contains("bench");
+
+    // Replaced whole, so the way back is saying so out loud.
+    org.run(&["task", "add", "cache-docs", "--amend", "--no-after"])
+        .assert_ok("unsequence it")
+        .assert_contains("now  top level, after nothing");
+    org.run(&["show", "cache-docs"])
+        .assert_lacks("must come after");
+}
+
+#[test]
+fn dropping_an_ordering_that_kept_two_scopes_apart_is_refused() {
+    // The seeded `bench` writes under `tests/`, which `cache-tests` already claims —
+    // legal only because it is sequenced after it. Removing the ordering puts the
+    // collision back, and the check that caught it at `task add` has to catch it here
+    // or the gate has a back door.
+    let org = Org::new("amend-overlap", "solo");
+    org.seed();
+
+    org.run(&["task", "add", "bench", "--amend", "--no-after"])
+        .assert_ok("the command itself succeeds")
+        .assert_contains("overlaps")
+        .assert_contains("cache-tests")
+        .assert_contains("not moved");
+    // Refused, not half-done.
+    org.run(&["show", "bench"]).assert_contains("cache-tests");
+
+    org.run(&["task", "add", "bench", "--amend", "--no-after", "--force"])
+        .assert_ok("forced")
+        .assert_contains("now  top level, after nothing");
+}
+
+#[test]
+fn a_move_that_would_loop_is_refused_and_changes_nothing() {
+    let org = Org::new("amend-loop", "solo");
+    org.seed();
+    a_sprint(&org, "cache-sprint");
+    org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "--amend",
+        "--parent",
+        "cache-sprint",
+    ])
+    .assert_ok("join");
+
+    let r = org.run(&[
+        "task",
+        "add",
+        "cache-sprint",
+        "--amend",
+        "--parent",
+        "cache-tests",
+    ]);
+    assert!(!r.ok(), "a sprint may not be part of its own item");
+    r.assert_contains("subtask loop");
+    org.run(&["show", "cache-tests"])
+        .assert_contains("part of    cache-sprint");
+
+    // And an ordering that loops, which is the other relation and a separate check.
+    let dep = org.run(&["task", "add", "cache-tests", "--amend", "--after", "bench"]);
+    assert!(!dep.ok(), "bench already comes after cache-tests");
+    dep.assert_contains("dependency loop");
+}
+
+#[test]
+fn an_amendment_has_to_say_what_it_changes() {
+    let org = Org::new("amend-empty", "solo");
+    org.seed();
+
+    let nothing = org.run(&["task", "add", "cache-tests", "--amend"]);
+    assert!(!nothing.ok(), "an amendment that says nothing is not one");
+    nothing.assert_contains("--parent").assert_contains("--top");
+
+    // Silence leaves a relation alone, so clearing one has its own flag — and naming
+    // both at once is a contradiction rather than a precedence puzzle.
+    for argv in [
+        vec![
+            "task",
+            "add",
+            "cache-tests",
+            "--amend",
+            "--parent",
+            "bench",
+            "--top",
+        ],
+        vec![
+            "task",
+            "add",
+            "bench",
+            "--amend",
+            "--after",
+            "cache-tests",
+            "--no-after",
+        ],
+    ] {
+        let r = org.run(&argv);
+        assert!(!r.ok(), "{argv:?} should be refused");
+        r.assert_contains("opposite things");
+    }
+}
+
+#[test]
+fn adding_a_task_whose_id_is_taken_says_what_moves_it_instead() {
+    // Where the amendment is discovered: the wall an operator hits is retyping the
+    // declaration, and the refusal is the only thing they read at that moment.
+    let org = Org::new("amend-taken", "solo");
+    org.seed();
+
+    let r = org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "cover the cache layer with tests",
+        "--project",
+        "caching",
+        "--parent",
+        "bench",
+    ]);
+    assert!(!r.ok(), "a taken id is not a new task");
+    r.assert_contains("already exists")
+        .assert_contains("--amend");
+}
+
+#[test]
+fn a_task_that_has_run_is_regrouped_rather_than_recreated() {
+    // The whole point, and the same wall `task budget` was built against: `task rm` is
+    // refused the moment a task has run, which is exactly when a grouping turns out to
+    // have been wrong.
+    let (org, _) = with_agent("amend-ran", "true");
+    a_task(&org, "t", "src/**", "true");
+    org.run(&["run", "t"]).assert_ok("run");
+    a_sprint(&org, "sprint");
+
+    let r = org.run(&["task", "rm", "t"]);
+    assert!(!r.ok(), "the old way out is closed once a task has run");
+    r.assert_contains("it ran, so it is history");
+
+    org.run(&["task", "add", "t", "--amend", "--parent", "sprint"])
+        .assert_ok("regroup it")
+        .assert_contains("now  in sprint, after nothing")
+        // `parent` is what decides the worktree, so a move is also a change of branch.
+        .assert_contains("wecode/sprint")
+        .assert_contains("stays on the branch they landed on");
+
+    // Still the same task, so what the earlier run spent is still filed under it.
+    org.run(&["audit", "--task", "t"])
+        .assert_ok("audit")
+        .assert_contains("spend");
+}
+
+#[test]
+fn a_running_task_keeps_the_worktree_it_started_in() {
+    // The one refusal that is about a process rather than about the plan: moving the
+    // group moves the checkout, and there is a run standing in it.
+    let org = Org::new("amend-running", "solo");
+    org.seed();
+    a_sprint(&org, "cache-sprint");
+    org.run(&["status", "cache-tests", "running"])
+        .assert_ok("mark it running");
+
+    let r = org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "--amend",
+        "--parent",
+        "cache-sprint",
+    ]);
+    assert!(!r.ok(), "a run may not have its tree moved under it");
+    r.assert_contains("keeps the worktree it started in")
+        .assert_contains("wecode status cache-tests waiting");
+
+    // The ordering is read on the next scan, not by the run in flight, so it may move.
+    org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "--amend",
+        "--after",
+        "cache-sprint",
+    ])
+    .assert_ok("an ordering is not a checkout");
+}
+
+#[test]
+fn moving_a_sprint_is_refused_while_something_inside_it_is_running() {
+    // The case a status check on the named task alone walks straight past: the sprint is
+    // not running, the item in it is, and moving the sprint re-roots the item too. It
+    // matters because nothing holds a run to the path it started in — `verify` asks for
+    // the worktree by owner again when the run is done, and a task re-rooted under one
+    // nobody cut falls back to judging the project's own checkout instead of the work.
+    let org = Org::new("amend-running-child", "solo");
+    org.seed();
+    a_sprint(&org, "cache-sprint");
+    org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "--amend",
+        "--parent",
+        "cache-sprint",
+    ])
+    .assert_ok("join the sprint");
+    org.run(&["status", "cache-tests", "running"])
+        .assert_ok("mark the item running");
+    org.run(&[
+        "task",
+        "add",
+        "outer",
+        "hold the whole caching effort",
+        "--project",
+        "caching",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "docs/outer/**",
+        "--tokens",
+        "1000",
+    ])
+    .assert_ok("a sprint to move the sprint into");
+
+    let r = org.run(&[
+        "task",
+        "add",
+        "cache-sprint",
+        "--amend",
+        "--parent",
+        "outer",
+    ]);
+    assert!(!r.ok(), "the item inside it is standing in the worktree");
+    // Named by the run that holds the tree open, not by the task that was typed.
+    r.assert_contains("cache-tests")
+        .assert_contains("keeps the worktree it started in")
+        .assert_contains("wecode status cache-tests waiting");
+    org.run(&["show", "cache-sprint"])
+        .assert_lacks("part of    outer");
+}
+
+#[test]
+fn a_move_that_leaves_the_worktree_where_it_is_goes_through() {
+    // The refusal asks whose worktree would change, not who is running, so a move
+    // inside a chain is not held up by a run: the root is the same before and after,
+    // and the checkout it names never moves.
+    let org = Org::new("amend-running-within", "solo");
+    org.seed();
+    a_sprint(&org, "cache-sprint");
+    org.run(&[
+        "task",
+        "add",
+        "cache-step",
+        "one step of the sprint",
+        "--project",
+        "caching",
+        "--parent",
+        "cache-sprint",
+        "--accept-cmd",
+        "cargo test",
+        "--write",
+        "docs/step/**",
+        "--tokens",
+        "1000",
+    ])
+    .assert_ok("a step in the sprint");
+    org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "--amend",
+        "--parent",
+        "cache-sprint",
+    ])
+    .assert_ok("join the sprint");
+    org.run(&["status", "cache-tests", "running"])
+        .assert_ok("mark it running");
+
+    // Still owned by cache-sprint either way, so the tree under the run does not move.
+    org.run(&[
+        "task",
+        "add",
+        "cache-tests",
+        "--amend",
+        "--parent",
+        "cache-step",
+    ])
+    .assert_ok("regroup within the same worktree")
+    .assert_contains("now  in cache-step, after nothing")
+    .assert_lacks("worktree");
+    org.run(&["show", "cache-tests"])
+        .assert_contains("part of    cache-sprint / cache-step / cache-tests");
+}
+
+#[test]
+fn moving_a_signed_task_asks_for_the_signature_again() {
+    // A signature given to a task that was going to ship on its own did not cover the
+    // same task shipping inside a sprint, on a different branch. The same rule
+    // `task scope` and `task budget` are held to, through the same `define` record.
+    let org = signs_first("amend-signed", "echo done >> src/app.txt");
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+    a_sprint(&org, "sprint");
+    org.run(&["approve", "admission", "--task", "t"])
+        .assert_ok("sign");
+
+    org.run(&["task", "add", "t", "--amend", "--parent", "sprint"])
+        .assert_ok("move it");
+    let r = org.run(&["run", "t"]);
+    assert!(!r.ok(), "the signature was for the task standing alone");
+    r.assert_contains("was changed after it was signed");
+
+    org.run(&["approve", "admission", "--task", "t"])
+        .assert_ok("sign what it is now");
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed");
+}
+
 // --------------------------------------------------------------- assign --------
 
 #[test]
