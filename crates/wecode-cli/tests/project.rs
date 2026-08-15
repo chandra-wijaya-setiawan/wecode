@@ -2,6 +2,7 @@
 
 mod support;
 
+use support::Org;
 use support::playbook::with_playbook;
 
 // -------------------------------------------------------- project status ------
@@ -222,6 +223,81 @@ fn archive_applies_to_projects_not_tasks() {
     let r = org.run(&["archive", "t"]);
     assert!(!r.ok());
     r.assert_contains("projects, not tasks");
+}
+
+#[test]
+fn filing_a_task_away_takes_it_off_the_plan_listing_too() {
+    // Regression: `tree --all` hid and showed archived *projects*, while an archived
+    // task was printed exactly as if it were live — no marker, no count, and `--all`
+    // changed nothing. Filing one away and then seeing it unchanged reads as a filing
+    // that did not take.
+    let (org, _) = with_playbook("arch-task-tree");
+    add_task(&org, "layer", None, "src/layer/**");
+    add_task(&org, "keys", Some("layer"), "src/keys/**");
+    add_task(&org, "bench", None, "benches/**");
+
+    org.run(&["archive", "task", "layer", "--force"])
+        .assert_ok("archive task")
+        .assert_contains("archived layer");
+
+    // The group goes as one, and the count says so rather than naming two rows.
+    org.run(&["tree"])
+        .assert_ok("tree")
+        .assert_lacks("layer")
+        .assert_lacks("keys")
+        .assert_contains("bench")
+        .assert_contains("1 archived, hidden");
+
+    // `--all` is one flag for both levels, and what it brings back says which it is.
+    let all = org.run(&["tree", "--all"]);
+    all.assert_ok("tree --all")
+        .assert_contains("layer")
+        .assert_contains("keys")
+        .assert_contains("1 archived, shown");
+    let layer = all
+        .all()
+        .lines()
+        .find(|l| l.contains("layer"))
+        .expect("the row is back")
+        .to_string();
+    assert!(layer.contains("archived"), "{layer:?}");
+
+    // Naming the project reports everything: there is no `--all` at that level, so
+    // hiding there would put the row out of reach. The marker is what keeps it from
+    // reading as live.
+    org.run(&["show", "caching"])
+        .assert_ok("show")
+        .assert_contains("layer")
+        .assert_contains("archived");
+
+    org.run(&["unarchive", "task", "layer"])
+        .assert_ok("unarchive task");
+    org.run(&["tree"])
+        .assert_ok("tree")
+        .assert_contains("layer")
+        .assert_contains("keys")
+        .assert_lacks("archived");
+}
+
+/// `wecode task add` against the `with_playbook` project, optionally under a parent.
+fn add_task(org: &Org, id: &str, parent: Option<&str>, glob: &str) {
+    let mut argv = vec![
+        "task",
+        "add",
+        id,
+        "--project",
+        "caching",
+        "--kind",
+        "chore",
+        "the cache returns a stale entry after eviction",
+        "--write",
+        glob,
+    ];
+    if let Some(p) = parent {
+        argv.push("--parent");
+        argv.push(p);
+    }
+    org.run(&argv).assert_ok("task add");
 }
 
 // ----------------------------------------------------------- task scope ------

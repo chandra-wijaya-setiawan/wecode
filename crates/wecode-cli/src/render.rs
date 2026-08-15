@@ -74,8 +74,12 @@ fn also_numbered(number: Option<wecode_core::Number>) -> String {
 
 /// The whole plan: projects, each with its task tree.
 ///
-/// `show_all` includes archived projects. Hiding is never silent — when anything is
-/// omitted the footer says how much and how to see it.
+/// `show_all` includes filed-away work — projects and tasks alike. One flag for both
+/// levels because an operator who files a task away and then sees it here reads the
+/// filing as having failed: `--all` means *everything*, or it means nothing.
+///
+/// Hiding is never silent — when anything is omitted the footer says how much and how
+/// to see it.
 #[must_use]
 pub(crate) fn tree(p: &Plan, show_all: bool) -> String {
     if p.is_empty() {
@@ -94,26 +98,48 @@ pub(crate) fn tree(p: &Plan, show_all: bool) -> String {
         );
     }
 
-    let mut out = String::new();
+    let mut listing = Listing {
+        show_all,
+        ..Listing::default()
+    };
     for proj in projects {
-        out.push_str(&project_line(p, proj));
+        listing.text.push_str(&project_line(p, proj));
         let mut roots: Vec<&Task> = p.roots_of(&proj.id).collect();
         roots.sort_by(|a, b| a.id.cmp(&b.id));
         for t in roots {
-            render_task(p, t, 1, &mut out);
+            render_task(p, t, 1, false, &mut listing);
         }
     }
+    let mut out = listing.text;
     out.push('\n');
     out.push_str(LEGEND);
     out.push_str(NUMBERS_NOTE);
-    out.push_str(&archived_note(p, show_all));
+    out.push_str(&archived_note(p, show_all, listing.filed));
     out
+}
+
+/// A plan being written out, and how much of it was filed away.
+///
+/// The count travels with the text because only the walk that met the rows knows how
+/// many there were, and a view that shows less than everything has to be able to say so.
+#[derive(Default)]
+struct Listing {
+    text: String,
+    /// Whether filed-away tasks are written rather than skipped.
+    show_all: bool,
+    /// Filed-away groups met, counted once each. Filing a task takes its subtasks with
+    /// it, so a feature and its four subtasks are one decision and read as `1`; four
+    /// would say there is far more out of sight than there is.
+    filed: usize,
 }
 
 /// One line naming what is not on screen. A view that quietly shows less than
 /// everything is worse than one that shows too much.
-fn archived_note(p: &Plan, show_all: bool) -> String {
-    let n = p.archived_count();
+///
+/// Projects and filed-away task groups are one number, because `--all` is one flag: a
+/// footer that counted only the projects would leave the tasks hidden *and* unmentioned.
+fn archived_note(p: &Plan, show_all: bool, filed: usize) -> String {
+    let n = p.archived_count() + filed;
     if n == 0 {
         String::new()
     } else if show_all {
@@ -139,7 +165,20 @@ fn project_line(plan: &Plan, p: &Project) -> String {
     )
 }
 
-fn render_task(plan: &Plan, t: &Task, depth: usize, out: &mut String) {
+/// A task's line, then every task beneath it.
+///
+/// `parent_filed` says the walk is already inside a filed-away group, so the group is
+/// counted at the row that begins it and not again at each of its subtasks.
+///
+/// A filed-away task stops the walk when it is not being shown: its subtasks were put
+/// away with it, and a subtask hung off it afterwards belongs to the same group.
+fn render_task(plan: &Plan, t: &Task, depth: usize, parent_filed: bool, out: &mut Listing) {
+    if t.archived && !parent_filed {
+        out.filed += 1;
+    }
+    if t.archived && !out.show_all {
+        return;
+    }
     let indent = "  ".repeat(depth);
     let mut suffix = String::new();
     if !t.depends_on.is_empty() {
@@ -149,7 +188,12 @@ fn render_task(plan: &Plan, t: &Task, depth: usize, out: &mut String) {
     if let Some(a) = &t.assignee {
         suffix.push_str(&format!(" → {a}"));
     }
-    out.push_str(&format!(
+    // Last on the line, as on a project: this column is already the widest thing here,
+    // and a marker in front of the status mark would indent every task by one.
+    if t.archived {
+        suffix.push_str("  archived");
+    }
+    out.text.push_str(&format!(
         "{}{indent}{} {:<5} {:<18} {}{}\n",
         gutter(t.number),
         t.status.mark(),
@@ -161,7 +205,7 @@ fn render_task(plan: &Plan, t: &Task, depth: usize, out: &mut String) {
     let mut kids: Vec<&Task> = plan.subtasks(&t.id).collect();
     kids.sort_by(|a, b| a.id.cmp(&b.id));
     for k in kids {
-        render_task(plan, k, depth + 1, out);
+        render_task(plan, k, depth + 1, t.archived, out);
     }
 }
 
@@ -262,11 +306,19 @@ pub(crate) fn project_detail(plan: &Plan, id: &ProjectId) -> String {
         tasks.len(),
         plan.progress(id) * 100.0
     ));
+    // Everything, filed away or not: this view is reached by naming the project, and
+    // there is no `--all` at this level to get back what it left out. What filing buys
+    // here is the marker — a hidden row that still dispatches must not read as live.
+    let mut listing = Listing {
+        show_all: true,
+        ..Listing::default()
+    };
     let mut roots: Vec<&Task> = plan.roots_of(id).collect();
     roots.sort_by(|a, b| a.id.cmp(&b.id));
     for t in roots {
-        render_task(plan, t, 1, &mut out);
+        render_task(plan, t, 1, false, &mut listing);
     }
+    out.push_str(&listing.text);
     out.push('\n');
     out.push_str(LEGEND);
     out.push_str(NUMBERS_NOTE);
@@ -2461,6 +2513,119 @@ mod tests {
         let line = out.lines().find(|l| l.contains("export")).unwrap();
         assert!(!body(line).starts_with(' '), "{line:?}");
         assert!(line.contains("archived"), "{line:?}");
+    }
+
+    /// Files a task away in a plan, the way the store's cascade would.
+    fn file_away(p: &mut Plan, id: &str) {
+        let mut t = p.task(&TaskId::new(id)).unwrap().clone();
+        t.archived = true;
+        p.update_task(t).unwrap();
+    }
+
+    #[test]
+    fn a_filed_away_task_is_off_the_listing_and_counted() {
+        // Regression: `--all` hid and showed archived *projects* here while an archived
+        // task was printed exactly as if it were live — no marker, no count, and `--all`
+        // changed nothing. Filing it away read as having failed.
+        let mut p = plan();
+        file_away(&mut p, "cache");
+        let out = tree(&p, false);
+        assert!(!out.contains("add a response cache"), "{out}");
+        assert!(
+            out.contains("benchmark the cache"),
+            "the rest stays:\n{out}"
+        );
+        assert!(
+            out.contains("1 archived, hidden — --all to include"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn all_brings_a_filed_away_task_back_and_says_which_it_is() {
+        let mut p = plan();
+        file_away(&mut p, "cache");
+        let out = tree(&p, true);
+        let line = out
+            .lines()
+            .find(|l| l.contains("add a response cache"))
+            .unwrap();
+        assert!(line.contains("archived"), "{line:?}");
+        // Last on the line, or every task indents by the width of the marker.
+        assert!(!body(line).starts_with("   "), "{line:?}");
+        assert!(out.contains("1 archived, shown"), "{out}");
+    }
+
+    #[test]
+    fn filing_a_task_away_takes_its_subtasks_and_counts_the_group_once() {
+        // Filing is one decision about one piece of work. Counting the subtasks
+        // separately would say there is far more out of sight than there is.
+        let mut p = plan();
+        p.add_task(Task::new("cache-keys", "export", "design the cache keys").under("cache"))
+            .unwrap();
+        file_away(&mut p, "cache");
+        file_away(&mut p, "cache-keys");
+        let out = tree(&p, false);
+        assert!(!out.contains("design the cache keys"), "{out}");
+        assert!(out.contains("1 archived"), "{out}");
+        assert!(
+            !out.contains("2 archived"),
+            "one group, not two rows:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_filed_away_project_and_a_filed_away_task_are_one_count() {
+        // `--all` is one flag, so the line that says what it would bring back has to be
+        // one number. Counting only the projects left the tasks hidden and unmentioned.
+        let mut p = plan();
+        p.add_project(Project::new("billing", "invoice the right amount", "api"))
+            .unwrap();
+        p.add_task(Task::new("rates", "billing", "load the rate table"))
+            .unwrap();
+        let mut arch = p.project(&ProjectId::new("billing")).unwrap().clone();
+        arch.archived = true;
+        p.update_project(arch).unwrap();
+        file_away(&mut p, "cache");
+
+        assert!(
+            tree(&p, false).contains("2 archived, hidden"),
+            "{}",
+            tree(&p, false)
+        );
+    }
+
+    #[test]
+    fn a_subtask_hung_off_a_filed_away_parent_goes_with_the_group() {
+        // It was added after the cascade ran, so its own flag is clear — but it is part
+        // of work the operator has put away, and a lone subtask under a heading that is
+        // not on screen is worse than not showing it.
+        let mut p = plan();
+        file_away(&mut p, "cache");
+        p.add_task(Task::new("cache-keys", "export", "design the cache keys").under("cache"))
+            .unwrap();
+        let out = tree(&p, false);
+        assert!(!out.contains("design the cache keys"), "{out}");
+        assert!(out.contains("1 archived"), "{out}");
+    }
+
+    #[test]
+    fn naming_a_project_reports_every_task_whatever_its_filing() {
+        // There is no `--all` at this level, so hiding here would put the row out of
+        // reach. The marker is what keeps it from reading as live.
+        let mut p = plan();
+        file_away(&mut p, "cache");
+        let out = project_detail(&p, &ProjectId::new("export"));
+        let line = out
+            .lines()
+            .find(|l| l.contains("add a response cache"))
+            .unwrap();
+        assert!(line.contains("archived"), "{line:?}");
+        let bench = out
+            .lines()
+            .find(|l| l.contains("benchmark the cache"))
+            .unwrap();
+        assert!(!bench.contains("archived"), "{bench:?}");
     }
 
     #[test]
