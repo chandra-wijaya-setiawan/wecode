@@ -38,7 +38,8 @@ timeout = "10s"                   # killed at this; see below
 [telegram]                        # and how the answer gets back; see below
 fetch = "curl -sS -m 20 \"https://api.telegram.org/bot$TG_TOKEN/getUpdates?offset=$WECODE_TELEGRAM_OFFSET\""
 answer = "curl -sS -m 20 -d callback_query_id=\"$WECODE_TELEGRAM_CALLBACK\" -d text=\"$WECODE_TELEGRAM_ANSWER\" \"https://api.telegram.org/bot$TG_TOKEN/answerCallbackQuery\""
-timeout = "30s"
+timeout = "30s"                   # the same line should edit the message it answers,
+                                  # so a decided button stops offering; see below
 
 [invariants]                      # outrank every grant below
 never_touch = [".github/**", "infra/**", "**/*.pem", "**/.env"]
@@ -426,6 +427,47 @@ as `WECODE_TELEGRAM_ANSWER` — flattened to one line and cut at 200 characters,
 `answerCallbackQuery`'s own ceiling. Both run under the single `timeout`, and `answer` is
 no more above `never_run` than `fetch` is.
 
+**A decided button should stop offering.** The acknowledgement above is a toast: three
+seconds and it is gone. What stays in the chat is the notification — still saying *needs
+your signature*, still carrying *Approve* and *Hold*. A merge signed at 02:14 looks at
+09:00 exactly like one nobody has answered, and the next thumb that lands on it decides a
+settled question. wecode cannot edit that message; it holds no token. So it says **which**
+message the button is on, and the same line strikes the keyboard off:
+
+```toml
+answer = """
+curl -sS -m 20 -d callback_query_id="$WECODE_TELEGRAM_CALLBACK" -d text=recorded \
+  "https://api.telegram.org/bot$TG_TOKEN/answerCallbackQuery" >/dev/null; \
+[ -z "$WECODE_TELEGRAM_MESSAGE" ] && exit 0; \
+curl -sS -m 20 -d chat_id="$WECODE_TELEGRAM_CHAT" \
+  -d message_id="$WECODE_TELEGRAM_MESSAGE" \
+  --data-urlencode "text=$WECODE_TELEGRAM_ANSWER" \
+  "https://api.telegram.org/bot$TG_TOKEN/editMessageText" >/dev/null
+"""
+```
+
+The guard exits `0` rather than skipping to the end: the line's exit status is what wecode
+reports, and a test that merely came out false would be `⚠ could not say so in the chat:
+exited 1` on every tap whose message is gone.
+
+`WECODE_TELEGRAM_CHAT` and `WECODE_TELEGRAM_MESSAGE` are the chat the tapped notification
+is in and the message in it that carries the keyboard, as Telegram wrote them. An
+`editMessageText` or `editMessageCaption` that sends no `reply_markup` removes the
+keyboard, so the message that asked becomes the message that records — and there is
+nothing left to tap twice. Use `editMessageCaption` when your notification is a document;
+a caption and a text are different fields and each API edits only its own.
+
+Both are **empty together, never one without the other**: Telegram stops handing out the
+message an old keyboard belongs to, and then there is nothing to edit. The tap is still
+signed — the task is in its `callback_data` — and still acknowledged. One test on one
+variable, as above, is the whole check a hook needs.
+
+One command and not two, deliberately. Answering the callback and taking the buttons off
+are one act from where you are standing — *this has been decided* — and two hooks would be
+two places for one of them to go missing, with a live *Approve* on a merged task as the
+failure. Everything the tap carries is in the environment; what your line does with it is
+your line's business.
+
 It is optional, and worth writing anyway. A typed reply is its own receipt — the words are
 in the chat, in front of whoever typed them — but a tap leaves nothing: the spinner stops
 and a button that signed a merge looks exactly like a button that is broken. Four things
@@ -440,6 +482,9 @@ follow from that:
 - **A receipt that failed to send is `⚠ could not say so in the chat: …`** under the
   outcome, not instead of it. The signature is already in the ledger, and un-signing it
   because the acknowledgement bounced would throw away an approval that was really given.
+  It is also the only warning that a button is still offering — the chat is exactly where
+  nothing was said — so it is worth reading in the loop's output rather than scrolling
+  past.
 
 `answer` without `fetch` is refused at load: nothing would ever reach it, since taps arrive
 through the fetch, and an operator tapping buttons that stay silent has been given the

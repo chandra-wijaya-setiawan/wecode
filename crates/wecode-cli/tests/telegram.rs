@@ -57,17 +57,33 @@ fn tapped(id: i64, from: &str, data: &str, under: &str) -> String {
         "{{\"id\":\"cb{id}\",{}{}{}}}",
         format_args!("\"from\":{{\"id\":{from},\"is_bot\":false,\"username\":\"you\"}},"),
         format_args!("\"chat_instance\":\"-176\",\"data\":\"{data}\","),
-        format_args!("\"message\":{{\"message_id\":1,\"text\":\"{under}\"}}"),
+        format_args!(
+            "\"message\":{{\"message_id\":1,\"chat\":{{\"id\":{from}}},\"text\":\"{under}\"}}"
+        ),
     );
     format!("{{\"update_id\":{id},\"callback_query\":{query}}}")
+}
+
+/// The same tap, from a keyboard whose notification Telegram will no longer hand over.
+/// The `callback_query` still arrives and still carries `data`; what is missing is the
+/// message the button is on, and so any way to take the button off it.
+fn tapped_orphaned(id: i64, from: &str, data: &str) -> String {
+    format!(
+        "{{\"update_id\":{id},\"callback_query\":{{\"id\":\"cb{id}\",{}\"data\":\"{data}\"}}}}",
+        format_args!("\"from\":{{\"id\":{from},\"is_bot\":false,\"username\":\"you\"}},"),
+    )
 }
 
 /// Gives the workspace something to say what came of a tap with, added to the
 /// `[telegram]` block [`chatting`] wrote. Returns the file that command appends to.
 ///
 /// `echo` rather than `curl`, for [`chatting`]'s reason: what is being proved is that the
-/// callback and the outcome reach the operator's line, and a real `answerCallbackQuery`
-/// would prove that only on a machine with a bot token on it.
+/// callback, the button's own address and the outcome reach the operator's line, and a
+/// real `answerCallbackQuery` would prove that only on a machine with a bot token on it.
+///
+/// The whole environment on one line, in the order a hook uses it: what to acknowledge,
+/// which message to edit, and what to say. `at:/` with nothing after it is the shape of a
+/// button that cannot be taken off anything — see [`tapped_orphaned`].
 fn acknowledging(org: &Org) -> PathBuf {
     let said = org.path("answered.txt");
     let conf = org.path("company.toml");
@@ -76,7 +92,7 @@ fn acknowledging(org: &Org) -> PathBuf {
     std::fs::write(
         &conf,
         format!(
-            "{text}answer = \"echo \\\"$WECODE_TELEGRAM_CALLBACK $WECODE_TELEGRAM_ANSWER\\\" >> {}\"\n",
+            "{text}answer = \"echo \\\"$WECODE_TELEGRAM_CALLBACK at:$WECODE_TELEGRAM_CHAT/$WECODE_TELEGRAM_MESSAGE $WECODE_TELEGRAM_ANSWER\\\" >> {}\"\n",
             said.display()
         ),
     )
@@ -162,6 +178,71 @@ fn a_tap_signs_the_merge_the_notification_is_about() {
     org.run(&["audit", "--task", "t"])
         .assert_ok("audit")
         .assert_contains("chief       telegram");
+    org.run(&["merge", "t"])
+        .assert_ok("merge")
+        .assert_contains("MERGED  t → dev");
+}
+
+#[test]
+fn a_decided_button_is_told_where_it_is_so_it_can_stop_looking_like_an_offer() {
+    // The receipt is a toast: three seconds and it is gone. What stays on the phone is
+    // the notification, still saying *needs your signature*, still carrying *Approve* —
+    // a question that has been answered, still asking. The next thumb to land on it
+    // decides something already decided.
+    //
+    // wecode holds no token and cannot edit that message. So it says which message: the
+    // chat and the message id the tapped keyboard hangs on, beside the callback, and one
+    // `editMessageReplyMarkup` with no keyboard on it turns the offer into a record.
+    let (org, _) = mergeable("tg-tap-settled", "approved");
+    landed_task(&org, "t");
+    let replies = chatting(&org, "48210934");
+    let said = acknowledging(&org);
+    holding(
+        &replies,
+        &[tapped(
+            700_126,
+            "48210934",
+            "approve",
+            "t needs you: approval",
+        )],
+    );
+
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        .assert_contains("approved merge");
+
+    let back = std::fs::read_to_string(&said).expect("the tap was acknowledged");
+    // Everything an edit needs, in one environment with the callback the spinner needs:
+    // one command, because taking the buttons off and saying why are one act.
+    assert!(back.contains("cb700126"), "{back}");
+    assert!(back.contains("at:48210934/1"), "{back}");
+    assert!(back.contains("approved merge"), "{back}");
+}
+
+#[test]
+fn a_tap_whose_message_is_gone_is_acknowledged_with_no_address_rather_than_half_of_one() {
+    // Telegram stops handing out the message an old keyboard belongs to, and then there
+    // is no message to take the buttons off. The tap still signs — the task is in the
+    // `callback_data`, which is why it belongs there — and is still acknowledged, so the
+    // spinner stops. What is empty is the address, and both halves of it: a hook tests
+    // one variable before it edits, and a half-addressed edit would be a `curl` failing
+    // at the API instead of a branch the hook could have taken.
+    let (org, _) = mergeable("tg-tap-orphan", "approved");
+    landed_task(&org, "t");
+    let replies = chatting(&org, "48210934");
+    let said = acknowledging(&org);
+    holding(&replies, &[tapped_orphaned(12, "48210934", "approve t")]);
+
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        .assert_contains("approved merge");
+
+    let back = std::fs::read_to_string(&said).expect("the tap was acknowledged");
+    assert!(back.contains("cb12"), "{back}");
+    assert!(
+        back.contains("at:/ "),
+        "no address at all, not half of one: {back}"
+    );
     org.run(&["merge", "t"])
         .assert_ok("merge")
         .assert_contains("MERGED  t → dev");

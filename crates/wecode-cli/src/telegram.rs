@@ -19,7 +19,7 @@
 //! is not a second way to sign anything. It is the same sentence, delivered without a
 //! keyboard, through the same identity check and the same Broker call.
 //!
-//! Six things are load-bearing:
+//! Seven things are load-bearing:
 //!
 //! - **wecode holds no token and speaks no HTTP.** `[telegram] fetch` is a command the
 //!   operator writes — a `curl` of the Bot API's `getUpdates` — and what it prints is
@@ -56,6 +56,17 @@
 //!   same shape `fetch` reads it — a command the operator wrote, given the callback to
 //!   answer and the one line to say. Not saying it would leave a button that signs and a
 //!   button that is broken looking exactly alike.
+//! - **A decided button stops being an offer.** The acknowledgement above is a toast: it
+//!   is gone in three seconds, and what stays in the chat is the notification — still
+//!   saying *needs your signature*, still carrying *Approve* and *Hold*. A merge signed
+//!   at 02:14 looks at 09:00 exactly like one nobody has answered, and the next thumb
+//!   that lands on it is a second decision on a settled question. wecode cannot edit that
+//!   message; it holds no token. What it can do is say **which** message it was, so the
+//!   `answer` line can: the chat and the message id the tapped keyboard hangs on go into
+//!   its environment beside the callback, and an `editMessageReplyMarkup` carrying no
+//!   keyboard turns the offer into a record. Without them the operator's hook has to keep
+//!   its own map from task to message and guess which row a receipt belongs to — a second
+//!   store of what wecode was already holding, wrong whenever the guess is.
 //!
 //! What is deliberately *not* here is a second gate. A reply is not a weaker signature
 //! than a typed one — it is the same record, and the reason to trust it is the same
@@ -129,11 +140,35 @@ pub(crate) struct Message {
     /// was tapped. Empty when it answers nothing, which is most chat, and is why an
     /// answer to something is what this reads.
     pub(crate) quoted: String,
-    /// The callback a tap has to be answered with, and `None` when a person typed it.
+    /// What a tap has to be answered with, and `None` when a person typed it.
     ///
-    /// Load-bearing twice over: it is what `[telegram] answer` acknowledges, and its
-    /// presence is the only thing that makes a tap a tap. Nothing decides anything by it.
-    pub(crate) tap: Option<String>,
+    /// Load-bearing twice over: it is what `[telegram] answer` is given, and its presence
+    /// is the only thing that makes a tap a tap. Nothing decides anything by it.
+    pub(crate) tap: Option<Tap>,
+}
+
+/// A tap's return address: what acknowledges it, and where the button that sent it is.
+///
+/// Two answers to two different questions, which is why they travel together. The
+/// callback stops the spinner on the phone that tapped; the chat and message say which
+/// notification carried the keyboard, so the same hook can strike the buttons off it.
+/// One without the other leaves either a spinner that never stops or an offer that
+/// outlives the decision it was offering.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Tap {
+    /// Not the message id and not the account: the callback, which is the only thing
+    /// `answerCallbackQuery` will take and the only reason this field exists.
+    pub(crate) callback: String,
+    /// The chat the tapped notification is in.
+    pub(crate) chat: String,
+    /// The message in it that carries the keyboard.
+    ///
+    /// Empty together with [`Self::chat`], never one without the other — see
+    /// [`located`]. Empty is Telegram declining to hand that message over any more,
+    /// which is the same staleness that puts the task in the button's `callback_data`:
+    /// the tap is still worth acting on and still worth acknowledging, and the keyboard
+    /// on a message nobody can name is a keyboard nobody can edit.
+    pub(crate) message: String,
 }
 
 /// Parses a `getUpdates` response.
@@ -201,6 +236,7 @@ fn message_of(m: &Value) -> Option<Message> {
 /// from the typed word it stands for.
 fn tap_of(q: &Value) -> Option<Message> {
     let (from, who) = sender(q.get("from")?)?;
+    let (chat, message) = located(q.get("message"));
     Some(Message {
         from,
         who,
@@ -213,10 +249,28 @@ fn tap_of(q: &Value) -> Option<Message> {
         // over any more, which is the reason to put the task in the button's `data`: 64
         // bytes is plenty for `approve #12`, and it never goes stale.
         quoted: text_of(q.get("message")),
-        // Not the message id and not the account: the callback, which is the only thing
-        // `answerCallbackQuery` will take and the only reason this field exists.
-        tap: Some(q.get("id").map(scalar)?),
+        tap: Some(Tap {
+            callback: q.get("id").map(scalar)?,
+            chat,
+            message,
+        }),
     })
+}
+
+/// Where a tapped button is: the chat, and the message in it carrying the keyboard.
+///
+/// Both or neither, deliberately. What reads these is a shell line the operator wrote,
+/// and an edit half-addressed is a `curl` that fails at the API rather than a branch the
+/// hook could have taken — so one test on one variable is the whole check it needs.
+fn located(message: Option<&Value>) -> (String, String) {
+    message
+        .and_then(|m| {
+            Some((
+                scalar(m.get("chat")?.get("id")?),
+                scalar(m.get("message_id")?),
+            ))
+        })
+        .unwrap_or_default()
 }
 
 /// Who sent something: the account, and the name to print for it.
@@ -381,14 +435,21 @@ pub(crate) fn fetch(company: &Company, org: &Path, offset: i64) -> Result<String
     )
 }
 
-/// Tells the chat what came of a tap, and does nothing at all when no `[telegram] answer`
-/// is configured.
+/// Tells the chat what came of a tap — and says where the button was, so the line that
+/// says it can also stop it offering. Does nothing at all when no `[telegram] answer` is
+/// configured.
 ///
 /// Reported and not raised, which is the notify hook's argument rather than [`fetch`]'s:
 /// an acknowledgement that did not arrive does not un-sign the signature it was about,
 /// and the four taps queued behind this one still have to be read. What it must not be is
 /// skipped — see the module's fifth reason.
-fn answer(company: &Company, org: &Path, callback: &str, said: &str) -> Result<(), String> {
+///
+/// One command and not two. Editing the message and answering the callback are one act
+/// from where the operator is standing — *this decision has been taken* — and two hooks
+/// would be two places for one of them to be missing, with a live *Approve* on a merged
+/// task as the failure. The whole tap is put in the environment and what the line does
+/// with it is the line's business.
+fn answer(company: &Company, org: &Path, tap: &Tap, said: &str) -> Result<(), String> {
     let Some(command) = company.telegram.answer.as_deref() else {
         return Ok(());
     };
@@ -397,7 +458,12 @@ fn answer(company: &Company, org: &Path, callback: &str, said: &str) -> Result<(
         org,
         command,
         &[
-            ("WECODE_TELEGRAM_CALLBACK", callback),
+            ("WECODE_TELEGRAM_CALLBACK", &tap.callback),
+            // The keyboard's address, empty together when Telegram will not name the
+            // message. Handed over as they arrived: an id is compared and pasted, never
+            // arithmetic, so nothing here needs it to be a number.
+            ("WECODE_TELEGRAM_CHAT", &tap.chat),
+            ("WECODE_TELEGRAM_MESSAGE", &tap.message),
             // Flattened and bounded like everything else that is quoted anywhere, and
             // for one more reason here: this is a value in a command's environment, and
             // a newline in it could end the line the operator wrote.
@@ -618,13 +684,14 @@ fn apply(store: &Store, company: &Company, org: &Path, msg: &Message, dry: bool)
     );
     // Every tap, whatever it came to, and no typed reply ever — the module's fifth
     // reason. Not in a dry run: what it moves is the chat, and a dry run moves nothing.
-    if let Some(callback) = &msg.tap
+    if let Some(tap) = &msg.tap
         && !dry
-        && let Err(e) = answer(company, org, callback, &outcome)
+        && let Err(e) = answer(company, org, tap, &outcome)
     {
         // Reported under the outcome rather than in place of it. The signature is
         // already given; what failed is saying so, and an operator whose taps have gone
-        // quiet needs to see which of the two it was.
+        // quiet needs to see which of the two it was. It is also the only place a button
+        // left offering will be mentioned: the chat is precisely where nothing was said.
         report.push_str(&format!("    ⚠ could not say so in the chat: {e}\n"));
     }
     report
@@ -854,12 +921,22 @@ mod tests {
             "message": {
               "message_id": 41,
               "from": {"id": 700, "is_bot": true, "username": "wecode_bot"},
+              "chat": {"id": 48210934, "type": "private"},
               "text": "cache-tests needs you: approval"
             }
           }
         }
       ]
     }"#;
+
+    /// A tap's return address, as one arrives from a keyboard on a live message.
+    fn tap(callback: &str) -> Tap {
+        Tap {
+            callback: callback.into(),
+            chat: "48210934".into(),
+            message: "41".into(),
+        }
+    }
 
     fn message(text: &str, quoted: &str) -> Message {
         Message {
@@ -909,10 +986,53 @@ mod tests {
             target(&typed, &plan()).unwrap()
         );
 
-        // The one field that differs, and it decides nothing: it is what the tap has to
-        // be acknowledged with.
-        assert_eq!(tapped.tap.as_deref(), Some("4382abc"));
+        // The one field that differs, and it decides nothing: it is the return address —
+        // what the tap is acknowledged with, and where the button that sent it is.
+        let tap = tapped.tap.clone().expect("a tap has a return address");
+        assert_eq!(tap.callback, "4382abc");
         assert_eq!(typed.tap, None);
+    }
+
+    #[test]
+    fn a_tap_says_which_message_the_button_it_came_from_is_on() {
+        // The half that makes a decided button stop offering. The acknowledgement is a
+        // toast and goes; the notification stays, still saying *needs your signature* and
+        // still carrying *Approve*. wecode cannot edit it — no token — so it says which
+        // message it is, and the operator's one line strikes the keyboard off.
+        let tap = updates(TAPPED).unwrap()[0]
+            .message
+            .clone()
+            .expect("a tap")
+            .tap
+            .expect("a return address");
+        assert_eq!(tap.chat, "48210934");
+        // As it arrived, unquoted: an id is pasted into an API call and never counted.
+        assert_eq!(tap.message, "41");
+    }
+
+    #[test]
+    fn a_button_on_a_message_telegram_will_not_name_has_no_address_at_all() {
+        // Both halves empty rather than one, so the hook has one thing to test before it
+        // tries an edit. The tap is still acted on and still acknowledged: what is gone
+        // is the ability to edit a message nobody can name, not the decision it carried.
+        let got = updates(
+            r#"{"ok":true,"result":[{"update_id":9,"callback_query":{
+                 "id":"77","from":{"id":48210934,"username":"cws"},"data":"approve #2"}}]}"#,
+        )
+        .unwrap();
+        let tap = got[0].message.clone().expect("a tap").tap.expect("a tap");
+        assert_eq!(tap.callback, "77");
+        assert_eq!((tap.chat.as_str(), tap.message.as_str()), ("", ""));
+
+        // And a message with no chat on it is the same answer, not half of one.
+        let got = updates(
+            r#"{"ok":true,"result":[{"update_id":9,"callback_query":{
+                 "id":"77","from":{"id":48210934,"username":"cws"},"data":"approve",
+                 "message":{"message_id":41,"text":"cache-tests needs you"}}}]}"#,
+        )
+        .unwrap();
+        let tap = got[0].message.clone().expect("a tap").tap.expect("a tap");
+        assert_eq!((tap.chat.as_str(), tap.message.as_str()), ("", ""));
     }
 
     #[test]
@@ -964,7 +1084,7 @@ mod tests {
         // The channel still works one-way: taps sign, and the operator finds out in a
         // terminal. Worse than configuring it, better than refusing to read the channel.
         let c = company("\n[telegram]\nfetch = \"true\"\n");
-        assert!(answer(&c, &std::env::temp_dir(), "4382abc", "signed").is_ok());
+        assert!(answer(&c, &std::env::temp_dir(), &tap("4382abc"), "signed").is_ok());
     }
 
     #[test]
@@ -974,7 +1094,7 @@ mod tests {
         let c = company(
             "\n[invariants]\nnever_run = [\"curl *\"]\n\n[telegram]\nfetch = \"true\"\nanswer = \"curl example.invalid\"\n",
         );
-        let e = answer(&c, &std::env::temp_dir(), "4382abc", "signed").unwrap_err();
+        let e = answer(&c, &std::env::temp_dir(), &tap("4382abc"), "signed").unwrap_err();
         assert!(e.contains("never_run"), "{e}");
     }
 
@@ -985,7 +1105,7 @@ mod tests {
         let c = company(
             "\n[telegram]\nfetch = \"true\"\nanswer = \"echo query is too old >&2; exit 6\"\n",
         );
-        let e = answer(&c, &std::env::temp_dir(), "4382abc", "signed").unwrap_err();
+        let e = answer(&c, &std::env::temp_dir(), &tap("4382abc"), "signed").unwrap_err();
         assert!(e.contains("exited 6"), "{e}");
         assert!(e.contains("query is too old"), "{e}");
     }
