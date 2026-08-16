@@ -26,7 +26,26 @@ use crate::{
 /// a real decision — which order, and what to do about a conflict — and guessing at it
 /// would be worse than saying so. A task with two predecessors that both changed code
 /// wants a merge task between them, which the plan can express.
-fn predecessor_branch(repo: &std::path::Path, plan: &Plan, task: &Task) -> Option<String> {
+///
+/// A predecessor already on `integration` is passed over. Its branch survives the merge
+/// — [`crate::teardown`] keeps it deliberately, so the task can be picked back up — but
+/// it stands where it stood when it landed, behind everything that landed beside it.
+/// Cutting from it trades a complete base for a partial one: the integration branch
+/// holds that predecessor's work *and* the rest, so the only thing the branch offers
+/// over it is the absence of the rest. That absence is what a chain of green tasks
+/// arrives at a red integration branch through — each one written against a tree
+/// missing its neighbours, judged by acceptance run over that tree, and landing as a
+/// merge whose other side nobody exercised.
+///
+/// Quiet, too, because it is not an edge: a branch-owning task only reaches `done` by
+/// being merged, so under the ordinary flow every done predecessor with a branch has
+/// already landed, and the base was stale every time.
+fn predecessor_branch(
+    repo: &std::path::Path,
+    plan: &Plan,
+    task: &Task,
+    integration: Option<&str>,
+) -> Option<String> {
     let mut candidates: Vec<&Task> = task
         .depends_on
         .iter()
@@ -40,8 +59,25 @@ fn predecessor_branch(repo: &std::path::Path, plan: &Plan, task: &Task) -> Optio
         // parent's, and there is no branch of its own to build on.
         let owner = work::owner(plan, &t.id)?;
         let branch = work::branch_for(&owner.id);
-        git::branch_exists(repo, &branch).then_some(branch)
+        if !git::branch_exists(repo, &branch) || landed(repo, integration, &owner.id) {
+            return None;
+        }
+        Some(branch)
     })
+}
+
+/// Whether this task's work is already on the integration branch.
+///
+/// Asked of git rather than of the task's status: `done` is what the plan believes, and
+/// `wecode rollback` reverts a merge without disturbing that belief. The merge commit
+/// names the task — see [`git::merge_commit_for`] — so history is the record, and there
+/// is no second copy of it to disagree with.
+///
+/// A project with no integration branch has nowhere for work to already be, and neither
+/// has a target git cannot resolve. Both answer *not landed*, leaving the predecessor's
+/// branch as the base — correctly, since it is then the only place that work is.
+fn landed(repo: &std::path::Path, integration: Option<&str>, id: &TaskId) -> bool {
+    integration.is_some_and(|target| git::merge_commit_for(repo, target, id.as_str()).is_some())
 }
 
 /// A task made ready to work on: where, and with what instructions.
@@ -172,19 +208,21 @@ pub(crate) fn prepare(
         if !git::is_repo(&repo) {
             return Err(format!("{} is not a git repository", repo.display()).into());
         }
-        // Where this branch starts. A predecessor's branch when there is one, so a
-        // dependent task *has* the work it comes after rather than merely being told
-        // about it — otherwise every chain touching the same files conflicts at merge,
-        // and the task would be building on a base that is missing its groundwork.
+        // Where this branch starts. A predecessor's branch when it has one still standing
+        // apart, so a dependent task *has* the work it comes after rather than merely
+        // being told about it — otherwise every chain touching the same files conflicts
+        // at merge, and the task would be building on a base that is missing its
+        // groundwork.
         //
         // Falling back to the playbook's integration branch, then to wherever the repo
-        // is standing. Guessing a name like "dev" would fail on repos without one.
-        let base = match predecessor_branch(&repo, plan, task) {
+        // is standing. Guessing a name like "dev" would fail on repos without one. The
+        // integration branch is the *first* answer rather than the last for a predecessor
+        // that has already landed there — [`predecessor_branch`] says why.
+        let integration = pb.as_ref().and_then(|p| p.project.merge_to.clone());
+        let from_predecessor = predecessor_branch(&repo, plan, task, integration.as_deref());
+        let base = match from_predecessor.or(integration) {
             Some(b) => Some(b),
-            None => match pb.as_ref().and_then(|p| p.project.merge_to.clone()) {
-                Some(b) => Some(b),
-                None => git::current_branch(&repo)?,
-            },
+            None => git::current_branch(&repo)?,
         };
 
         if path.is_dir() {
@@ -194,8 +232,19 @@ pub(crate) fn prepare(
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            // Asked before the branch is cut, because afterwards the answer is always
+            // yes — and reported, because which base a task was given is the one thing
+            // about preparation the operator could not see, while being what decides
+            // both what the work is written against and what acceptance is run over.
+            // Only on a branch being created: `worktree_add` reuses an existing one and
+            // ignores the base, so naming it for a task picked back up would name a
+            // commit nothing was taken from.
+            let fresh = !git::branch_exists(&repo, &branch);
             git::worktree_add(&repo, &path, &branch, base.as_deref())?;
             notes.push_str(&format!("  worktree {}\n", path.display()));
+            if let Some(b) = base.as_deref().filter(|_| fresh) {
+                notes.push_str(&format!("  base     {b}\n"));
+            }
         }
         // Written down after git agreed, and on the reset path as well as the fresh
         // one. A tree standing from before the registry existed is one wecode made and
@@ -1220,7 +1269,100 @@ pub(crate) fn worktree_remove(a: &Args) -> Res {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wecode_core::Budget;
+    use wecode_core::{Budget, Project};
+
+    /// git, insisting it worked. A real repository is the only way to ask the question
+    /// these tests are about — git is a subprocess here, so a fake would test itself.
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repository where `first` did its work on `wecode/first`, and `main` is the
+    /// integration branch. When `merged`, that branch landed the way `wecode merge`
+    /// lands one — `--no-ff`, subject `<task>: <title>` — and `main` then moved on,
+    /// which is what leaves the branch standing behind it.
+    fn chain_repo(name: &str, merged: bool) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("wecode-exec-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for argv in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "t@t"],
+            &["config", "user.name", "t"],
+            &["commit", "-qm", "start", "--allow-empty"],
+            &["checkout", "-q", "-b", "wecode/first"],
+            &["commit", "-qm", "first: attempt 1", "--allow-empty"],
+            &["checkout", "-q", "main"],
+        ] {
+            git_in(&dir, argv);
+        }
+        if merged {
+            let msg = "first: lay the groundwork";
+            git_in(&dir, &["merge", "-q", "--no-ff", "-m", msg, "wecode/first"]);
+            // What makes the branch stale rather than merely redundant.
+            git_in(&dir, &["commit", "-qm", "other: alongside", "--allow-empty"]);
+        }
+        dir
+    }
+
+    /// `second` after a done `first`, which is the whole graph these tests need.
+    fn chain() -> (Plan, Task) {
+        let mut plan = Plan::new();
+        plan.add_project(Project::new("caching", "cache things", "app"))
+            .unwrap();
+        let mut first = Task::new("first", "caching", "lay the groundwork");
+        first.status = TaskStatus::Done;
+        plan.add_task(first).unwrap();
+        let second = Task::new("second", "caching", "build on the groundwork").after("first");
+        plan.add_task(second.clone()).unwrap();
+        (plan, second)
+    }
+
+    #[test]
+    fn a_predecessor_still_standing_apart_is_the_base() {
+        // Unchanged, and the reason the branch is consulted at all: work that is only
+        // on `wecode/first` is nowhere else, so that is where the successor starts.
+        let repo = chain_repo("base-unmerged", false);
+        let (plan, second) = chain();
+        assert_eq!(
+            predecessor_branch(&repo, &plan, &second, Some("main")),
+            Some("wecode/first".to_string())
+        );
+    }
+
+    #[test]
+    fn a_predecessor_already_on_the_integration_branch_is_not_the_base() {
+        // The whole defect. The branch survives the merge on purpose, so it was still
+        // found and still cut from — at the commit it stood on when it landed, missing
+        // everything that landed beside it. `None` here sends `prepare` to the
+        // integration branch, which has the predecessor's work *and* the rest.
+        let repo = chain_repo("base-merged", true);
+        let (plan, second) = chain();
+        assert!(git::branch_exists(&repo, "wecode/first"), "kept on purpose");
+        assert_eq!(predecessor_branch(&repo, &plan, &second, Some("main")), None);
+    }
+
+    #[test]
+    fn a_project_with_no_integration_branch_still_builds_on_its_predecessor() {
+        // Nowhere for work to already be. Answering anything but the branch here would
+        // drop the predecessor's work on the strength of a question nobody can ask.
+        let repo = chain_repo("base-no-target", true);
+        let (plan, second) = chain();
+        assert_eq!(
+            predecessor_branch(&repo, &plan, &second, None),
+            Some("wecode/first".to_string())
+        );
+    }
 
     /// A harness with whatever clock the test is about.
     fn harness(wall: Option<u64>, idle: Option<u64>) -> AgentTemplate {
