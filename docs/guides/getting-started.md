@@ -118,7 +118,7 @@ about.
 
 A cell still reading `0` after a run means the agent reported no token count, not that
 it was free. `wecode show <task>` has the per-attempt column and says which, and
-[config.md](../reference/config.md) lists the `protocol` values wecode can read a count
+[config/company.md](../reference/config/company.md) lists the `protocol` values wecode can read a count
 out of.
 
 ## 8. Let it run itself
@@ -143,7 +143,7 @@ command = "notify-send 'wecode' \"$WECODE_TASK needs you: $WECODE_WAITING_FOR\""
 It runs once, when a task *starts* waiting — for a signature, an answer, or a decision
 about work that failed. `WECODE_WAITING_FOR` is `approval`, `input`, `failed` or
 `signature`, so one `case` in shell can route them differently; the full list of
-variables is in [config.md](../reference/config.md#the-notify-hook). Anything that runs
+variables is in [config/notify.md](../reference/config/notify.md). Anything that runs
 in a shell works, and a hook that fails is reported rather than allowed to affect the
 task.
 
@@ -175,7 +175,7 @@ Two things worth knowing before you point it at a real bot. Only an account name
 is a credential — keep it in the environment, as above, rather than in the file. Set it
 up with `wecode telegram --dry-run`, which says what the waiting replies would sign
 without signing them. The rest is in
-[config.md](../reference/config.md#signing-from-a-reply).
+[config/telegram.md](../reference/config/telegram.md#signing-from-a-reply).
 
 ## Working through an agent
 

@@ -14,7 +14,7 @@ Then, by task:
 - **[guides/getting-started.md](guides/getting-started.md)** — set up a company and run something
 - **[guides/playbooks.md](guides/playbooks.md)** — teach a project how its work is broken down
 - **[reference/commands.md](reference/commands.md)** — the CLI surface
-- **[reference/config.md](reference/config.md)** — `company.toml` and `.wecode/playbook.toml`
+- **[reference/config/](reference/config/README.md)** — `company.toml` and `.wecode/playbook.toml`, one page per thing configured
 - **[reference/schema.md](reference/schema.md)** — what is in `wecode.db`
 - **[design/decisions.md](design/decisions.md)** — why it is like this
 - **[design/method.md](design/method.md)** — the development method, and which of its rules the machinery enforces rather than an orchestrator remembering

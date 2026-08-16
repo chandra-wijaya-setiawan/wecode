@@ -60,7 +60,7 @@ seat *may do*; intelligence is a property of who is in it, and two seats with th
 authority and different models is a shape the chart has to be able to express. The
 number is matched against the harness's own list of models, weakest first, so what is
 declared is an *ordering* and not a name that goes stale. See
-[reference/config.md](reference/config.md).
+[reference/config/company.md](reference/config/company.md#which-model-a-seat-gets).
 
 The **chief** post is special in one way: it may not write files or run commands, and
 loading a company whose chief can is a validation error. An agent that can both set the

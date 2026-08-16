@@ -1,7 +1,7 @@
 # The database
 
 One file per workspace, `wecode.db`. Everything machine-written lives here; everything
-hand-edited lives in `company.toml` (see [config.md](config.md)), because a binary blob
+hand-edited lives in `company.toml` (see [config/company.md](config/company.md)), because a binary blob
 cannot be diffed, reviewed or opened in an editor.
 
 Currently **schema version 7**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
