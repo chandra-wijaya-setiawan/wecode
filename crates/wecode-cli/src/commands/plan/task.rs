@@ -12,8 +12,7 @@
 //! considered and abandoned is `status <id> dropped`.
 
 use wecode_core::{
-    Admission, Budget, Measure, Plan, ProjectId, Scope, Task, TaskId, TaskKind, TaskStatus,
-    admission,
+    Admission, Budget, Measure, Plan, ProjectId, Task, TaskId, TaskKind, TaskStatus, admission,
 };
 use wecode_gov::{Action, WorkKind};
 use wecode_org::{Company, Playbook, Subtask};
@@ -322,6 +321,10 @@ pub(crate) fn task_add(a: &Args) -> Res {
 /// All or nothing, on purpose. A half-built expansion leaves later steps depending on
 /// tasks that were never created, and the operator has to work out which of four ids
 /// to retype; refusing the set costs one edit to the playbook instead.
+///
+/// A step that named no paths writes where the main task may. That is the one thing
+/// here that comes from the plan rather than the playbook — a kind block has no scope
+/// to give — and like every other substitution it is named back to the operator.
 fn expand(
     a: &Args,
     store: &Store,
@@ -347,11 +350,14 @@ fn expand(
                 expect_status: 0,
             });
         }
-        if !s.write.is_empty() || !s.read.is_empty() {
-            t = t.scoped(Scope {
-                read: s.read.clone(),
-                write: s.write.clone(),
-            });
+        // What the step named, and the main task's paths where it named none. The
+        // playbook has no scope to give — a kind block says nothing about paths — so a
+        // silent step would otherwise be refused for having no scope at all, and the
+        // only repair would be to restate the main task's `--write` in every step of
+        // the template.
+        let scope = s.scope_under(&main.scope);
+        if !scope.is_empty() {
+            t = t.scoped(scope);
         }
         if s.tokens.is_some() || s.wall_secs.is_some() {
             t = t.budgeted(Budget {
@@ -401,6 +407,15 @@ fn expand(
         ));
     }
 
+    // The steps writing where the main task may, rather than somewhere they named.
+    // Held here because both the refusal below and the table after it have to say so:
+    // a glob that appears nowhere in the playbook is otherwise unattributable.
+    let inherited: Vec<&str> = steps
+        .iter()
+        .filter(|s| s.inherits_write() && !main.scope.write.is_empty())
+        .map(|s| s.id.as_str())
+        .collect();
+
     // Into the scratch plan in declared order, so each step is checked against the
     // siblings that precede it: the overlap check needs them present to see that the
     // ordering makes two scopes safe.
@@ -446,6 +461,29 @@ fn expand(
                  filled that step's budget or acceptance\n"
             ));
         }
+        // Two steps that both write where the main task may, with nothing ordering
+        // them, claim the same files at the same time. The glob in that verdict is the
+        // main task's and appears nowhere in the playbook, so say where it came from:
+        // the repair is an `after` in the template, not a narrower `--write` here.
+        let clashing: Vec<&str> = defects
+            .iter()
+            .filter(|(t, d)| {
+                inherited.contains(&t.id.as_str())
+                    && d.iter()
+                        .any(|d| matches!(d, wecode_core::Defect::ScopeOverlaps { .. }))
+            })
+            .map(|(t, _)| t.id.as_str())
+            .collect();
+        if !clashing.is_empty() {
+            out.push_str(&format!(
+                "\n  {}: the write scope in that verdict is {}'s, because [{}.<step>] \
+                 named none\n  order the steps with `after`, or give each a `write` of \
+                 its own\n",
+                clashing.join(", "),
+                main.id,
+                main.kind.as_str()
+            ));
+        }
         out.push_str(&format!(
             "\n  fix the [{}.<step>] blocks in the playbook, or pass --force\n",
             main.kind.as_str()
@@ -474,6 +512,17 @@ fn expand(
         .collect();
 
     let mut out = render::plan::expansion(main, &saved);
+    // The write column above says what each step may change; this says which of them
+    // did not ask for it — a default that arrives silently is one nobody checks. Only
+    // the write side: it is the enforced guardrail, and the one the table shows.
+    if !inherited.is_empty() {
+        out.push_str(&format!(
+            "\n  write scope from {}: {}  ([{}.<step>] named none)\n",
+            main.id,
+            inherited.join(", "),
+            main.kind.as_str()
+        ));
+    }
     if !defects.is_empty() {
         out.push_str("  forced — defects recorded as waivers\n");
     }

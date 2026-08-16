@@ -265,6 +265,114 @@ fn without_expand_a_templated_playbook_behaves_exactly_as_before() {
     assert!(!org.run(&["show", "retry-design"]).ok());
 }
 
+// --------------------------------------------------------- inherited scope ------
+
+/// `TEMPLATED` with the build step's paths removed, so it names none at all. The
+/// playbook has no scope to give, so what it writes can only come from the main task.
+fn with_a_silent_step(name: &str) -> (Org, PathBuf) {
+    let (org, repo) = with_template(name);
+    org.playbook(&repo, &TEMPLATED.replace("write  = [\"src/{{task}}/**\"]\n", ""));
+    (org, repo)
+}
+
+#[test]
+fn a_step_that_names_no_scope_writes_where_the_main_task_may() {
+    // Otherwise the step is refused for having no scope, and the only repair is to
+    // restate `--write` in every block of the template.
+    let (org, _) = with_a_silent_step("exp-inherit");
+    let mut argv = EXPANDABLE.to_vec();
+    argv.push("--expand");
+    org.run(&argv)
+        .assert_ok("task add --expand")
+        .assert_contains("expanded retry into 2 subtasks")
+        // Named back, like every other substitution: the glob is nowhere in the file.
+        .assert_contains("write scope from retry: retry-build");
+
+    org.run(&["show", "retry-build"])
+        .assert_ok("show the build subtask")
+        .assert_contains("src/**");
+
+    // The step that named its own paths still has them, and is not credited with
+    // inheriting anything.
+    org.run(&["show", "retry-design"])
+        .assert_ok("show the design subtask")
+        .assert_contains("src/design/retry.md");
+}
+
+#[test]
+fn an_inheriting_step_is_an_ordinary_task_the_gate_admits() {
+    let (org, _) = with_a_silent_step("exp-inherit-admits");
+    let mut argv = EXPANDABLE.to_vec();
+    argv.push("--expand");
+    org.run(&argv).assert_ok("task add --expand");
+
+    org.run(&["check", "retry-build"])
+        .assert_ok("check the build step")
+        .assert_contains("admitted");
+    // Inheriting the parent's paths is not overlapping with it: one contains the
+    // other rather than competing with it.
+    org.run(&["check", "retry"])
+        .assert_ok("check the main task")
+        .assert_contains("admitted");
+}
+
+#[test]
+fn two_inheriting_steps_that_nothing_orders_refuse_the_expansion_and_say_why() {
+    // Both would claim the main task's paths at the same time. Refused as a whole,
+    // and attributed: the glob in the verdict appears nowhere in the playbook, so the
+    // repair is an `after` in the template rather than a narrower --write here.
+    let (org, repo) = with_template("exp-inherit-clash");
+    org.playbook(
+        &repo,
+        &TEMPLATED.replace(
+            "[feature.build]\nafter  = [\"design\"]\nwrite  = [\"src/{{task}}/**\"]\n",
+            "[feature.build]\n",
+        ),
+    );
+
+    let mut argv = EXPANDABLE.to_vec();
+    argv.push("--expand");
+    org.run(&argv)
+        .assert_ok("the main task still admits")
+        .assert_contains("saved task retry")
+        .assert_contains("not expanded")
+        .assert_contains("overlaps")
+        .assert_contains("the write scope in that verdict is retry's")
+        .assert_contains("order the steps with `after`");
+
+    for id in ["retry-design", "retry-build"] {
+        assert!(!org.run(&["show", id]).ok(), "{id} should not exist");
+    }
+}
+
+#[test]
+fn a_spike_step_is_not_handed_the_paths_the_main_task_may_change() {
+    // The one kind admitted without a write scope: it answers a question. Inheriting
+    // would quietly grant an exploration the right to rewrite what it explored.
+    const SPIKE_SECTION: &str = r#"
+[spike]
+worktree  = true
+assign_to = "impl"
+accept    = ["true"]
+tokens    = 500
+wall_secs = 30
+"#;
+    let (org, repo) = with_template("exp-inherit-spike");
+    let build_is_a_spike = TEMPLATED.replace(
+        "after  = [\"design\"]\nwrite  = [\"src/{{task}}/**\"]\n",
+        "after  = [\"design\"]\nkind   = \"spike\"\n",
+    );
+    org.playbook(&repo, &(build_is_a_spike + SPIKE_SECTION));
+
+    let mut argv = EXPANDABLE.to_vec();
+    argv.push("--expand");
+    org.run(&argv)
+        .assert_ok("task add --expand")
+        .assert_contains("expanded retry into 2 subtasks")
+        // Admitted with no write scope at all, and credited with inheriting nothing.
+        .assert_lacks("write scope from retry");
+}
+
 // ------------------------------------------------------------ design gate ------
 
 /// `TEMPLATED` with the gate turned on: a feature here is refused unless a design
