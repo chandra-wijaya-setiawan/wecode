@@ -17,6 +17,7 @@ The inventory, including what is weak. Anything not here is not built — see
 | **Templated decomposition** | `--expand` emits the subtasks a playbook declares |
 | **Design gate** | `design_required` refuses a kind with no design task behind it |
 | **Dispatch gate** | `dispatch = "approved"` refuses to start a task nobody signed for |
+| **Advisory checks** | a task that departs from its playbook is said so, and admitted anyway |
 | **Archiving** | park a project: hidden *and* not scheduled |
 
 The **admission gate** is the part most worth knowing. A task is refused, with a
@@ -57,6 +58,33 @@ that seat, and it goes stale if the task is redefined afterwards — amending a 
 for it again. Off by default: a run is bounded by a budget, confined to a worktree and
 judged before it can land, which is what makes it safe to leave `auto` where `merge` is
 `approved`.
+
+**Advisory checks** are the second verdict, and the one that refuses nothing. The gate
+decides whether a task may be worked on; it has no opinion about whether the task is the
+one this project's playbook would have written, because none of that is a defect. A
+playbook's defaults fill only what a declaration leaves blank, so anything that departs
+from them was typed over guidance that was already there — usually without the typist
+knowing the guidance existed. `task add` and `check <task>` now print what departed:
+
+- **an acceptance command dropped.** Naming any acceptance replaces all of it, so one
+  `--accept-cmd` silently takes the project's own check off. This is the one the layer
+  was written for; the others fell out of looking for its siblings.
+- **a budget figure gone with it.** The same all-or-nothing rule applies to the budget,
+  so `--tokens` on its own takes the kind's wall limit off — and a run with no wall
+  limit stops when somebody notices.
+- **a budget under what the kind is written for.** Under, not merely different: room
+  bought above the default costs nothing if it turns out to be unnecessary.
+- **another post.** The kind names who does this work; this task names someone else.
+- **a kind that was not decomposed.** The playbook declares steps for it and the task
+  has none, so `--expand` would have written several tasks where there is one.
+
+Nothing here blocks, and that is structural rather than a setting: a divergence is a
+separate type from a defect, checked by a separate function, so no amount of it can
+refuse a task. Every one is a call an operator is allowed to make, and a gate that
+refused them would be wrong about as often as it was right. Silent wherever it would be
+guessing — a project with no playbook, a kind with no section, a task the gate is
+already asking about, and work that has closed, which cannot be re-declared against
+guidance that arrived after it.
 
 **Playbooks** are guidance for whoever decomposes work, read before creating tasks. Free
 prose for how to break work down, plus a few typed fields wecode acts on: whether the

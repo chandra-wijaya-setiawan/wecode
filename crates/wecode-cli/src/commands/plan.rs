@@ -21,6 +21,13 @@
 //! flags into the pieces every declaration is assembled from. `--tokens` has to mean the
 //! same thing to a project, to a task and to an amendment, and reading it in three
 //! places is how it stops meaning the same thing.
+//!
+//! …and the playbook's opinion, which belongs to two of them. The gate below decides
+//! whether a task may be worked on; the project's guidance decides nothing, and is
+//! read back out afterwards for the two commands where somebody is looking at a task
+//! they could still change their mind about — `task add` and `check`. Both are wrapped
+//! here rather than answered inside their own modules, because a second verdict that
+//! two modules format two ways is two features.
 
 mod amend;
 mod filing;
@@ -31,14 +38,16 @@ mod task;
 
 pub(crate) use amend::{task_budget, task_scope};
 pub(crate) use filing::set_archived;
-pub(crate) use inspect::{check, show};
+pub(crate) use inspect::show;
 pub(crate) use project::project_add;
 pub(crate) use staff::{assign, set_status};
-pub(crate) use task::{task_add, task_rm};
+pub(crate) use task::task_rm;
 
-use wecode_core::{Budget, Cmp, Measure, Scope};
+use wecode_core::admission::{self, Divergence};
+use wecode_core::{Budget, Cmp, Measure, Scope, Task};
 
 use crate::args::Args;
+use crate::commands::ctx::{Res, open, playbook_of};
 
 pub(crate) fn parse_metric(spec: &str, flag: &str) -> Result<Measure, String> {
     let parts: Vec<&str> = spec.split(':').collect();
@@ -68,6 +77,81 @@ pub(crate) fn budget_from(a: &Args) -> Option<Budget> {
         tokens: a.num("tokens"),
         wall_secs: a.num("wall"),
     })
+}
+
+// ----------------------------------------------------- the second verdict ------
+
+/// `task add`, with what the playbook would have written appended.
+///
+/// After the command rather than inside it, and that ordering is the point: the gate
+/// speaks first and decides, then the guidance speaks and decides nothing. A task
+/// refused above is not in the plan, so it draws no advice — the blocking questions
+/// are the ones to answer, and burying them under an opinion would be the wrong way
+/// round.
+pub(crate) fn task_add(a: &Args) -> Res {
+    // The id names the task being declared, so it is read as a task and nothing else.
+    let mut out = task::task_add(a)?;
+    out.push_str(&advice_on(a, a.cmd(2), false)?);
+    Ok(out)
+}
+
+/// `check <id>`, likewise — and reading the id the way `check` itself reads it.
+///
+/// Ids are unique per level rather than globally, so a project and a task may share
+/// one. The verdict above resolves the project first and stops there; advising about
+/// the task of that name would file an opinion under something else's heading.
+pub(crate) fn check(a: &Args) -> Res {
+    let mut out = inspect::check(a)?;
+    out.push_str(&advice_on(a, a.cmd(1), true)?);
+    Ok(out)
+}
+
+/// The playbook's opinion of a task that is in the plan, or nothing.
+///
+/// Read back from the store rather than passed down from the command, so `--expand`
+/// is judged on the steps it actually created. Silent at every point where the answer
+/// would be a guess: no such task, no repository, no playbook, no section for the
+/// kind. A playbook that cannot be read advises nothing for the reason `design_gate`
+/// gates nothing — an unregistered repo is already reported as its own defect, and a
+/// read-only verdict should not fail on it.
+fn advice_on(a: &Args, typed: &str, project_first: bool) -> Res {
+    if typed.is_empty() {
+        return Ok(String::new());
+    }
+    let (store, company) = open(a)?;
+    let plan = store.load_plan()?;
+    if project_first && plan.project_ref(typed).is_some() {
+        return Ok(String::new());
+    }
+    let Some(t) = plan.task_ref(typed) else {
+        return Ok(String::new());
+    };
+    let expected = plan
+        .project(&t.project)
+        .and_then(|p| playbook_of(&company, p).ok().flatten())
+        .and_then(|pb| pb.expected_of(t.kind));
+    Ok(expected.map_or_else(String::new, |e| {
+        advisory(t, &admission::advise(t, &plan, &e))
+    }))
+}
+
+/// The block of notes, formatted so it cannot be mistaken for the verdict above it:
+/// stated rather than numbered, and told outright that nothing was refused.
+fn advisory(t: &Task, notes: &[Divergence]) -> String {
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "\n  ⚠ {} note{} — the playbook for [{}] would have written this differently\n\n",
+        notes.len(),
+        if notes.len() == 1 { "" } else { "s" },
+        t.kind.as_str()
+    );
+    for n in notes {
+        out.push_str(&format!("  ·  {}\n", n.note()));
+    }
+    out.push_str("\n  advisory — nothing is refused for these\n");
+    out
 }
 
 pub(crate) fn scope_from(a: &Args) -> Option<Scope> {
