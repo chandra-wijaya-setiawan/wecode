@@ -228,7 +228,10 @@ fn a_workspace_that_configures_nothing_is_told_where_the_lines_go() {
         .assert_ok("nothing configured is not a failure")
         .assert_contains("· [notify] command")
         .assert_contains("nothing is configured")
-        .assert_contains("config.md");
+        // Both halves, because either alone is a loop that only goes one way: a
+        // notification nobody can answer, or a reply channel nothing speaks into.
+        .assert_contains("config/notify.md")
+        .assert_contains("config/telegram.md");
 }
 
 #[test]
