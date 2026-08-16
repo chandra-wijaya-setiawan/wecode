@@ -148,7 +148,7 @@ this build opens its `wecode.db`.
 
 `[notify] command` is handed `WECODE_TASK_NUMBER`, the digits with no `#`, so the message
 that reaches a phone can carry the thing the operator has to type back. See
-[config](config.md).
+[config/notify.md](config/notify.md).
 
 **`wecode check <id>`** and **`wecode task add`** answer twice. The first verdict is the
 admission gate — defects, each carrying a fixed question, and a task is not saved until
@@ -343,7 +343,7 @@ The envelope carries a **repo map** under that heading: the directories git trac
 files inside the ones the task may write to marked `✍`, and the line each of those files
 uses to describe itself. It is there so an agent does not open with `find` and `wc -l`
 against a budget the task is held to. A template that wants it somewhere particular names
-`{{repo_map}}`; see [config.md](config.md#the-envelope).
+`{{repo_map}}`; see [config/envelope.md](config/envelope.md).
 
 That shared path is also where the dispatch gate lives, so it holds for both. A project
 whose playbook says `dispatch = "approved"` refuses either until `wecode approve admission
@@ -358,7 +358,7 @@ of the two it is, and `wecode audit --task <id>` shows the sequence.
 
 `start` also reports the project's shared build cache — `cache CARGO_TARGET_DIR=...`,
 beside the worktree — because a hand-run task that built somewhere else would be the one
-build not sharing it. See [config](config.md#the-build-cache).
+build not sharing it. See [config/playbook.md](config/playbook.md#the-build-cache).
 
 **`wecode verify`** can be run on its own, and is the same code path `run` uses. It reads
 the *uncommitted* diff, so run it before committing by hand. The acceptance commands get
