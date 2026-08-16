@@ -209,7 +209,7 @@ pub(crate) fn inbox(a: &Args) -> Res {
     let (ws, store, company) = open_full(a)?;
     if company.telegram.fetch.is_none() {
         let mut why = String::from("no [telegram] fetch in company.toml — nothing reads replies\n");
-        why.push_str("  docs/reference/config.md has the getUpdates line to put there\n");
+        why.push_str("  docs/reference/config/telegram.md has the getUpdates line to put there\n");
         return Err(why.into());
     }
     telegram::drain_channel(&ws, &store, &company, a.has("dry-run"))

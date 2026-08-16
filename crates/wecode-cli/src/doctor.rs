@@ -347,7 +347,8 @@ fn render(checks: &[Check]) -> String {
     if checks.iter().all(|c| c.outcome.is_absent()) {
         out.push_str(
             "\n  nothing is configured, so nothing is broken: the way out and the way back\n  \
-             are both a terminal. docs/reference/config.md has both lines.\n",
+             are both a terminal. docs/reference/config/notify.md has the line out,\n  \
+             and config/telegram.md the line back.\n",
         );
     }
     out
@@ -392,7 +393,10 @@ mod tests {
 
         let out = render(&checks);
         assert!(out.contains("nothing is configured"), "{out}");
-        assert!(out.contains("config.md"), "where the lines go: {out}");
+        // Both halves are named, because either one alone is a loop that only goes one
+        // way: a notification nobody can answer, or a reply channel nothing speaks into.
+        assert!(out.contains("config/notify.md"), "the line out: {out}");
+        assert!(out.contains("config/telegram.md"), "the line back: {out}");
     }
 
     #[test]
