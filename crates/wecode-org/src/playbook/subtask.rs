@@ -5,13 +5,19 @@
 //! *different*; everything it leaves unset falls through to the playbook for the step's
 //! own kind, exactly as a hand-written task of that kind would.
 //!
+//! Scope is the one thing that falls through somewhere else: to the main task being
+//! expanded, by [`Subtask::scope_under`]. The playbook has no scope to give — a kind
+//! block says nothing about paths — so a step that named none would otherwise be
+//! refused for having no scope at all, and the only repair would be to restate the main
+//! task's paths in every step of the template.
+//!
 //! Expansion is pure. It produces values and schedules nothing: the tasks it describes
 //! still face the admission gate, and may be edited or dropped before anything runs.
 
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
-use wecode_core::TaskKind;
+use wecode_core::{Scope, TaskKind};
 
 use super::PlaybookError;
 use super::kind::KindPlaybook;
@@ -67,6 +73,10 @@ pub struct SubtaskTemplate {
 
 /// A subtask template resolved against one main task: ids, not names, and every
 /// placeholder filled.
+///
+/// `write` and `read` are still only what the template said. What the step actually
+/// runs under is [`Subtask::scope_under`], because the rest of the answer belongs to
+/// the main task rather than to the playbook.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Subtask {
     pub id: String,
@@ -80,6 +90,47 @@ pub struct Subtask {
     pub assign_to: Option<String>,
     pub tokens: Option<u64>,
     pub wall_secs: Option<u64>,
+}
+
+impl Subtask {
+    /// Whether this step writes where the main task said it may, rather than somewhere
+    /// of its own.
+    ///
+    /// A spike is excluded even when it names nothing, because it is the one kind
+    /// admitted without a write scope: it answers a question. Handing it the paths the
+    /// main task may change would grant an exploration the right to rewrite them, which
+    /// no one asked for and nothing on screen would say.
+    #[must_use]
+    pub fn inherits_write(&self) -> bool {
+        self.write.is_empty() && self.kind.requires_write_scope()
+    }
+
+    /// The scope this step runs under: what it named, and the main task's where it
+    /// named nothing.
+    ///
+    /// Per side, not all-or-nothing. A step that narrows the reading and leaves the
+    /// writing alone is stating one difference, and should not lose the other — the
+    /// same reason every other field here falls through on its own.
+    ///
+    /// Inheriting is all this does. Two steps that both inherit and are not ordered by
+    /// `after` claim the same paths at the same time, and the admission gate refuses
+    /// them for it; sequencing them here would be the template writing itself an
+    /// ordering nobody declared.
+    #[must_use]
+    pub fn scope_under(&self, main: &Scope) -> Scope {
+        Scope {
+            read: if self.read.is_empty() {
+                main.read.clone()
+            } else {
+                self.read.clone()
+            },
+            write: if self.inherits_write() {
+                main.write.clone()
+            } else {
+                self.write.clone()
+            },
+        }
+    }
 }
 
 /// Reads a kind's sub-tables into templates, in the order `subtasks` declares.
@@ -279,6 +330,98 @@ write  = ["README.md"]
         assert!(out[1].accept.is_empty());
         assert!(out[1].assign_to.is_none());
         assert_eq!(out[1].tokens, None);
+    }
+
+    /// A template that leaves scope to the main task: `build` names none at all, and
+    /// `check` narrows only the reading.
+    const SILENT: &str = r#"
+[feature]
+subtasks = ["design", "build", "check"]
+
+[feature.design]
+kind  = "design"
+write = ["docs/wecode/{{task}}/design.md"]
+
+[feature.build]
+after = ["design"]
+
+[feature.check]
+after = ["build"]
+read  = ["docs/**"]
+"#;
+
+    /// A step of the one kind that may be admitted with no write scope at all.
+    const A_SPIKE: &str = r#"
+[feature]
+subtasks = ["look"]
+
+[feature.look]
+kind = "spike"
+"#;
+
+    /// What a main task of this shape declares: both sides set, so inheriting one
+    /// side and not the other is visible.
+    fn main_scope() -> Scope {
+        Scope {
+            read: vec!["crates/**".to_string()],
+            write: vec!["crates/wecode-cli/**".to_string()],
+        }
+    }
+
+    /// A playbook's feature steps, resolved against a main task called `retry`.
+    fn steps_of(toml: &str) -> Vec<Subtask> {
+        Playbook::parse(toml)
+            .unwrap()
+            .for_kind(TaskKind::Feature)
+            .unwrap()
+            .expand(TaskKind::Feature, "retry", "a title")
+    }
+
+    #[test]
+    fn a_step_that_names_no_scope_writes_where_the_main_task_may() {
+        // The playbook has no scope to give — a kind block says nothing about paths —
+        // so without this the step is refused for having none, and the only repair is
+        // to restate the main task's paths in every step of the template.
+        let build = &steps_of(SILENT)[1];
+        assert!(build.inherits_write());
+        assert_eq!(build.scope_under(&main_scope()), main_scope());
+    }
+
+    #[test]
+    fn a_step_that_names_its_own_scope_keeps_it() {
+        let design = &steps_of(SILENT)[0];
+        assert!(!design.inherits_write());
+        assert_eq!(
+            design.scope_under(&main_scope()).write,
+            vec!["docs/wecode/retry/design.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn each_side_of_the_scope_falls_through_on_its_own() {
+        // `check` states one difference — what it reads — and should not lose the
+        // other by having stated anything at all.
+        let check = steps_of(SILENT)[2].scope_under(&main_scope());
+        assert_eq!(check.read, vec!["docs/**".to_string()]);
+        assert_eq!(check.write, main_scope().write);
+    }
+
+    #[test]
+    fn a_spike_step_is_not_handed_the_paths_the_main_task_may_change() {
+        // The one kind admitted without a write scope. Inheriting here would turn a
+        // question into a licence to rewrite the answer.
+        let look = &steps_of(A_SPIKE)[0];
+        assert!(!look.inherits_write());
+        assert!(look.scope_under(&main_scope()).write.is_empty());
+        // Reading is not a licence to change anything, so it still falls through.
+        assert_eq!(look.scope_under(&main_scope()).read, main_scope().read);
+    }
+
+    #[test]
+    fn a_main_task_with_no_scope_passes_none_on() {
+        // Nothing is invented: the step is left as bare as it was, and the admission
+        // gate asks about it in the ordinary way.
+        assert!(steps_of(SILENT)[1].scope_under(&Scope::default()).is_empty());
     }
 
     #[test]
