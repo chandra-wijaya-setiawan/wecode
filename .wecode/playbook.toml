@@ -139,7 +139,13 @@ drop the design step when the title already says the decision.
 kind      = "design"
 title     = "decide how to {{title}}"
 write     = ["docs/wecode/{{task}}/design.md"]
-accept    = ["test -f docs/wecode/{{task}}/design.md"]
+# `test -f` was the whole gate, and `: > design.md` passed it — so a signature could be
+# given to an empty file and the ledger would record that someone had read it. The
+# script checks form only: that the document says what it is about, has parts, argues
+# in prose, and is not its neighbour retitled. Whether the decision is a *good* one is
+# what `approve design` is for, and nothing here takes that over.
+accept    = ["test -f docs/wecode/{{task}}/design.md",
+             "./scripts/design-check.sh docs/wecode/{{task}}/design.md"]
 tokens    = 200000
 
 [feature.build]
