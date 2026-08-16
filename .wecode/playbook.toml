@@ -114,7 +114,7 @@ Shipping a capability is not the same as delivering it. A task that adds a confi
 surface — an environment variable a hook can read, a field company.toml can set — has
 not changed anything an operator touches until the config uses it, and the agent cannot
 write that config by design. Say in the task what the operator must wire, and put a
-worked example in docs/reference/config.md.
+worked example in the docs/reference/config/ page that owns that surface.
 
 The test step proves the feature works in the assembled system, not that the units
 compile. A suite that passes whether or not the feature is exercised has tested
