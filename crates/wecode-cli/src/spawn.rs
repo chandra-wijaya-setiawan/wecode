@@ -204,6 +204,14 @@ impl Outcome {
     }
 }
 
+/// Deleting a file, in the two spellings a worker reaches for.
+///
+/// `git rm` earns its place by being the one an agent tries first on a tracked file:
+/// the outcome is the same either way, since wecode commits with `add -A` and that
+/// stages a deletion however it was made, but a refusal is the same dead end whichever
+/// command hits it. Neither reaches further than `rm` alone already does.
+const REMOVAL: [&str; 2] = ["rm *", "git rm *"];
+
 /// The argv this template will actually run, with `{{prompt}}` filled in.
 ///
 /// Exposed so the Broker can be asked about the real command line before anything
@@ -223,6 +231,22 @@ impl Outcome {
 /// File tools are all-or-nothing here: the harness cannot express "write only
 /// `src/**`", so a role with any write scope gets the editing tools and the diff check
 /// remains what holds it to the declared paths. A role with none gets neither.
+///
+/// Removal travels with them, because none of the file tools do it. `Edit` and `Write`
+/// make a file exist or make it say something else, and nothing in that set makes one
+/// stop existing — so a write grant that stopped at the two of them would be half a
+/// grant. The worker told to split a module writes the halves and leaves the original
+/// standing; the one told to drop dead code empties the file rather than deleting it.
+/// Both read as work done badly rather than as authority never given.
+///
+/// It is derived from `write` and not from `run`: deciding a file's contents includes
+/// deciding it should have none, and an operator who declared a write scope should not
+/// have had to think of `rm` as well. Spelled as shell patterns only because that is
+/// the harness's whole vocabulary for it — which is the bargain `Edit` already accepts,
+/// since a glob cannot bound a command to `src/**` any more than the harness can bound
+/// `Write` to it. The safety net is unchanged: `git diff --name-only HEAD` names a
+/// deleted path exactly as it names an edited one, so a removal out of scope is caught
+/// by the same check at the same moment.
 #[must_use]
 pub(crate) fn allowed_tools(grant: &wecode_gov::Grant) -> String {
     let mut out: Vec<String> = grant.run.iter().map(|g| format!("Bash({g})")).collect();
@@ -231,6 +255,14 @@ pub(crate) fn allowed_tools(grant: &wecode_gov::Grant) -> String {
     }
     if !grant.write.is_empty() {
         out.extend(["Edit", "Write"].map(str::to_string));
+        // Skipping what the run grant already said, so the launch line the ledger
+        // records does not name the same authority twice.
+        out.extend(
+            REMOVAL
+                .into_iter()
+                .filter(|g| !grant.run.iter().any(|r| r == g))
+                .map(|g| format!("Bash({g})")),
+        );
     }
     // Comma-separated: a run glob contains spaces, and space separation would split
     // `cargo *` into two tools, one of which is `*`.
@@ -685,6 +717,27 @@ mod tests {
         assert!(tools.contains("Read"), "{tools}");
         assert!(!tools.contains("Edit"), "{tools}");
         assert!(!tools.contains("Write"), "{tools}");
+        // Removal is part of the same grant, so a role without it does not get it.
+        assert!(!tools.contains("Bash(rm *)"), "{tools}");
+        assert!(!tools.contains("Bash(git rm *)"), "{tools}");
+    }
+
+    #[test]
+    fn a_role_that_writes_can_also_remove_a_file() {
+        // Edit and Write only make a file exist. Without this a worker told to split a
+        // module writes the halves and cannot delete the original.
+        let tools = allowed_tools(&wecode_gov::Grant::writer(&["src/**"]));
+        assert!(tools.contains("Bash(rm *)"), "{tools}");
+        assert!(tools.contains("Bash(git rm *)"), "{tools}");
+    }
+
+    #[test]
+    fn a_removal_the_run_grant_already_named_is_not_granted_twice() {
+        let mut g = wecode_gov::Grant::writer(&["src/**"]);
+        g.run = vec!["rm *".into()];
+        let tools = allowed_tools(&g);
+        assert_eq!(tools.matches("Bash(rm *)").count(), 1, "{tools}");
+        assert!(tools.contains("Bash(git rm *)"), "{tools}");
     }
 
     #[test]
