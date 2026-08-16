@@ -3,7 +3,13 @@
 //! Every check is decided by inspecting values and the plan. Nothing calls a model.
 //! That is the point — a gate that sometimes says yes for reasons nobody can
 //! reproduce is not a gate.
+//!
+//! Two layers, and the second is not the first with a flag on it. A [`Defect`] is a
+//! reason work cannot start; a [`Divergence`] is a workable declaration that is not
+//! what the project's own guidance would have written — see [`advise`] for why that
+//! had to be a separate verdict rather than a defect that declines to block.
 
+use crate::common::Measure;
 use crate::id::{ProjectId, TaskId};
 use crate::plan::Plan;
 use crate::project::Project;
@@ -166,8 +172,15 @@ impl Defect {
         }
     }
 
-    /// Whether this blocks work outright. Everything currently does; the
-    /// distinction exists so advisory checks can be added without changing callers.
+    /// Whether this blocks work outright. Everything does, and the flag survives
+    /// only because [`Admission::decide`] is written in terms of it.
+    ///
+    /// It was put here as the seam advisory checks would arrive through, and that
+    /// turned out to be the wrong seam: every caller reads a non-empty `Vec<Defect>`
+    /// as a refusal without consulting this — `task add` declines to save, the board
+    /// counts the rows as defects — so one answering `false` would have blocked the
+    /// work anyway, at sites that never asked. Advice went beside the gate instead:
+    /// [`Divergence`], reported by [`advise`].
     #[must_use]
     pub fn is_blocking(&self) -> bool {
         true
@@ -512,6 +525,159 @@ fn globs_overlap(a: &str, b: &str) -> bool {
 fn literal_prefix(glob: &str) -> String {
     let cut = glob.find(['*', '?', '[']).unwrap_or(glob.len());
     glob[..cut].trim_end_matches('/').to_string()
+}
+
+// -------------------------------------------------------------- advice ------
+
+/// What a project's playbook would have put on a task of one kind, reduced to the
+/// fields a declaration can be compared against.
+///
+/// Handed in rather than read, for the reason `needs_design` is: core touches no
+/// files, and a playbook is a file in somebody else's repository. The default says
+/// nothing, so a project that wrote no guidance for a kind gets no advice rather
+/// than advice invented on its behalf.
+#[derive(Clone, PartialEq, Eq, Default, Debug)]
+pub struct Expected {
+    /// The commands work of this kind is accepted by.
+    pub accept: Vec<String>,
+    /// The post work of this kind is done by.
+    pub assign_to: Option<String>,
+    pub tokens: Option<u64>,
+    pub wall_secs: Option<u64>,
+    /// The names of the steps `--expand` would emit, in declared order.
+    pub steps: Vec<String>,
+}
+
+/// One place a task is not what its project's guidance would have written.
+///
+/// Deliberately not a [`Defect`]. Every one of these is a call the operator is
+/// allowed to make — an acceptance command that does not apply here, a post chosen
+/// for this one job, a budget cut on purpose — and a gate that refused them would be
+/// wrong about as often as it was right. What nobody chooses is making one *without
+/// noticing*, and that is what this reports: the playbook's values fill only what a
+/// declaration left blank, so each of these was typed over guidance already there.
+///
+/// `measure` on the two budget variants is the phrase the figure is counted in, not
+/// a discriminant — tokens and seconds differ in unit and in nothing else worth
+/// branching on.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Divergence {
+    /// A command this kind is accepted by that this task will not run.
+    AcceptanceDropped { cmd: String },
+    /// Assigned to a post other than the one this kind names.
+    AssignedElsewhere { on: String, expected: String },
+    /// A budget figure under this kind's default.
+    BudgetBelow { measure: &'static str, declared: u64, expected: u64 },
+    /// A budget figure this kind is written for that the task carries none of — the
+    /// acceptance trap from the other end, and the more expensive one. The default
+    /// budget is filled only when a task states no figure at all, so `--tokens` on
+    /// its own quietly takes the wall limit off, and a run with no wall limit stops
+    /// when somebody notices.
+    BudgetUnset { measure: &'static str, expected: u64 },
+    /// A kind this project breaks down, declared whole.
+    NotDecomposed { steps: Vec<String> },
+}
+
+impl Divergence {
+    /// What to say about it. Fixed text, like [`Defect::question`] — but stated
+    /// rather than asked: nothing is waiting on an answer.
+    #[must_use]
+    pub fn note(&self) -> String {
+        match self {
+            Self::AcceptanceDropped { cmd } => format!(
+                "`{cmd}` is how this project accepts work of this kind, and this task does not \
+                 run it. Naming any acceptance replaces all of it."
+            ),
+            Self::AssignedElsewhere { on, expected } => {
+                format!("this kind is done by `{expected}`; this one is on `{on}`.")
+            }
+            Self::BudgetBelow { measure, declared, expected } => format!(
+                "the budget is {declared} {measure}, under the {expected} this kind is written \
+                 for — a run that stops short still spends what it used."
+            ),
+            Self::BudgetUnset { measure, expected } => format!(
+                "this kind is written for {expected} {measure} and this task declares none. \
+                 Naming either figure takes the whole default off."
+            ),
+            Self::NotDecomposed { steps } => format!(
+                "this kind breaks into {}, and this task has no steps. `--expand` on a fresh \
+                 declaration writes them, or add each with `--parent`.",
+                steps.join(", ")
+            ),
+        }
+    }
+}
+
+/// Where a task departs from what its project wrote down for its kind.
+///
+/// A second verdict, not a softer first one. It could not be folded into
+/// [`check_task`] as non-blocking defects: no caller of that function asks
+/// [`Defect::is_blocking`] before acting on the list, so an advisory defect would
+/// still have stopped `task add` saving, and counted as a defect on the board.
+/// Closed work is exempt, for the reason the design gate exempts it: guidance
+/// arrives in a playbook commit, and a task that already finished cannot be
+/// re-declared against guidance written after it.
+#[must_use]
+pub fn advise(t: &Task, plan: &Plan, expected: &Expected) -> Vec<Divergence> {
+    let mut out = Vec::new();
+    if t.status.is_closed() {
+        return out;
+    }
+
+    // A task that states no acceptance has it filled from here, so only one that
+    // states some can have dropped any. The empty case is `MeasureMissing`, already
+    // asked about by the gate; answering it twice in two voices helps nobody.
+    if !t.acceptance.is_empty() {
+        let runs = |cmd: &String| {
+            t.acceptance
+                .iter()
+                .any(|m| matches!(m, Measure::Command { cmd: c, .. } if c == cmd))
+        };
+        for cmd in expected.accept.iter().filter(|c| !runs(c)) {
+            out.push(Divergence::AcceptanceDropped { cmd: cmd.clone() });
+        }
+    }
+
+    if let (Some(on), Some(post)) = (&t.assignee, &expected.assign_to)
+        && on != post
+    {
+        out.push(Divergence::AssignedElsewhere {
+            on: on.clone(),
+            expected: post.clone(),
+        });
+    }
+
+    // A budget nobody stated is `BudgetMissing`, and the gate is asking about it.
+    // Past that the two figures are read separately, because they are overridden
+    // together: naming one takes the playbook's default off both.
+    //
+    // Under, not merely different. Room bought above the default costs nothing when
+    // it turns out to be unnecessary; below it the run stops part-done with the spend
+    // already made, which is the expensive direction to discover by accident.
+    if t.budget.is_set() {
+        for (measure, declared, default) in [
+            ("tokens", t.budget.tokens, expected.tokens),
+            ("seconds of wall time", t.budget.wall_secs, expected.wall_secs),
+        ] {
+            match (declared, default) {
+                (None, Some(expected)) => out.push(Divergence::BudgetUnset { measure, expected }),
+                (Some(declared), Some(expected)) if declared < expected => {
+                    out.push(Divergence::BudgetBelow { measure, declared, expected });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // A kind the project decomposes, declared whole. Not said to a task that is
+    // already a step of somebody else's expansion: a template whose step takes the
+    // kind being expanded would otherwise advise every one of them to expand again.
+    if !expected.steps.is_empty() && t.parent.is_none() && plan.subtasks(&t.id).next().is_none() {
+        out.push(Divergence::NotDecomposed {
+            steps: expected.steps.clone(),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1172,6 +1338,157 @@ mod tests {
             Admission::Admitted { waivers, .. } => assert_eq!(waivers, vec![waiver]),
             Admission::Draft { .. } => panic!("expected admitted"),
         }
+    }
+
+    // ----------------------------------------------------------- advice ------
+
+    /// What a project would have written for the kind `good_task` is — matched to
+    /// `good_task` itself, so a note in these tests is always a real divergence.
+    fn written() -> Expected {
+        Expected {
+            accept: vec!["cargo test".into()],
+            assign_to: Some("impl".into()),
+            tokens: Some(1000),
+            wall_secs: Some(60),
+            steps: Vec::new(),
+        }
+    }
+
+    /// The same, for a project that also decomposes the kind.
+    fn decomposed() -> Expected {
+        Expected { steps: vec!["design".into(), "build".into()], ..written() }
+    }
+
+    fn ran(cmd: &str) -> Measure {
+        Measure::Command { cmd: cmd.into(), expect_status: 0 }
+    }
+
+    #[test]
+    fn a_declaration_that_takes_the_guidance_as_written_draws_nothing() {
+        // Three silences at once. A task that matches says nothing; guidance nobody
+        // wrote says nothing, the way an empty `known_repos` or an empty design gate
+        // does; and an extra check of one's own is more checking, not less — only
+        // omissions are reported.
+        let t = good_task().assigned_to("impl");
+        assert!(advise(&t, &seeded(), &written()).is_empty());
+        assert!(advise(&t, &seeded(), &Expected::default()).is_empty());
+        let extra = t.clone().accepting(ran("cargo clippy"));
+        assert!(advise(&extra, &seeded(), &written()).is_empty(), "{extra:?}");
+    }
+
+    #[test]
+    fn naming_an_acceptance_replaces_all_of_it_and_that_is_said_out_loud() {
+        // The silent one. `task add` fills acceptance only when none was given, so
+        // one `--accept-cmd` drops the project's own check without a word.
+        let mut t = good_task().assigned_to("impl");
+        t.acceptance = vec![ran("cargo test -p export")];
+        assert_eq!(
+            advise(&t, &seeded(), &written()),
+            vec![Divergence::AcceptanceDropped { cmd: "cargo test".into() }]
+        );
+    }
+
+    #[test]
+    fn what_the_gate_is_already_asking_for_is_not_asked_again_in_another_voice() {
+        // An absent acceptance is `MeasureMissing` and an absent budget is
+        // `BudgetMissing`. Advice on top of either would read as a second problem.
+        let mut t = good_task().assigned_to("impl");
+        t.acceptance.clear();
+        t.budget = Budget::default();
+        let defects = check_task(&t, &seeded(), &[]);
+        assert!(defects.contains(&Defect::MeasureMissing), "{defects:?}");
+        assert!(defects.contains(&Defect::BudgetMissing), "{defects:?}");
+        assert!(advise(&t, &seeded(), &written()).is_empty());
+    }
+
+    #[test]
+    fn a_post_other_than_the_one_the_kind_names_is_noted() {
+        let t = good_task().assigned_to("review");
+        let elsewhere = Divergence::AssignedElsewhere { on: "review".into(), expected: "impl".into() };
+        assert!(advise(&t, &seeded(), &written()).contains(&elsewhere));
+        // Unassigned is not a divergence: the playbook is about to fill it.
+        assert!(!advise(&good_task(), &seeded(), &written()).contains(&elsewhere));
+    }
+
+    #[test]
+    fn a_budget_under_the_default_is_noted_and_one_over_it_is_not() {
+        let mut lean = good_task().assigned_to("impl");
+        lean.budget = Budget { tokens: Some(100), wall_secs: Some(10) };
+        let notes = advise(&lean, &seeded(), &written());
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes.contains(&Divergence::BudgetBelow {
+            measure: "tokens", declared: 100, expected: 1000,
+        }));
+
+        let mut generous = good_task().assigned_to("impl");
+        generous.budget = Budget { tokens: Some(100_000), wall_secs: Some(6000) };
+        assert!(advise(&generous, &seeded(), &written()).is_empty());
+    }
+
+    #[test]
+    fn naming_one_figure_takes_the_other_off_and_that_is_said_out_loud() {
+        // `--tokens` alone leaves the task with no wall limit at all, because the
+        // playbook's budget is filled only when nothing was stated. The gate is
+        // satisfied — a budget *is* set — and the run has no ceiling on its clock.
+        let mut t = good_task().assigned_to("impl");
+        t.budget = Budget { tokens: Some(5000), wall_secs: None };
+        assert!(check_task(&t, &seeded(), &[]).is_empty(), "the gate is happy");
+        assert_eq!(
+            advise(&t, &seeded(), &written()),
+            vec![Divergence::BudgetUnset { measure: "seconds of wall time", expected: 60 }]
+        );
+    }
+
+    #[test]
+    fn a_kind_the_project_breaks_down_is_noted_when_it_is_declared_whole() {
+        let t = good_task().assigned_to("impl");
+        let notes = advise(&t, &seeded(), &decomposed());
+        assert_eq!(
+            notes,
+            vec![Divergence::NotDecomposed { steps: vec!["design".into(), "build".into()] }]
+        );
+        assert!(notes[0].note().contains("design, build"), "{notes:?}");
+    }
+
+    #[test]
+    fn nothing_that_is_already_part_of_a_decomposition_is_told_to_expand() {
+        // Both ends of it. A task that has steps needs none written, and a step of
+        // somebody else's expansion is already inside one — a template step that
+        // names no kind takes the kind being expanded, so without the second half
+        // every generated step would be advised to expand itself.
+        let mut plan = seeded();
+        plan.add_task(good_task()).unwrap();
+        plan.add_task(design().under("cache-layer")).unwrap();
+        let whole = plan.task(&"cache-layer".into()).unwrap().clone();
+        let step = Task::new("cache-layer-build", "caching", "build the cache layer")
+            .under("cache-layer")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/export/inner/**"]))
+            .budgeted(budget())
+            .assigned_to("impl");
+        for t in [&whole, &step] {
+            let notes = advise(t, &plan, &decomposed());
+            assert!(!notes.iter().any(|d| matches!(d, Divergence::NotDecomposed { .. })), "{notes:?}");
+        }
+    }
+
+    #[test]
+    fn finished_work_is_not_second_guessed_by_guidance_written_after_it() {
+        // The same rule the design gate keeps: guidance arrives in a playbook commit,
+        // and a task that has already run cannot be re-declared against it.
+        let mut done = good_task().assigned_to("review");
+        done.status = TaskStatus::Done;
+        assert!(advise(&done, &seeded(), &decomposed()).is_empty());
+    }
+
+    #[test]
+    fn advice_never_refuses_anything() {
+        // The pin on the whole layer: a task can diverge from the guidance on every
+        // count and still be admitted, because a divergence is not a defect.
+        let mut t = good_task().assigned_to("review");
+        t.budget = Budget { tokens: Some(1), wall_secs: Some(1) };
+        assert!(!advise(&t, &seeded(), &decomposed()).is_empty());
+        assert!(check_task(&t, &seeded(), &[]).is_empty());
     }
 
     #[test]

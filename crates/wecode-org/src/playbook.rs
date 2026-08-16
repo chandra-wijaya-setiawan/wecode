@@ -55,6 +55,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use wecode_core::TaskKind;
+use wecode_core::admission::Expected;
 
 /// Where a playbook sits inside the repo it describes.
 pub const PLAYBOOK_PATH: &str = ".wecode/playbook.toml";
@@ -291,6 +292,29 @@ impl Playbook {
             .collect()
     }
 
+    /// What this project would have put on a task of `kind` — the shape the
+    /// advisory check compares a declaration against.
+    ///
+    /// `None` for a kind with no section, and that is the whole of the rule about
+    /// silence. Guidance nobody wrote is not guidance to be measured against, and a
+    /// default filled in here would put wecode's opinion in this repository's mouth.
+    ///
+    /// The prose is deliberately left out. It is for whoever decomposes the work and
+    /// there is nothing on a task to compare it to; only the fields `task add`
+    /// already fills from cross over, which is what makes every divergence one
+    /// somebody typed.
+    #[must_use]
+    pub fn expected_of(&self, kind: TaskKind) -> Option<Expected> {
+        let k = self.for_kind(kind)?;
+        Some(Expected {
+            accept: k.accept.clone(),
+            assign_to: k.assign_to.clone(),
+            tokens: k.tokens,
+            wall_secs: k.wall_secs,
+            steps: k.subtasks.iter().map(|s| s.name.clone()).collect(),
+        })
+    }
+
     /// Kinds this project has written guidance for, in lifecycle order.
     #[must_use]
     pub fn kinds(&self) -> Vec<(TaskKind, &KindPlaybook)> {
@@ -373,6 +397,35 @@ mod tests {
         let p = Playbook::parse("").unwrap();
         assert!(p.is_empty());
         assert!(p.project.merge_to.is_none());
+    }
+
+    #[test]
+    fn a_kind_reports_what_it_would_have_written() {
+        let p = Playbook::parse(SAMPLE).unwrap();
+        let e = p.expected_of(TaskKind::Bug).unwrap();
+        assert_eq!(e.accept, vec!["cargo test --workspace".to_string()]);
+        assert_eq!(e.assign_to.as_deref(), Some("impl"));
+        assert!(e.steps.is_empty(), "this sample declares no subtasks");
+    }
+
+    #[test]
+    fn the_steps_are_named_in_declared_order_so_the_note_can_list_them() {
+        let p = Playbook::parse(
+            "[feature]\nsubtasks = [\"design\", \"build\"]\n\n[feature.design]\nkind = \"design\"\n\n[feature.build]\nafter = [\"design\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            p.expected_of(TaskKind::Feature).unwrap().steps,
+            vec!["design".to_string(), "build".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_kind_with_no_section_expects_nothing_rather_than_the_default() {
+        // `Some(Expected::default())` and `None` are different answers: one says the
+        // project asked for nothing, the other that it was never asked.
+        let p = Playbook::parse(SAMPLE).unwrap();
+        assert!(p.expected_of(TaskKind::Feature).is_none());
     }
 
     // ---------------------------------------------------- machine check ------

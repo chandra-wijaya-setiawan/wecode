@@ -150,6 +150,29 @@ this build opens its `wecode.db`.
 that reaches a phone can carry the thing the operator has to type back. See
 [config](config.md).
 
+**`wecode check <id>`** and **`wecode task add`** answer twice. The first verdict is the
+admission gate — defects, each carrying a fixed question, and a task is not saved until
+they are answered or `--force`d. The second is advisory, and appears only for a task
+whose project has a playbook with a section for its kind:
+
+```
+  ⚠ 2 notes — the playbook for [bug] would have written this differently
+
+  ·  `bash scripts/max-lines.sh` is how this project accepts work of this kind, and
+     this task does not run it. Naming any acceptance replaces all of it.
+  ·  this kind is written for 2700 seconds of wall time and this task declares none.
+     Naming either figure takes the whole default off.
+
+  advisory — nothing is refused for these
+```
+
+A note is never a refusal, whatever it says and however many there are: the task above
+is saved, and `check` calls it `✓ admitted`. It exists because a playbook fills only
+what a declaration leaves blank, and fills acceptance and budget *whole* — so a single
+`--accept-cmd` takes the project's own checks off, and a lone `--tokens` takes the
+kind's wall limit with it, neither of which said anything until now. See
+[playbooks](../guides/playbooks.md) for what is reported and where it stays silent.
+
 **`wecode task budget <id>`** changes what a task may spend without recreating it. The
 way out before it was `wecode task rm` followed by `task add` again, and that stops
 working at the moment it is wanted: a task that has run is history and refuses to be

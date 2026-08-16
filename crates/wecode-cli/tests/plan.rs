@@ -8,6 +8,7 @@
 mod support;
 
 use support::agent::{a_task, a_task_in_src, signs_first, with_agent};
+use support::playbook::with_playbook;
 use support::{Org, Run};
 
 // ----------------------------------------------------------------- plan --------
@@ -1267,4 +1268,33 @@ fn assign_names_the_available_posts_when_given_a_bad_one() {
     let r = org.run(&["assign", "cache-tests", "--to", "nobody"]);
     assert!(!r.ok());
     r.assert_contains("no such post").assert_contains("chief");
+}
+
+// ------------------------------------------------------------- advisory --------
+
+#[test]
+fn a_task_the_playbook_would_not_have_written_is_told_so_and_still_admitted() {
+    // The second verdict. Every departure here is legal — an acceptance command of
+    // one's own, a smaller budget, another post — so the gate is structurally unable
+    // to mention it, and each was typed over guidance already there: `task add` fills
+    // only what a declaration leaves blank, which is why `--tokens` alone takes the
+    // wall limit off too. A case per divergence is in core; this is the wiring.
+    let (org, _) = with_playbook("advise");
+    let add = |id: &str, scope: &str, extra: &[&str]| {
+        let mut v = vec!["task", "add", id, "the export returns a stale body",
+                         "--project", "caching", "--kind", "bug", "--write", scope];
+        v.extend_from_slice(extra);
+        org.run(&v)
+    };
+    add("stale", "src/**", &["--accept-cmd", "cargo test -p export", "--tokens", "100", "--to", "chief"])
+        .assert_ok("a legal task").assert_contains("saved task stale")
+        .assert_contains("would have written this differently")
+        .assert_contains("`true` is how this project accepts")
+        .assert_contains("100 tokens, under the 1000").assert_contains("done by `impl`")
+        .assert_contains("60 seconds of wall time and this task declares none")
+        .assert_contains("advisory — nothing is refused");
+    org.run(&["check", "stale"]).assert_ok("check").assert_contains("✓ admitted");
+    // The control that matters most for a warning: a declaration that states nothing
+    // takes all of it from the playbook, so there is nothing to say about it.
+    add("quiet", "docs/**", &[]).assert_ok("add").assert_lacks("would have written");
 }

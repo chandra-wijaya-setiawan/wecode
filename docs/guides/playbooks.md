@@ -184,6 +184,70 @@ person in that seat. It covers one task, not the subtasks beneath it, and it goe
 if the task is redefined afterwards: amending a scope asks for it again, so signing
 something small and then widening it is not a way through.
 
+## When a task is not what the playbook would have written
+
+Everything above either fills a blank or refuses a task. Neither reaches the case in
+between: a task that is perfectly admissible and is simply not the one this playbook
+describes.
+
+It comes from the filling rule itself. Defaults land only where a declaration is
+*silent*, so the moment a task states anything, that field is its own — and because
+acceptance and budget are each filled whole, stating one part discards the rest:
+
+```
+wecode task add stale "the export returns a stale body" --project caching --kind bug \
+  --accept-cmd "cargo test -p export" --tokens 5000
+```
+
+That task is admitted. It also no longer runs `bash scripts/max-lines.sh`, or whatever
+else `[bug]` accepts, and it has no wall limit at all — the `wall_secs` in `[bug]` was
+never applied, because `--tokens` was enough to make the budget "stated". Nothing about
+either is visible in the output, and both are discovered after the budget is spent.
+
+So `task add` and `check <task>` print a second block when a task departs from its
+kind's guidance:
+
+```
+  ⚠ 3 notes — the playbook for [bug] would have written this differently
+
+  ·  `bash scripts/max-lines.sh` is how this project accepts work of this kind, and
+     this task does not run it. Naming any acceptance replaces all of it.
+  ·  this kind is written for 2700 seconds of wall time and this task declares none.
+     Naming either figure takes the whole default off.
+  ·  the budget is 5000 tokens, under the 150000 this kind is written for — a run that
+     stops short still spends what it used.
+
+  advisory — nothing is refused for these
+```
+
+It reports five things: an acceptance command dropped, a budget figure dropped with it,
+a budget under the kind's default, a post other than the one the kind names, and a kind
+with declared subtasks that was added whole rather than with `--expand`.
+
+**Nothing here blocks, ever.** A divergence is a different type from a defect and is
+computed by a different function, so it cannot become a refusal by accident or by
+setting. Each of these is a legitimate call — an acceptance command that does not apply
+to this task, a post picked for one job, a budget deliberately cut — and a gate that
+refused them would be wrong about as often as it was right. What is not a legitimate
+call is making one without knowing the guidance said otherwise, and that is the whole of
+what this reports.
+
+It is silent wherever it would be guessing:
+
+- **no playbook, or no section for the kind.** Guidance nobody wrote is not guidance to
+  measure against, and the same rule the design gate keeps: a project does not acquire
+  an opinion by omission.
+- **anything the gate is already asking about.** A task with no acceptance is
+  `MeasureMissing` and a task with no budget is `BudgetMissing`. Saying it twice in two
+  voices reads as two problems.
+- **a task that has closed.** Guidance arrives in a playbook commit; work that already
+  finished cannot be re-declared against it.
+- **a task that is already part of a decomposition.** A step of an expansion is not told
+  to expand itself.
+
+An extra check of your own is never a note. Only omissions are reported — a task that
+runs the project's command and one more is doing more checking, not less.
+
 ## Sharing the build cache
 
 A worktree is a clean checkout, which is what makes it safe — and it means `target/`
