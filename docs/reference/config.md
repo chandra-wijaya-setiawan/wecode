@@ -177,6 +177,8 @@ default, nothing is run and waits are silent.
 | `WECODE_TASK_TITLE` | its title, as written |
 | `WECODE_TASK_STATUS` | the status being set — `needs-approval`, `failed`, … |
 | `WECODE_WAITING_FOR` | `approval` \| `input` \| `failed` \| `signature` |
+| `WECODE_SIGN` | the approval that ends this wait — `merge`, `design`, `admission`; empty when no signature does |
+| `WECODE_SIGNERS` | who may give it, one per line; empty when nobody may |
 | `WECODE_PROJECT` | the project it belongs to |
 | `WECODE_COMPANY` | `[company] name` |
 | `WECODE_ORG` | the workspace, so the hook can call `wecode` back |
@@ -194,6 +196,36 @@ from wherever it arrives: the reply that signs it has to name the task, and `#4`
 characters where `cache-warm-on-deploy` is twenty spelled exactly. The variable holds the
 digits alone so the hook decides how to write them — a hook that wants the sigil writes
 `#$WECODE_TASK_NUMBER`, and one that wants a bare number cannot portably strip one.
+
+**Offer only a decision that can be made, to somebody who can make it.** A message saying
+*you are wanted* under an *Approve* button is offering a decision, and two things decide
+whether a thumb on it settles anything. `WECODE_SIGN` is the first: it holds the word that
+goes after `approve` — in a [reply](#signing-from-a-reply), on a
+[button](#signing-by-tapping-a-button), or on a command line — and it is **empty for
+`input` and `failed`**, which are waits no signature answers. An *Approve* on one of those
+is refused when the reply is read, which is minutes to an hour later, on the machine the
+operator is not standing at; from where they are, they answered it. `WECODE_SIGNERS` is
+the second: authority is the post's, checked by the Broker at the moment of signing, so a
+notification that reached the wrong seat offered something that seat never held. It names
+the people whose seat may give this signature, one per line — the seat's own name where
+nobody is in it, since `--as <post>` still signs at a terminal — and it is empty when no
+seat in `company.toml` holds that approval at all, which is worth saying in place of the
+button rather than discovering by pressing it.
+
+```sh
+# in your [notify] command: ask for the signature only where there is one to give
+if   [ -z "$WECODE_SIGN" ];    then ask=""      # no signature answers this wait
+elif [ -z "$WECODE_SIGNERS" ]; then ask="nobody holds $WECODE_SIGN — see [roles.*] approve"
+else ask="$WECODE_SIGNERS: reply \`approve $WECODE_SIGN #$WECODE_TASK_NUMBER\`"
+fi
+```
+
+The two travel together on purpose: the signers are the signers *of that kind*, so a task
+whose merge nobody holds and a task with nothing to sign are different messages. Both are
+read from the same place the answer will be judged against — `WECODE_SIGN` from the rule
+that decides what a bare `approve` means for a task in this state, `WECODE_SIGNERS` from
+the `approve` list on each post's role — so what the notification offers is what the
+channel behind it accepts.
 
 **Say what it produced.** A message that only names the task answers *you are wanted* and
 not *for what*, and deciding whether to sign a diff then means opening a terminal to look
@@ -279,7 +311,11 @@ must not have. `wecode company show` prints the hook, or says there is none.
 and until a task stops for a person nothing asks it. `wecode doctor` asks it now — it
 fires this hook for real, against a task that does not exist, and reports what came back
 under the same rule the loop uses. The drill's message carries no short number, so a
-reply to it signs nothing. See [commands](commands.md#the-ones-worth-explaining).
+reply to it signs nothing. What it does carry truthfully is `WECODE_SIGN` and
+`WECODE_SIGNERS` — both are read from `company.toml` rather than from the invented task —
+so the rehearsal also answers whether your notifier reaches a seat that can sign, which is
+the question a real wait asks at 02:14. See
+[commands](commands.md#the-ones-worth-explaining).
 
 ### Signing from a reply
 
@@ -398,12 +434,26 @@ about which task it was:
 
 ```sh
 # in your [notify] command: the button's callback_data is the words a reply would carry
-curl -sS -d chat_id="$TG_CHAT" -d text="$WECODE_TASK: $WECODE_WAITING_FOR" \
-  --data-urlencode "reply_markup={\"inline_keyboard\":[[
-     {\"text\":\"Approve\",\"callback_data\":\"approve $WECODE_TASK\"},
-     {\"text\":\"Hold\",\"callback_data\":\"no $WECODE_TASK\"}]]}" \
-  "https://api.telegram.org/bot$TG_TOKEN/sendMessage"
+send() { curl -sS -d chat_id="$TG_CHAT" -d text="$WECODE_TASK: $WECODE_WAITING_FOR" "$@" \
+  "https://api.telegram.org/bot$TG_TOKEN/sendMessage"; }
+if [ -n "$WECODE_SIGN" ] && [ -n "$WECODE_SIGNERS" ]; then
+  send --data-urlencode "reply_markup={\"inline_keyboard\":[[
+     {\"text\":\"Approve\",\"callback_data\":\"approve $WECODE_SIGN $WECODE_TASK\"},
+     {\"text\":\"Hold\",\"callback_data\":\"no $WECODE_TASK\"}]]}"
+else
+  send            # nothing here can be signed: the message goes without a keyboard
+fi
 ```
+
+**A button is a promise that a thumb decides something.** Hang it only where
+`WECODE_SIGN` names an approval and `WECODE_SIGNERS` names somebody who holds it. An
+*Approve* on a `failed` task signs nothing whoever presses it; one offering an approval no
+seat in the chart holds is refused by the Broker when the reply is read — and both are
+refused *after* the operator has treated the wait as answered, in output printed where
+they are not. Putting `$WECODE_SIGN` in the `callback_data` rather than leaving `approve`
+bare costs nothing and pins the button to the approval the message was written about,
+which a bare `approve` re-reads against whatever the task is waiting for by the time the
+tap arrives.
 
 **A tap is not a second way to sign anything.** Telegram hands it back through the same
 `getUpdates` as a `callback_query`, and wecode reads it as the message it stands for: the
