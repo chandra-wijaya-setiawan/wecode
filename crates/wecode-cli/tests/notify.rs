@@ -228,6 +228,78 @@ fn a_wait_for_permission_to_start_has_nothing_to_show_yet() {
 }
 
 #[test]
+fn the_message_says_what_may_be_signed_and_who_may_sign_it() {
+    // The other half of answering from a phone, and the half that decides whether the
+    // answer counts. A notification that says *you are wanted* under an *Approve* button
+    // is offering a decision, and until this the hook writing that button knew neither
+    // which approval it was nor whether the person it reached held one.
+    let org = Org::new("notify-authority", "solo");
+    org.seed();
+    let log = notified(&org, "echo [$WECODE_SIGN] [$WECODE_SIGNERS]");
+
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("stop it for a person");
+    // `merge` is the word that goes after `approve`, in a reply or on a button, and
+    // `you` is the person whose seat holds it — the chief, in this template.
+    assert_eq!(announcements(&log), vec!["[merge] [you]"]);
+}
+
+#[test]
+fn the_gate_names_the_signature_it_is_holding_out_for() {
+    // The wait with no status behind it names a different approval from the one at the
+    // other end of the work: `admission` lets it start, `merge` lands it. A hook that
+    // wrote `approve merge` on both would offer to sign work that has not run.
+    let org = signs_first("notify-authority-gate", "echo done >> src/app.txt");
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+    let log = notified(&org, "echo $WECODE_WAITING_FOR [$WECODE_SIGN] [$WECODE_SIGNERS]");
+
+    org.run(&["loop", "--once"])
+        .assert_ok("one pass")
+        .assert_contains("⏸ t needs your signature");
+    assert_eq!(announcements(&log), vec!["signature [admission] [you]"]);
+}
+
+#[test]
+fn a_wait_that_no_signature_answers_offers_nothing_to_sign() {
+    // `failed` is a decision for a person and not one a signature takes: there is no
+    // `approve` for it, and a reply saying so is refused. So the button must not be
+    // offered — a thumb that lands on it has decided something and settled nothing,
+    // and the refusal prints where the operator is not standing.
+    let org = Org::new("notify-unsignable", "solo");
+    org.seed();
+    let log = notified(&org, "echo [$WECODE_SIGN] [$WECODE_SIGNERS]");
+
+    org.run(&["status", "cache-tests", "failed"])
+        .assert_ok("stop it for a person");
+    assert_eq!(announcements(&log), vec!["[] []"]);
+}
+
+#[test]
+fn a_signature_no_seat_holds_is_announced_with_nobody_to_give_it() {
+    // The empty list is the report. A workspace whose chart gives that approval to
+    // nobody will refuse every `approve` for it, and the operator finds out by tapping
+    // the button — from a phone, an hour after the wait began. Named at the wait
+    // instead, the hook can say *this needs a seat that may sign merges* rather than
+    // offering one that cannot be given.
+    let org = Org::new("notify-unheld", "solo");
+    org.seed();
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    let stripped = text.replace(
+        "approve = [\"admission\", \"design\", \"merge\"]",
+        "approve = [\"admission\", \"design\"]",
+    );
+    assert_ne!(stripped, text, "the template's chief no longer signs merges");
+    std::fs::write(&conf, stripped).unwrap();
+    let log = notified(&org, "echo [$WECODE_SIGN] [$WECODE_SIGNERS]");
+
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("stop it for a person");
+    // Still named: what is waiting has not changed, only who can end it.
+    assert_eq!(announcements(&log), vec!["[merge] []"]);
+}
+
+#[test]
 fn a_run_that_fails_its_acceptance_announces_that_instead() {
     let (org, _) = with_agent("notify-run-fail", "echo nothing >> a.txt");
     a_task(&org, "t", "a.txt", "grep -q done a.txt");

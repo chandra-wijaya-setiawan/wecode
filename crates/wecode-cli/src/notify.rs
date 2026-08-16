@@ -47,6 +47,18 @@
 //! ask git yourself. That is a shell, and a notification's whole premise is that there
 //! is not one where the operator is standing. See [`diff_of`] for what is sent instead,
 //! and [`DIFF`] for how much of it.
+//!
+//! And **what may be signed, and by whom** — see [`signing`] and [`signers`]. A message
+//! that says *you are wanted* under an *Approve* button is offering a decision, and the
+//! hook writing that button knew neither of the two things that decide whether it is
+//! real. Not *whether there is a signature to give*: `input` and `failed` are waits no
+//! `approve` answers, and a tap on one is refused after the operator has already decided
+//! they dealt with it. And not *who may give it*: authority is the post's, checked by the
+//! Broker at the moment of signing, so a message that reached the wrong seat offered
+//! something that seat never held — and the refusal is printed on the machine the
+//! operator is not standing at. Both are known here, before the message goes out, and
+//! both are handed over: a hook can put the button only where a thumb decides something,
+//! and address it to somebody who can.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -58,6 +70,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use wecode_core::{Task, TaskId, TaskStatus};
+use wecode_gov::ActionKind;
 use wecode_org::{Company, Workspace};
 use wecode_store::Store;
 
@@ -133,6 +146,65 @@ impl Waiting {
     }
 }
 
+/// The signature this wait is for, and `None` when it is a wait no signature answers.
+///
+/// Asked of [`crate::telegram::implied`] — the function that decides what a bare
+/// `approve` in a reply signs — rather than mapped a second time here. The two are the
+/// same question asked from opposite ends: *what is this notification offering* and
+/// *what did that answer sign*. Two mappings would be one gaining a case, and the shape
+/// of that bug is a message that offers a decision the channel behind it refuses.
+///
+/// So `input` and `failed` come back `None`, because a reply signs nothing for either.
+/// That is not a claim that nothing can be done about them — what happens to work that
+/// failed is a decision, and a real one. It is that the decision is not a signature:
+/// there is no `approve` that takes it, so a message offering one is offering a button
+/// whose only outcome is a refusal.
+///
+/// `status` rather than `task.status`, for the reason [`on_status_change`] takes both:
+/// a caller that has already written one holds a copy that is out of date, and the
+/// signature a stale status implies is the wrong one — or none.
+fn signing(task: &Task, status: TaskStatus, why: Waiting) -> Option<ActionKind> {
+    let mut asking = task.clone();
+    asking.status = status;
+    // The dispatch gate is exactly what `Waiting::Signature` means, and it is the one
+    // wait the status cannot express — which is why that argument exists at all.
+    crate::telegram::implied(&asking, why == Waiting::Signature)
+}
+
+/// Who may give that signature, one name per line, and empty when nobody may.
+///
+/// A post's own `approve` list, read the way the Broker reads it, because that is what
+/// will be asked when the answer arrives: an account is an identity and the seat behind
+/// it is the authority. A hook that knows this can address the message to somebody who
+/// can act on it rather than to whoever the channel reaches — and when the list is
+/// empty, say so instead of offering a button that cannot do anything.
+///
+/// **People where a seat has them, the seat itself where it has none.** A notification
+/// goes to a person, so their name is what a message can be addressed with; but a vacant
+/// seat still signs, at a terminal, with `--as <post>` — and a list that dropped it would
+/// report *nobody may sign this* about work somebody can sign in one command. Both are an
+/// answer to "who do I go to", which is the only question this is asked.
+///
+/// Not filtered to the people who can be reached from this hook: wecode does not know
+/// what channel the operator wrote, and a name it declined to print is one the operator
+/// cannot chase.
+fn signers(company: &Company, kind: Option<ActionKind>) -> String {
+    let Some(kind) = kind else {
+        return String::new();
+    };
+    let mut who: Vec<String> = Vec::new();
+    for post in &company.posts {
+        if !company.effective(post).allows_approve(kind) {
+            continue;
+        }
+        match company.users_of(&post.name).as_slice() {
+            [] => who.push(post.name.clone()),
+            held => who.extend(held.iter().map(|u| u.name.clone())),
+        }
+    }
+    who.join("\n")
+}
+
 /// The reason to announce, when a status change is a task *starting* to wait.
 ///
 /// `None` when it already was: a failed task re-marked failed, or one moving from
@@ -197,6 +269,11 @@ pub(crate) const DRILL: &str = "doctor-drill";
 /// the four artifact variables arrive empty — the shape a `signature` wait has anyway.
 /// What the operator receives is therefore a thinner message than a real one, in
 /// exactly the fields that could do damage.
+///
+/// What it does carry truthfully is the signature the wait is for and the seats that
+/// hold it — [`signing`] and [`signers`] read the company, not the task — which is the
+/// half of the rehearsal worth having: a drill that named nobody would be the operator
+/// checking their notifier and learning nothing about whether it reaches a holder.
 ///
 /// The id it does carry names no task in any plan, so a reply to the drill resolves to
 /// nothing and signs nothing. A workspace that genuinely has a task called
@@ -401,6 +478,10 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
     // the caller because there is no call site that already holds it: every other one is
     // a status write, and a signature wait is not a status write at all.
     let made = Produced::of(org, task);
+    // What this wait can actually be answered with, and by whom. Resolved here for the
+    // reason `made` is: it is a fact about the wait rather than about the status write,
+    // and no call site holds it.
+    let sign = signing(task, status, why);
 
     // Through `sh -c`, like acceptance: what an operator writes here is a shell line —
     // a pipe, a quoted argument, a `||` fallback — not an argv this could split.
@@ -426,6 +507,13 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
         .env("WECODE_TASK_STATUS", status.as_str())
         .env("WECODE_PROJECT", task.project.as_str())
         .env("WECODE_WAITING_FOR", why.as_str())
+        // What the notification may offer, and who may take it up. The word is the one
+        // that goes after `approve` — in a reply, on a button, or on a command line —
+        // and it is empty for a wait no signature answers, so a hook can put the button
+        // only where a thumb decides something. The names are empty when nobody holds
+        // that authority at all, which is the message worth sending in place of it.
+        .env("WECODE_SIGN", sign.map_or("", ActionKind::as_str))
+        .env("WECODE_SIGNERS", signers(company, sign))
         .env("WECODE_COMPANY", &company.name)
         // So a hook can call wecode back — `wecode show "$WECODE_TASK"` — from whatever
         // directory it happens to be started in.
@@ -674,7 +762,7 @@ impl Announced {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use wecode_core::{Budget, Measure, Scope};
+    use wecode_core::{Budget, Measure, Scope, TaskKind};
 
     fn task() -> Task {
         Task::new("t", "p", "cover the cache layer with tests")
@@ -690,9 +778,19 @@ mod tests {
     }
 
     /// A company with the given `[notify]` body, or none at all.
+    ///
+    /// Two seats, because who may sign is a question about a chart rather than about a
+    /// role: `lead` holds the merge signature and has a person in it, `impl` writes code
+    /// and holds nothing. A workspace with one seat cannot tell a notification addressed
+    /// to a holder from one addressed to whoever was nearest.
     fn company(notify: &str) -> Company {
         Company::parse(&format!(
-            "[company]\nname = \"cws\"\n\n[roles.engineer]\nwrite = [\"src/**\"]\n{notify}"
+            "[company]\nname = \"cws\"\n\
+             \n[roles.engineer]\nwrite = [\"src/**\"]\n\
+             \n[roles.holder]\nread = [\"**\"]\napprove = [\"merge\", \"admission\"]\n\
+             \n[[posts]]\nname = \"impl\"\nrole = \"engineer\"\n\
+             \n[[posts]]\nname = \"lead\"\nrole = \"holder\"\n\
+             \n[[users]]\nname = \"Chandra\"\npost = \"lead\"\n{notify}"
         ))
         .expect("the profile parses")
     }
@@ -792,6 +890,110 @@ mod tests {
         assert_eq!(
             written.trim(),
             "t failed failed p cover the cache layer with tests"
+        );
+    }
+
+    #[test]
+    fn what_a_wait_offers_is_what_a_reply_to_it_would_sign() {
+        // The two ends of one question, held together the way the statuses and the
+        // reasons above are: what the notification offers has to be what the channel
+        // behind it accepts, or the button is a refusal with a nicer label.
+        let approval = |t: &Task| signing(t, TaskStatus::NeedsApproval, Waiting::Approval);
+        assert_eq!(approval(&task()), Some(ActionKind::Merge));
+        assert_eq!(
+            approval(&task().of_kind(TaskKind::Design)),
+            Some(ActionKind::Design),
+            "a design is signed off, not merged"
+        );
+        assert_eq!(
+            signing(&task(), TaskStatus::Ready, Waiting::Signature),
+            Some(ActionKind::Admission)
+        );
+
+        // The waits with no yes in them. A hook that put *Approve* on either would be
+        // offering a decision whose only outcome is `nothing is waiting to be signed`.
+        assert_eq!(signing(&task(), TaskStatus::Failed, Waiting::Failed), None);
+        assert_eq!(signing(&task(), TaskStatus::NeedsInput, Waiting::Input), None);
+    }
+
+    #[test]
+    fn who_may_sign_is_read_off_the_seats_that_hold_it() {
+        let c = company("");
+        // The person in the seat, not the seat: a notification is addressed to somebody.
+        assert_eq!(signers(&c, Some(ActionKind::Merge)), "Chandra");
+        // `impl` writes code and signs nothing, so it is not on the list however many
+        // notifications reach whoever sits there.
+        assert!(!signers(&c, Some(ActionKind::Merge)).contains("impl"));
+        // A kind nobody's role names: empty, which is the report rather than a gap.
+        assert_eq!(signers(&c, Some(ActionKind::Design)), "");
+        // Nothing to sign, so nobody to name — the same silence, said once.
+        assert_eq!(signers(&c, None), "");
+    }
+
+    #[test]
+    fn a_seat_with_nobody_in_it_is_named_as_the_seat() {
+        // It still signs, at a terminal, with `--as <post>`. Dropping it would report
+        // "nobody may sign this" about work one command signs, which is worse than the
+        // silence it would be replacing.
+        let vacant = Company::parse(
+            "[company]\nname = \"cws\"\n\n[roles.holder]\nread = [\"**\"]\napprove = [\"merge\"]\n\
+             \n[[posts]]\nname = \"lead\"\nrole = \"holder\"\n",
+        )
+        .expect("the profile parses");
+        assert_eq!(signers(&vacant, Some(ActionKind::Merge)), "lead");
+    }
+
+    #[test]
+    fn a_hook_is_told_what_may_be_signed_and_by_whom() {
+        // The gap this closes: the message said *you are wanted* and carried a button,
+        // and whether a thumb on it decided anything depended on two things the hook
+        // could not see — whether this wait has a signature at all, and whether the
+        // person reading holds it.
+        let out = std::env::temp_dir().join("wecode-notify-authority.txt");
+        let _ = std::fs::remove_file(&out);
+        let c = company(&format!(
+            "\n[notify]\ncommand = \"echo [$WECODE_SIGN] [$WECODE_SIGNERS] > {}\"\n",
+            out.display()
+        ));
+        assert!(
+            on_status_change(
+                &c,
+                &dir(),
+                &task(),
+                TaskStatus::Verifying,
+                TaskStatus::NeedsApproval
+            )
+            .is_empty(),
+            "ran clean"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&out)
+                .expect("the hook wrote its file")
+                .trim(),
+            "[merge] [Chandra]"
+        );
+    }
+
+    #[test]
+    fn a_wait_no_signature_answers_offers_nothing_to_sign() {
+        // Empty, and empty in both: naming who *would* sign a merge beside a failed task
+        // would be the notification answering a question nobody can ask of it.
+        let out = std::env::temp_dir().join("wecode-notify-unsignable.txt");
+        let _ = std::fs::remove_file(&out);
+        let c = company(&format!(
+            "\n[notify]\ncommand = \"echo [$WECODE_SIGN] [$WECODE_SIGNERS] > {}\"\n",
+            out.display()
+        ));
+        assert!(
+            on_status_change(&c, &dir(), &task(), TaskStatus::Running, TaskStatus::Failed)
+                .is_empty(),
+            "ran clean"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&out)
+                .expect("the hook wrote its file")
+                .trim(),
+            "[] []"
         );
     }
 
