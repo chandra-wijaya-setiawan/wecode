@@ -221,6 +221,13 @@ SCOPE
 You may modify only: {{write_scope}}
 Writes outside this list are rejected.
 
+GUIDANCE
+This project keeps its own guidance in the repository you are standing in, at
+.wecode/playbook.toml. Read the section for this kind of work before you start:
+it is what the project already decided about how work like this is done here,
+and nothing else in this envelope repeats it. Do not edit it — it is guidance
+you were handed, and it is outside the scope above on purpose.
+
 CONTEXT FROM COMPLETED WORK
 {{context}}
 
@@ -338,6 +345,11 @@ ACCEPTANCE
 SCOPE
 You may modify only: {{write_scope}}
 Writes outside this list are rejected.
+
+GUIDANCE
+Read .wecode/playbook.toml in the repository you are standing in before you
+start — the section for this kind of work is what this project already decided
+about how it is done here. Do not edit it; it is outside the scope above.
 
 CONTEXT FROM COMPLETED WORK
 {{context}}
@@ -547,6 +559,26 @@ mod tests {
                 c.templates.task_envelope.contains("write_scope"),
                 "{} envelope must state the scope",
                 t.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_envelope_points_a_worker_at_the_guidance_its_playbook_wrote() {
+        // The playbook is committed in the tree the worker lands in, and nothing else
+        // in the envelope says what it says — so a worker that is never told the file
+        // exists works to guidance it has not read. Asserted against the constant
+        // rather than the string, so moving the file cannot leave every shipped
+        // envelope pointing at where it used to be.
+        for t in all() {
+            let c = company_of(t);
+            assert!(
+                c.templates
+                    .task_envelope
+                    .contains(crate::playbook::PLAYBOOK_PATH),
+                "{} envelope must name {}",
+                t.name,
+                crate::playbook::PLAYBOOK_PATH
             );
         }
     }

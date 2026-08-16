@@ -282,6 +282,40 @@ fn the_map_reaches_a_remote_agent_as_an_artifact() {
 }
 
 #[test]
+fn a_worker_is_pointed_at_the_guidance_its_own_playbook_wrote() {
+    // The one thing the project decided about *how* work like this is done here, and
+    // the envelope was the one place it never appeared: objective, title, acceptance
+    // and scope say what the work is, and none of them says how this repository wants
+    // it done. The file is committed in the tree the worker lands in, so what was
+    // missing was never the guidance — it was any reason to know it was there.
+    let (org, _) = with_agent("handoff-guidance", "true");
+    a_task(&org, "t", "src/**", "true");
+
+    org.run(&["start", "t"])
+        .assert_ok("start")
+        .assert_contains("GUIDANCE")
+        .assert_contains(".wecode/playbook.toml")
+        // Handed over to be read, not to be rewritten: a worker that could edit the
+        // guidance it was given is not governed by it.
+        .assert_contains("Do not edit it");
+
+    // And it is actually there to be read. A pointer into a tree that does not hold
+    // the file would be worse than saying nothing — the worker spends a budget
+    // looking, finds nothing, and concludes the project wrote no guidance at all.
+    let guidance = org
+        .path("config/run")
+        .join("wecode-e2e-handoff-guidance")
+        .join("t")
+        .join(".wecode/playbook.toml");
+    let text = std::fs::read_to_string(&guidance)
+        .unwrap_or_else(|e| panic!("{}: {e}", guidance.display()));
+    assert!(
+        text.contains("Uses a worktree, like most work here."),
+        "the chore guidance is what this task's worker would read:\n{text}"
+    );
+}
+
+#[test]
 fn a_task_with_no_predecessors_says_so_plainly() {
     let (org, _) = with_agent("handoff-none", "true");
     a_task(&org, "t", "src/**", "true");
