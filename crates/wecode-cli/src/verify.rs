@@ -1,9 +1,15 @@
 //! Judging finished work from what it actually did.
 //!
-//! Two questions, both answered without asking the agent:
+//! Three questions, all answered without asking the agent:
 //!
 //! - **Did it stay in scope?** From the branch's own diff, not from a self-report — and
 //!   from all of it, including the attempts already committed on it.
+//! - **Did it do anything?** A task that declared a write scope and left no diff did not
+//!   do its work. Acceptance cannot catch this and never could: the commands a task is
+//!   held to are the repository's own, and they passed on the tree before it started.
+//!   An agent that ran out of budget, gave up, or reported success it had not earned
+//!   therefore came back green — a run that changed nothing was judged as one that
+//!   delivered, and passing is what merges.
 //! - **Does it pass?** By running the acceptance commands here, not by being told.
 //!
 //! That ordering is the design's own rule — the diff always wins. An agent's
@@ -20,6 +26,7 @@
 //! too late, and without it a denial was a sentence in the ledger about a file already
 //! sitting on the branch.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -73,6 +80,19 @@ impl Check {
 pub(crate) struct Changed {
     dir: PathBuf,
     paths: Vec<String>,
+    /// Whether the scope this diff was judged against asked for any writes at all.
+    ///
+    /// Recorded by [`violations`], because that call is the only moment both halves are
+    /// in one hand — the same reason `dir` travels here. A diff on its own cannot say
+    /// whether being empty is a failure: for a spike, which is the one kind admitted
+    /// without a write scope, an empty diff is the declared outcome; for every other
+    /// kind it is the work not done.
+    ///
+    /// `false` until the scope has been consulted, so a diff nobody checked a scope
+    /// against makes no claim about what was owed. That is the honest default rather
+    /// than a lenient one: such a verdict has already skipped the scope half entirely,
+    /// and inventing a second finding out of the half that did not run would be worse.
+    owed: Cell<bool>,
 }
 
 impl Changed {
@@ -86,6 +106,15 @@ impl Changed {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.paths.is_empty()
+    }
+
+    /// The task said it would change something and changed nothing.
+    ///
+    /// Not the same question as `is_empty`, and the difference is the whole of it: an
+    /// empty diff is a verdict about the work only once something is known to have been
+    /// expected of it.
+    pub(crate) fn delivered_nothing(&self) -> bool {
+        self.owed.get() && self.paths.is_empty()
     }
 }
 
@@ -118,9 +147,20 @@ impl Verdict {
         self.checks.iter().filter(|c| c.missing()).collect()
     }
 
+    /// Everything that had to hold, including the one an agent can satisfy by doing
+    /// nothing at all.
+    ///
+    /// A task that declared a write scope and produced no diff fails here whatever its
+    /// acceptance says, and the acceptance saying so is the point: those commands are
+    /// the repository's own and were green before the run started, so a green board
+    /// beside an empty diff was the *expected* reading of a run that did nothing. It is
+    /// the quietest way for work to be marked delivered — quieter than a failing check,
+    /// which at least says something is wrong — and `passed` is what sends a branch to
+    /// `needs-approval` and from there to a merge.
     pub(crate) fn passed(&self) -> bool {
         self.violations.is_empty()
             && self.unjudgeable.is_empty()
+            && !self.changed.delivered_nothing()
             && !self.checks.is_empty()
             && self.checks.iter().all(Check::passed)
     }
@@ -174,6 +214,7 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Changed, git::GitError>
     Ok(Changed {
         dir: dir.to_path_buf(),
         paths: all,
+        owed: Cell::new(false),
     })
 }
 
@@ -182,6 +223,13 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Changed, git::GitError>
 /// An empty write scope means the task claimed it would change nothing, so *any*
 /// change is a violation — not a free pass. A spike is the kind that legitimately
 /// has no scope, and a spike that edited files did something it did not declare.
+///
+/// The mirror of that reading is recorded here rather than returned: a scope that
+/// *does* name paths is a task claiming it will change something, and a diff judged
+/// against one is owed a change. Not a violation — nothing was written where it was
+/// forbidden — so it does not belong in this list, which is the governance channel and
+/// files each entry against the task as a refused write. It belongs on the diff, where
+/// [`Verdict::passed`] reads it, and this is the one call that can put it there.
 ///
 /// Naming a refused write and stopping it from landing are one act, which is why they
 /// are one function. Sanctioned means *recoverable*, and until now nothing recovered:
@@ -202,6 +250,7 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Changed, git::GitError>
 /// the task by the time anything is committed, and the ledger is the half that must not
 /// be lost.
 pub(crate) fn violations(changed: &Changed, scope: &Scope) -> Vec<String> {
+    changed.owed.set(!scope.write.is_empty());
     let refused: Vec<String> = changed
         .paths()
         .iter()
@@ -297,7 +346,8 @@ pub(crate) fn verdict(
     ));
     if v.changed.is_empty() {
         // Not neutral: a task that declared a write scope and changed nothing did
-        // not do its work, whatever its acceptance says.
+        // not do its work, whatever its acceptance says. Said twice on purpose —
+        // here as the diff, and below as the verdict it now carries.
         out.push_str("  nothing changed\n");
     }
     for path in &v.changed {
@@ -346,6 +396,15 @@ pub(crate) fn verdict(
             _ => {}
         }
     } else {
+        if v.changed.delivered_nothing() {
+            // The green checks above are about to be read as a pass by whoever is
+            // scanning, so this says which way they point: they ran against a tree the
+            // task never touched, and they would have passed before it started.
+            out.push_str(
+                "  ✗ nothing changed — this task declared a write scope and produced no diff\n\
+                 \x20   the acceptance above ran against a tree the work never touched\n",
+            );
+        }
         if !v.violations.is_empty() {
             out.push_str(&format!(
                 "  ✗ {} write{} outside scope — recorded against this task\n",
@@ -372,7 +431,7 @@ pub(crate) fn verdict(
                 missing.len()
             ));
         }
-        if v.checks.is_empty() && v.violations.is_empty() {
+        if v.checks.is_empty() && v.violations.is_empty() && !v.changed.delivered_nothing() {
             out.push_str("  ✗ nothing to judge by\n");
         }
     }
@@ -400,7 +459,19 @@ mod tests {
         Changed {
             dir: PathBuf::new(),
             paths: paths(list),
+            owed: Cell::new(false),
         }
+    }
+
+    /// A verdict assembled the way the `verify` command assembles one: acceptance, then
+    /// the diff, then the scope read against it. The order is the caller's and it is
+    /// part of the answer — the scope is what tells an empty diff whether being empty
+    /// is the declared outcome or the work not done.
+    fn judged(measures: &[Measure], changed: Changed, scope: &Scope) -> Verdict {
+        let mut v = ran(&std::env::temp_dir(), measures);
+        v.changed = changed;
+        v.violations = violations(&v.changed, scope);
+        v
     }
 
     /// Acceptance with no shared cache — what a project that declares none gets.
@@ -776,6 +847,104 @@ mod tests {
         );
         assert!(v.passed());
         assert!(v.unrunnable().is_empty());
+    }
+
+    // ------------------------------------------------- what it actually did ------
+
+    #[test]
+    fn a_run_that_changed_nothing_does_not_pass_on_its_acceptance_alone() {
+        // The whole point. Acceptance is the repository's own suite, so it was green
+        // before the agent started and is green after one that did nothing — an agent
+        // that ran out of budget, or gave up, or reported a success it never earned,
+        // came back with a clean board and an empty diff and was sent to the signature
+        // queue as delivered work.
+        let v = judged(&[cmd("true")], touched(&[]), &scope(&["src/**"]));
+
+        assert!(v.checks.iter().all(Check::passed), "{:?}", v.checks);
+        assert!(v.violations.is_empty(), "nothing was written anywhere");
+        assert!(!v.passed(), "an empty diff is not a delivery");
+    }
+
+    #[test]
+    fn an_agent_that_touched_a_real_worktree_and_left_it_alone_is_caught_the_same_way() {
+        // The same finding read off git rather than off a fabricated diff, and in the
+        // order the `verify` command assembles it: acceptance first, then the diff,
+        // then the scope. The acceptance here is one that genuinely passes on an
+        // untouched tree — `test -f README.md` — because that is the shape of the real
+        // failure. A repository's own suite is green before its agents start.
+        let dir = worktree("did-nothing");
+        let mut v = ran(&dir, &[cmd("test -f README.md")]);
+        v.changed = changed(&dir, &TaskId::new("t1")).unwrap();
+        v.violations = violations(&v.changed, &scope(&["src/**"]));
+
+        assert!(v.checks[0].passed(), "{:?}", v.checks);
+        assert!(v.changed.is_empty(), "{:?}", v.changed);
+        assert!(
+            !v.passed(),
+            "green checks over an untouched tree are not a delivery"
+        );
+    }
+
+    #[test]
+    fn the_same_task_passes_once_it_has_actually_changed_something() {
+        // The other half, or the check above would be satisfied by never passing.
+        let v = judged(&[cmd("true")], touched(&["src/a.rs"]), &scope(&["src/**"]));
+        assert!(v.passed(), "{v:?}");
+    }
+
+    #[test]
+    fn a_spike_that_declared_no_writes_is_not_failed_for_changing_nothing() {
+        // A spike is time-boxed investigation: it is the one kind admitted without a
+        // write scope, because what it owes is an answer rather than a diff. Reading
+        // every empty diff as a failure would make it the one kind that can never pass
+        // — any change is already a violation, so both outcomes would be red.
+        let v = judged(&[cmd("true")], touched(&[]), &Scope::default());
+        assert!(v.passed(), "{v:?}");
+    }
+
+    #[test]
+    fn work_the_scope_refused_still_counts_as_having_been_done() {
+        // Two findings, not one: the task changed something and it changed the wrong
+        // thing. Folding them together would report a scope violation as an idle run.
+        let v = judged(
+            &[cmd("true")],
+            touched(&["Cargo.toml"]),
+            &scope(&["src/**"]),
+        );
+        assert!(!v.passed());
+        assert!(!v.changed.delivered_nothing(), "it did write something");
+        assert_eq!(v.violations, ["Cargo.toml"]);
+    }
+
+    #[test]
+    fn a_diff_no_scope_was_read_against_makes_no_claim_about_what_was_owed() {
+        // `owed` is recorded by the scope check, so until that has run nothing knows a
+        // change was expected. Such a verdict has already skipped the scope half — the
+        // honest answer is silence here rather than a second finding invented out of a
+        // question nobody asked.
+        assert!(!touched(&[]).delivered_nothing());
+    }
+
+    #[test]
+    fn the_verdict_says_which_way_the_green_checks_point() {
+        // A passing check beside an empty diff is the reading this exists to correct,
+        // and the operator sees the render before they see the status word.
+        let task = Task::new("t1", "caching", "trim the cache").scoped(scope(&["src/**"]));
+        let v = judged(&[cmd("true")], touched(&[]), &task.scope);
+        let out = verdict(
+            &task,
+            &task.id,
+            Path::new("/tmp/t1"),
+            &v,
+            TaskStatus::Failed,
+        );
+
+        assert!(out.contains("nothing changed"), "{out}");
+        assert!(out.contains("produced no diff"), "{out}");
+        assert!(!out.contains("✓ passed"), "{out}");
+        // Not this: there were checks and they ran. Saying both would send the reader
+        // looking for a missing acceptance command that is right there above it.
+        assert!(!out.contains("nothing to judge by"), "{out}");
     }
 
     #[test]
