@@ -9,7 +9,10 @@
 //!   held to are the repository's own, and they passed on the tree before it started.
 //!   An agent that ran out of budget, gave up, or reported success it had not earned
 //!   therefore came back green — a run that changed nothing was judged as one that
-//!   delivered, and passing is what merges.
+//!   delivered, and passing is what merges. A main task with steps beneath it is the
+//!   one shape where an empty diff of its own is the plan working: its subtasks share
+//!   the tree it owns and commit on its branch, so the work it is owed is standing
+//!   there under their names rather than missing.
 //! - **Does it pass?** By running the acceptance commands here, not by being told.
 //!
 //! That ordering is the design's own rule — the diff always wins. An agent's
@@ -80,6 +83,18 @@ impl Check {
 pub(crate) struct Changed {
     dir: PathBuf,
     paths: Vec<String>,
+    /// What this task's steps delivered on the branch it owns.
+    ///
+    /// Kept apart from `paths` rather than folded into it, because these are not this
+    /// task's writes to answer for in either direction. Not against its scope: a step
+    /// declares its own, and a design step writing `docs/**` beneath a parent scoped to
+    /// `crates/**` is the template doing exactly what it says — charging it here would
+    /// fail the parent for its children's licence. And not as its delivery either,
+    /// which is why the two lists are counted separately in the render.
+    ///
+    /// What they do settle is the one question an empty diff cannot answer on its own:
+    /// whether the work this task was owed is on the branch. It is, under their names.
+    delegated: Vec<String>,
     /// Whether the scope this diff was judged against asked for any writes at all.
     ///
     /// Recorded by [`violations`], because that call is the only moment both halves are
@@ -108,13 +123,26 @@ impl Changed {
         self.paths.is_empty()
     }
 
-    /// The task said it would change something and changed nothing.
+    /// What this task's steps put on its branch — see [`Changed::delegated`].
+    pub(crate) fn delegated(&self) -> &[String] {
+        &self.delegated
+    }
+
+    /// The task said it would change something and nothing was done about it.
     ///
     /// Not the same question as `is_empty`, and the difference is the whole of it: an
     /// empty diff is a verdict about the work only once something is known to have been
-    /// expected of it.
+    /// expected of it — and only once nothing else was answering for it.
+    ///
+    /// A main task with steps is that second case, and it is not a loophole. It is what
+    /// decomposition *is*: the plan counts leaves, one worktree is cut per main task,
+    /// and its subtasks commit their work on its branch. A parent that wrote nothing of
+    /// its own has not gone quiet — its steps did the writing, each judged against the
+    /// scope it declared as it finished. Failing the parent for that fails it for the
+    /// shape the playbook asked for, and it fails at the end, after every step has
+    /// already passed and the only thing left was to land them.
     pub(crate) fn delivered_nothing(&self) -> bool {
-        self.owed.get() && self.paths.is_empty()
+        self.owed.get() && self.paths.is_empty() && self.delegated.is_empty()
     }
 }
 
@@ -194,28 +222,89 @@ fn is_worker_area(path: &str) -> bool {
 /// against its own scope; and the base carries the predecessor work this task was cut
 /// from, which is not this task's to answer for.
 ///
+/// The steps of a task that owns the tree are read too, into a second list — see
+/// [`Changed::delegated`] and [`a_step_here`]. Not this task's diff, and it never joins
+/// it; it is only the answer to whether a parent's own empty diff means the work is
+/// missing or means the work is theirs.
+///
 /// The window is [`git::attempts_on`]'s — the newest twenty commits wecode made here —
 /// so a branch carrying more than that behind the current attempt is read from the last
 /// twenty. That is the same history `wecode show` and the handoff already read, and
 /// widening it belongs there rather than in one caller's copy of the question.
 pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Changed, git::GitError> {
     let mut all = git::changed_files(dir)?;
+    let mut delegated = Vec::new();
     let mine = format!("{id}: attempt");
+    let owns = owns_the_tree(dir, id);
     for (sha, subject) in git::attempts_on(dir)? {
-        if subject.starts_with(&mine) {
-            // The file list is the whole of what a scope check wants. The diff body is
-            // the handoff's business, so it is asked for at zero bytes and dropped.
-            let (files, _) = git::commit_summary(dir, &sha, 0)?;
+        let ours = subject.starts_with(&mine);
+        // Its own attempts are its own diff first, whatever else is true of the
+        // branch: no task is one of its own steps.
+        let theirs = !ours && owns && a_step_here(dir, &subject);
+        if !ours && !theirs {
+            continue;
+        }
+        // The file list is the whole of what a scope check wants. The diff body is
+        // the handoff's business, so it is asked for at zero bytes and dropped.
+        let (files, _) = git::commit_summary(dir, &sha, 0)?;
+        if theirs {
+            delegated.extend(files);
+        } else {
             all.extend(files);
         }
     }
     all.sort();
     all.dedup();
+    delegated.sort();
+    delegated.dedup();
+    // A file a step delivered and this task then edited is this task's own work, and
+    // saying so twice would report one path as both.
+    delegated.retain(|p| !all.contains(p));
     Ok(Changed {
         dir: dir.to_path_buf(),
         paths: all,
+        delegated,
         owed: Cell::new(false),
     })
+}
+
+/// Whether the tree this verdict is standing in is the one this task owns.
+///
+/// A main task's worktree is named after it — [`crate::work::worktree_for`] — and its
+/// subtasks share it rather than opening a second checkout. So the directory name
+/// answers, from inside a verdict, the question the plan would otherwise have to be
+/// opened for: *am I the top of this tree, or one of the steps in it?* Only the top is
+/// answered for by the attempts around it. A step's neighbours in the log are its
+/// siblings, and a sibling's work excuses nothing — that task owes its own diff.
+///
+/// It follows that a step which is itself a parent is still judged on its own diff:
+/// from in here its children and its siblings are the same shape, and the relation that
+/// tells them apart is in the plan. The tree's owner is the one this can settle without
+/// it, and it is the one that reaches a merge.
+fn owns_the_tree(dir: &Path, id: &TaskId) -> bool {
+    dir.file_name().and_then(|n| n.to_str()) == Some(id.as_str())
+}
+
+/// Whether this attempt belongs to a task working *inside* this tree rather than to one
+/// the tree was cut from.
+///
+/// A subtask has no branch of its own — that is the rule `merge` is built on — so a
+/// wecode attempt with no `wecode/<id>` standing behind it was committed here, by a step
+/// sharing this worktree. Asked of the branch and not of the id, because a step is named
+/// by whoever created it: `--expand` spells one `<parent>-<step>` and `task add --parent`
+/// takes any id at all, and a naming convention is not a relation.
+///
+/// The branch is also what keeps the base out, which is the half that has to be right.
+/// A branch cut from a predecessor's, or from an integration branch carrying merges,
+/// brings that work's attempts into this log with exactly the shape of a step's — and
+/// every task that owned a tree has a `wecode/<id>` that outlives it, kept deliberately
+/// through teardown and through the merge. That branch is what says the commits came
+/// from behind this task rather than from below it.
+fn a_step_here(dir: &Path, subject: &str) -> bool {
+    match subject.split_once(": attempt") {
+        Some((id, _)) => !git::branch_exists(dir, &crate::work::branch_for(&TaskId::new(id))),
+        None => false,
+    }
 }
 
 /// Changed paths the scope does not permit — named, and kept out of the commit.
@@ -348,7 +437,15 @@ pub(crate) fn verdict(
         // Not neutral: a task that declared a write scope and changed nothing did
         // not do its work, whatever its acceptance says. Said twice on purpose —
         // here as the diff, and below as the verdict it now carries.
-        out.push_str("  nothing changed\n");
+        //
+        // Unless its steps did the writing, which is the one reading of an empty diff
+        // that is not a finding — and the reader has to be told which of the two they
+        // are looking at before they reach the verdict.
+        out.push_str(if v.changed.delegated().is_empty() {
+            "  nothing changed\n"
+        } else {
+            "  nothing of its own — its steps did the writing\n"
+        });
     }
     for path in &v.changed {
         let bad = v.violations.contains(path);
@@ -358,6 +455,21 @@ pub(crate) fn verdict(
             path,
             if bad { "   outside scope" } else { "" }
         ));
+    }
+
+    let steps = v.changed.delegated();
+    if !steps.is_empty() {
+        // Listed apart from the diff and marked apart from it, because neither tick
+        // above would be true of these: they are not this task's writes, and this
+        // task's scope is not what they were held to.
+        out.push_str(&format!(
+            "\nits steps — {} file{} already on this branch\n",
+            steps.len(),
+            if steps.len() == 1 { "" } else { "s" }
+        ));
+        for path in steps {
+            out.push_str(&format!("  · {path}\n"));
+        }
     }
 
     if !v.checks.is_empty() {
@@ -459,6 +571,7 @@ mod tests {
         Changed {
             dir: PathBuf::new(),
             paths: paths(list),
+            delegated: Vec::new(),
             owed: Cell::new(false),
         }
     }
@@ -493,27 +606,47 @@ mod tests {
         let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
         let dir = Path::new(&base).join(format!("wecode-verify-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        init(&dir)
+    }
 
-        let run = |args: &[&str]| {
-            let ok = Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(args)
-                .status()
-                .unwrap()
-                .success();
-            assert!(ok, "git {args:?}");
-        };
-        run(&["init", "-q", "-b", "main"]);
-        run(&["config", "user.email", "operator@localhost"]);
-        run(&["config", "user.name", "operator"]);
+    /// The tree wecode cuts for a main task: a directory named after the task that owns
+    /// it, which is how `work::worktree_for` names one and how a verdict standing in it
+    /// knows whether the attempts around it are its steps' or the base's.
+    fn owned_worktree(name: &str, owner: &str) -> std::path::PathBuf {
+        let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+        let org = Path::new(&base).join(format!("wecode-verify-{name}"));
+        let _ = std::fs::remove_dir_all(&org);
+        init(&org.join(owner))
+    }
+
+    fn init(dir: &Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        git_here(dir, &["init", "-q", "-b", "main"]);
+        git_here(dir, &["config", "user.email", "operator@localhost"]);
+        git_here(dir, &["config", "user.name", "operator"]);
         // Base history, by a hand other than wecode's: what the branch was cut from is
         // never the task's answer to give.
-        write(&dir, "README.md", "the project\n");
-        run(&["add", "-A"]);
-        run(&["commit", "-qm", "the base this branch was cut from"]);
-        dir
+        write(dir, "README.md", "the project\n");
+        git_here(dir, &["add", "-A"]);
+        git_here(dir, &["commit", "-qm", "the base this branch was cut from"]);
+        dir.to_path_buf()
+    }
+
+    fn git_here(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    /// The branch a task that owned a tree leaves behind it. Kept after a merge and
+    /// after teardown, which is what makes its absence mean *this task never had one*.
+    fn branch_of(dir: &Path, id: &str) {
+        git_here(dir, &["branch", &crate::work::branch_for(&TaskId::new(id))]);
     }
 
     fn write(dir: &Path, path: &str, body: &str) {
@@ -945,6 +1078,117 @@ mod tests {
         // Not this: there were checks and they ran. Saying both would send the reader
         // looking for a missing acceptance command that is right there above it.
         assert!(!out.contains("nothing to judge by"), "{out}");
+    }
+
+    // --------------------------------------------- work that belongs to steps ------
+
+    #[test]
+    fn a_parent_is_not_failed_for_work_that_belongs_to_its_steps() {
+        // The shape the playbook asks for, failed at the last moment for having it. A
+        // main task with steps owns the worktree and the branch; the steps commit their
+        // work there and each is judged as it finishes. The parent then writes nothing
+        // of its own — correctly, there is nothing left of its work to do — and the
+        // empty-diff rule read that as an agent that gave up. It failed after every
+        // step had passed, on the one task that can land them.
+        let dir = owned_worktree("parent-steps", "t");
+        attempt(&dir, "t-one", 1, &[("src/one.rs", "fn one() {}\n")]);
+        attempt(&dir, "t-two", 1, &[("src/two.rs", "fn two() {}\n")]);
+        // The reset before the parent's own run, which is what leaves its diff empty.
+        retry(&dir);
+
+        let mut v = ran(&dir, &[cmd("test -f README.md")]);
+        v.changed = changed(&dir, &TaskId::new("t")).unwrap();
+        v.violations = violations(&v.changed, &scope(&["src/**"]));
+
+        assert!(v.changed.is_empty(), "none of it is the parent's: {v:?}");
+        assert_eq!(v.changed.delegated(), ["src/one.rs", "src/two.rs"]);
+        assert!(!v.changed.delivered_nothing(), "{v:?}");
+        assert!(v.passed(), "{v:?}");
+    }
+
+    #[test]
+    fn a_step_writing_where_its_parent_may_not_is_not_the_parents_violation() {
+        // Why the steps' work is held apart from the diff rather than folded into it. A
+        // step declares its own scope — a design step writes `docs/**` beneath a parent
+        // scoped to `src/**`, which is the template doing exactly what it says — so
+        // counting those paths as the parent's would fail it for its children's licence
+        // and record refused writes against a task that made none.
+        let dir = owned_worktree("step-scope", "t");
+        attempt(&dir, "t-design", 1, &[("docs/design/t.md", "the decision\n")]);
+        retry(&dir);
+
+        let c = changed(&dir, &TaskId::new("t")).unwrap();
+        assert!(violations(&c, &scope(&["src/**"])).is_empty(), "{c:?}");
+        assert!(!c.delivered_nothing(), "{c:?}");
+    }
+
+    #[test]
+    fn a_parent_whose_steps_have_not_written_anything_yet_still_fails() {
+        // The other half: nothing beneath it either. An empty branch is the failure the
+        // rule exists for whatever the task's shape is, and a parent is not exempt by
+        // being one — it is excused by work standing on its branch, and there is none.
+        let dir = owned_worktree("parent-empty", "t");
+        let c = changed(&dir, &TaskId::new("t")).unwrap();
+        violations(&c, &scope(&["src/**"]));
+        assert!(c.delegated().is_empty(), "{c:?}");
+        assert!(c.delivered_nothing(), "{c:?}");
+    }
+
+    #[test]
+    fn work_the_branch_was_cut_from_is_not_a_parents_steps() {
+        // The case that decides how a step is recognised. A branch cut from a
+        // predecessor's — or from an integration branch carrying merges — brings that
+        // work's attempts into this log looking exactly like a step's. What separates
+        // them is that a task which owned a tree leaves a `wecode/<id>` behind it and a
+        // subtask never had one, so the base cannot excuse a task that did nothing.
+        let dir = owned_worktree("base-attempts", "t");
+        attempt(&dir, "pred", 1, &[("src/p.rs", "fn p() {}\n")]);
+        branch_of(&dir, "pred");
+        retry(&dir);
+
+        let c = changed(&dir, &TaskId::new("t")).unwrap();
+        assert!(c.is_empty(), "{c:?}");
+        assert!(c.delegated().is_empty(), "the predecessor's, not a step's");
+        violations(&c, &scope(&["src/**"]));
+        assert!(c.delivered_nothing(), "{c:?}");
+    }
+
+    #[test]
+    fn a_step_is_not_excused_by_what_its_siblings_delivered() {
+        // Only the task the tree is named after is answered for by the attempts around
+        // it. A step's neighbours in the log are its siblings, already judged on their
+        // own scopes, and a task that owes a diff is not relieved of it by standing
+        // next to one.
+        let dir = owned_worktree("sibling-empty", "t");
+        attempt(&dir, "t-one", 1, &[("src/one.rs", "fn one() {}\n")]);
+        retry(&dir);
+
+        let c = changed(&dir, &TaskId::new("t-two")).unwrap();
+        assert!(c.delegated().is_empty(), "{c:?}");
+        violations(&c, &scope(&["src/**"]));
+        assert!(c.delivered_nothing(), "{c:?}");
+    }
+
+    #[test]
+    fn the_verdict_names_the_work_its_steps_left_on_the_branch() {
+        // The reader reaches the diff before the verdict, and "0 files / nothing
+        // changed" over a passing parent is the sentence they would have to reconcile
+        // on their own. What the branch carries is said where the missing diff would
+        // have been read.
+        let dir = owned_worktree("parent-render", "t");
+        attempt(&dir, "t-one", 1, &[("src/one.rs", "fn one() {}\n")]);
+        retry(&dir);
+
+        let task = Task::new("t", "caching", "the cache layer").scoped(scope(&["src/**"]));
+        let mut v = ran(&dir, &[cmd("true")]);
+        v.changed = changed(&dir, &TaskId::new("t")).unwrap();
+        v.violations = violations(&v.changed, &task.scope);
+        let out = verdict(&task, &task.id, &dir, &v, TaskStatus::NeedsApproval);
+
+        assert!(out.contains("its steps did the writing"), "{out}");
+        assert!(out.contains("· src/one.rs"), "{out}");
+        assert!(!out.contains("nothing changed"), "{out}");
+        assert!(out.contains("✓ passed"), "{out}");
     }
 
     #[test]
