@@ -155,6 +155,34 @@ pub(crate) fn ledger_index(audit: &[AuditLine]) -> Ledger {
     out
 }
 
+/// The newest records about one subject, newest first — what has just happened here, as
+/// against what the plan says is meant to. A project's own records and its tasks' are
+/// one set, every task record naming the project it belongs to; an empty name matches
+/// everything, so naming neither is the whole workspace.
+pub(crate) fn newest<'a>(
+    audit: &'a [AuditLine],
+    project: &str,
+    task: &str,
+    take: usize,
+) -> Vec<&'a AuditLine> {
+    audit
+        .iter()
+        .rev()
+        .filter(|l| (project.is_empty() || l.project == project) && (task.is_empty() || l.task == task))
+        .take(take)
+        .collect()
+}
+
+/// An age in the largest unit that still says something.
+pub(crate) fn ago(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
 /// Rolled-up counts for a task and its subtasks.
 fn task_totals(plan: &Plan, id: &TaskId, l: &Ledger) -> Counts {
     let mut total = l.by_task.get(id.as_str()).copied().unwrap_or_default();
@@ -1128,14 +1156,10 @@ mod tests {
     }
 
     #[test]
-    fn a_focused_project_reaches_past_its_root_tasks() {
+    fn a_focused_view_reaches_past_the_children_of_its_subject() {
+        // `t3` is a grandchild of `t1`: L1 used to end at root tasks and L2 at children.
         let out = focus(&nested(), &[], "caching", &repos(), &no_gates());
         assert!(out.contains(&at_depth("feat t3", 3)), "{out}");
-    }
-
-    #[test]
-    fn a_focused_task_reaches_past_its_own_children() {
-        // `t3` is a grandchild of `t1`, and L2 used to end at children.
         let out = focus(&nested(), &[], "t1", &repos(), &no_gates());
         assert!(out.contains(&at_depth("feat t2", 1)), "{out}");
         assert!(out.contains(&at_depth("feat t3", 2)), "{out}");
@@ -1168,21 +1192,14 @@ mod tests {
     }
 
     #[test]
-    fn the_standing_counts_leaves_so_a_breakdown_is_not_counted_twice() {
-        // `nested` is t1 › t2 › t3, which is one piece of work broken down twice — not
-        // three. Counting the parents would put a project at 1/3 for finishing all of it.
+    fn the_standing_counts_leaves_and_belongs_to_the_project_row_alone() {
+        // `nested` is t1 › t2 › t3, one piece of work broken down twice — not three.
+        // Counting the parents would put a project at 1/3 for finishing all of it. On a
+        // task row the fraction would restate the status — `✓ done 1/1` — and a parent's
+        // breakdown is the rows directly beneath it, indented, already on the screen.
         let mut p = nested();
         finish(&mut p, "t3");
         assert_eq!(standing(&p, &ProjectId::new("caching")), Some((1, 1)));
-    }
-
-    #[test]
-    fn a_task_row_carries_its_word_alone() {
-        // Why the standing stops at the project row: on a leaf it would restate the
-        // status — `✓ done 1/1` — and a parent's breakdown is the rows directly beneath
-        // it, indented, already on the screen.
-        let mut p = nested();
-        finish(&mut p, "t3");
         for id in ["t1", "t3"] {
             let cell = task_status(p.task(&TaskId::new(id)).unwrap());
             assert!(!cell.contains('/'), "{id}: {cell}");
@@ -1193,7 +1210,10 @@ mod tests {
     fn the_status_column_fits_every_word_a_row_can_carry() {
         // Holds `STATUS_W` to the vocabulary rather than to today's longest word, so a
         // new status arrives as a failing test instead of as a board that stopped
-        // lining up.
+        // lining up. Two names are shortened to fit; the rest are what the CLI accepts.
+        assert_eq!(status_word(TaskStatus::NeedsApproval), "approval");
+        assert_eq!(status_word(TaskStatus::NeedsInput), "input");
+        assert_eq!(status_word(TaskStatus::Waiting), "waiting");
         for s in ProjectStatus::all() {
             let cell = format!("{} {} 99/99", s.mark(), s.as_str());
             assert!(cell.chars().count() <= STATUS_W, "{cell:?}");
@@ -1222,51 +1242,37 @@ mod tests {
     }
 
     #[test]
-    fn an_alarm_on_a_task_turns_its_project_red_too() {
-        let audit = vec![line("caching", "t1", "write", "x.pem", "alarm")];
+    fn an_incident_rolls_up_to_the_project_and_says_which_it_was() {
+        // An alarm is red and a denial amber, at both levels. Health is only a colour
+        // now, so the words for a denial have to be in the cell it colours.
         let p = plan();
-        let l = ledger_index(&audit);
+        let l = ledger_index(&[line("caching", "t1", "write", "x.pem", "alarm")]);
         assert_eq!(task_of(&p, &l, "t1").health, Health::Red);
         assert_eq!(vitals(&p, &l).health, Health::Red, "an alarm must roll up");
-    }
 
-    #[test]
-    fn a_denial_is_amber_not_red_and_names_itself() {
-        let audit = vec![line("caching", "t1", "write", "other.rs", "deny")];
-        let p = plan();
-        let l = ledger_index(&audit);
+        let l = ledger_index(&[line("caching", "t1", "write", "other.rs", "deny")]);
         let v = task_of(&p, &l, "t1");
         assert_eq!(v.health, Health::Amber);
-        // Health is only a colour now, so the denial must appear in words too.
         assert!(v.needs.iter().any(|n| n == "1 denied"), "{:?}", v.needs);
     }
 
     #[test]
-    fn task_spend_rolls_up_to_the_project_exactly_once() {
-        // The double-count trap: the record names both a project and a task.
-        let audit = vec![line("caching", "t1", "spend", "400t/10s", "allow")];
+    fn spend_reaches_the_project_from_every_level_and_is_counted_once() {
+        // The double-count trap: a task's record names its project too. A project's own
+        // records are its alone, and a subtask's reach both the task above it and the
+        // project.
         let p = plan();
-        let l = ledger_index(&audit);
+        let l = ledger_index(&[line("caching", "t1", "spend", "400t/10s", "allow")]);
         assert_eq!(vitals(&p, &l).spent, 400, "counted once, not twice");
-    }
 
-    #[test]
-    fn project_level_spend_is_counted_without_a_task() {
-        let audit = vec![line("caching", "", "spend", "150t/1s", "allow")];
-        let p = plan();
-        let l = ledger_index(&audit);
+        let l = ledger_index(&[line("caching", "", "spend", "150t/1s", "allow")]);
         assert_eq!(vitals(&p, &l).spent, 150);
-        // ...and it does not leak onto the task.
-        assert_eq!(task_of(&p, &l, "t1").spent, 0);
-    }
+        assert_eq!(task_of(&p, &l, "t1").spent, 0, "and it does not leak onto the task");
 
-    #[test]
-    fn a_subtasks_spend_reaches_its_parent_task_and_the_project() {
         let mut p = plan();
         p.add_task(good_task("t1a", "the inner half", "crates/cache/inner/**").under("t1"))
             .unwrap();
-        let audit = vec![line("caching", "t1a", "spend", "700t/2s", "allow")];
-        let l = ledger_index(&audit);
+        let l = ledger_index(&[line("caching", "t1a", "spend", "700t/2s", "allow")]);
         assert_eq!(task_of(&p, &l, "t1").spent, 700, "a parent sees its subtask's spend");
         assert_eq!(vitals(&p, &l).spent, 700);
     }
@@ -1284,24 +1290,20 @@ mod tests {
     }
 
     #[test]
-    fn a_projects_design_gate_reaches_its_rows() {
-        // The board's defect count must agree with `wecode check`, or a feature the
-        // gate refuses would sit green on the cockpit.
+    fn a_draft_reads_as_unassigned_until_its_project_gates_the_kind() {
+        // Waiting to be assigned is not a fault. A gated kind is: the board's defect
+        // count must agree with `wecode check`, or a feature the gate refuses would sit
+        // green on the cockpit.
         let p = plan();
+        let v = task_of(&p, &ledger_index(&[]), "t1");
+        assert!(!v.needs.iter().any(|n| n.ends_with("defect")), "{:?}", v.needs);
+        assert!(v.needs.iter().any(|n| n == "unassigned"), "{:?}", v.needs);
+        assert_eq!(v.health, Health::Green);
+
         let gates: DesignGates = [(ProjectId::new("caching"), vec![TaskKind::Feature])].into();
         let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &ledger_index(&[]), &gates);
         assert!(v.needs.iter().any(|n| n == "1 defect"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
-    }
-
-    #[test]
-    fn a_draft_with_no_defects_reads_as_unassigned() {
-        let p = plan();
-        let l = ledger_index(&[]);
-        let v = task_of(&p, &l, "t1");
-        assert!(!v.needs.iter().any(|n| n.ends_with("defect")), "{:?}", v.needs);
-        assert!(v.needs.iter().any(|n| n == "unassigned"), "{:?}", v.needs);
-        assert_eq!(v.health, Health::Green, "waiting to be assigned is not a fault");
     }
 
     #[test]
@@ -1408,6 +1410,15 @@ mod tests {
         // Counted as the one group it is. Three would read as three separate decisions.
         assert!(out.contains("1 archived, --all to include"), "{out}");
         assert!(out.contains("PROJECT caching"), "the project stays:\n{out}");
+
+        // And a subtask filed away on its own leaves the task it belongs to behind.
+        let mut p = nested();
+        file_away(&mut p, "t2");
+        let out = portfolio(&p, &[], &repos(), &no_gates(), false);
+        assert!(out.contains("feat t1"), "the parent stays:\n{out}");
+        assert!(!out.contains("feat t2"), "{out}");
+        assert!(!out.contains("feat t3"), "and what is under it:\n{out}");
+        assert!(out.contains("1 archived"), "{out}");
     }
 
     #[test]
@@ -1426,17 +1437,6 @@ mod tests {
         assert!(t2.starts_with(DIM), "{t2:?}");
         let t1 = out.lines().find(|l| l.contains("feat t1")).unwrap();
         assert!(!t1.starts_with(DIM), "a live row is not greyed: {t1:?}");
-    }
-
-    #[test]
-    fn filing_a_subtask_leaves_its_parent_on_the_board() {
-        let mut p = nested();
-        file_away(&mut p, "t2");
-        let out = portfolio(&p, &[], &repos(), &no_gates(), false);
-        assert!(out.contains("feat t1"), "the parent stays:\n{out}");
-        assert!(!out.contains("feat t2"), "{out}");
-        assert!(!out.contains("feat t3"), "and what is under it:\n{out}");
-        assert!(out.contains("1 archived"), "{out}");
     }
 
     #[test]

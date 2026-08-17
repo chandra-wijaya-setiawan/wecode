@@ -278,6 +278,52 @@ exactly as it does anywhere else.
 `wecode up` is the same command under its old name. Renaming what the hands already know
 is a tax with no revenue, so both spellings stay.
 
+### The instrument
+
+Four keys turn the cockpit from something an operator watches into something they work.
+None of them is a mode: each is a key pressed on the screen already in front of them, and
+`esc` puts every one of them back.
+
+| key | what it does |
+| --- | --- |
+| `/` | narrow this screen to the rows that answer what you type |
+| `:` | ask the same question of the whole workspace, and open what it finds |
+| `p` | give the pane under the table room to be read, or take it back |
+| `t` | swap that pane between the preview and the ledger as it is written |
+
+**`/` filters what is on the glass.** Every keystroke re-narrows, so the list is always
+the answer to what has been typed so far; `enter` opens the row the cursor is on and `esc`
+puts the screen back as it found it. A row answers if the query appears anywhere in its
+label, its declared status, its needs-you cell — or **the title it was written down with**,
+which is what somebody actually remembers a task by and the one thing the four columns
+have no room for. Matching is case-insensitive and not a pattern: `appr` is a question,
+not a glob. The four attention groups stand down while a query holds, because they are
+the same leaves read a second way and a narrowed HOME would answer with one task twice.
+A query nothing answers says so, rather than printing the line about how to start a
+workspace to somebody who has simply mistyped.
+
+**`:` is the palette**: the same narrowing asked from HOME, which is where every project
+and every task in the workspace has a row. That is why it needs no second list and no
+second kind of search — it pushes a HOME screen and opens the query line over it, so *go
+to anything from anywhere* is one line of typing, `enter` lands on it, and `esc` walks
+back out through the screen it pushed to wherever the operator was standing.
+
+**The pane under the table is a preview of the screen `enter` would open.** For a task it
+is the TASK page itself, cut off wherever the pane ends — the same words rather than a
+summary of them, so descending reads *further* and never reads something else. `p` gives
+it half the frame when what is in it is worth more than another five rows.
+
+**`t` turns that pane into a live tail** of the ledger for whatever the cursor is on: a
+project's own records and its tasks', a task's alone, the whole workspace when the cursor
+is on neither. Every act an agent takes passes the Broker on its way to the ledger, so
+these lines are as near as wecode gets to reading over its shoulder — what it opened,
+what it ran, what it was refused. Newest last, the way a log reads, each with how long
+ago it happened; a refusal is amber and an alarm red. The cockpit's reload tick is what
+makes it a tail rather than a snapshot of one.
+
+`?` inside the cockpit lists every key, these four included; the one-line summary in
+`wecode help` above names only the keys that move and fold.
+
 **`wecode board`** is not a second cockpit. It prints the same state once and exits, for
 pipes, logs, and anywhere there is no terminal — a different consumer, not a different
 view. `wecode tui` refuses to start without a tty and says so, naming `board` as what to
