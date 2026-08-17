@@ -62,15 +62,14 @@ pub(crate) enum Health {
     Red,
 }
 
-/// Everything the board knows about one project or task, all of it derived.
+/// Everything the board knows about one project or task, all of it derived. Not the
+/// incident counts: an alarm, a denial and a defect each write their own words into
+/// `needs` and their own colour into `health`, so a field beside them was a third copy.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Vitals {
     pub(crate) health: Health,
     pub(crate) spent: u64,
     pub(crate) budget: Option<u64>,
-    pub(crate) alarms: usize,
-    pub(crate) denials: usize,
-    pub(crate) defects: usize,
     pub(crate) needs: Vec<String>,
 }
 
@@ -235,9 +234,6 @@ pub(crate) fn project_vitals(plan: &Plan, p: &Project, l: &Ledger, repos: &[Stri
         ),
         spent: c.spent,
         budget: p.budget.tokens,
-        alarms: c.alarms,
-        denials: c.denials,
-        defects,
         needs,
     }
 }
@@ -278,9 +274,6 @@ pub(crate) fn task_vitals(plan: &Plan, t: &Task, l: &Ledger, gates: &DesignGates
         health: health_of(c.alarms, over, defects, stalled, c.denials, awaiting),
         spent: c.spent,
         budget: t.budget.tokens,
-        alarms: c.alarms,
-        denials: c.denials,
-        defects,
         needs,
     }
 }
@@ -341,10 +334,8 @@ fn health_of(
 
 /// A task's own progress: done leaves beneath it, or itself if it is a leaf.
 fn task_progress(plan: &Plan, t: &Task) -> f32 {
+    // Never empty: the walk bottoms out on the task's own status.
     let leaves = leaf_statuses(plan, t);
-    if leaves.is_empty() {
-        return 0.0;
-    }
     let done = leaves.iter().filter(|s| **s == TaskStatus::Done).count();
     done as f32 / leaves.len() as f32
 }
@@ -357,7 +348,7 @@ fn leaf_statuses(plan: &Plan, t: &Task) -> Vec<TaskStatus> {
     kids.iter().flat_map(|k| leaf_statuses(plan, k)).collect()
 }
 
-fn spend_cell(spent: u64, budget: Option<u64>) -> String {
+pub(crate) fn spend_cell(spent: u64, budget: Option<u64>) -> String {
     let k = |n: u64| {
         if n >= 1000 {
             format!("{}k", n / 1000)
@@ -502,7 +493,7 @@ const ATTENTION: usize = 5;
 /// Not four filters over one list: a row is in exactly one group, because somebody
 /// reading four counts is counting, and a task in two of them is counted twice.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Group {
+pub(crate) enum Group {
     NeedsYou,
     Moving,
     Next,
@@ -510,9 +501,9 @@ enum Group {
 }
 
 impl Group {
-    const ALL: [Self; 4] = [Self::NeedsYou, Self::Moving, Self::Next, Self::Landed];
+    pub(crate) const ALL: [Self; 4] = [Self::NeedsYou, Self::Moving, Self::Next, Self::Landed];
 
-    fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::NeedsYou => "NEEDS YOU",
             Self::Moving => "MOVING",
@@ -529,7 +520,7 @@ impl Group {
     /// being the answer to *what wants me* — and it is never empty there, since nothing
     /// joins that group without either a status a person owes something to or a dead-end
     /// prerequisite, each of which writes its own words in [`task_vitals`].
-    fn line(self, plan: &Plan, t: &Task, l: &Ledger, v: &Vitals) -> String {
+    pub(crate) fn line(self, plan: &Plan, t: &Task, l: &Ledger, v: &Vitals) -> String {
         match self {
             Self::NeedsYou => v.needs.join(", "),
             // Every act an agent takes passes the Broker on its way to the ledger, so
@@ -586,13 +577,49 @@ fn blocking(plan: &Plan, t: &Task) -> String {
     }
 }
 
-/// The groups, drawn before any tree.
+/// Each group, the rows it leads with in the order it shows them, and the tail it stood
+/// down to a count — the whole of the grouping, and the only copy of it. [`crate::tui`]
+/// draws its own rows from this rather than reading the same statuses a second time, so
+/// the board an operator leaves open and the snapshot they get on their phone cannot come
+/// to disagree about what needs them.
 ///
 /// `projects` is the same list the tree below walks, so the two halves of one view can
 /// never disagree about which projects are on screen. Leaves only, for the reason the
 /// standing counts leaves: a breakdown is not a piece of work, its pieces are — and those
-/// pieces are rows in this very list, so grouping the parent would put one job in front
-/// of a person twice.
+/// pieces are rows in this very list, so grouping the parent would put one job in front of
+/// a person twice.
+pub(crate) fn attention_groups<'a>(
+    plan: &'a Plan,
+    projects: &[&Project],
+    l: &Ledger,
+    show_all: bool,
+) -> Vec<(Group, Vec<&'a Task>, usize)> {
+    let leaves: Vec<&Task> = projects
+        .iter()
+        .flat_map(|p| plan.tasks_of(&p.id))
+        .filter(|t| plan.subtasks(&t.id).next().is_none())
+        .filter(|t| show_all || !t.archived)
+        .collect();
+    let mut out = Vec::new();
+    for group in Group::ALL {
+        let mut shown: Vec<&Task> = leaves
+            .iter()
+            .copied()
+            .filter(|t| group_of(plan, t) == Some(group))
+            .collect();
+        if group == Group::Landed {
+            // Newest first — "recently" is the whole of what this group claims. Every
+            // other group is left in id order, so two runs of the same command agree.
+            shown.sort_by_key(|t| Reverse(l.by_task.get(t.id.as_str()).map_or(0, |c| c.last)));
+        }
+        let hidden = shown.len().saturating_sub(ATTENTION);
+        shown.truncate(ATTENTION);
+        out.push((group, shown, hidden));
+    }
+    out
+}
+
+/// The groups, drawn before any tree.
 fn attention(
     plan: &Plan,
     projects: &[&Project],
@@ -600,33 +627,16 @@ fn attention(
     gates: &DesignGates,
     show_all: bool,
 ) -> String {
-    let leaves: Vec<&Task> = projects
-        .iter()
-        .flat_map(|p| plan.tasks_of(&p.id))
-        .filter(|t| plan.subtasks(&t.id).next().is_none())
-        .filter(|t| show_all || !t.archived)
-        .collect();
-
     let mut out = String::new();
-    for g in Group::ALL {
+    for (g, shown, hidden) in attention_groups(plan, projects, l, show_all) {
         out.push_str(&format!("{DIM}│ {}{RESET}\n", g.title()));
-        let mut mine: Vec<&Task> = leaves
-            .iter()
-            .copied()
-            .filter(|t| group_of(plan, t) == Some(g))
-            .collect();
-        if mine.is_empty() {
+        if shown.is_empty() {
             // Drawn empty rather than dropped: four headings in the same places every
             // time is what lets somebody find the one they came for without reading.
             out.push_str(&format!("{DIM}│      —{RESET}\n"));
             continue;
         }
-        if g == Group::Landed {
-            // Newest first — "recently" is the whole of what this group claims. Every
-            // other group is left in id order, so two runs of the same command agree.
-            mine.sort_by_key(|t| Reverse(l.by_task.get(t.id.as_str()).map_or(0, |c| c.last)));
-        }
-        for t in mine.iter().take(ATTENTION) {
+        for t in shown {
             let mut v = task_vitals(plan, t, l, gates);
             // The group's answer, in the cell that already carries the colour. An
             // incident on a moving row still turns it red; the words for it are on that
@@ -642,11 +652,8 @@ fn attention(
                 t.archived,
             ));
         }
-        if mine.len() > ATTENTION {
-            out.push_str(&format!(
-                "{DIM}│      … and {} more{RESET}\n",
-                mine.len() - ATTENTION
-            ));
+        if hidden > 0 {
+            out.push_str(&format!("{DIM}│      … and {} more{RESET}\n", hidden));
         }
     }
     out
@@ -701,7 +708,7 @@ fn project_status(plan: &Plan, p: &Project) -> String {
 }
 
 /// Short enough for a column; `needs-approval` and `needs-input` are why.
-fn status_word(s: TaskStatus) -> &'static str {
+pub(crate) fn status_word(s: TaskStatus) -> &'static str {
     match s {
         TaskStatus::NeedsApproval => "approval",
         TaskStatus::NeedsInput => "input",
@@ -726,18 +733,11 @@ fn footer(hint: &str) -> String {
     format!("{DIM}└─ {hint}{RESET}\n")
 }
 
-/// A project's root tasks in id order.
-fn roots_of<'a>(plan: &'a Plan, p: &ProjectId) -> Vec<&'a Task> {
-    let mut roots: Vec<&Task> = plan.roots_of(p).collect();
-    roots.sort_by(|a, b| a.id.cmp(&b.id));
-    roots
-}
-
-/// Subtasks in id order, so two runs of the same command agree.
-fn kids_of<'a>(plan: &'a Plan, t: &Task) -> Vec<&'a Task> {
-    let mut kids: Vec<&Task> = plan.subtasks(&t.id).collect();
-    kids.sort_by(|a, b| a.id.cmp(&b.id));
-    kids
+/// Tasks in id order, so two runs of one command — and both cockpits — agree.
+pub(crate) fn sorted<'a>(it: impl Iterator<Item = &'a Task>) -> Vec<&'a Task> {
+    let mut v: Vec<&Task> = it.collect();
+    v.sort_by(|a, b| a.id.cmp(&b.id));
+    v
 }
 
 /// A tree being drawn, and how many rows it left out.
@@ -783,7 +783,7 @@ fn subtree(
         &task_vitals(plan, t, l, gates),
         t.archived,
     ));
-    for k in kids_of(plan, t) {
+    for k in sorted(plan.subtasks(&t.id)) {
         subtree(plan, k, l, gates, depth + 1, show_all, out);
     }
 }
@@ -822,7 +822,7 @@ pub(crate) fn portfolio(
             &project_vitals(plan, p, &l, known_repos),
             p.archived,
         ));
-        for t in roots_of(plan, &p.id) {
+        for t in sorted(plan.roots_of(&p.id)) {
             subtree(plan, t, &l, gates, 1, show_all, &mut drawn);
         }
     }
@@ -877,7 +877,7 @@ pub(crate) fn focus(
             p.archived,
         ));
         let mut drawn = Drawn::default();
-        for t in roots_of(plan, &p.id) {
+        for t in sorted(plan.roots_of(&p.id)) {
             subtree(plan, t, &l, gates, 1, p.archived, &mut drawn);
         }
         out.push_str(&drawn.text);
@@ -903,7 +903,7 @@ pub(crate) fn focus(
             t.archived,
         ));
         let mut drawn = Drawn::default();
-        for k in kids_of(plan, t) {
+        for k in sorted(plan.subtasks(&t.id)) {
             subtree(plan, k, &l, gates, 1, t.archived, &mut drawn);
         }
         out.push_str(&drawn.text);
@@ -1290,7 +1290,7 @@ mod tests {
         let p = plan();
         let gates: DesignGates = [(ProjectId::new("caching"), vec![TaskKind::Feature])].into();
         let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &ledger_index(&[]), &gates);
-        assert_eq!(v.defects, 1, "{:?}", v.needs);
+        assert!(v.needs.iter().any(|n| n == "1 defect"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
     }
 
@@ -1299,7 +1299,7 @@ mod tests {
         let p = plan();
         let l = ledger_index(&[]);
         let v = task_of(&p, &l, "t1");
-        assert_eq!(v.defects, 0, "control case must be defect-free");
+        assert!(!v.needs.iter().any(|n| n.ends_with("defect")), "{:?}", v.needs);
         assert!(v.needs.iter().any(|n| n == "unassigned"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Green, "waiting to be assigned is not a fault");
     }
