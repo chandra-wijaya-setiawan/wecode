@@ -46,3 +46,14 @@ what it is), and delivered count. Outcome, not output.
 - Not a feed. "Landed" is the last few, not a scrollback.
 - Not new data. Every fact above already exists in the plan, the ledger, or a measure
   command — this is assembly, not collection.
+
+## Review of attempt 1 — signature withheld
+
+Delivered and good: spend against budget on every row with over-budget in red, parent
+rolls aggregating children, and waiting rows naming what blocks them. Kept.
+
+Missing: the document's first requirement. The portfolio is still one hierarchy tree.
+There are no attention groups — no **needs you / moving / next / landed** leading the
+view, no ordering by what a person acts on, no handful-per-group ceiling. "Group by
+attention, not by hierarchy" is the owner's headline ask and the reason this task
+exists; the rest was supporting detail. Attempt 2 is about that section alone.
