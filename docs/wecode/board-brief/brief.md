@@ -22,7 +22,10 @@ shaped, not how a *person* reads it. The board should lead with groups in the or
 person acts on them:
 
 1. **needs you** — signatures, blocked-on-grant, questions. Always first, always small.
-2. **moving** — running and verifying now.
+2. **moving** — running and verifying now. Each row carries the agent's own latest
+   line from its stream (wecode already captures it since `retry-cause`), so "running"
+   answers *what is it doing*, not just *that it is*. The owner's words: "I don't even
+   know what agents are running and what they're doing."
 3. **next** — ready and waiting, with what unblocks each.
 4. **landed** — recently merged, each with its one-line what and cost.
 
