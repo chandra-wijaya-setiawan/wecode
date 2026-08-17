@@ -17,6 +17,16 @@ use support::Org;
 /// cannot answer for them.
 fn grounded(org: &Org) {
     org.repo();
+    harnessed(org);
+}
+
+/// The half of [`grounded`] that does not need a repository: a harness this machine
+/// has, and an allowlist whose every name is set.
+///
+/// Separate because a workspace that declares no repository at all is one of the states
+/// the drill has to survive, and `org.repo()` can only point a `[[repos]]` block that
+/// exists at a real one.
+fn harnessed(org: &Org) {
     let conf = org.path("company.toml");
     let text = std::fs::read_to_string(&conf).unwrap();
     let ground = text
@@ -354,6 +364,115 @@ fn a_machine_that_can_do_the_work_says_so_and_says_where() {
         // Resolved, and not started: a coding agent launched to see whether it launches
         // is a session and a bill.
         .assert_contains("resolved, not started");
+}
+
+#[test]
+fn the_machine_is_asked_about_before_the_person_is() {
+    // The order a task meets them, and the order the repairs go in: a channel that can
+    // reach the operator is worth nothing on a machine that cannot cut a worktree, and
+    // an operator reading top to bottom should meet the fault that stops everything
+    // before the one that stops the reply.
+    let org = Org::new("doctor-order", "solo");
+    org.seed();
+    grounded(&org);
+
+    let out = org.run(&["doctor"]);
+    out.assert_ok("the drill");
+    let (machine, hooks) = (
+        out.stdout.find("machine").expect("the machine half"),
+        out.stdout.find("hooks").expect("the hooks half"),
+    );
+    assert!(machine < hooks, "the halves are the wrong way round:\n{}", out.stdout);
+}
+
+#[test]
+fn every_seat_the_missing_harness_would_have_launched_is_named() {
+    // The solo template staffs two posts with one harness, and which seats are waiting
+    // is what decides whether this is the morning's first job: a harness only `test`
+    // runs on is a different repair from the one that stops the whole company.
+    let org = Org::new("doctor-seats", "solo");
+    org.seed();
+    grounded(&org);
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        text.replace("command = \"sh\"", "command = \"wecode-no-such-harness\""),
+    )
+    .unwrap();
+
+    let out = org.run(&["doctor"]);
+    assert!(!out.ok(), "a missing harness exited 0:\n{}", out.all());
+    out.assert_contains("posts chief, impl");
+}
+
+#[test]
+fn the_verdict_counts_the_faults_and_carries_the_report_with_it() {
+    // Two independent repairs, and the count is the operator's first read of how much
+    // of the morning this is. The report travels on the same stream as the verdict on
+    // purpose: sent to stdout it could be separated from the reason by a redirect, and
+    // `wecode doctor && wecode loop` would fail with nothing said about why.
+    let org = Org::new("doctor-two-faults", "solo");
+    org.seed();
+    grounded(&org);
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        text.replace("command = \"sh\"", "command = \"wecode-no-such-harness\"")
+            .replace(
+                org.path("repo").to_str().unwrap(),
+                "/wecode-no-such-directory-4c1b",
+            ),
+    )
+    .unwrap();
+
+    let out = org.run(&["doctor"]);
+    assert!(!out.ok(), "two faults exited 0:\n{}", out.all());
+    assert!(
+        out.stderr.contains("2 failed checks"),
+        "the verdict does not count them:\n{}",
+        out.all()
+    );
+    // Both named, on the stream the verdict went out on.
+    assert!(out.stderr.contains("[[repos]] app"), "{}", out.all());
+    assert!(out.stderr.contains("wecode-no-such-harness"), "{}", out.all());
+}
+
+#[test]
+fn a_workspace_that_has_declared_no_repository_yet_is_still_a_clean_exit() {
+    // A plan somebody is still writing. Nothing here is compulsory, and the drill has
+    // to be a thing you can put in a script on the first day of a workspace rather than
+    // on the day it is full — so an absence is a `·` and a zero.
+    let org = Org::new("doctor-no-repos", "solo");
+    harnessed(&org);
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    let stripped = text.replace("[[repos]]\nname = \"app\"\npath = \"~/projects/your-repo\"\n", "");
+    assert_ne!(stripped, text, "the template's repo block was not removed");
+    std::fs::write(&conf, stripped).unwrap();
+
+    org.run(&["doctor"])
+        .assert_ok("nothing declared is not a failure")
+        .assert_contains("· [[repos]]")
+        .assert_contains("nothing can be dispatched yet");
+}
+
+#[test]
+fn the_drill_opens_no_database_and_makes_none() {
+    // The guarantee behind every other claim about it: the drill has no handle on
+    // anything it could write, so there is nothing it can do to a plan by being run —
+    // including being run by somebody who is not sure what it does. Proved by taking
+    // the store away rather than by reading the code, since the store is what every
+    // other command reaches for first.
+    let org = Org::new("doctor-no-store", "solo");
+    grounded(&org);
+    let db = org.path("wecode.db");
+    assert!(db.is_file(), "the workspace has no store to remove");
+    std::fs::remove_file(&db).unwrap();
+
+    org.run(&["doctor"]).assert_ok("the drill without a store");
+    assert!(!db.exists(), "the drill made a store of its own");
 }
 
 #[test]

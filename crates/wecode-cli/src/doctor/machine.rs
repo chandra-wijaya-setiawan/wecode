@@ -423,6 +423,28 @@ mod tests {
     }
 
     #[test]
+    fn the_rows_come_in_the_order_a_dispatch_needs_them() {
+        // Not presentation. `git` is asked first because every repository row below it
+        // leans on the same binary, and a machine without one would otherwise report
+        // the missing tool once per repo instead of once — and the place worktrees land
+        // is asked before the repository they are cut from, which is the order the
+        // failures actually happen in.
+        let checks = drill(&staffed("command = \"sh\"\nenv_allowlist = [\"PATH\"]\n"), &scratch("order"));
+        let at: Vec<&str> = checks.iter().map(|c| c.at.as_str()).collect();
+        assert_eq!(
+            at,
+            vec![
+                GIT,
+                TREES,
+                "[[repos]]",
+                "[agents.harness] command",
+                "[agents.harness] env_allowlist",
+            ],
+            "{checks:?}"
+        );
+    }
+
+    #[test]
     fn the_tool_every_worktree_is_cut_with_is_named_with_its_version() {
         // Sound on any machine that can build this, which is the point: the row exists
         // for the machine that cannot, where every repository row below it would
@@ -504,6 +526,38 @@ mod tests {
     }
 
     #[test]
+    fn a_path_that_is_a_file_is_not_a_repository_either() {
+        // The likelier shape of this than a missing directory: a `path` pointing at the
+        // repository's `.git`, or at a tarball somebody meant to unpack. `is_dir` is
+        // what separates them, and a check that only asked `exists` would hand the path
+        // to git and report git's confusion instead of the operator's typo.
+        let file = scratch("repo-file").join("app.tar.gz");
+        std::fs::write(&file, "not a repository").unwrap();
+        let check = repository(&Repo {
+            name: "app".to_string(),
+            path: file.to_string_lossy().into_owned(),
+        });
+        assert!(check.outcome.is_broken(), "{check:?}");
+        assert!(check.outcome.note().contains("is not there"), "{check:?}");
+    }
+
+    #[test]
+    fn every_declared_repository_answers_for_itself() {
+        // One row each, named by the name the operator gave it. A drill that stopped at
+        // the first fault would report the workspace as one repair when it is two, and
+        // an operator who fixed the named one would run it again to be told about the
+        // next — which is the shape that makes people stop running it.
+        let c = company(
+            "\n[[repos]]\nname = \"app\"\npath = \"~/projects/definitely-not-a-repo-9f3a\"\n\n\
+             [[repos]]\nname = \"infra\"\npath = \"~/projects/definitely-not-a-repo-4c1b\"\n",
+        );
+        let checks = repositories(&c);
+        assert_eq!(checks.len(), 2, "{checks:?}");
+        assert!(at(&checks, "[[repos]] app").is_broken(), "{checks:?}");
+        assert!(at(&checks, "[[repos]] infra").is_broken(), "{checks:?}");
+    }
+
+    #[test]
     fn a_workspace_with_nothing_declared_yet_is_absent_rather_than_broken() {
         // A plan somebody is still writing. The drill has to be a thing you can leave
         // in a script from the first day of a workspace, not from the day it is full.
@@ -552,6 +606,31 @@ mod tests {
         assert!(note.is_broken(), "{note:?}");
         assert!(note.note().contains("never_run sh *"), "{note:?}");
         assert!(note.note().contains("impl"), "the seat it would refuse: {note:?}");
+    }
+
+    #[test]
+    fn the_charter_is_read_against_each_seats_own_launch_line() {
+        // Why the check is per-seat and not per-harness: two posts on one harness are
+        // launched on two different lines, because the tools come from the role. A
+        // `never_run` that catches the engineer's `Edit,Write` leaves the watcher's
+        // read-only line alone, and the seat named in the report is the one that would
+        // actually be refused — which is also the one whose role has to change.
+        let c = company(
+            "\n[roles.watcher]\nread = [\"**\"]\n\n\
+             [invariants]\nnever_run = [\"*Edit,Write*\"]\n\n\
+             [[posts]]\nname = \"eyes\"\nrole = \"watcher\"\nagent = \"harness\"\n\n\
+             [[posts]]\nname = \"impl\"\nrole = \"engineer\"\nagent = \"harness\"\n\n\
+             [agents.harness]\ncommand = \"sh\"\n\
+             args = [\"--allowedTools\", \"{{tools}}\", \"{{prompt}}\"]\n\
+             env_allowlist = [\"PATH\"]\n",
+        );
+        let checks = harnesses(&c);
+        let note = at(&checks, "[agents.harness] command");
+        assert!(note.is_broken(), "{note:?}");
+        // `eyes` is the first seat in the file and is not the one refused, so a check
+        // that reported whichever seat it reached first would name it.
+        assert!(note.note().contains("`impl`"), "the seat refused: {note:?}");
+        assert!(!note.note().contains("`eyes`"), "{note:?}");
     }
 
     #[test]
@@ -608,6 +687,39 @@ mod tests {
     }
 
     #[test]
+    fn every_seat_waiting_on_the_answer_is_named_and_counted_as_one() {
+        // Two seats, one harness: the repair is the same repair, and it is a different
+        // morning's work from a harness only `test` is staffed with. The plural is part
+        // of it — a report that said `post chief, impl` would read as one post with a
+        // comma in its name.
+        let c = company(
+            "\n[[posts]]\nname = \"chief\"\nrole = \"engineer\"\nagent = \"harness\"\n\n\
+             [[posts]]\nname = \"impl\"\nrole = \"engineer\"\nagent = \"harness\"\n\n\
+             [agents.harness]\ncommand = \"wecode-no-such-harness\"\n\
+             env_allowlist = [\"PATH\"]\n",
+        );
+        let checks = harnesses(&c);
+        // Still two rows and not four: the harness is the thing that is broken, not
+        // each seat's copy of it.
+        assert_eq!(checks.len(), 2, "{checks:?}");
+        let note = at(&checks, "[agents.harness] command");
+        assert!(note.note().contains("posts chief, impl"), "{note:?}");
+    }
+
+    #[test]
+    fn a_list_that_is_wrong_in_both_ways_says_both() {
+        // They are different repairs — one line to add a name to the list, one to go
+        // and export a variable — so a report that stopped at the first would be one
+        // more run of the drill for a fault it had already seen.
+        let c = staffed("command = \"sh\"\nenv_allowlist = [\"WECODE_DOCTOR_UNSET\"]\n");
+        let checks = harnesses(&c);
+        let note = at(&checks, "[agents.harness] env_allowlist");
+        assert!(note.is_broken(), "{note:?}");
+        assert!(note.note().contains("WECODE_DOCTOR_UNSET"), "{note:?}");
+        assert!(note.note().contains("PATH is not on the list"), "{note:?}");
+    }
+
+    #[test]
     fn a_command_is_resolved_the_way_the_thing_that_launches_it_resolves_it() {
         assert!(resolve("sh").is_some_and(|p| p.ends_with("sh")));
         assert_eq!(resolve("wecode-no-such-harness"), None);
@@ -625,6 +737,46 @@ mod tests {
         std::fs::write(&plain, "#!/bin/sh\n").unwrap();
         assert!(!executable(&plain), "a file nobody may execute");
         assert!(!executable(&dir), "a directory is not a program");
+    }
+
+    #[test]
+    fn a_harness_installed_at_a_path_is_found_once_it_can_be_run_and_not_before() {
+        // A release downloaded to a directory of one's own and named in `command` by
+        // its full path — the second commonest way a harness is installed, and the one
+        // where the fault is a mode bit rather than a missing file. `spawn` refuses it
+        // with `Permission denied` at dispatch; here it is a line to fix beforehand.
+        let harness = scratch("installed").join("harness");
+        std::fs::write(&harness, "#!/bin/sh\nexit 0\n").unwrap();
+        let named = harness.to_string_lossy().into_owned();
+        assert_eq!(resolve(&named), None, "a file nobody may execute");
+
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(resolve(&named), Some(harness));
+    }
+
+    #[test]
+    fn what_a_command_said_is_its_first_line_and_nothing_after_it() {
+        // Every note is one row of a report read down a column. `git --version` is one
+        // line today and a wrapper that prints its own banner first is not, so the row
+        // takes what it can use rather than folding somebody's build info into it.
+        assert_eq!(said(b"  git version 2.43.0  \nand more\n"), "git version 2.43.0");
+        assert_eq!(said(b""), "");
+    }
+
+    #[test]
+    fn how_a_command_ended_is_said_for_the_case_where_it_printed_nothing() {
+        let out = Command::new("sh").args(["-c", "exit 3"]).output().unwrap();
+        assert_eq!(exited(&out), "exited 3");
+    }
+
+    #[test]
+    fn a_report_with_no_harness_in_it_does_not_claim_one_was_resolved() {
+        // The note is a claim about what the drill did. On a workspace whose harnesses
+        // nothing is staffed with, nothing was resolved, and saying so would send an
+        // operator looking for a row that is not there.
+        let out = super::super::render(&[section(&company(""), &scratch("bare-note"))]);
+        assert!(!out.contains("resolved, not started"), "{out}");
     }
 
     #[test]
