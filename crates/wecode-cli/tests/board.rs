@@ -24,6 +24,173 @@ fn project_row(out: &str) -> String {
         .to_string()
 }
 
+/// Every heading the board divides itself with, in the order it must draw them.
+const HEADS: [&str; 5] = ["NEEDS YOU", "MOVING", "NEXT", "LANDED", "PORTFOLIO"];
+
+/// The rows of one attention group: what lies between its heading and the next one.
+///
+/// Sliced by the headings rather than by counting lines, so a test says *this row is in
+/// this group* — which is the whole claim the grouping makes, and the one a test that
+/// only searched the whole snapshot for a word would pass without checking.
+fn group(out: &str, title: &str) -> Vec<String> {
+    let rows: Vec<String> = out
+        .lines()
+        .skip_while(|l| !l.contains(title))
+        .skip(1)
+        .take_while(|l| !HEADS.iter().any(|h| l.contains(h)))
+        .map(str::to_string)
+        .collect();
+    assert!(out.contains(title), "no `{title}` group in:\n{out}");
+    rows
+}
+
+/// A group row's own name for a task — the `what` cell, project included.
+///
+/// Matched on rather than on the bare id, because the cells these tests read say things
+/// like `after cache-tests`: a row is found by what it *is*, never by a task it mentions.
+fn label(id: &str) -> String {
+    format!("caching/{id}")
+}
+
+/// The one row in `title` naming `id`, with the group asserted to hold exactly one.
+fn row_in(out: &str, title: &str, id: &str) -> String {
+    let mut found: Vec<String> = group(out, title)
+        .into_iter()
+        .filter(|l| l.contains(&label(id)))
+        .collect();
+    assert_eq!(found.len(), 1, "`{id}` in `{title}` of:\n{out}");
+    found.remove(0)
+}
+
+#[test]
+fn the_board_opens_with_the_four_questions_and_not_with_the_tree() {
+    // The headline: a person opening this from a phone is asking *what is mine to do*,
+    // and a tree answers *how is this organised*. The tree is still the second half of
+    // the view — but it is the second half, and what it is under is a heading.
+    let org = Org::new("board-attention", "software-company");
+    org.seed();
+    let out = board(&org, &["board"]);
+
+    let heads: Vec<&str> = out
+        .lines()
+        .filter(|l| HEADS.iter().any(|h| l.contains(h)))
+        .collect();
+    assert_eq!(heads.len(), 5, "{out}");
+    for (drawn, want) in heads.iter().zip(HEADS) {
+        assert!(drawn.contains(want), "out of order at `{want}`:\n{out}");
+    }
+
+    // The acceptance for the eye. Nothing about the plan's shape may come first.
+    let first = out
+        .lines()
+        .find(|l| l.contains("caching") || HEADS.iter().any(|h| l.contains(h)))
+        .expect("a first row");
+    assert!(first.contains("NEEDS YOU"), "the board opens on: {first}");
+    assert!(!first.contains("PROJECT"), "{first}");
+}
+
+#[test]
+fn every_group_answers_the_question_its_own_rows_raise() {
+    // Why grouping is not sorting: `> running` is a fact four rows share, and the four
+    // groups each ask something the status word cannot answer on its own.
+    let org = Org::new("board-groups", "software-company");
+    org.seed();
+
+    // NEXT — what would move this, for work that is not moving. Both halves: nobody
+    // owns the first, and the second is behind it whoever owns them.
+    let out = board(&org, &["board"]);
+    assert!(row_in(&out, "NEXT", "cache-tests").contains("unassigned"), "{out}");
+    assert!(row_in(&out, "NEXT", "bench").contains("after cache-tests"), "{out}");
+    org.run(&["assign", "cache-tests", "--to", "test"])
+        .assert_ok("assign");
+    let out = board(&org, &["board"]);
+    assert!(row_in(&out, "NEXT", "cache-tests").contains("queued for test"), "{out}");
+
+    // MOVING — what it is doing, which is the question `running` leaves open. Read off
+    // the ledger, because every act an agent takes passes the Broker to get there.
+    org.run(&["status", "cache-tests", "running"]).assert_ok("run");
+    org.run(&["guard", "impl", "write", "tests/cache_spec.rs", "--task", "cache-tests"])
+        .assert_ok("guard");
+    let out = board(&org, &["board"]);
+    let moving = row_in(&out, "MOVING", "cache-tests");
+    assert!(moving.contains("write tests/cache_spec.rs"), "{moving}");
+
+    // NEEDS YOU — what is wanted, in the words the row already computed.
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("hold");
+    let out = board(&org, &["board"]);
+    assert!(row_in(&out, "NEEDS YOU", "cache-tests").contains("needs-approval"), "{out}");
+
+    // LANDED — what landed, in the words somebody wrote when they asked for it. The
+    // cost is the spend cell, which every row already carries.
+    org.run(&["status", "cache-tests", "done"]).assert_ok("done");
+    let out = board(&org, &["board"]);
+    let landed = row_in(&out, "LANDED", "cache-tests");
+    assert!(landed.contains("cover the cache layer"), "{landed}");
+}
+
+#[test]
+fn a_row_is_in_exactly_one_group_at_a_time() {
+    // What makes four groups readable rather than four filters: somebody reading them
+    // is counting, and work in two of them is counted twice. Asserted as the state
+    // moves, because every move is a chance to leave a copy behind in the old group.
+    let org = Org::new("board-partition", "software-company");
+    org.seed();
+    for status in ["ready", "running", "needs-input", "done", "dropped"] {
+        org.run(&["status", "cache-tests", status])
+            .assert_ok(status);
+        let out = board(&org, &["board"]);
+        let held: Vec<&str> = HEADS
+            .iter()
+            .take(4)
+            .filter(|h| group(&out, h).iter().any(|l| l.contains(&label("cache-tests"))))
+            .copied()
+            .collect();
+        // Dropped is in none of them: not waiting, not moving, and it did not land.
+        let want = usize::from(status != "dropped");
+        assert_eq!(held.len(), want, "`{status}` sat in {held:?}:\n{out}");
+    }
+}
+
+#[test]
+fn a_group_shows_a_handful_and_says_how_many_it_stood_down() {
+    // The ceiling the company already declares for itself — `[attention]
+    // max_open_items` — applied to the eye rather than to the scheduler. A group that
+    // rendered its whole tail would push the other three off a phone screen, which is
+    // the failure this view exists to fix.
+    let org = Org::new("board-ceiling", "software-company");
+    org.seed();
+    for n in 0..6 {
+        // Scopes that overlap nothing, here and with each other: two tasks that could
+        // write the same file are a defect, and an undeclared one would leave this
+        // measuring admission rather than the ceiling.
+        org.run(&[
+            "task",
+            "add",
+            &format!("extra-{n}"),
+            "another piece of the caching work",
+            "--project",
+            "caching",
+            "--accept-cmd",
+            "cargo test",
+            "--write",
+            &format!("src/extra-{n}/**"),
+            "--tokens",
+            "1000",
+        ])
+        .assert_ok("add task")
+        .assert_lacks("not saved");
+    }
+
+    let out = board(&org, &["board"]);
+    let next = group(&out, "NEXT");
+    // Five rows and the count. Eight tasks are open, so three are stood down.
+    assert_eq!(next.len(), 6, "five rows and one tail line:\n{out}");
+    assert!(next[5].contains("… and 3 more"), "{out}");
+    // And what it stood down is still reachable — the tree below drew all of them.
+    assert!(out.contains("extra-5"), "{out}");
+}
+
 #[test]
 fn the_board_says_how_far_a_project_has_got() {
     // The gap this closes: `> active` is a fact about intent — the project is open for
