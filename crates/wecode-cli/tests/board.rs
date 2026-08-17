@@ -84,6 +84,54 @@ fn the_board_counts_what_the_other_views_count() {
 }
 
 #[test]
+fn the_board_says_how_much_of_the_work_nobody_has_been_handed() {
+    // The half the fraction cannot say. `draft 0/2` reads the same whether two agents
+    // are mid-run and whether nothing owns the work at all — and it is the second that
+    // never resolves on its own, because a task only leaves `draft` once it names a
+    // post and the loop only ever dispatches one that has.
+    let org = Org::new("board-unowned", "software-company");
+    org.seed();
+
+    let before = project_row(&board(&org, &["board"]));
+    assert!(before.contains("2 to assign"), "{before}");
+
+    // And it comes down as the work is handed over, one post at a time. A count that
+    // only ever went up would be a banner, and people stop reading banners.
+    org.run(&["assign", "cache-tests", "--to", "test"])
+        .assert_ok("assign");
+    let after = project_row(&board(&org, &["board"]));
+    assert!(after.contains("1 to assign"), "{after}");
+
+    org.run(&["assign", "bench", "--to", "test"])
+        .assert_ok("assign");
+    let staffed = project_row(&board(&org, &["board"]));
+    assert!(!staffed.contains("to assign"), "nothing left to say: {staffed}");
+}
+
+#[test]
+fn a_project_whose_work_has_all_landed_asks_to_be_closed() {
+    // Where the standing runs out. `2/2` beside `draft` is the whole plan finished
+    // under a project nothing will ever close by itself — and an operator reading this
+    // from a phone is the only one who can.
+    let org = Org::new("board-closable", "software-company");
+    org.seed();
+    for t in ["cache-tests", "bench"] {
+        org.run(&["status", t, "done"]).assert_ok("done");
+    }
+
+    let row = project_row(&board(&org, &["board"]));
+    assert!(row.contains("2/2"), "{row}");
+    assert!(row.contains("ready to close"), "{row}");
+
+    // Once they have, the row goes quiet. A closed project still asking to be closed is
+    // what teaches somebody the cell is decoration.
+    org.run(&["status", "caching", "done"]).assert_ok("close");
+    let closed = project_row(&board(&org, &["board"]));
+    assert!(!closed.contains("ready to close"), "{closed}");
+    assert!(closed.contains("done 2/2"), "the reading stays: {closed}");
+}
+
+#[test]
 fn a_project_with_nothing_planned_yet_reports_no_standing() {
     // `0/0` is arithmetic about nothing. The needs-you cell already has the sentence.
     let org = Org::new("board-standing-bare", "software-company");

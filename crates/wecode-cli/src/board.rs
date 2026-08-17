@@ -20,6 +20,11 @@
 //! question somebody away from their desk is actually asking. A task row keeps the
 //! word alone, for the reason the progress bar went: on a leaf it would restate the
 //! status, and a parent's subtasks are the rows immediately beneath it.
+//!
+//! A fraction says how far, not whether it can go further, so the needs-you cell
+//! carries the two ends it cannot: work nobody has been handed, and work that has all
+//! landed under a project still declared open. Both are a project sitting still with
+//! every column around it reading healthy, and neither is resolved by the next tick.
 
 use std::collections::BTreeMap;
 
@@ -174,12 +179,30 @@ pub(crate) fn project_vitals(
     if stuck > 0 {
         needs.push(format!("{stuck} stuck"));
     }
+    let unowned = unowned(plan, &p.id);
+    if unowned > 0 {
+        needs.push(format!("{unowned} to assign"));
+    }
+    // The far end of the standing. Nothing closes a project on its own, so one whose
+    // last task landed weeks ago still reads `active` — and the only move left is the
+    // operator's, which is the definition of this cell.
+    let closable = !p.status.is_closed() && standing(plan, &p.id).is_some_and(|(d, n)| d == n);
+    if closable {
+        needs.push("ready to close".to_string());
+    }
     if plan.tasks_of(&p.id).next().is_none() {
         needs.push("no tasks".to_string());
     }
 
     Vitals {
-        health: health_of(c.alarms, over, defects, stalled, c.denials, waiting + stuck),
+        health: health_of(
+            c.alarms,
+            over,
+            defects,
+            stalled,
+            c.denials,
+            waiting + stuck + unowned + usize::from(closable),
+        ),
         spent: c.spent,
         budget: p.budget.tokens,
         alarms: c.alarms,
@@ -421,6 +444,30 @@ fn standing(plan: &Plan, id: &ProjectId) -> Option<(usize, usize)> {
     }
     let done = leaves.iter().filter(|t| t.status.is_done()).count();
     Some((done, leaves.len()))
+}
+
+/// Open work nobody has been handed — the leaves still to do that name no post.
+///
+/// Not slow work: stopped work. `wecode task add` moves a task out of `draft` only once
+/// it names a post, and [`crate::scheduler::dispatchable`] only ever picks up one that
+/// has an assignee — so no tick promotes these and no loop starts them, however green
+/// every other column reads.
+///
+/// The leaves the standing divides, less the closed and the filed-away, so the two
+/// readings are halves of one sentence: `1/4` says where the work got to, `3 to assign`
+/// says why it stopped there. Parents go with the parked — a breakdown is not
+/// dispatched, its pieces are, and staffing what somebody archived teaches them to
+/// ignore the cell.
+///
+/// Amber here while the task row calls the same task `unassigned` in green, on purpose:
+/// one leaf mid-planning is normal and its own row is right there. The project row is
+/// the one an operator reads from a phone, and there the count answers *does this need
+/// me* — nothing else is going to start this.
+fn unowned(plan: &Plan, id: &ProjectId) -> usize {
+    plan.tasks_of(id)
+        .filter(|t| plan.subtasks(&t.id).next().is_none())
+        .filter(|t| !t.archived && !t.status.is_closed() && t.assignee.is_none())
+        .count()
 }
 
 /// The declared state, and beside it where the work under it has got to.
@@ -698,6 +745,16 @@ mod tests {
 
     fn no_gates() -> DesignGates {
         DesignGates::new()
+    }
+
+    /// The vitals of `caching`, the project every fixture here builds.
+    fn vitals(p: &Plan, l: &Ledger) -> Vitals {
+        project_vitals(p, p.project(&ProjectId::new("caching")).unwrap(), l, &repos())
+    }
+
+    /// The same, for the tests with no ledger to speak of.
+    fn quiet(p: &Plan) -> Vitals {
+        vitals(p, &ledger_index(&[]))
     }
 
     /// A project with one well-formed task, so a defect in a test is one the test
@@ -1003,17 +1060,7 @@ mod tests {
             task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).health,
             Health::Red
         );
-        assert_eq!(
-            project_vitals(
-                &p,
-                p.project(&ProjectId::new("caching")).unwrap(),
-                &l,
-                &repos()
-            )
-            .health,
-            Health::Red,
-            "an alarm must roll up"
-        );
+        assert_eq!(vitals(&p, &l).health, Health::Red, "an alarm must roll up");
     }
 
     #[test]
@@ -1033,13 +1080,7 @@ mod tests {
         let audit = vec![line("caching", "t1", "spend", "400t/10s", "allow")];
         let p = plan();
         let l = ledger_index(&audit);
-        let v = project_vitals(
-            &p,
-            p.project(&ProjectId::new("caching")).unwrap(),
-            &l,
-            &repos(),
-        );
-        assert_eq!(v.spent, 400, "counted once, not twice");
+        assert_eq!(vitals(&p, &l).spent, 400, "counted once, not twice");
     }
 
     #[test]
@@ -1047,13 +1088,7 @@ mod tests {
         let audit = vec![line("caching", "", "spend", "150t/1s", "allow")];
         let p = plan();
         let l = ledger_index(&audit);
-        let v = project_vitals(
-            &p,
-            p.project(&ProjectId::new("caching")).unwrap(),
-            &l,
-            &repos(),
-        );
-        assert_eq!(v.spent, 150);
+        assert_eq!(vitals(&p, &l).spent, 150);
         // ...and it does not leak onto the task.
         assert_eq!(
             task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).spent,
@@ -1073,16 +1108,7 @@ mod tests {
             700,
             "a parent task sees its subtask's spend"
         );
-        assert_eq!(
-            project_vitals(
-                &p,
-                p.project(&ProjectId::new("caching")).unwrap(),
-                &l,
-                &repos()
-            )
-            .spent,
-            700
-        );
+        assert_eq!(vitals(&p, &l).spent, 700);
     }
 
     #[test]
@@ -1160,6 +1186,59 @@ mod tests {
             Health::Green,
             "waiting to be assigned is not a fault"
         );
+    }
+
+    #[test]
+    fn a_project_counts_the_work_nobody_has_been_handed() {
+        // The gap the standing leaves: `draft 0/1` says none of it is finished and
+        // stops there, while the reason is that no post owns it — so no tick promotes
+        // it and the loop never picks it up. Green, that project waits for ever.
+        let v = quiet(&plan());
+        assert!(v.needs.iter().any(|n| n == "1 to assign"), "{:?}", v.needs);
+        assert_eq!(v.health, Health::Amber);
+
+        let mut p = plan();
+        let mut t = p.task(&TaskId::new("t1")).unwrap().clone();
+        t.assignee = Some("impl".to_string());
+        p.update_task(t).unwrap();
+        let v = quiet(&p);
+        assert!(!v.needs.iter().any(|n| n.ends_with("to assign")), "{:?}", v.needs);
+        assert_eq!(v.health, Health::Green, "handed over is nothing to report");
+    }
+
+    #[test]
+    fn only_the_leaves_that_are_still_open_are_counted_as_unassigned() {
+        // Three ways a task is not somebody's next move: it is finished, it is filed
+        // away, or it is a breakdown rather than a piece of work. `nested` is t1 › t2 ›
+        // t3, so counting parents would ask for three posts where one piece of work is.
+        let mut p = nested();
+        assert_eq!(unowned(&p, &ProjectId::new("caching")), 1, "t3 alone");
+        finish(&mut p, "t3");
+        assert_eq!(unowned(&p, &ProjectId::new("caching")), 0);
+
+        let mut p = nested();
+        file_away(&mut p, "t3");
+        assert_eq!(unowned(&p, &ProjectId::new("caching")), 0, "parked, not owed");
+    }
+
+    #[test]
+    fn a_project_whose_work_has_all_landed_asks_to_be_closed() {
+        // Where `5/5` runs out. No tick closes a project, so one whose last task landed
+        // goes on reading `active` — and the board is the surface that should say the
+        // remaining move is the operator's.
+        let mut p = plan();
+        finish(&mut p, "t1");
+        let v = quiet(&p);
+        assert!(v.needs.iter().any(|n| n == "ready to close"), "{:?}", v.needs);
+        assert_eq!(v.health, Health::Amber);
+
+        // And it stops once they have. A closed project asking to be closed is the
+        // reading that teaches people the cell is noise.
+        let mut done = p.project(&ProjectId::new("caching")).unwrap().clone();
+        done.status = ProjectStatus::Done;
+        p.update_project(done).unwrap();
+        let v = quiet(&p);
+        assert!(v.needs.is_empty(), "{:?}", v.needs);
     }
 
     #[test]
@@ -1267,12 +1346,7 @@ mod tests {
         dead.status = TaskStatus::Failed;
         p.update_task(dead).unwrap();
 
-        let v = project_vitals(
-            &p,
-            p.project(&ProjectId::new("caching")).unwrap(),
-            &ledger_index(&[]),
-            &repos(),
-        );
+        let v = quiet(&p);
         assert!(v.needs.iter().any(|n| n == "1 stuck"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
     }
