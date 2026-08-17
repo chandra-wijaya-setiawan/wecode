@@ -11,6 +11,15 @@
 //! with the whole task tree under each, and a focus view narrows to one of them.
 //! The tree goes all the way down: a plan that hangs its real work off a parent
 //! task showed none of it while the portfolio stopped at roots.
+//!
+//! A project's status cell carries its **standing** — how much of its work is
+//! finished — beside the state somebody declared for it. Still no progress column:
+//! this is one reading in the cell that already answers *where is this*, and it goes
+//! on projects only. `> active` says a project is open for work, which is a fact
+//! about intent; `> active 2/5` says where the work has got to, which is the
+//! question somebody away from their desk is actually asking. A task row keeps the
+//! word alone, for the reason the progress bar went: on a leaf it would restate the
+//! status, and a parent's subtasks are the rows immediately beneath it.
 
 use std::collections::BTreeMap;
 
@@ -318,9 +327,18 @@ fn title_bar(level: &str, subject: &str, hint: &str) -> String {
     )
 }
 
+/// Room for the longest status word plus a two-digit standing beside it.
+///
+/// Padded, never cut: a plan with more tasks than that pushes the columns to its
+/// right rather than losing a digit, because a ragged line still reads and `1/2` where
+/// `1/20` was meant does not. `the_status_column_fits_every_word_a_row_can_carry`
+/// holds the number to the vocabulary, so a new status is a failing test rather than a
+/// board that quietly stopped lining up.
+const STATUS_W: usize = 15;
+
 fn header_row() -> String {
     format!(
-        "{DIM}│ {:>4} {:<26} {:<11} {:<12} {}{RESET}\n",
+        "{DIM}│ {:>4} {:<26} {:<STATUS_W$} {:<12} {}{RESET}\n",
         "#", "what", "status", "spend", "needs you"
     )
 }
@@ -358,7 +376,7 @@ fn row(number: Option<Number>, label: &str, status: &str, v: &Vitals, archived: 
         }
     };
     let line = format!(
-        "│ {} {:<26} {:<11} {:<12} {}",
+        "│ {} {:<26} {:<STATUS_W$} {:<12} {}",
         number_cell(number),
         truncate(label, 26),
         status,
@@ -377,18 +395,59 @@ fn row(number: Option<Number>, label: &str, status: &str, v: &Vitals, archived: 
     }
 }
 
-fn project_status(p: &Project) -> String {
-    format!("{} {}", p.status.mark(), p.status.as_str())
+/// How far a project's work has got: finished leaves over the leaves there are.
+///
+/// `None` when nothing has been planned yet. `0/0` is a reading of nothing, and the
+/// needs-you cell already says `no tasks` for that case — which is the sentence, not
+/// the arithmetic.
+///
+/// Leaves, and the same ones [`Plan::progress`] divides, so this cell cannot disagree
+/// with the percentage `wecode plan` and `wecode show` print for the same project. Two
+/// ways of counting would be two answers to *how far along is this*, and the board
+/// would be the surface people stopped trusting. Dropped work therefore stays in the
+/// denominator, as it does there: abandoning a task is a decision to record, not a way
+/// for a project to finish.
+///
+/// Shown as a fraction rather than as that percentage because the board is read at a
+/// glance: `99%` is what 199 of 200 and 999 of 1000 both round to, and how many tasks
+/// are left is the part somebody acts on.
+fn standing(plan: &Plan, id: &ProjectId) -> Option<(usize, usize)> {
+    let leaves: Vec<&Task> = plan
+        .tasks_of(id)
+        .filter(|t| plan.subtasks(&t.id).next().is_none())
+        .collect();
+    if leaves.is_empty() {
+        return None;
+    }
+    let done = leaves.iter().filter(|t| t.status.is_done()).count();
+    Some((done, leaves.len()))
+}
+
+/// The declared state, and beside it where the work under it has got to.
+///
+/// The standing sits on the project row and nowhere else, for the reason the stuck
+/// count does: the rows beneath are what to read next, and this is the number that
+/// says whether to read them at all — and it is still there when a long tree has
+/// scrolled every one of them off the screen.
+fn project_status(plan: &Plan, p: &Project) -> String {
+    let word = p.status.as_str();
+    match standing(plan, &p.id) {
+        Some((done, total)) => format!("{} {word} {done}/{total}", p.status.mark()),
+        None => format!("{} {word}", p.status.mark()),
+    }
 }
 
 /// Short enough for a column; `needs-approval` and `needs-input` are why.
-fn task_status(t: &Task) -> String {
-    let word = match t.status {
+fn status_word(s: TaskStatus) -> &'static str {
+    match s {
         TaskStatus::NeedsApproval => "approval",
         TaskStatus::NeedsInput => "input",
         other => other.as_str(),
-    };
-    format!("{} {word}", t.status.mark())
+    }
+}
+
+fn task_status(t: &Task) -> String {
+    format!("{} {}", t.status.mark(), status_word(t.status))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -493,7 +552,7 @@ pub(crate) fn portfolio(
         drawn.text.push_str(&row(
             p.number,
             &format!("PROJECT {} [{}]", p.id, p.repo),
-            &project_status(p),
+            &project_status(plan, p),
             &project_vitals(plan, p, &l, known_repos),
             p.archived,
         ));
@@ -545,7 +604,7 @@ pub(crate) fn focus(
         out.push_str(&row(
             p.number,
             &format!("PROJECT {} [{}]", p.id, p.repo),
-            &project_status(p),
+            &project_status(plan, p),
             &v,
             p.archived,
         ));
@@ -795,6 +854,143 @@ mod tests {
             for gone in ["health", "progress"] {
                 assert!(!out.contains(gone), "`{gone}` should be gone from:\n{out}");
             }
+        }
+    }
+
+    /// Marks a task finished, the way `wecode status <id> done` would.
+    fn finish(p: &mut Plan, id: &str) {
+        let mut t = p.task(&TaskId::new(id)).unwrap().clone();
+        t.status = TaskStatus::Done;
+        p.update_task(t).unwrap();
+    }
+
+    /// Which column a needle lands in, counted as a terminal would count it: colour
+    /// codes take no width and a glyph takes one however many bytes it needs, so a
+    /// column assertion made on `str::find` alone would be measuring the encoding.
+    fn column_of(line: &str, needle: &str) -> usize {
+        let at = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("no `{needle}` in {line:?}"));
+        let mut width = 0;
+        let mut escaping = false;
+        for c in line[..at].chars() {
+            if escaping {
+                escaping = c != 'm';
+            } else if c == '\x1b' {
+                escaping = true;
+            } else {
+                width += 1;
+            }
+        }
+        width
+    }
+
+    #[test]
+    fn a_project_row_says_how_much_of_its_work_is_finished() {
+        // The reading the declared state cannot give: `· draft` is the same word on the
+        // day a project is opened and on the day its last task lands.
+        let mut p = plan();
+        p.add_task(good_task("t2", "the second half", "crates/other/**"))
+            .unwrap();
+        finish(&mut p, "t1");
+        let out = portfolio(&p, &[], &repos(), &no_gates(), false);
+        let row = out
+            .lines()
+            .find(|l| l.contains("PROJECT caching"))
+            .expect("the project row");
+        // Beside the declared word, never instead of it: a project can be open and
+        // untouched, or finished and still open, and only both readings tell them apart.
+        assert!(row.contains("draft 1/2"), "{row}");
+    }
+
+    #[test]
+    fn the_standing_counts_leaves_so_a_breakdown_is_not_counted_twice() {
+        // `nested` is t1 › t2 › t3, which is one piece of work broken down twice — not
+        // three. Counting the parents would put a project at 1/3 for finishing all of it.
+        let mut p = nested();
+        finish(&mut p, "t3");
+        assert_eq!(standing(&p, &ProjectId::new("caching")), Some((1, 1)));
+    }
+
+    #[test]
+    fn the_standing_is_the_reading_the_other_views_print_as_a_percentage() {
+        // The property, not the number: `wecode plan` and `wecode show` divide the same
+        // leaves, and a board that counted its own way would be a second answer to how
+        // far along a project is. Dropped work therefore stays in the denominator here
+        // too — it is a decision recorded, not a way to reach the end of a project.
+        let mut p = plan();
+        for (id, glob) in [("t2", "crates/b/**"), ("t3", "crates/c/**")] {
+            p.add_task(good_task(id, "another half", glob)).unwrap();
+        }
+        finish(&mut p, "t1");
+        let mut dropped = p.task(&TaskId::new("t2")).unwrap().clone();
+        dropped.status = TaskStatus::Dropped;
+        p.update_task(dropped).unwrap();
+
+        let id = ProjectId::new("caching");
+        let (done, total) = standing(&p, &id).expect("three tasks");
+        assert_eq!((done, total), (1, 3));
+        assert!(
+            (done as f32 / total as f32 - p.progress(&id)).abs() < f32::EPSILON,
+            "{done}/{total} against {}",
+            p.progress(&id)
+        );
+    }
+
+    #[test]
+    fn a_project_with_nothing_planned_yet_has_no_standing_to_report() {
+        // `0/0` is arithmetic about nothing, and the row already says `no tasks` in
+        // words — which is the sentence a person acts on.
+        let mut p = Plan::new();
+        p.add_project(Project::new("bare", "some real objective here", "wecode"))
+            .unwrap();
+        assert_eq!(standing(&p, &ProjectId::new("bare")), None);
+        let row = project_status(&p, p.project(&ProjectId::new("bare")).unwrap());
+        assert_eq!(row, "· draft");
+    }
+
+    #[test]
+    fn a_task_row_carries_its_word_alone() {
+        // Why the standing stops at the project row: on a leaf it would restate the
+        // status — `✓ done 1/1` — and a parent's breakdown is the rows directly beneath
+        // it, indented, already on the screen.
+        let mut p = nested();
+        finish(&mut p, "t3");
+        for id in ["t1", "t3"] {
+            let cell = task_status(p.task(&TaskId::new(id)).unwrap());
+            assert!(!cell.contains('/'), "{id}: {cell}");
+        }
+    }
+
+    #[test]
+    fn the_status_column_fits_every_word_a_row_can_carry() {
+        // Holds `STATUS_W` to the vocabulary rather than to today's longest word, so a
+        // new status arrives as a failing test instead of as a board that stopped
+        // lining up.
+        for s in ProjectStatus::all() {
+            let cell = format!("{} {} 99/99", s.mark(), s.as_str());
+            assert!(cell.chars().count() <= STATUS_W, "{cell:?}");
+        }
+        for s in TaskStatus::all() {
+            let cell = format!("{} {}", s.mark(), status_word(*s));
+            assert!(cell.chars().count() <= STATUS_W, "{cell:?}");
+        }
+    }
+
+    #[test]
+    fn the_standing_leaves_the_columns_where_the_header_says_they_are() {
+        // Two format strings hold this layout, and the widths only agree because
+        // somebody keeps them agreeing. Measured against the header, so widening one
+        // and not the other fails here rather than in a screenshot.
+        let out = portfolio(&nested(), &[], &repos(), &no_gates(), false);
+        let header = out.lines().find(|l| l.contains("needs you")).unwrap();
+        let spend = column_of(header, "spend");
+        for (label, cell) in [
+            ("PROJECT caching", spend_cell(0, Some(1000))),
+            ("feat t1", spend_cell(0, Some(500))),
+        ] {
+            let row = out.lines().find(|l| l.contains(label)).expect(label);
+            assert_eq!(column_of(row, cell.trim_end()), spend, "{label}: {row}");
         }
     }
 
