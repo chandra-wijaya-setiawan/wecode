@@ -108,9 +108,15 @@ PLAN
         hide a project from the cockpit, or bring it back (--force if work is live)
 
 COCKPIT
-  wecode up                            live dashboard: j/k move, space fold, q quit
-        every level draws the whole task tree; z folds it all, Z opens it
-  wecode board [<id>] [--all]          the same view as a one-shot snapshot
+  wecode tui [<id>]                    one application, three screens that call
+                                       each other (`wecode up` is the same command)
+        HOME     needs-you · moving · next · landed, over the whole portfolio
+        PROJECT  one project's task tree      TASK  one task in full
+        enter opens what the cursor is on, esc goes back, q quits
+        j/k move · space fold · z/Z fold all · a archived · r reload · ? keys
+        <id> is the screen it opens on, not a mode: esc still reaches HOME
+  wecode board [<id>] [--all]          the same state printed once — for pipes,
+                                       logs, and anywhere there is no terminal
 
 WORK
   wecode assign <task> --to <post>     check the post may do it, then make it ready
@@ -203,7 +209,9 @@ fn run(a: &Args) -> Res {
         ("check", _) => check(a),
         ("status", _) => set_status(a),
         ("board", _) => board_snapshot(a),
-        ("up", _) | ("cockpit", _) => cockpit(a),
+        // `up` and `cockpit` are what it was called before there was one application
+        // to name: a rename that breaks muscle memory is a tax with no revenue.
+        ("tui", _) | ("up", _) | ("cockpit", _) => cockpit(a),
         ("assign", _) => assign(a),
         ("use", _) => use_org(a),
         ("orgs", _) => Ok(render::org::orgs()),
