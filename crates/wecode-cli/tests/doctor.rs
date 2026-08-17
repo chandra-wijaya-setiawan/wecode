@@ -1,10 +1,39 @@
-//! Running the hooks that reach the operator, before anything depends on them.
+//! Running what a task will depend on, before a task depends on it: the machine the
+//! work happens on, and the hooks that reach the operator when it stops.
 
 mod support;
 
 use std::path::{Path, PathBuf};
 
 use support::Org;
+
+/// Makes everything the machine half asks about true: a repository that is there, a
+/// harness this machine has, and an allowlist whose every name is set.
+///
+/// Called by every test that expects a clean exit, and stated rather than assumed,
+/// because the alternative is a suite that passes or fails on what the developer
+/// running it happens to have — `claude` on their PATH, `ANTHROPIC_API_KEY` in their
+/// shell. What those tests are about is the hooks, so the machine is held still and
+/// cannot answer for them.
+fn grounded(org: &Org) {
+    org.repo();
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    let ground = text
+        .replace("command = \"claude\"", "command = \"sh\"")
+        .lines()
+        .map(|l| {
+            if l.starts_with("env_allowlist = ") {
+                "env_allowlist = [\"PATH\"]".to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_ne!(ground, text, "the agent template was not replaced");
+    std::fs::write(&conf, ground).unwrap();
+}
 
 /// Points the workspace's notify hook at `command`.
 ///
@@ -64,6 +93,7 @@ fn a_configured_hook_is_run_rather_than_read_back() {
     // and a queue with nothing in it are the same silence.
     let org = Org::new("doctor-runs", "solo");
     org.seed();
+    grounded(&org);
     let log = org.path("drilled.txt");
     hooked(
         &org,
@@ -90,6 +120,7 @@ fn the_message_carries_no_number_for_a_reply_to_sign_against() {
     // would be one `approve` away from signing work nobody had looked at.
     let org = Org::new("doctor-no-number", "solo");
     org.seed();
+    grounded(&org);
     let log = org.path("number.txt");
     hooked(
         &org,
@@ -106,6 +137,7 @@ fn a_hook_that_does_not_work_is_found_here_rather_than_at_02_14() {
     // shape this is for: a report nobody reads is the state it was written to end.
     let org = Org::new("doctor-broken", "solo");
     org.seed();
+    grounded(&org);
     hooked(&org, "echo could not resolve host >&2; exit 6");
 
     let out = org.run(&["doctor"]);
@@ -121,6 +153,7 @@ fn a_hook_that_exits_well_and_says_something_is_not_taken_for_a_delivery() {
     // question — and the drill reads it under the same rule the loop does.
     let org = Org::new("doctor-refused", "solo");
     org.seed();
+    grounded(&org);
     hooked(&org, "echo Bad Request: chat not found");
 
     let out = org.run(&["doctor"]);
@@ -135,6 +168,7 @@ fn the_channel_is_read_from_the_start_and_no_reply_is_consumed() {
     // unread replies as a side effect of checking it could read them.
     let org = Org::new("doctor-offset", "solo");
     org.seed();
+    grounded(&org);
     let (replies, asked) = chatting(&org);
     // Chat, not an instruction: read, moved past, and nothing signed. What matters here
     // is that reading it moves the cursor.
@@ -170,6 +204,7 @@ fn the_channel_is_read_from_the_start_and_no_reply_is_consumed() {
 fn the_drill_signs_nothing_and_leaves_the_work_where_it_found_it() {
     let org = Org::new("doctor-moves-nothing", "solo");
     org.seed();
+    grounded(&org);
     let (replies, _) = chatting(&org);
     // A reply that would sign a merge, sitting unread in the channel. The drill reads
     // the same channel and must come to no conclusion about it.
@@ -203,6 +238,7 @@ fn a_channel_nobody_can_answer_from_is_reported_as_the_silence_it_is() {
     // machine the operator is not at.
     let org = Org::new("doctor-nobody", "solo");
     org.seed();
+    grounded(&org);
     let conf = org.path("company.toml");
     let text = std::fs::read_to_string(&conf).unwrap();
     std::fs::write(
@@ -223,6 +259,7 @@ fn a_workspace_that_configures_nothing_is_told_where_the_lines_go() {
     // what lets the drill sit in front of `wecode loop` in a script.
     let org = Org::new("doctor-bare", "solo");
     org.seed();
+    grounded(&org);
 
     org.run(&["doctor"])
         .assert_ok("nothing configured is not a failure")
@@ -235,12 +272,98 @@ fn a_workspace_that_configures_nothing_is_told_where_the_lines_go() {
 }
 
 #[test]
+fn a_workspace_nobody_has_edited_yet_is_told_its_repository_is_not_there() {
+    // `wecode init` writes `path = "~/projects/your-repo"`, which parses, validates and
+    // names a directory that has never existed. Nothing asked about it until a task on
+    // that repo was dispatched — and then it was that *task* that failed, with a
+    // worktree cut and a run recorded against it.
+    let org = Org::new("doctor-repo-example", "solo");
+    org.seed();
+
+    let out = org.run(&["doctor"]);
+    assert!(!out.ok(), "an unusable repository exited 0:\n{}", out.all());
+    out.assert_contains("[[repos]] app");
+    out.assert_contains("your-repo");
+    out.assert_contains("is not there");
+}
+
+#[test]
+fn a_harness_this_machine_does_not_have_is_found_before_a_task_is_dispatched() {
+    // The failure this half exists for. Left to dispatch it arrives as a task that
+    // could not be done, once per promotion, and it is nothing of the kind.
+    let org = Org::new("doctor-no-harness", "solo");
+    org.seed();
+    grounded(&org);
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        text.replace("command = \"sh\"", "command = \"wecode-no-such-harness\""),
+    )
+    .unwrap();
+
+    let out = org.run(&["doctor"]);
+    assert!(!out.ok(), "a missing harness exited 0:\n{}", out.all());
+    out.assert_contains("wecode-no-such-harness");
+    // Which seats are waiting on it, since that is what decides whether the repair is
+    // this morning's — and it is the harness that is named, not the task.
+    out.assert_contains("post");
+}
+
+#[test]
+fn a_variable_the_agent_was_promised_is_read_off_the_environment_wecode_is_in() {
+    // A worker is started with `env_clear`, so the allowlist is not a filter over the
+    // environment — it *is* the environment. A name on it that is unset here is carried
+    // through as nothing, and the agent finds out on its first authenticated call,
+    // having spent the task's budget getting there.
+    let org = Org::new("doctor-no-key", "solo");
+    org.seed();
+    grounded(&org);
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        text.replace(
+            "env_allowlist = [\"PATH\"]",
+            "env_allowlist = [\"PATH\", \"WECODE_DOCTOR_UNSET\"]",
+        ),
+    )
+    .unwrap();
+
+    let out = org.run(&["doctor"]);
+    assert!(!out.ok(), "a variable that never arrives exited 0:\n{}", out.all());
+    out.assert_contains("[agents.claude-code] env_allowlist");
+    out.assert_contains("WECODE_DOCTOR_UNSET");
+}
+
+#[test]
+fn a_machine_that_can_do_the_work_says_so_and_says_where() {
+    // The good day. Worktrees land outside both the repository and the workspace, which
+    // is the commonest question asked about them, so the answer is in the report whether
+    // or not anything is wrong with it.
+    let org = Org::new("doctor-machine-ok", "solo");
+    org.seed();
+    grounded(&org);
+
+    org.run(&["doctor"])
+        .assert_ok("a machine that can do the work")
+        .assert_contains("machine")
+        .assert_contains("✓ git")
+        .assert_contains("worktree root")
+        .assert_contains("wecode-e2e-doctor-machine-ok")
+        // Resolved, and not started: a coding agent launched to see whether it launches
+        // is a session and a bill.
+        .assert_contains("resolved, not started");
+}
+
+#[test]
 fn the_seat_that_would_sign_is_named_with_what_it_may_sign() {
     // The other silent half: a reply that resolves to a person whose post may sign
     // nothing is read, attributed, put past the Broker and refused — a round trip that
     // ends where it started, six hours later.
     let org = Org::new("doctor-seat", "solo");
     org.seed();
+    grounded(&org);
     chatting(&org);
     std::fs::write(org.path("replies.json"), "{\"ok\":true,\"result\":[]}").unwrap();
 
