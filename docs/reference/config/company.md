@@ -114,6 +114,35 @@ first turn and says nothing thereafter. `wecode run` prints the replayed figure 
 the spend, because cache reads are billed — at a tenth of the rate — and a number left
 out of a budget should not also be left off the screen.
 
+## Run it before you depend on it
+
+Everything above is checked when the file is *loaded*: the TOML parses, the roles
+resolve, a post names an agent that exists. What none of that asks is whether the names
+are true **here** — whether `[[repos]] path` is a directory on this machine and a
+repository, whether `[agents.*] command` resolves to something executable on wecode's
+`PATH`, whether every name in `env_allowlist` is actually set in the environment wecode
+is running in. Those are questions about a filesystem and a shell, and until a task was
+dispatched nothing asked them.
+
+That is the wrong moment to find out, because the failure is *misattributed* rather than
+merely late. Dispatch happens after admission and after scheduling, with a worktree
+already cut and a run row already open, so a missing `claude` or an `[[repos]] app` still
+pointing at the `~/projects/your-repo` the template shipped with lands on the board as a
+task that could not be done. Read back later it is indistinguishable from work that was
+genuinely too hard, and `wecode loop` files another one on every promotion.
+
+`wecode doctor` asks all three now. It resolves the command the way `spawn` will —
+without starting it — checks the charter's `never_run` against the line each staffed seat
+would actually be dispatched on, and reads the allowlist back off its own environment,
+which matters more than it looks: a worker is started with `env_clear`, so the list is
+not a filter over the ambient environment, it *is* the environment. A name on it that is
+unset where wecode runs arrives as nothing at all, and the agent discovers that on its
+first authenticated call, having already spent the task's budget getting there. A missing
+`PATH` is the same fault wearing a disguise — every name on the list is set, so nothing
+reads as wrong, and the harness starts without the `git` it commits with. An agent no
+post is staffed with is reported as an absence, not a fault. See
+[commands](../commands.md#the-ones-worth-explaining).
+
 ## Which model a seat gets
 
 `intelligence` on a post says how capable its occupant should be, on a scale of 1 to 10.

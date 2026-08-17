@@ -375,7 +375,7 @@ would put a cause on every record that has none.
 | **Short numbers** | every project and task also answers to a number you can type from a phone |
 | **Notify hook** | a command wecode runs when a task starts waiting on a person |
 | **`wecode telegram`** | signs what the replies to those notifications approved |
-| **`wecode doctor`** | runs both of those now, so neither is trusted untested |
+| **`wecode doctor`** | checks the machine can do the work, and runs both of those, before a task depends on either |
 
 **The notify hook is the only thing here that does not wait to be looked at.** Every
 view above answers a question the operator thought to ask; a task that stopped at 02:14
@@ -443,6 +443,35 @@ signing work nobody looked at. What it cannot do is say the message arrived: wec
 no chat and sees no phone, so the report ends by naming the half only the operator can
 answer. The exit status carries the rest, which is what puts `wecode doctor && wecode
 loop` in front of a day's unattended work.
+
+**The same command first asks whether the machine can do the work at all.** Everything
+wecode does to a task ends in something outside wecode: a `git` that cuts a worktree, a
+directory that holds it, a repository it is cut from, a coding CLI started inside it with
+an environment somebody wrote down by hand. `company.toml` names all of it — `[[repos]]
+path`, `[agents.*] command`, `[agents.*] env_allowlist` — and until this, nothing asked
+whether any of those names were true here.
+
+Where a broken hook fails silently, a broken machine fails *loudly in the wrong place*. A
+missing `claude` fails at dispatch, which is after admission, after scheduling, with a
+worktree cut and a run row opened — so it lands on the board as a task that could not be
+done, when it is a machine that was never set up. `wecode loop` then does it again on the
+next promotion, filing one honest-looking record per attempt for a cause none of them
+names. The commonest case is barely a typo: `wecode init` ships `path =
+"~/projects/your-repo"`, which parses, validates, and has never existed.
+
+So the drill resolves `git`, writes and removes a probe where worktrees land, asks git
+whether each `[[repos]]` path is really a repository, and resolves each staffed
+`[agents.*] command` the way `spawn` will — checking the charter first, since a line
+`never_run` forbids is refused however well installed the harness is. It reads the
+`env_allowlist` back off its own environment, because a worker is started `env_clear`ed
+and handed exactly what that list names: the list is not a filter over the environment,
+it *is* the environment, and a name unset here arrives as nothing at all.
+
+It starts no agent — one launched to see whether it launches is a session, a bill, and
+sometimes a login prompt on a terminal nobody is watching. It installs nothing and writes
+nothing anybody owns. And an absence is not a fault here either: a workspace with no
+repositories yet is a plan somebody is still writing, and a harness no post is staffed
+with launches nothing and is nobody's problem.
 
 **Every level shows the whole tree beneath it.** The portfolio used to stop at root
 tasks, so a plan that broke its work down showed only the tops of the breakdowns — and
