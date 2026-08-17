@@ -12,26 +12,27 @@
 //! The tree goes all the way down: a plan that hangs its real work off a parent
 //! task showed none of it while the portfolio stopped at roots.
 //!
-//! A project's status cell carries its **standing** — how much of its work is
-//! finished — beside the state somebody declared for it. Still no progress column:
-//! this is one reading in the cell that already answers *where is this*, and it goes
-//! on projects only. `> active` says a project is open for work, which is a fact
-//! about intent; `> active 2/5` says where the work has got to, which is the
-//! question somebody away from their desk is actually asking. A task row keeps the
-//! word alone, for the reason the progress bar went: on a leaf it would restate the
-//! status, and a parent's subtasks are the rows immediately beneath it.
+//! A project's status cell carries its **standing** — `> active 2/5` — beside the state
+//! somebody declared for it. Still no progress column: `active` is a fact about intent
+//! and reads the same on the day a project opens as on the day its last task lands, so
+//! the fraction is the other half of one cell. Projects only; on a leaf it would restate
+//! the status, and a parent's breakdown is the rows immediately beneath it.
 //!
-//! A fraction says how far, not whether it can go further, so the needs-you cell
-//! carries the two ends it cannot: work nobody has been handed, and work that has all
-//! landed under a project still declared open. Both are a project sitting still with
-//! every column around it reading healthy, and neither is resolved by the next tick.
+//! A fraction says how far, not whether it can go further, so the needs-you cell carries
+//! the two ends it cannot: work nobody has been handed, and work that has all landed
+//! under a project still declared open. Neither is resolved by the next tick.
+//!
+//! None of that can say *when*, because all of it is counted off the plan as it stands.
+//! A project halfway through, fully staffed and faultless, prints the same row on the
+//! evening its last task landed and a fortnight later. The ledger is the only record of
+//! when anything happened, and the gap since its newest line is what reads `quiet 14d`.
 
 use std::collections::BTreeMap;
 
 use wecode_core::{
     Number, Plan, Project, ProjectId, ProjectStatus, Task, TaskId, TaskKind, TaskStatus, admission,
 };
-use wecode_store::AuditLine;
+use wecode_store::{AuditLine, now_secs};
 
 use crate::render::kind_tag;
 
@@ -77,6 +78,9 @@ pub(crate) struct Counts {
     spent: u64,
     alarms: usize,
     denials: usize,
+    /// When the newest record folded in here was written. `0` for a subject the ledger
+    /// has never named.
+    last: u64,
 }
 
 impl Counts {
@@ -84,6 +88,9 @@ impl Counts {
         self.spent += other.spent;
         self.alarms += other.alarms;
         self.denials += other.denials;
+        // The newest, not the sum: rolled up this says when anything under here last
+        // moved, and a project quiet for a week is not quiet if a subtask ran an hour ago.
+        self.last = self.last.max(other.last);
     }
 }
 
@@ -101,7 +108,9 @@ pub(crate) struct Ledger {
 pub(crate) fn ledger_index(audit: &[AuditLine]) -> Ledger {
     let mut out = Ledger::default();
     for l in audit {
-        let mut c = Counts::default();
+        // Every record is movement, not only a spend: a denial, an approval and a merge
+        // are all wecode having done something about this subject.
+        let mut c = Counts { last: l.at, ..Counts::default() };
         if l.action == "spend" {
             // target is "<tokens>t/<secs>s"
             if let Some(t) = l.target.split('t').next()
@@ -190,6 +199,12 @@ pub(crate) fn project_vitals(
     if closable {
         needs.push("ready to close".to_string());
     }
+    // The one reading here that is not a function of the plan and the ledger alone. The
+    // clock is read at the call, so the rule itself is something a test can hand a time to.
+    let quiet = quiet_for(plan, p, &c, now_secs());
+    if let Some(days) = quiet {
+        needs.push(format!("quiet {days}d"));
+    }
     if plan.tasks_of(&p.id).next().is_none() {
         needs.push("no tasks".to_string());
     }
@@ -201,7 +216,7 @@ pub(crate) fn project_vitals(
             defects,
             stalled,
             c.denials,
-            waiting + stuck + unowned + usize::from(closable),
+            waiting + stuck + unowned + usize::from(closable) + usize::from(quiet.is_some()),
         ),
         spent: c.spent,
         budget: p.budget.tokens,
@@ -352,11 +367,10 @@ fn title_bar(level: &str, subject: &str, hint: &str) -> String {
 
 /// Room for the longest status word plus a two-digit standing beside it.
 ///
-/// Padded, never cut: a plan with more tasks than that pushes the columns to its
-/// right rather than losing a digit, because a ragged line still reads and `1/2` where
-/// `1/20` was meant does not. `the_status_column_fits_every_word_a_row_can_carry`
-/// holds the number to the vocabulary, so a new status is a failing test rather than a
-/// board that quietly stopped lining up.
+/// Padded, never cut: a bigger plan pushes the columns to its right rather than losing a
+/// digit, because a ragged line still reads and `1/2` where `1/20` was meant does not.
+/// `the_status_column_fits_every_word_a_row_can_carry` holds this to the vocabulary, so a
+/// new status arrives as a failing test rather than a board that stopped lining up.
 const STATUS_W: usize = 15;
 
 fn header_row() -> String {
@@ -420,20 +434,16 @@ fn row(number: Option<Number>, label: &str, status: &str, v: &Vitals, archived: 
 
 /// How far a project's work has got: finished leaves over the leaves there are.
 ///
-/// `None` when nothing has been planned yet. `0/0` is a reading of nothing, and the
-/// needs-you cell already says `no tasks` for that case — which is the sentence, not
-/// the arithmetic.
+/// `None` when nothing has been planned yet — `0/0` is arithmetic about nothing, and the
+/// needs-you cell already says `no tasks` in words.
 ///
-/// Leaves, and the same ones [`Plan::progress`] divides, so this cell cannot disagree
-/// with the percentage `wecode plan` and `wecode show` print for the same project. Two
-/// ways of counting would be two answers to *how far along is this*, and the board
-/// would be the surface people stopped trusting. Dropped work therefore stays in the
-/// denominator, as it does there: abandoning a task is a decision to record, not a way
-/// for a project to finish.
-///
-/// Shown as a fraction rather than as that percentage because the board is read at a
-/// glance: `99%` is what 199 of 200 and 999 of 1000 both round to, and how many tasks
-/// are left is the part somebody acts on.
+/// The same leaves [`Plan::progress`] divides, so this cannot disagree with the
+/// percentage `wecode plan` and `wecode show` print for the same project; two answers to
+/// *how far along is this* would make the board the surface people stopped trusting.
+/// Dropped work therefore stays in the denominator, as it does there: abandoning a task
+/// is a decision to record, not a way for a project to finish. Shown as a fraction and
+/// not that percentage because `99%` is what 199 of 200 and 999 of 1000 both round to,
+/// and how many tasks are left is the part somebody acts on.
 fn standing(plan: &Plan, id: &ProjectId) -> Option<(usize, usize)> {
     let leaves: Vec<&Task> = plan
         .tasks_of(id)
@@ -450,19 +460,14 @@ fn standing(plan: &Plan, id: &ProjectId) -> Option<(usize, usize)> {
 ///
 /// Not slow work: stopped work. `wecode task add` moves a task out of `draft` only once
 /// it names a post, and [`crate::scheduler::dispatchable`] only ever picks up one that
-/// has an assignee — so no tick promotes these and no loop starts them, however green
-/// every other column reads.
+/// has an assignee — so no tick promotes these, however green every other column reads.
 ///
-/// The leaves the standing divides, less the closed and the filed-away, so the two
-/// readings are halves of one sentence: `1/4` says where the work got to, `3 to assign`
-/// says why it stopped there. Parents go with the parked — a breakdown is not
-/// dispatched, its pieces are, and staffing what somebody archived teaches them to
-/// ignore the cell.
-///
-/// Amber here while the task row calls the same task `unassigned` in green, on purpose:
-/// one leaf mid-planning is normal and its own row is right there. The project row is
-/// the one an operator reads from a phone, and there the count answers *does this need
-/// me* — nothing else is going to start this.
+/// The leaves the standing divides, less the closed and the filed-away, so the two are
+/// halves of one sentence: `1/4` says where the work got to, `3 to assign` says why it
+/// stopped there. Parents go with the parked — a breakdown is not dispatched, its pieces
+/// are. Amber here while the task row calls the same task `unassigned` in green, on
+/// purpose: one leaf mid-planning is normal and its own row is right there, whereas the
+/// project row is the one read from a phone, where the count answers *does this need me*.
 fn unowned(plan: &Plan, id: &ProjectId) -> usize {
     plan.tasks_of(id)
         .filter(|t| plan.subtasks(&t.id).next().is_none())
@@ -470,12 +475,48 @@ fn unowned(plan: &Plan, id: &ProjectId) -> usize {
         .count()
 }
 
+/// A day: the gap under which the board says nothing about time. The shortest silence
+/// that cannot be an ordinary night — wecode runs tasks in minutes, so an hour would be
+/// true of every workspace whose operator went to lunch, and a cell that is right about
+/// everybody is read by nobody.
+const QUIET_AFTER: u64 = 24 * 60 * 60;
+
+/// Whole days between two ledger times, once there is at least one. Rounded down, so the
+/// reading is never longer than the silence, and `None` rather than a wrap for a record
+/// dated ahead of the clock — a machine whose time went backwards is not a project that
+/// raced ahead.
+fn quiet_days(last: u64, now: u64) -> Option<u64> {
+    let days = now.saturating_sub(last) / QUIET_AFTER;
+    (days > 0).then_some(days)
+}
+
+/// How long a project has stood still, in whole days — `None` while it is still moving.
+///
+/// Silent in four cases, each a row that would otherwise cry wolf. A closed project is
+/// meant to stand still. One with no open work left already says `ready to close`, and
+/// two cells for one fact teach a reader to skip both. A run in flight writes nothing to
+/// the ledger until it lands, so it reads exactly like silence and is the opposite of it.
+/// And a project the ledger has never named has no silence to measure — unreachable in a
+/// stored workspace, where defining a project is itself a record, so one nobody ever ran
+/// is timed from the day it was written.
+fn quiet_for(plan: &Plan, p: &Project, c: &Counts, now: u64) -> Option<u64> {
+    if p.status.is_closed() || c.last == 0 {
+        return None;
+    }
+    let open: Vec<&Task> = plan.tasks_of(&p.id).filter(|t| !t.status.is_closed()).collect();
+    if open.is_empty()
+        || open.iter().any(|t| matches!(t.status, TaskStatus::Running | TaskStatus::Verifying))
+    {
+        return None;
+    }
+    quiet_days(c.last, now)
+}
+
 /// The declared state, and beside it where the work under it has got to.
 ///
-/// The standing sits on the project row and nowhere else, for the reason the stuck
-/// count does: the rows beneath are what to read next, and this is the number that
-/// says whether to read them at all — and it is still there when a long tree has
-/// scrolled every one of them off the screen.
+/// On the project row and nowhere else, for the reason the stuck count is: the rows
+/// beneath are what to read next, this is the number that says whether to read them at
+/// all, and it survives a long tree scrolling every one of them off the screen.
 fn project_status(plan: &Plan, p: &Project) -> String {
     let word = p.status.as_str();
     match standing(plan, &p.id) {
@@ -753,8 +794,45 @@ mod tests {
     }
 
     /// The same, for the tests with no ledger to speak of.
-    fn quiet(p: &Plan) -> Vitals {
+    fn bare(p: &Plan) -> Vitals {
         vitals(p, &ledger_index(&[]))
+    }
+
+    /// One task's vitals, ungated. Spelled once: the four arguments took four lines in
+    /// each of a dozen tests, and only one of those tests was about any of them.
+    fn task_of(p: &Plan, l: &Ledger, id: &str) -> Vitals {
+        task_vitals(p, p.task(&TaskId::new(id)).unwrap(), l, &no_gates())
+    }
+
+    /// Moves a task into a state, the way the store would.
+    fn set(p: &mut Plan, id: &str, s: TaskStatus) {
+        let mut t = p.task(&TaskId::new(id)).unwrap().clone();
+        t.status = s;
+        p.update_task(t).unwrap();
+    }
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    /// The ledger of a project whose newest record was written `days` ago.
+    fn aged(days: u64) -> Ledger {
+        let at = now_secs() - days * DAY;
+        ledger_index(&[AuditLine { at, ..line("caching", "t1", "spend", "10t/1s", "allow") }])
+    }
+
+    /// The measure and the budget every fixture here carries. Spelled once: what each
+    /// test is about is the plan's shape, never which command judges it.
+    fn cmd(c: &str) -> Measure {
+        Measure::Command {
+            cmd: c.into(),
+            expect_status: 0,
+        }
+    }
+
+    fn budget(tokens: u64, wall_secs: u64) -> Budget {
+        Budget {
+            tokens: Some(tokens),
+            wall_secs: Some(wall_secs),
+        }
     }
 
     /// A project with one well-formed task, so a defect in a test is one the test
@@ -763,14 +841,8 @@ mod tests {
         let mut p = Plan::new();
         p.add_project(
             Project::new("caching", "cut export p99 below 500ms", "wecode")
-                .measured(Measure::Command {
-                    cmd: "cargo bench".into(),
-                    expect_status: 0,
-                })
-                .budgeted(Budget {
-                    tokens: Some(1000),
-                    wall_secs: Some(60),
-                }),
+                .measured(cmd("cargo bench"))
+                .budgeted(budget(1000, 60)),
         )
         .unwrap();
         p.add_task(good_task("t1", "write the cache layer", "crates/cache/**"))
@@ -780,15 +852,9 @@ mod tests {
 
     fn good_task(id: &str, title: &str, glob: &str) -> Task {
         Task::new(id, "caching", title)
-            .accepting(Measure::Command {
-                cmd: "cargo test".into(),
-                expect_status: 0,
-            })
+            .accepting(cmd("cargo test"))
             .scoped(Scope::write(&[glob]))
-            .budgeted(Budget {
-                tokens: Some(500),
-                wall_secs: Some(30),
-            })
+            .budgeted(budget(500, 30))
     }
 
     fn line(project: &str, task: &str, action: &str, target: &str, outcome: &str) -> AuditLine {
@@ -916,9 +982,7 @@ mod tests {
 
     /// Marks a task finished, the way `wecode status <id> done` would.
     fn finish(p: &mut Plan, id: &str) {
-        let mut t = p.task(&TaskId::new(id)).unwrap().clone();
-        t.status = TaskStatus::Done;
-        p.update_task(t).unwrap();
+        set(p, id, TaskStatus::Done);
     }
 
     /// Which column a needle lands in, counted as a terminal would count it: colour
@@ -980,9 +1044,7 @@ mod tests {
             p.add_task(good_task(id, "another half", glob)).unwrap();
         }
         finish(&mut p, "t1");
-        let mut dropped = p.task(&TaskId::new("t2")).unwrap().clone();
-        dropped.status = TaskStatus::Dropped;
-        p.update_task(dropped).unwrap();
+        set(&mut p, "t2", TaskStatus::Dropped);
 
         let id = ProjectId::new("caching");
         let (done, total) = standing(&p, &id).expect("three tasks");
@@ -1056,10 +1118,7 @@ mod tests {
         let audit = vec![line("caching", "t1", "write", "x.pem", "alarm")];
         let p = plan();
         let l = ledger_index(&audit);
-        assert_eq!(
-            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).health,
-            Health::Red
-        );
+        assert_eq!(task_of(&p, &l, "t1").health, Health::Red);
         assert_eq!(vitals(&p, &l).health, Health::Red, "an alarm must roll up");
     }
 
@@ -1068,7 +1127,7 @@ mod tests {
         let audit = vec![line("caching", "t1", "write", "other.rs", "deny")];
         let p = plan();
         let l = ledger_index(&audit);
-        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates());
+        let v = task_of(&p, &l, "t1");
         assert_eq!(v.health, Health::Amber);
         // Health is only a colour now, so the denial must appear in words too.
         assert!(v.needs.iter().any(|n| n == "1 denied"), "{:?}", v.needs);
@@ -1090,10 +1149,7 @@ mod tests {
         let l = ledger_index(&audit);
         assert_eq!(vitals(&p, &l).spent, 150);
         // ...and it does not leak onto the task.
-        assert_eq!(
-            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).spent,
-            0
-        );
+        assert_eq!(task_of(&p, &l, "t1").spent, 0);
     }
 
     #[test]
@@ -1103,11 +1159,7 @@ mod tests {
             .unwrap();
         let audit = vec![line("caching", "t1a", "spend", "700t/2s", "allow")];
         let l = ledger_index(&audit);
-        assert_eq!(
-            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).spent,
-            700,
-            "a parent task sees its subtask's spend"
-        );
+        assert_eq!(task_of(&p, &l, "t1").spent, 700, "a parent sees its subtask's spend");
         assert_eq!(vitals(&p, &l).spent, 700);
     }
 
@@ -1116,13 +1168,9 @@ mod tests {
         let audit = vec![line("caching", "t1", "spend", "5000t/0s", "allow")];
         let p = plan();
         let l = ledger_index(&audit);
-        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates());
+        let v = task_of(&p, &l, "t1");
         assert_eq!(v.health, Health::Red);
-        assert!(
-            v.needs.iter().any(|n| n.contains("over budget")),
-            "{:?}",
-            v.needs
-        );
+        assert!(v.needs.iter().any(|n| n.contains("over budget")), "{:?}", v.needs);
     }
 
     #[test]
@@ -1130,9 +1178,7 @@ mod tests {
         let mut p = plan();
         assert_eq!(p.progress(&ProjectId::new("caching")), 0.0);
 
-        let mut t = p.task(&TaskId::new("t1")).unwrap().clone();
-        t.status = TaskStatus::Done;
-        p.update_task(t).unwrap();
+        finish(&mut p, "t1");
         assert_eq!(p.progress(&ProjectId::new("caching")), 1.0);
 
         p.add_task(good_task("t2", "the second half", "crates/other/**"))
@@ -1147,15 +1193,9 @@ mod tests {
             .unwrap();
         p.add_task(good_task("t1b", "second inner", "crates/cache/b/**").under("t1"))
             .unwrap();
-        let mut a = p.task(&TaskId::new("t1a")).unwrap().clone();
-        a.status = TaskStatus::Done;
-        p.update_task(a).unwrap();
-
-        assert_eq!(
-            task_progress(&p, p.task(&TaskId::new("t1")).unwrap()),
-            0.5,
-            "one of two subtasks done"
-        );
+        finish(&mut p, "t1a");
+        let t1 = p.task(&TaskId::new("t1")).unwrap();
+        assert_eq!(task_progress(&p, t1), 0.5, "one of two subtasks done");
     }
 
     #[test]
@@ -1164,12 +1204,7 @@ mod tests {
         // gate refuses would sit green on the cockpit.
         let p = plan();
         let gates: DesignGates = [(ProjectId::new("caching"), vec![TaskKind::Feature])].into();
-        let v = task_vitals(
-            &p,
-            p.task(&TaskId::new("t1")).unwrap(),
-            &ledger_index(&[]),
-            &gates,
-        );
+        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &ledger_index(&[]), &gates);
         assert_eq!(v.defects, 1, "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
     }
@@ -1178,14 +1213,10 @@ mod tests {
     fn a_draft_with_no_defects_reads_as_unassigned() {
         let p = plan();
         let l = ledger_index(&[]);
-        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates());
+        let v = task_of(&p, &l, "t1");
         assert_eq!(v.defects, 0, "control case must be defect-free");
         assert!(v.needs.iter().any(|n| n == "unassigned"), "{:?}", v.needs);
-        assert_eq!(
-            v.health,
-            Health::Green,
-            "waiting to be assigned is not a fault"
-        );
+        assert_eq!(v.health, Health::Green, "waiting to be assigned is not a fault");
     }
 
     #[test]
@@ -1193,7 +1224,7 @@ mod tests {
         // The gap the standing leaves: `draft 0/1` says none of it is finished and
         // stops there, while the reason is that no post owns it — so no tick promotes
         // it and the loop never picks it up. Green, that project waits for ever.
-        let v = quiet(&plan());
+        let v = bare(&plan());
         assert!(v.needs.iter().any(|n| n == "1 to assign"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
 
@@ -1201,7 +1232,7 @@ mod tests {
         let mut t = p.task(&TaskId::new("t1")).unwrap().clone();
         t.assignee = Some("impl".to_string());
         p.update_task(t).unwrap();
-        let v = quiet(&p);
+        let v = bare(&p);
         assert!(!v.needs.iter().any(|n| n.ends_with("to assign")), "{:?}", v.needs);
         assert_eq!(v.health, Health::Green, "handed over is nothing to report");
     }
@@ -1228,40 +1259,66 @@ mod tests {
         // remaining move is the operator's.
         let mut p = plan();
         finish(&mut p, "t1");
-        let v = quiet(&p);
+        let v = bare(&p);
         assert!(v.needs.iter().any(|n| n == "ready to close"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
 
-        // And it stops once they have. A closed project asking to be closed is the
-        // reading that teaches people the cell is noise.
+        // And it is the whole of what the row asks, however long ago that last task
+        // landed: two cells for one fact teach a reader to skip both.
+        assert_eq!(vitals(&p, &aged(9)).needs, vec!["ready to close".to_string()]);
+
+        // It stops once they have. A closed project asking to be closed is the reading
+        // that teaches people the cell is noise.
         let mut done = p.project(&ProjectId::new("caching")).unwrap().clone();
         done.status = ProjectStatus::Done;
         p.update_project(done).unwrap();
-        let v = quiet(&p);
-        assert!(v.needs.is_empty(), "{:?}", v.needs);
+        assert!(bare(&p).needs.is_empty(), "{:?}", bare(&p).needs);
+        assert!(vitals(&p, &aged(9)).needs.is_empty(), "nor is it quiet: it is closed");
+    }
+
+    #[test]
+    fn a_project_nothing_has_happened_in_says_how_long() {
+        // What the standing cannot say: `draft 0/1` prints the same on the evening a
+        // task was written and a fortnight later, and only one of those wants somebody.
+        let v = vitals(&plan(), &aged(3));
+        assert!(v.needs.iter().any(|n| n == "quiet 3d"), "{:?}", v.needs);
+        assert_eq!(v.health, Health::Amber);
+        // Silent while the workspace is warm, and silent for a plan the ledger has never
+        // named — no record is no gap, only a project nothing has started yet.
+        for l in [aged(0), ledger_index(&[])] {
+            let needs = vitals(&plan(), &l).needs;
+            assert!(!needs.iter().any(|n| n.starts_with("quiet")), "{needs:?}");
+        }
+    }
+
+    #[test]
+    fn a_run_in_flight_is_not_silence_however_old_the_last_record_is() {
+        // An agent mid-run writes nothing to the ledger until it lands, so a long run
+        // reads exactly like a dead project and is the opposite of one.
+        let mut p = plan();
+        for s in [TaskStatus::Running, TaskStatus::Verifying] {
+            set(&mut p, "t1", s);
+            let needs = vitals(&p, &aged(9)).needs;
+            assert!(!needs.iter().any(|n| n.starts_with("quiet")), "{s:?}: {needs:?}");
+        }
+    }
+
+    #[test]
+    fn the_silence_is_counted_in_whole_days_so_it_never_overstates() {
+        assert_eq!(quiet_days(0, DAY - 1), None, "under a day is not a reading");
+        assert_eq!(quiet_days(0, 2 * DAY - 1), Some(1), "rounded down, never up");
+        assert_eq!(quiet_days(9 * DAY, 0), None, "a clock that went backwards");
     }
 
     #[test]
     fn a_project_with_no_tasks_says_so_and_is_amber() {
         let mut p = Plan::new();
-        p.add_project(
-            Project::new("bare", "some real objective here", "wecode")
-                .measured(Measure::Command {
-                    cmd: "cargo test".into(),
-                    expect_status: 0,
-                })
-                .budgeted(Budget {
-                    tokens: Some(10),
-                    wall_secs: Some(1),
-                }),
-        )
-        .unwrap();
-        let v = project_vitals(
-            &p,
-            p.project(&ProjectId::new("bare")).unwrap(),
-            &ledger_index(&[]),
-            &repos(),
-        );
+        let empty = Project::new("bare", "some real objective here", "wecode")
+            .measured(cmd("cargo test"))
+            .budgeted(budget(10, 1));
+        p.add_project(empty).unwrap();
+        let empty = p.project(&ProjectId::new("bare")).unwrap();
+        let v = project_vitals(&p, empty, &ledger_index(&[]), &repos());
         assert!(v.needs.iter().any(|n| n == "no tasks"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
     }
@@ -1269,20 +1326,9 @@ mod tests {
     #[test]
     fn a_task_awaiting_a_person_is_amber_and_names_the_reason() {
         let mut p = plan();
-        let mut t = p.task(&TaskId::new("t1")).unwrap().clone();
-        t.status = TaskStatus::NeedsApproval;
-        p.update_task(t).unwrap();
-        let v = task_vitals(
-            &p,
-            p.task(&TaskId::new("t1")).unwrap(),
-            &ledger_index(&[]),
-            &no_gates(),
-        );
-        assert!(
-            v.needs.iter().any(|n| n == "needs-approval"),
-            "{:?}",
-            v.needs
-        );
+        set(&mut p, "t1", TaskStatus::NeedsApproval);
+        let v = task_of(&p, &ledger_index(&[]), "t1");
+        assert!(v.needs.iter().any(|n| n == "needs-approval"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
     }
 
@@ -1293,12 +1339,7 @@ mod tests {
         let mut p = plan();
         p.add_task(good_task("t2", "the second half", "crates/other/**").after("t1"))
             .unwrap();
-        let v = task_vitals(
-            &p,
-            p.task(&TaskId::new("t2")).unwrap(),
-            &ledger_index(&[]),
-            &no_gates(),
-        );
+        let v = task_of(&p, &ledger_index(&[]), "t2");
         assert_eq!(v.defects, 0, "{:?}", v.needs);
         assert_eq!(v.health, Health::Green);
     }
@@ -1311,22 +1352,11 @@ mod tests {
         let mut p = plan();
         p.add_task(good_task("t2", "the second half", "crates/other/**").after("t1"))
             .unwrap();
-        let mut t1 = p.task(&TaskId::new("t1")).unwrap().clone();
-        t1.status = TaskStatus::Dropped;
-        p.update_task(t1).unwrap();
+        set(&mut p, "t1", TaskStatus::Dropped);
 
-        let v = task_vitals(
-            &p,
-            p.task(&TaskId::new("t2")).unwrap(),
-            &ledger_index(&[]),
-            &no_gates(),
-        );
+        let v = task_of(&p, &ledger_index(&[]), "t2");
         assert_eq!(v.health, Health::Amber);
-        assert!(
-            v.needs.iter().any(|n| n == "stuck on t1 (dropped)"),
-            "{:?}",
-            v.needs
-        );
+        assert!(v.needs.iter().any(|n| n == "stuck on t1 (dropped)"), "{:?}", v.needs);
     }
 
     #[test]
@@ -1342,11 +1372,8 @@ mod tests {
                 .after("t1a"),
         )
         .unwrap();
-        let mut dead = p.task(&TaskId::new("t1a")).unwrap().clone();
-        dead.status = TaskStatus::Failed;
-        p.update_task(dead).unwrap();
-
-        let v = quiet(&p);
+        set(&mut p, "t1a", TaskStatus::Failed);
+        let v = bare(&p);
         assert!(v.needs.iter().any(|n| n == "1 stuck"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
     }
@@ -1414,10 +1441,7 @@ mod tests {
         let out = focus(&p, &[], "t2", &repos(), &no_gates());
         assert!(out.contains("feat t2"), "{out}");
         assert!(out.contains(&at_depth("feat t3", 1)), "{out}");
-        assert!(
-            !out.contains("archived, hidden"),
-            "nothing left out:\n{out}"
-        );
+        assert!(!out.contains("archived, hidden"), "nothing left out:\n{out}");
     }
 
     #[test]
@@ -1445,10 +1469,7 @@ mod tests {
         let audit = vec![line("caching", "t1", "write", "x.pem", "alarm")];
         let out = focus(&p, &audit, "caching", &repos(), &no_gates());
         assert!(out.contains("1 alarm"), "{out}");
-        assert!(
-            out.contains("x.pem"),
-            "the evidence, not just the count:\n{out}"
-        );
+        assert!(out.contains("x.pem"), "the evidence, not just the count:\n{out}");
     }
 
     #[test]
@@ -1463,10 +1484,7 @@ mod tests {
         let out = focus(&p, &audit, "t1", &repos(), &no_gates());
         assert!(out.contains("incidents"), "{out}");
         assert!(out.contains("x.pem"), "{out}");
-        assert!(
-            !out.contains("elsewhere.rs"),
-            "should not show another task's: {out}"
-        );
+        assert!(!out.contains("elsewhere.rs"), "not another task's: {out}");
     }
 
     #[test]

@@ -132,6 +132,29 @@ fn a_project_whose_work_has_all_landed_asks_to_be_closed() {
 }
 
 #[test]
+fn a_board_of_a_workspace_that_is_moving_says_nothing_about_time() {
+    // The half of the silence rule only a real workspace can prove. `quiet 3d` is worth
+    // reading because it is rare, and a cell that told every operator on earth their live
+    // workspace had gone quiet is the first one they would learn to skip. Here the times
+    // are the ones the store actually wrote, against the threshold as it actually is —
+    // where a unit or a sign the wrong way round shows up as a row shouting on day one.
+    //
+    // The other half — that the words do appear once a day has passed — cannot be
+    // reached from here, because nothing in a test can make a stored workspace old.
+    // board.rs unit-tests that against a ledger it hands its own times to.
+    let org = Org::new("board-quiet", "software-company");
+    org.seed();
+    org.run(&["assign", "cache-tests", "--to", "test"])
+        .assert_ok("assign");
+    org.run(&["status", "cache-tests", "done"]).assert_ok("done");
+
+    let out = board(&org, &["board"]);
+    assert!(!out.contains("quiet"), "a workspace that just moved: {out}");
+    let down = board(&org, &["board", "caching"]);
+    assert!(!down.contains("quiet"), "nor on the way down: {down}");
+}
+
+#[test]
 fn a_project_with_nothing_planned_yet_reports_no_standing() {
     // `0/0` is arithmetic about nothing. The needs-you cell already has the sentence.
     let org = Org::new("board-standing-bare", "software-company");
