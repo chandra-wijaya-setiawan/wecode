@@ -6,6 +6,14 @@
 //! by an agent; it is the colour of the needs-you cell rather than a column,
 //! because every cause of amber or red already writes an entry there.
 //!
+//! The portfolio **opens on the same four attention groups the snapshot leads with** —
+//! needs-you, moving, next, landed — and keeps the tree under them. Not a second reading
+//! of the same statuses: the rows come from [`board::attention_groups`], where `wecode
+//! board` gets its own, so a cockpit left open on a desk and a snapshot read on a phone
+//! cannot disagree about what needs somebody. At L0 only, for the reason the snapshot's
+//! focus views are trees: descending is what somebody does once a group row has told
+//! them where to look.
+//!
 //! Every level draws the whole is-part-of tree beneath its subject, subtasks and
 //! their subtasks included. A row with work under it can be folded shut, which is
 //! how the portfolio stays a scan without hiding anything by default: what is not
@@ -24,11 +32,11 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{DefaultTerminal, Frame};
-use wecode_core::{Number, Plan, Project, ProjectId, Task, TaskId, TaskStatus};
+use wecode_core::{Number, Plan, Project, ProjectId, Task, TaskId};
 use wecode_org::Company;
 use wecode_store::{AuditLine, AuditQuery, Store};
 
-use crate::board::{self, Health, Ledger, Vitals};
+use crate::board::{self, Health, Ledger, Vitals, status_word};
 
 /// How often to re-read the store.
 const RELOAD: Duration = Duration::from_millis(1500);
@@ -49,22 +57,14 @@ enum Subject {
     Task(TaskId),
 }
 
-impl Subject {
-    fn as_str(&self) -> &str {
-        match self {
-            Self::Project(p) => p.as_str(),
-            Self::Task(t) => t.as_str(),
-        }
-    }
-}
-
 /// Whether a row has anything under it, and whether it is showing it.
 ///
 /// A leaf still occupies the marker column. Two spaces of nothing keep every id in
 /// the same place down a branch; without them a row's indentation would encode its
 /// depth *and* whether its neighbour had children, which is unreadable.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 enum Fold {
+    #[default]
     Leaf,
     Open,
     Shut,
@@ -80,9 +80,14 @@ impl Fold {
     }
 }
 
-/// One visible line: a subject at a depth, with its derived vitals.
+/// One visible line: a subject at a depth, with its derived vitals — or a caption, which
+/// is a line of the view's own words with no subject behind it.
+#[derive(Default)]
 struct RowItem {
-    subject: Subject,
+    /// `None` for a caption: a group heading, the dash under an empty group, or the
+    /// count one ends with. In the table rather than in a pane of its own, because the
+    /// table is what scrolls and a heading that stayed put would leave its rows behind.
+    subject: Option<Subject>,
     /// The short number, in its own column. Not folded into `label` for the same
     /// reason as on the snapshot board: the label carries the indent and truncates,
     /// and a handle that moves and disappears is not a handle.
@@ -93,13 +98,22 @@ struct RowItem {
     /// The declared state, as a mark and a word. Distinct from `vitals.health`,
     /// which is computed — a task can be perfectly healthy and not started.
     status: String,
-    vitals: Vitals,
+    /// `None` for a caption, which has no cells to fill but its own words.
+    vitals: Option<Vitals>,
     fold: Fold,
 }
 
 impl RowItem {
     fn is_project(&self) -> bool {
-        matches!(self.subject, Subject::Project(_))
+        matches!(self.subject, Some(Subject::Project(_)))
+    }
+}
+
+/// A row of the view's own words: a group heading, or the line a group ends with.
+fn caption(text: &str) -> RowItem {
+    RowItem {
+        label: text.to_string(),
+        ..RowItem::default()
     }
 }
 
@@ -182,7 +196,7 @@ impl App {
     /// which is how the portfolio came to end at root tasks and a focused task at
     /// its grandchildren.
     fn rebuild(&mut self) {
-        let selected = self.selected().map(|r| r.subject.clone());
+        let selected = self.selected().and_then(|r| r.subject.clone());
         let l = board::ledger_index(&self.audit);
         let tree = Tree {
             plan: &self.plan,
@@ -200,7 +214,15 @@ impl App {
                 } else {
                     self.plan.projects().collect()
                 };
-                for p in projects {
+                // The four questions, then the shape of the plan — the order the
+                // snapshot prints them in, and for the same reason. Skipped when there
+                // is nothing at all, so an empty workspace still falls through to the
+                // line saying how to start one rather than to four headings over none.
+                if !projects.is_empty() {
+                    tree.push_attention(&mut rows, &projects);
+                    rows.push(caption("PORTFOLIO"));
+                }
+                for p in &projects {
                     tree.push_project(&mut rows, p, &self.known_repos);
                 }
             }
@@ -218,12 +240,12 @@ impl App {
 
         self.rows = rows;
         let restored = selected
-            .and_then(|s| self.rows.iter().position(|r| r.subject == s))
+            .and_then(|s| self.rows.iter().position(|r| r.subject.as_ref() == Some(&s)))
             .unwrap_or(0);
         self.table.select(if self.rows.is_empty() {
             None
         } else {
-            Some(restored)
+            Some(self.land_on(restored, true))
         });
     }
 
@@ -260,13 +282,30 @@ impl App {
         // first row underflows rather than wrapping, and lands on the first row.
         let cur = self.table.selected().unwrap_or(0);
         let last = self.rows.len().saturating_sub(1);
-        self.table
-            .select(Some(cur.checked_add_signed(delta).unwrap_or(0).min(last)));
+        let want = cur.checked_add_signed(delta).unwrap_or(0).min(last);
+        self.table.select(Some(self.land_on(want, delta >= 0)));
+    }
+
+    /// The nearest row from `at` that points at something, searched the way the cursor
+    /// was travelling and then back the other way. A caption is a row like any other to
+    /// the table, and resting on one empties the detail pane and leaves enter with
+    /// nothing to do — so the cursor steps over it.
+    fn land_on(&self, at: usize, forward: bool) -> usize {
+        let points = |i: &usize| self.rows.get(*i).is_some_and(|r| r.subject.is_some());
+        let down = at..self.rows.len();
+        let up = (0..=at).rev();
+        if forward {
+            down.chain(up).find(points)
+        } else {
+            up.chain(down).find(points)
+        }
+        .unwrap_or(at)
     }
 
     fn descend(&mut self) {
-        let Some(row) = self.selected() else { return };
-        let subject = row.subject.clone();
+        let Some(subject) = self.selected().and_then(|r| r.subject.clone()) else {
+            return;
+        };
         // What this view would *draw*, not what the plan holds. A parent whose only
         // subtask is filed away is a leaf here, and descending onto it would otherwise
         // land on a screen showing one row.
@@ -290,11 +329,11 @@ impl App {
     /// Folds the selected row shut, or opens it again.
     fn toggle_fold(&mut self) {
         let Some(row) = self.selected() else { return };
-        if row.fold == Fold::Leaf {
+        // A caption is a leaf as far as folding goes: there is nothing under either.
+        let (Some(subject), Fold::Open | Fold::Shut) = (row.subject.clone(), row.fold) else {
             self.status = "leaf — nothing to fold".into();
             return;
-        }
-        let subject = row.subject.clone();
+        };
         if !self.collapsed.remove(&subject) {
             self.collapsed.insert(subject);
         }
@@ -351,8 +390,11 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
-            KeyCode::Char('g') => self.table.select(Some(0)),
-            KeyCode::Char('G') => self.table.select(Some(self.rows.len().saturating_sub(1))),
+            KeyCode::Char('g') => self.table.select(Some(self.land_on(0, true))),
+            KeyCode::Char('G') => {
+                let last = self.rows.len().saturating_sub(1);
+                self.table.select(Some(self.land_on(last, false)));
+            }
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.descend(),
             KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left => self.ascend(),
             KeyCode::Char(' ') => self.toggle_fold(),
@@ -380,13 +422,6 @@ impl App {
     }
 }
 
-/// Tasks in id order, so the view does not reshuffle between frames.
-fn sorted<'a>(it: impl Iterator<Item = &'a Task>) -> Vec<&'a Task> {
-    let mut v: Vec<&Task> = it.collect();
-    v.sort_by(|a, b| a.id.cmp(&b.id));
-    v
-}
-
 fn last(i: usize, n: usize) -> bool {
     i + 1 == n
 }
@@ -411,7 +446,7 @@ impl<'a> Tree<'a> {
     /// The subtasks this view will draw, in id order so it does not reshuffle between
     /// frames.
     fn kids(&self, id: &TaskId) -> Vec<&'a Task> {
-        sorted(
+        board::sorted(
             self.plan
                 .subtasks(id)
                 .filter(|k| self.show_archived || !k.archived),
@@ -420,11 +455,46 @@ impl<'a> Tree<'a> {
 
     /// The same for a project's top-level tasks.
     fn roots(&self, id: &ProjectId) -> Vec<&'a Task> {
-        sorted(
+        board::sorted(
             self.plan
                 .roots_of(id)
                 .filter(|t| self.show_archived || !t.archived),
         )
+    }
+
+    /// The four groups, above the tree and before it. Flat, and never folded: a group
+    /// is not a branch of the tree, it is the same leaves torn out of it and asked a
+    /// different question — which is why both halves are drawn.
+    fn push_attention(&self, rows: &mut Vec<RowItem>, projects: &[&Project]) {
+        let groups = board::attention_groups(self.plan, projects, self.ledger, self.show_archived);
+        for (group, shown, hidden) in groups {
+            rows.push(caption(group.title()));
+            // An empty group keeps its heading, as on the snapshot: four of them in the
+            // same places every time is what lets somebody find the one they came for.
+            if shown.is_empty() {
+                rows.push(caption("   —"));
+            }
+            for t in shown {
+                let mut vitals = board::task_vitals(self.plan, t, self.ledger, self.gates);
+                // The question this group asks, in the cell that carries the colour —
+                // what tells four rows reading `> running` apart.
+                vitals.needs = vec![group.line(self.plan, t, self.ledger, &vitals)];
+                rows.push(RowItem {
+                    subject: Some(Subject::Task(t.id.clone())),
+                    number: t.number,
+                    // A row torn out of the tree has to say which project it came from,
+                    // or the id is the only handle on it.
+                    label: format!("  {}/{}", t.project, t.id),
+                    status: format!("{} {}", t.status.mark(), status_word(t.status)),
+                    vitals: Some(vitals),
+                    ..RowItem::default()
+                });
+            }
+            if hidden > 0 {
+                // What it stood down is not lost — the tree below drew all of it.
+                rows.push(caption(&format!("   … and {hidden} more")));
+            }
+        }
     }
 
     fn fold_of(&self, subject: &Subject, has_children: bool) -> Fold {
@@ -455,8 +525,8 @@ impl<'a> Tree<'a> {
                 if p.archived { "  archived" } else { "" }
             ),
             status: format!("{} {}", p.status.mark(), p.status.as_str()),
-            vitals: board::project_vitals(self.plan, p, self.ledger, known_repos),
-            subject,
+            vitals: Some(board::project_vitals(self.plan, p, self.ledger, known_repos)),
+            subject: Some(subject),
             fold,
         });
         if fold == Fold::Open {
@@ -495,8 +565,8 @@ impl<'a> Tree<'a> {
                 if t.archived { "  archived" } else { "" }
             ),
             status: format!("{} {}", t.status.mark(), status_word(t.status)),
-            vitals: board::task_vitals(self.plan, t, self.ledger, self.gates),
-            subject,
+            vitals: Some(board::task_vitals(self.plan, t, self.ledger, self.gates)),
+            subject: Some(subject),
             fold,
         });
         if fold == Fold::Open {
@@ -507,51 +577,43 @@ impl<'a> Tree<'a> {
     }
 }
 
-/// Short enough for a column. `needs-approval` and `needs-input` are the reason
-/// this exists rather than using `as_str` directly.
-fn status_word(s: TaskStatus) -> &'static str {
-    match s {
-        TaskStatus::NeedsApproval => "approval",
-        TaskStatus::NeedsInput => "input",
-        other => other.as_str(),
-    }
-}
-
 /// Colour follows meaning, not decoration: green is finished, yellow is waiting on
 /// a person, cyan is in flight.
 fn status_style(row: &RowItem) -> Style {
     let base = Style::new();
-    match &row.subject {
-        Subject::Project(_) => base.fg(Color::Cyan),
-        Subject::Task(_) => {
-            if row.status.contains("done") {
-                base.fg(Color::Green)
-            } else if row.status.contains("approval")
-                || row.status.contains("input")
-                || row.status.contains("failed")
-            {
-                base.fg(Color::Yellow)
-            } else if row.status.contains("running") || row.status.contains("verifying") {
-                base.fg(Color::Cyan)
-            } else {
-                base.fg(Color::DarkGray)
-            }
-        }
+    if row.is_project() {
+        base.fg(Color::Cyan)
+    } else if row.status.contains("done") {
+        base.fg(Color::Green)
+    } else if row.status.contains("approval")
+        || row.status.contains("input")
+        || row.status.contains("failed")
+    {
+        base.fg(Color::Yellow)
+    } else if row.status.contains("running") || row.status.contains("verifying") {
+        base.fg(Color::Cyan)
+    } else {
+        base.fg(Color::DarkGray)
     }
 }
 
+/// The snapshot's spend cell without its padding, this table laying out its own columns.
+/// Shortened by the same rule, so `1k` cannot mean two numbers on two boards.
 fn spend_text(v: &Vitals) -> String {
-    let k = |n: u64| {
-        if n >= 1000 {
-            format!("{}k", n / 1000)
-        } else {
-            n.to_string()
-        }
-    };
-    match v.budget {
-        Some(b) => format!("{}/{}", k(v.spent), k(b)),
-        None => k(v.spent),
+    board::spend_cell(v.spent, v.budget).trim().to_string()
+}
+
+/// The needs-you cell, wearing its computed health as the colour of the words.
+fn needs_span(v: &Vitals) -> Span<'static> {
+    if v.needs.is_empty() {
+        return Span::styled("—", Style::new().fg(Color::DarkGray));
     }
+    let style = match v.health {
+        Health::Red => Style::new().fg(Color::Red),
+        Health::Amber => Style::new().fg(Color::Yellow),
+        Health::Green => Style::new(),
+    };
+    Span::styled(v.needs.join(", "), style)
 }
 
 fn draw(f: &mut Frame, app: &mut App) {
@@ -601,21 +663,21 @@ fn table(f: &mut Frame, area: Rect, app: &mut App) {
         .rows
         .iter()
         .map(|r| {
-            let needs = if r.vitals.needs.is_empty() {
-                Span::styled("—", Style::new().fg(Color::DarkGray))
-            } else {
-                let style = match r.vitals.health {
-                    Health::Red => Style::new().fg(Color::Red),
-                    Health::Amber => Style::new().fg(Color::Yellow),
-                    Health::Green => Style::new(),
-                };
-                Span::styled(r.vitals.needs.join(", "), style)
+            // A caption has no cells but its own words: a spend of `0` and a dash under
+            // a heading are readings of nothing that read as though they were readings.
+            let spend = r.vitals.as_ref().map_or_else(String::new, spend_text);
+            let needs = match &r.vitals {
+                None => Span::raw(""),
+                Some(v) => needs_span(v),
             };
             // A project names itself in bold cyan; a task is plain and connected by
             // a tree glyph, so the two levels are distinguishable without reading.
             // The title is deliberately not here — at this width it truncated to
             // noise, and the detail pane already carries it in full.
-            let what = if r.is_project() {
+            let what = if r.subject.is_none() {
+                // Grey: a heading is a place on the screen, not a thing to act on.
+                Line::from(r.label.clone().fg(Color::DarkGray))
+            } else if r.is_project() {
                 Line::from(Span::styled(
                     r.label.clone(),
                     Style::new().add_modifier(Modifier::BOLD).fg(Color::Cyan),
@@ -633,7 +695,7 @@ fn table(f: &mut Frame, area: Rect, app: &mut App) {
                 Line::from(number),
                 what,
                 Line::from(Span::styled(r.status.clone(), status_style(r))),
-                Line::from(spend_text(&r.vitals)),
+                Line::from(spend),
                 Line::from(needs),
             ])
         })
@@ -678,29 +740,32 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::new().fg(Color::DarkGray))
         .title(" detail ");
+    // A caption is not a subject: there is nothing to say about a heading, and the
+    // cursor does not rest on one anyway.
+    let lines = app
+        .selected()
+        .and_then(|r| r.subject.as_ref())
+        .map_or_else(Vec::new, |s| detail_lines(app, s));
+    f.render_widget(
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+        area,
+    );
+}
 
-    let Some(row) = app.selected() else {
-        f.render_widget(Paragraph::new("").block(block), area);
-        return;
-    };
-
+/// What the pane says about one subject. An empty answer for a row the plan no longer
+/// holds: a frame drawn between a delete and the reload that notices it.
+fn detail_lines(app: &App, subject: &Subject) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    match &row.subject {
+    match subject {
         Subject::Project(id) => {
-            let Some(p) = app.plan.project(id) else {
-                f.render_widget(Paragraph::new("").block(block), area);
-                return;
-            };
+            let Some(p) = app.plan.project(id) else { return Vec::new() };
             lines.push(Line::from(p.objective.clone().bold()));
             lines.push(Line::from(
                 format!("repo: {}  ·  {}", p.repo, p.status.as_str()).fg(Color::DarkGray),
             ));
         }
         Subject::Task(id) => {
-            let Some(t) = app.plan.task(id) else {
-                f.render_widget(Paragraph::new("").block(block), area);
-                return;
-            };
+            let Some(t) = app.plan.task(id) else { return Vec::new() };
             lines.push(Line::from(t.title.clone().bold()));
 
             // The two relations, named apart. Conflating them is the error this
@@ -744,11 +809,16 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    let id = row.subject.as_str();
+    // A project shows every incident within it, a task only its own. The project row
+    // rolls its tasks' alarms up, so it has to be able to show what they were.
+    let mine = |l: &AuditLine| match subject {
+        Subject::Project(id) => l.project == id.as_str(),
+        Subject::Task(id) => l.task == id.as_str(),
+    };
     let incidents: Vec<&AuditLine> = app
         .audit
         .iter()
-        .filter(|l| l.is_denial() && attributed_to(l, &row.subject, id))
+        .filter(|l| l.is_denial() && mine(l))
         .collect();
 
     if incidents.is_empty() {
@@ -767,20 +837,7 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
             ]));
         }
     }
-
-    f.render_widget(
-        Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-/// A project shows every incident within it, a task only its own. The project row
-/// rolls its tasks' alarms up, so it has to be able to show what they were.
-fn attributed_to(l: &AuditLine, subject: &Subject, id: &str) -> bool {
-    match subject {
-        Subject::Project(_) => l.project == id,
-        Subject::Task(_) => l.task == id,
-    }
+    lines
 }
 
 fn footer(f: &mut Frame, area: Rect, app: &App) {
@@ -802,7 +859,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
 
 fn help(f: &mut Frame, area: Rect) {
     let w = 54u16.min(area.width.saturating_sub(4));
-    let h = 21u16.min(area.height.saturating_sub(2));
+    let h = 22u16.min(area.height.saturating_sub(2));
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -821,6 +878,7 @@ fn help(f: &mut Frame, area: Rect) {
         Line::from("r            reload now".to_string()),
         Line::from("q            quit".to_string()),
         Line::from(""),
+        Line::from("the four groups lead; the tree is under PORTFOLIO".fg(Color::DarkGray)),
         Line::from("▾ open  ▸ folded shut  · the whole tree is drawn".fg(Color::DarkGray)),
         Line::from("status is declared:".fg(Color::DarkGray)),
         Line::from("  · draft  ⋯ waiting  ○ ready  > running".fg(Color::DarkGray)),
@@ -884,7 +942,7 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use wecode_core::{Budget, Measure, Scope};
+    use wecode_core::{Budget, Measure, Scope, TaskStatus};
 
     /// Renders one frame into an in-memory backend and returns it as text.
     fn render(app: &mut App, w: u16, h: u16) -> String {
@@ -945,6 +1003,26 @@ mod tests {
         App::new(store, company).expect("app")
     }
 
+    /// Puts the cursor on a subject's first row, the way `j` and `k` would. First,
+    /// because a leaf is now on screen twice — once in the group asking about it, once
+    /// in the tree — and the group row is the one the cockpit opens on.
+    fn select(a: &mut App, subject: &Subject) {
+        let pos = a
+            .rows
+            .iter()
+            .position(|r| r.subject.as_ref() == Some(subject))
+            .unwrap_or_else(|| panic!("no row for {subject:?}"));
+        a.table.select(Some(pos));
+    }
+
+    fn project(id: &str) -> Subject {
+        Subject::Project(ProjectId::new(id))
+    }
+
+    fn leaf(id: &str) -> Subject {
+        Subject::Task(TaskId::new(id))
+    }
+
     fn task(id: &str, title: &str, glob: &str) -> Task {
         Task::new(id, "caching", title)
             .accepting(Measure::Command {
@@ -956,6 +1034,117 @@ mod tests {
                 tokens: Some(9000),
                 wall_secs: Some(600),
             })
+    }
+
+    /// Every heading the portfolio divides itself with, in the order it must draw them.
+    const HEADS: [&str; 5] = ["NEEDS YOU", "MOVING", "NEXT", "LANDED", "PORTFOLIO"];
+
+    /// Which row of a rendered frame names `needle`, so an assertion can say what is
+    /// *above* what rather than only that both are somewhere on the screen.
+    fn row_of(out: &str, needle: &str) -> usize {
+        out.lines()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no `{needle}` in:\n{out}"))
+    }
+
+    /// The one rendered line naming `needle`.
+    fn line_with<'a>(out: &'a str, needle: &str) -> &'a str {
+        out.lines().nth(row_of(out, needle)).expect("the row")
+    }
+
+    /// Which row each heading is on. Matched at the start of its own cell rather than
+    /// anywhere in the frame: the title bar says `L0 PORTFOLIO`, and a looser search
+    /// would report the tree as sitting above every group.
+    fn heads(out: &str) -> Vec<usize> {
+        let at = |h: &str| out.lines().position(|l| l.trim_start_matches(['│', ' ']).starts_with(h));
+        HEADS
+            .iter()
+            .map(|h| at(h).unwrap_or_else(|| panic!("no `{h}` heading in:\n{out}")))
+            .collect()
+    }
+
+    #[test]
+    fn the_cockpit_opens_on_the_same_groups_the_snapshot_leads_with() {
+        // The headline. `wecode board` answers *what is mine to do* before it answers
+        // *how is this organised*, and a live cockpit that opened on the tree sent the
+        // operator back to the snapshot to find out what needed them.
+        let mut a = app("groups");
+        let out = render(&mut a, 118, 30);
+        let at = heads(&out);
+        assert!(at.windows(2).all(|w| w[0] < w[1]), "out of order:\n{out}");
+        // The tree survives, under the last of them — which is what makes the rows
+        // above it a view rather than a preamble somebody scrolls past.
+        assert!(row_of(&out, "PROJECT caching") > at[4], "above PORTFOLIO:\n{out}");
+        assert!(out.contains("feat keys"), "and goes all the way down it:\n{out}");
+
+        // Descending leaves them behind: the question down there is how this one thing
+        // is put together, which is why the snapshot's focus views are trees too.
+        a.focus = Some(project("caching"));
+        a.rebuild();
+        let out = render(&mut a, 118, 30);
+        for head in HEADS {
+            assert!(!out.contains(head), "`{head}` at L1:\n{out}");
+        }
+    }
+
+    #[test]
+    fn a_group_row_answers_the_question_its_own_group_asks() {
+        // Why grouping is not sorting: `· draft` is a fact these rows share, and what
+        // would move this one is the question the status word cannot answer.
+        let mut a = app("group-rows");
+        let out = render(&mut a, 118, 30);
+        assert!(line_with(&out, "caching/keys").contains("unassigned"), "{out}");
+
+        a.store
+            .set_task_status(&TaskId::new("keys"), TaskStatus::NeedsApproval)
+            .unwrap();
+        a.reload();
+        let out = render(&mut a, 118, 30);
+        // And it leaves one group for another: a row in two of them is counted twice,
+        // which is why these are four groups rather than four filters over one list.
+        let at = heads(&out);
+        let row = row_of(&out, "caching/keys");
+        assert!(row > at[0] && row < at[1], "not in NEEDS YOU:\n{out}");
+        assert!(line_with(&out, "caching/keys").contains("needs-approval"), "{out}");
+    }
+
+    #[test]
+    fn a_group_shows_a_handful_and_says_how_many_it_stood_down() {
+        // The ceiling the snapshot applies, applied here for the same reason: a group
+        // that drew its whole tail would push the other three off the screen, which is
+        // the failure leading with attention exists to fix.
+        let mut a = app("ceiling");
+        for n in 0..6 {
+            let t = task(&format!("extra-{n}"), "another piece", &format!("src/extra-{n}/**"));
+            a.store.save_task(&t).unwrap();
+        }
+        a.reload();
+        let out = render(&mut a, 118, 40);
+        assert!(out.contains("… and 2 more"), "seven leaves, five rows:\n{out}");
+        // What it stood down is still reachable — the tree below drew all of them.
+        assert!(out.contains("feat extra-5"), "{out}");
+    }
+
+    #[test]
+    fn the_cursor_never_rests_on_a_heading() {
+        // A heading points at nothing: stopping on one empties the detail pane and
+        // leaves enter with nothing to do, which reads as a cockpit that has hung.
+        let mut a = app("cursor");
+        let points_at_something = |a: &App| {
+            let row = a.selected().expect("a selection");
+            assert!(row.subject.is_some(), "rested on `{}`", row.label);
+        };
+        assert_eq!(a.selected().unwrap().subject, Some(leaf("keys")), "opens on a row");
+        for delta in [1, -1] {
+            for _ in 0..a.rows.len() {
+                a.move_by(delta);
+                points_at_something(&a);
+            }
+        }
+        for k in ['g', 'G'] {
+            a.key(KeyEvent::from(KeyCode::Char(k)));
+            points_at_something(&a);
+        }
     }
 
     #[test]
@@ -977,16 +1166,13 @@ mod tests {
         // code it works on — the two things that actually confused a reader.
         let out = render(&mut app("level"), 118, 24);
         assert!(out.contains("PROJECT caching"), "{out}");
-        assert!(
-            out.contains("[main]"),
-            "the repo belongs on the row:\n{out}"
-        );
+        assert!(out.contains("[main]"), "the repo belongs on the row:\n{out}");
     }
 
     #[test]
     fn tasks_hang_off_the_project_with_tree_glyphs() {
         let mut a = app("glyphs");
-        a.focus = Some(Subject::Project(ProjectId::new("caching")));
+        a.focus = Some(project("caching"));
         a.rebuild();
         let out = render(&mut a, 118, 24);
         assert!(
@@ -1022,10 +1208,7 @@ mod tests {
         // Everything else keeps the name the CLI accepts.
         assert_eq!(status_word(TaskStatus::Waiting), "waiting");
         for s in TaskStatus::all() {
-            assert!(
-                status_word(*s).len() <= 9,
-                "{s:?} is too wide for the column"
-            );
+            assert!(status_word(*s).len() <= 9, "{s:?} is too wide for the column");
         }
     }
 
@@ -1043,7 +1226,9 @@ mod tests {
             .save_task(&task("salt", "pick the salt", "crates/cache/salt.rs").under("keys"))
             .unwrap();
         a.reload();
-        let out = render(&mut a, 118, 24);
+        // Tall enough for the groups and the whole tree under them: the tree is what
+        // this is about, and a row scrolled off the frame is not a row that is missing.
+        let out = render(&mut a, 118, 30);
         for row in ["feat layer", "feat keys", "feat salt"] {
             assert!(out.contains(row), "missing `{row}` at L0:\n{out}");
         }
@@ -1052,7 +1237,9 @@ mod tests {
     #[test]
     fn folding_a_row_hides_what_is_under_it_and_says_which_way_it_points() {
         let mut a = app("fold");
-        // The project is selected to begin with, so this folds the whole tree away.
+        // On the project, so this folds the whole tree away. Not the row the cockpit
+        // opens on any more — that is the group row asking about the leaf.
+        select(&mut a, &project("caching"));
         a.toggle_fold();
         let out = render(&mut a, 118, 24);
         assert!(out.contains("▸ PROJECT caching"), "marker flips:\n{out}");
@@ -1067,12 +1254,7 @@ mod tests {
     #[test]
     fn folding_a_task_hides_its_subtasks_and_leaves_the_task() {
         let mut a = app("fold-task");
-        let pos = a
-            .rows
-            .iter()
-            .position(|r| r.subject == Subject::Task(TaskId::new("layer")))
-            .unwrap();
-        a.table.select(Some(pos));
+        select(&mut a, &leaf("layer"));
         a.toggle_fold();
         let out = render(&mut a, 118, 24);
         assert!(out.contains("feat layer"), "the row itself stays:\n{out}");
@@ -1082,12 +1264,7 @@ mod tests {
     #[test]
     fn a_leaf_has_nothing_to_fold_and_is_told_so() {
         let mut a = app("fold-leaf");
-        let pos = a
-            .rows
-            .iter()
-            .position(|r| r.subject == Subject::Task(TaskId::new("keys")))
-            .unwrap();
-        a.table.select(Some(pos));
+        select(&mut a, &leaf("keys"));
         a.toggle_fold();
         assert!(a.status.contains("nothing to fold"), "{}", a.status);
         assert!(a.collapsed.is_empty(), "a leaf is not recorded as folded");
@@ -1098,6 +1275,7 @@ mod tests {
         // Kept by subject, not by row index: a reload rebuilds every row, and a
         // fold that reopened itself every tick and a half would be unusable.
         let mut a = app("fold-reload");
+        select(&mut a, &project("caching"));
         a.toggle_fold();
         a.reload();
         let out = render(&mut a, 118, 24);
@@ -1109,9 +1287,14 @@ mod tests {
     fn z_folds_the_whole_plan_and_shift_z_opens_it() {
         let mut a = app("fold-all");
         a.key(KeyEvent::from(KeyCode::Char('z')));
-        assert_eq!(a.rows.len(), 1, "projects only");
+        // The tree is one project row. The groups above it are not a branch of it and
+        // do not fold — `keys` is still on screen, in the group that is asking about it.
+        assert!(
+            !a.rows.iter().any(|r| r.subject == Some(leaf("layer"))),
+            "the tree is folded away"
+        );
         // Leaves are never recorded: the set holds `caching` and `layer`, not `keys`.
-        assert!(!a.collapsed.contains(&Subject::Task(TaskId::new("keys"))));
+        assert!(!a.collapsed.contains(&leaf("keys")));
 
         a.key(KeyEvent::from(KeyCode::Char('Z')));
         assert!(a.collapsed.is_empty());
@@ -1123,9 +1306,10 @@ mod tests {
     fn descending_into_a_folded_row_opens_it_first() {
         // Otherwise zooming in lands on a screen showing only the thing zoomed into.
         let mut a = app("fold-descend");
+        select(&mut a, &project("caching"));
         a.toggle_fold();
         a.descend();
-        assert_eq!(a.focus, Some(Subject::Project(ProjectId::new("caching"))));
+        assert_eq!(a.focus, Some(project("caching")));
         let out = render(&mut a, 118, 24);
         assert!(out.contains("feat layer"), "{out}");
     }
@@ -1139,10 +1323,7 @@ mod tests {
         a.reload();
         let out = render(&mut a, 118, 24);
         assert!(!out.contains("feat layer"), "{out}");
-        assert!(
-            !out.contains("feat keys"),
-            "the group goes together:\n{out}"
-        );
+        assert!(!out.contains("feat keys"), "the group goes together:\n{out}");
         // The project row is left, and reads as a leaf: the fold marker would otherwise
         // point at rows this view is not drawing.
         assert!(out.contains("PROJECT caching"), "{out}");
@@ -1164,7 +1345,7 @@ mod tests {
             .set_task_archived(&TaskId::new("layer"), true)
             .unwrap();
         a.reload();
-        a.focus = Some(Subject::Task(TaskId::new("layer")));
+        a.focus = Some(leaf("layer"));
         a.rebuild();
         let out = render(&mut a, 118, 24);
         assert!(out.contains("feat layer"), "{out}");
@@ -1178,12 +1359,7 @@ mod tests {
             .set_task_archived(&TaskId::new("keys"), true)
             .unwrap();
         a.reload();
-        let pos = a
-            .rows
-            .iter()
-            .position(|r| r.subject == Subject::Task(TaskId::new("layer")))
-            .unwrap();
-        a.table.select(Some(pos));
+        select(&mut a, &leaf("layer"));
         a.descend();
         assert!(a.focus.is_none(), "focus unchanged");
         assert!(a.status.contains("leaf"), "{}", a.status);
@@ -1199,12 +1375,9 @@ mod tests {
     #[test]
     fn descending_a_project_reveals_its_tasks() {
         let mut a = app("descend");
-        assert_eq!(
-            a.selected().unwrap().subject,
-            Subject::Project(ProjectId::new("caching"))
-        );
+        select(&mut a, &project("caching"));
         a.descend();
-        assert_eq!(a.focus, Some(Subject::Project(ProjectId::new("caching"))));
+        assert_eq!(a.focus, Some(project("caching")));
 
         let out = render(&mut a, 110, 24);
         assert!(out.contains("L1 project caching"), "{out}");
@@ -1216,12 +1389,12 @@ mod tests {
     fn a_task_ascends_to_its_parent_task_then_to_its_project() {
         // The is-part-of chain, which is what "up" means — not the dependency graph.
         let mut a = app("ascend");
-        a.focus = Some(Subject::Task(TaskId::new("keys")));
+        a.focus = Some(leaf("keys"));
         a.rebuild();
         a.ascend();
-        assert_eq!(a.focus, Some(Subject::Task(TaskId::new("layer"))));
+        assert_eq!(a.focus, Some(leaf("layer")));
         a.ascend();
-        assert_eq!(a.focus, Some(Subject::Project(ProjectId::new("caching"))));
+        assert_eq!(a.focus, Some(project("caching")));
         a.ascend();
         assert!(a.focus.is_none(), "back to the portfolio");
     }
@@ -1229,20 +1402,11 @@ mod tests {
     #[test]
     fn descending_into_a_leaf_is_refused_with_a_reason() {
         let mut a = app("leaf");
-        a.focus = Some(Subject::Project(ProjectId::new("caching")));
+        a.focus = Some(project("caching"));
         a.rebuild();
-        let pos = a
-            .rows
-            .iter()
-            .position(|r| r.subject == Subject::Task(TaskId::new("keys")))
-            .unwrap();
-        a.table.select(Some(pos));
+        select(&mut a, &leaf("keys"));
         a.descend();
-        assert_eq!(
-            a.focus,
-            Some(Subject::Project(ProjectId::new("caching"))),
-            "focus unchanged"
-        );
+        assert_eq!(a.focus, Some(project("caching")), "focus unchanged");
         assert!(a.status.contains("leaf"), "{}", a.status);
     }
 
@@ -1259,7 +1423,9 @@ mod tests {
     fn navigation_clamps_at_both_ends() {
         let mut a = app("clamp");
         a.move_by(-5);
-        assert_eq!(a.table.selected(), Some(0));
+        // Not row zero any more: that is the `NEEDS YOU` heading. Clamping lands on
+        // the first row there is anything to say about.
+        assert_eq!(a.selected().unwrap().subject, Some(leaf("keys")));
         a.move_by(100);
         assert_eq!(a.table.selected(), Some(a.rows.len() - 1));
     }
@@ -1280,14 +1446,9 @@ mod tests {
     #[test]
     fn the_detail_pane_says_where_a_task_sits() {
         let mut a = app("detail");
-        a.focus = Some(Subject::Project(ProjectId::new("caching")));
+        a.focus = Some(project("caching"));
         a.rebuild();
-        let pos = a
-            .rows
-            .iter()
-            .position(|r| r.subject == Subject::Task(TaskId::new("keys")))
-            .unwrap();
-        a.table.select(Some(pos));
+        select(&mut a, &leaf("keys"));
         let out = render(&mut a, 110, 24);
         assert!(out.contains("in caching / layer"), "{out}");
     }
@@ -1299,12 +1460,7 @@ mod tests {
             .save_task(&task("bench", "benchmark the cache", "benches/**").after("layer"))
             .unwrap();
         a.reload();
-        let pos = a
-            .rows
-            .iter()
-            .position(|r| r.subject == Subject::Task(TaskId::new("bench")))
-            .unwrap();
-        a.table.select(Some(pos));
+        select(&mut a, &leaf("bench"));
         let out = render(&mut a, 110, 24);
         assert!(out.contains("waiting on: layer"), "{out}");
     }
@@ -1319,12 +1475,7 @@ mod tests {
             .set_task_status(&TaskId::new("layer"), TaskStatus::Done)
             .unwrap();
         a.reload();
-        let pos = a
-            .rows
-            .iter()
-            .position(|r| r.subject == Subject::Task(TaskId::new("bench")))
-            .unwrap();
-        a.table.select(Some(pos));
+        select(&mut a, &leaf("bench"));
         let out = render(&mut a, 110, 24);
         assert!(out.contains("prerequisites met"), "{out}");
     }
@@ -1339,17 +1490,8 @@ mod tests {
 
     #[test]
     fn spend_abbreviates_thousands_and_shows_the_cap() {
-        let v = Vitals {
-            health: Health::Green,
-            spent: 1500,
-            budget: Some(200_000),
-            alarms: 0,
-            denials: 0,
-            defects: 0,
-            needs: vec![],
-        };
+        let v = Vitals { health: Health::Green, spent: 1500, budget: Some(200_000), needs: vec![] };
         assert_eq!(spend_text(&v), "1k/200k");
-
         let no_budget = Vitals { budget: None, ..v };
         assert_eq!(spend_text(&no_budget), "1k");
     }
