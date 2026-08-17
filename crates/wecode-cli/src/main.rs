@@ -51,9 +51,10 @@ SETUP
         a bare name lands in ~/.wecode/workspaces/<name>
   wecode templates                        list available templates
   wecode company show                     profile, posts, invariants
-  wecode doctor                           run the hooks that reach you, now
-        fires [notify] command for real and reads [telegram] fetch back; signs
-        nothing, consumes no reply, and exits non-zero if what is set is broken
+  wecode doctor                           check this machine can do the work
+        resolves git, the worktree root, every [[repos]] path and [agents.*]
+        command, then fires [notify] command and reads [telegram] fetch back;
+        signs nothing, consumes no reply, non-zero if what is set does not work
 
   Commands find the workspace by walking up from the working directory, or via
   --org <name|dir> / $WECODE_ORG / the default set by `wecode use`.

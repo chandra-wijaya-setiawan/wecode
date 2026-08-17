@@ -1,75 +1,47 @@
-//! Running the way out and the way back, instead of reading them back.
+//! Exercising what a task will depend on, before a task depends on it.
 //!
-//! [`crate::notify`] pushes *a task has stopped for you* to wherever the operator is,
-//! and [`crate::telegram`] reads the answer. Both halves are command lines the operator
-//! writes into `company.toml` by hand — a `notify-send`, a `curl` of the Bot API — and
-//! nothing ran either of them until a real task stopped for a real person. That is the
-//! worst moment to find out: the chat id is one digit out, the token has expired, the
-//! machine has no notification daemon, the charter forbids the line.
+//! Two halves, in the order they are needed. [`machine`] asks whether this computer can
+//! do the work at all — a `git`, somewhere to cut worktrees, a repository to cut them
+//! from, a coding CLI to run inside them, and the environment that CLI is launched with.
+//! [`hooks`] asks whether the operator can be reached once it stops, and can answer.
 //!
-//! And every one of those failures looks the same from where the operator is standing.
-//! A hook that was never run and a queue with nothing in it are both **silence**, which
-//! is the one report this channel cannot tell apart — the board says a task is waiting,
-//! and nothing anywhere says whether anybody was told. So a configuration is trusted
-//! for exactly as long as it takes for something to depend on it.
+//! Both halves are configuration nothing else checks. `company.toml` is hand-edited by
+//! design — a role's write scope is exactly the thing you want to review in a diff — and
+//! the price of that is a file full of paths, command names and variable names that are
+//! true on the machine they were written on and are believed everywhere else until
+//! something depends on them.
 //!
-//! The drill runs them. Not a parse of the config and not a `which` of the first word:
-//! the hook itself, with a task in its environment, against whatever network and
-//! whatever daemon this machine actually has. What comes back is read the way wecode
-//! already reads it — an exit status, and [`crate::notify`]'s rule that a hook which
-//! delivered has no reason to speak.
+//! What the two halves cost when they are wrong is different, and worth stating.
 //!
-//! Three things it deliberately does not do.
+//! - A broken **hook** is silent. A hook that never ran and a queue with nothing in it
+//!   look identical from where the operator is standing, so nothing anywhere says the
+//!   message did not arrive.
+//! - A broken **machine** is loud in the wrong place. The dispatch fails, so the task
+//!   fails — after admission, after scheduling, with a worktree cut, a run recorded and
+//!   an attempt against its name. Read back later it is a task that could not be done,
+//!   and it is nothing of the kind: `claude` is not installed, or `[[repos]] app` still
+//!   points at the example path the template shipped with. Under `wecode loop` that
+//!   repeats once per promotion, and every one of those records is a lie about the work.
 //!
-//! - **It decides nothing and consumes nothing.** No signature, no ledger record, no
-//!   status write, and no inbox cursor: the fetch is asked from offset `0`, which is
-//!   *everything Telegram still holds* and confirms none of it. A drill that swallowed
-//!   the reply it was checking for would be the failure it exists to find, and one that
-//!   signed something would be worse than never running.
-//! - **It does not run `[telegram] answer`.** `answerCallbackQuery` takes a live
-//!   callback id and there is not one; a made-up id is refused whatever the token is, so
-//!   running it would report a working channel as broken. The line is checked against
-//!   the charter and read no further, and the report says which of the two happened
-//!   rather than letting a configured line look like an exercised one.
-//! - **It cannot say the message arrived.** wecode holds no chat and cannot see a phone.
-//!   `[notify] command` exiting `0` in silence is the strongest thing knowable from this
-//!   side, and it is a weaker claim than *delivered* — which is exactly why the drill
-//!   sends a real message rather than a simulated one. The last line of the report is
-//!   the half only the operator can answer.
+//! So the answer is one command that runs before either has anything riding on it, and
+//! whose exit status is the verdict: `wecode doctor && wecode loop` starts a day's
+//! unattended work only on a machine that can do it and a channel that can say so.
 //!
-//! An absent hook is reported and is not a failure. Nothing here is compulsory: a
-//! workspace whose operator watches a terminal is not misconfigured, it is configured
-//! for a terminal. What the report says about it is where the line goes, and the exit
-//! status stays clean — `wecode doctor && wecode loop` should refuse to start on a hook
-//! that is broken, never on one nobody wanted.
+//! **What is not set is not a failure.** Nothing in either half is compulsory, and an
+//! operator who watches a terminal is configured for a terminal rather than
+//! misconfigured. Three marks and not two, because *nothing is set* and *what is set
+//! does not work* are the two answers an operator has to act on differently, and a
+//! single `✗` for both sends them to the wrong file.
+
+mod hooks;
+mod machine;
 
 use std::path::Path;
 
-use wecode_gov::ActionKind;
-use wecode_org::{Company, User, workspace};
+use wecode_org::{Company, workspace};
 
 use crate::args::Args;
 use crate::commands::ctx::Res;
-use crate::{notify, telegram};
-
-/// What a reply can sign, in the order the report names them.
-///
-/// Not every [`ActionKind`]. A budget increase and a measure amendment are not waits a
-/// task puts in front of a person, so a seat that cannot sign them is not a seat that
-/// cannot answer a notification — see [`crate::telegram::implied`], which is the list
-/// this mirrors.
-const SIGNABLE: [ActionKind; 3] = [
-    ActionKind::Merge,
-    ActionKind::Admission,
-    ActionKind::Design,
-];
-
-/// The names the checks are reported under: what the operator would grep `company.toml`
-/// for, so a report can be acted on without a translation step.
-const PUSH: &str = "[notify] command";
-const PULL: &str = "[telegram] fetch";
-const ACK: &str = "[telegram] answer";
-const WHO: &str = "who may answer";
 
 /// What came of trying one thing.
 #[derive(Debug)]
@@ -83,9 +55,7 @@ enum Outcome {
 }
 
 impl Outcome {
-    /// The mark in the left column. Three and not two, because *nothing is set* and
-    /// *what is set is broken* are the two answers an operator has to act on
-    /// differently, and a single `✗` for both would send them to the wrong file.
+    /// The mark in the left column — see the module note on why there are three.
     fn mark(&self) -> char {
         match self {
             Self::Sound(_) => '✓',
@@ -110,16 +80,41 @@ impl Outcome {
 }
 
 /// One thing the drill tried, named where it is written down.
+///
+/// `at` is owned rather than a `&'static str` because half the report is now named
+/// after things the operator invented: `[[repos]] app` and `[agents.claude-code]
+/// command` are the headings that can be grepped for in the file that caused them, and
+/// a fixed set of names could only have said `repositories` and `agents`.
 #[derive(Debug)]
 struct Check {
-    at: &'static str,
+    at: String,
     outcome: Outcome,
 }
 
 impl Check {
+    fn new(at: impl Into<String>, outcome: Outcome) -> Self {
+        Self {
+            at: at.into(),
+            outcome,
+        }
+    }
+
     fn is(&self, at: &str) -> bool {
         self.at == at
     }
+}
+
+/// One half of the report: its heading, its rows, and what the rows cannot say for
+/// themselves.
+#[derive(Debug)]
+struct Section {
+    title: &'static str,
+    checks: Vec<Check>,
+    /// Printed under the rows, empty when there is nothing to add. It belongs to the
+    /// half rather than to the report, because what a half has left to say depends on
+    /// what it found — see [`hooks`], whose last line is the only question wecode is
+    /// not entitled to answer.
+    note: String,
 }
 
 /// `wecode doctor`.
@@ -129,13 +124,22 @@ impl Check {
 /// reaches through the hook — a `[notify] command` that calls `wecode` back is the
 /// operator's own line doing the operator's own thing, and the charter is what bounds
 /// that, exactly as when the loop fires it.
+///
+/// It follows that the drill reads `company.toml` and nothing else. That is a bound on
+/// what it can check as well as on what it can break: the toolchain a *particular* task
+/// declares as its acceptance lives in the plan, so what is checked here is what every
+/// task needs rather than what any one of them asked for.
 pub(crate) fn run(a: &Args) -> Res {
     let ws = workspace::resolve(a.get("org"))?;
     let company = ws.load()?;
-    let checks = drill(&company, ws.root());
-    let report = render(&checks);
+    let sections = drill(&company, ws.root());
+    let report = render(&sections);
 
-    let broken = checks.iter().filter(|c| c.outcome.is_broken()).count();
+    let broken = sections
+        .iter()
+        .flat_map(|s| &s.checks)
+        .filter(|c| c.outcome.is_broken())
+        .count();
     if broken == 0 {
         return Ok(report);
     }
@@ -150,167 +154,10 @@ pub(crate) fn run(a: &Args) -> Res {
     .into())
 }
 
-/// Everything the drill tries, in the order the path runs: out to the operator, back
-/// from them, the receipt for a tap, and whether the person replying may sign at all.
-fn drill(company: &Company, org: &Path) -> Vec<Check> {
-    vec![
-        pushed(company, org),
-        read_back(company, org),
-        acknowledged(company),
-        who_answers(company),
-    ]
-}
-
-/// Fires `[notify] command` for real.
-///
-/// Read through the same rule the loop reads it by, because it *is* the same call: a
-/// hook is believed when it exits `0` and says nothing, and anything it printed is
-/// quoted back. There is no second, gentler standard for a rehearsal — a drill that
-/// forgave what the loop would report would be measuring the wrong thing.
-fn pushed(company: &Company, org: &Path) -> Check {
-    let outcome = match company.notify.command {
-        None => Outcome::Absent(
-            "not set — a task that stops for you waits until you look at a terminal".to_string(),
-        ),
-        Some(_) => match notify::rehearse(company, org).trim() {
-            "" => Outcome::Sound(
-                "ran and said nothing, which is what a delivery looks like".to_string(),
-            ),
-            said => Outcome::Broken(complaint(said)),
-        },
-    };
-    Check { at: PUSH, outcome }
-}
-
-/// A notify warning as the drill quotes it: the mark and the prefix taken off, since
-/// the report has a column for both and `✗ [notify] command  ⚠ notify: …` says it
-/// twice.
-fn complaint(said: &str) -> String {
-    let said = said.trim();
-    // The whole prefix or none of it. Trimming the words separately would eat a hook's
-    // own `notify: …` — which is a thing `notify-send` says about itself, and the
-    // reason the operator is reading this line at all.
-    said.strip_prefix("⚠ notify:")
-        .unwrap_or(said)
-        .trim()
-        .to_string()
-}
-
-/// Runs `[telegram] fetch` and parses what it printed.
-///
-/// Both halves, because either can be the thing that is wrong and they fail at
-/// different ends of the pipe: a `curl` that cannot resolve the host exits non-zero,
-/// and a token that has been revoked exits `0` with `{"ok":false,…}` in its body. The
-/// second is the one worth the whole check — it is indistinguishable from a quiet
-/// channel to everything except the parser, which is why the parser is run here rather
-/// than the command alone.
-///
-/// From offset `0`. `getUpdates` treats an offset as an acknowledgement of everything
-/// below it, so asking from where the cursor actually is would have the drill delete
-/// the operator's unread replies as a side effect of checking that it could read them.
-/// Zero asks for everything still held and confirms nothing.
-fn read_back(company: &Company, org: &Path) -> Check {
-    let outcome = match company.telegram.fetch {
-        None => Outcome::Absent(
-            "not set — the answer to a notification is still a terminal".to_string(),
-        ),
-        Some(_) => {
-            match telegram::fetch(company, org, 0).and_then(|body| telegram::updates(&body)) {
-                Err(e) => Outcome::Broken(e),
-                Ok(held) => Outcome::Sound(format!(
-                    "read the channel: {} held, none acted on",
-                    plural(held.len(), "update")
-                )),
-            }
-        }
-    };
-    Check { at: PULL, outcome }
-}
-
-/// Reads `[telegram] answer` as far as it can be read without a callback to answer.
-///
-/// Not run — see the module note. What is checked is the one thing that can be: the
-/// charter, which refuses a line by pattern and never needs to execute one. Absent is
-/// reported against whether replies are read at all, because a workspace with no
-/// channel has nothing to acknowledge and a workspace with one has a button that signs
-/// in silence.
-fn acknowledged(company: &Company) -> Check {
-    let outcome = match &company.telegram.answer {
-        None if company.telegram.fetch.is_none() => {
-            Outcome::Absent("not set — nothing reads the channel either".to_string())
-        }
-        None => Outcome::Absent("not set — a tap signs, and the chat says nothing back".into()),
-        Some(line) => match crate::commands::exec::forbidden_by_charter(company, line) {
-            Some(pattern) => {
-                Outcome::Broken(format!("forbidden by the charter: never_run {pattern}"))
-            }
-            None => Outcome::Sound(
-                "set, and not run: answerCallbackQuery needs a live callback id".to_string(),
-            ),
-        },
-    };
-    Check { at: ACK, outcome }
-}
-
-/// Whether anybody's reply would resolve to a seat, and whether that seat may sign.
-///
-/// The silent half of the way back, and the reason this is a check of its own. A
-/// `fetch` that works perfectly and a `company.toml` where nobody gives a `telegram`
-/// id is a channel wecode reads every pass and answers from never: the account
-/// resolves to nobody, there is no fallback seat by design, and the operator replying
-/// `approve` on a phone gets no reply and no signature. Nothing is broken anywhere a
-/// log would show it.
-///
-/// A seat that may sign nothing is the same failure one step later — the reply is read,
-/// attributed, put past the Broker and refused. Worth its own mark, because the fix is
-/// in a different block of the same file.
-fn who_answers(company: &Company) -> Check {
-    let who = company.telegram_users();
-    let outcome = if who.is_empty() {
-        if company.telegram.fetch.is_none() {
-            Outcome::Absent("no [[users]] gives a telegram id".to_string())
-        } else {
-            Outcome::Broken(
-                "the channel is read and no [[users]] gives a telegram id — every reply \
-                 resolves to nobody and signs nothing"
-                    .to_string(),
-            )
-        }
-    } else {
-        let seats: Vec<String> = who.iter().map(|u| seat(company, u)).collect();
-        if who.iter().all(|u| signs(company, u).is_empty()) {
-            Outcome::Broken(format!("{} — a reply is read, and refused", seats.join("; ")))
-        } else {
-            Outcome::Sound(seats.join("; "))
-        }
-    };
-    Check { at: WHO, outcome }
-}
-
-/// One person who can reply, and what their seat may put its name to.
-fn seat(company: &Company, user: &User) -> String {
-    match signs(company, user).as_slice() {
-        [] => format!("{} ({}) may sign nothing", user.name, user.post),
-        kinds => format!("{} ({}) signs {}", user.name, user.post, kinds.join(", ")),
-    }
-}
-
-/// The waits this user's post may sign off.
-///
-/// Read off the grant rather than asked of the Broker, which is the same answer for
-/// the same reason `wecode brief` is derived: the grant is where the authority is
-/// written, and a Broker call would need a session, a task and something to decide
-/// about — none of which a drill has, and inventing them is how a rehearsal starts
-/// answering a different question from the real one.
-fn signs(company: &Company, user: &User) -> Vec<&'static str> {
-    company.post(&user.post).map_or_else(Vec::new, |post| {
-        let held = company.effective(post);
-        SIGNABLE
-            .iter()
-            .filter(|k| held.allows_approve(**k))
-            .map(|k| k.as_str())
-            .collect()
-    })
+/// Both halves, in the order a task meets them: the machine it runs on, then the person
+/// it stops for.
+fn drill(company: &Company, org: &Path) -> Vec<Section> {
+    vec![machine::section(company, org), hooks::section(company, org)]
 }
 
 /// `1 update`, `2 updates` — a report a person reads should not say `1 updates`.
@@ -321,35 +168,29 @@ fn plural(n: usize, thing: &str) -> String {
     }
 }
 
-fn render(checks: &[Check]) -> String {
-    let mut out = String::from("\nhooks\n");
-    for c in checks {
-        out.push_str(&format!(
-            "  {} {:<18} {}\n",
-            c.outcome.mark(),
-            c.at,
-            c.outcome.note()
-        ));
-    }
-
-    // The half of the question wecode is not entitled to answer. Printed only when the
-    // hook actually ran, because it is an instruction — go and look — and a workspace
-    // with no hook has nothing to go and look for.
-    if checks
+fn render(sections: &[Section]) -> String {
+    // One column across the whole report, measured rather than fixed: the widest
+    // heading is `[agents.<whatever the operator called it>] env_allowlist`, and a
+    // hardcoded pad would either wrap it or space every other row out to fit it.
+    let width = sections
         .iter()
-        .any(|c| c.is(PUSH) && matches!(c.outcome, Outcome::Sound(_)))
-    {
-        out.push_str(
-            "\n  a real notification went out just now, for a task that does not exist.\n  \
-             whether it arrived is the half only you can check.\n",
-        );
-    }
-    if checks.iter().all(|c| c.outcome.is_absent()) {
-        out.push_str(
-            "\n  nothing is configured, so nothing is broken: the way out and the way back\n  \
-             are both a terminal. docs/reference/config/notify.md has the line out,\n  \
-             and config/telegram.md the line back.\n",
-        );
+        .flat_map(|s| &s.checks)
+        .map(|c| c.at.chars().count())
+        .max()
+        .unwrap_or_default();
+
+    let mut out = String::new();
+    for section in sections {
+        out.push_str(&format!("\n{}\n", section.title));
+        for c in &section.checks {
+            out.push_str(&format!(
+                "  {} {:<width$}  {}\n",
+                c.outcome.mark(),
+                c.at,
+                c.outcome.note()
+            ));
+        }
+        out.push_str(&section.note);
     }
     out
 }
@@ -357,253 +198,47 @@ fn render(checks: &[Check]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    /// A company with the given blocks appended. Parsed rather than built, so what the
-    /// drill reads is what an operator would actually have written.
-    fn company(blocks: &str) -> Company {
-        Company::parse(&format!(
-            "[company]\nname = \"cws\"\n\n[roles.engineer]\nwrite = [\"src/**\"]\n{blocks}"
-        ))
-        .expect("the profile parses")
-    }
-
-    /// A directory that is not a workspace, so the drill finds no plan and no tree —
-    /// which is the state a hook is configured in, before anything has run.
-    fn dir() -> PathBuf {
-        std::env::temp_dir()
-    }
-
-    fn at<'a>(checks: &'a [Check], what: &str) -> &'a Outcome {
-        &checks
-            .iter()
-            .find(|c| c.is(what))
-            .unwrap_or_else(|| panic!("no {what} check"))
-            .outcome
-    }
-
-    #[test]
-    fn a_workspace_that_configures_nothing_is_absent_rather_than_broken() {
-        // Nothing here is compulsory. An operator who watches a terminal is configured
-        // for a terminal, and a drill that failed them would be a check nobody could
-        // leave in a script.
-        let checks = drill(&company(""), &dir());
-        assert!(checks.iter().all(|c| c.outcome.is_absent()), "{checks:?}");
-        assert!(checks.iter().all(|c| !c.outcome.is_broken()));
-
-        let out = render(&checks);
-        assert!(out.contains("nothing is configured"), "{out}");
-        // Both halves are named, because either one alone is a loop that only goes one
-        // way: a notification nobody can answer, or a reply channel nothing speaks into.
-        assert!(out.contains("config/notify.md"), "the line out: {out}");
-        assert!(out.contains("config/telegram.md"), "the line back: {out}");
-    }
-
-    #[test]
-    fn a_notify_hook_that_works_is_run_and_believed() {
-        let checks = drill(&company("\n[notify]\ncommand = \"true\"\n"), &dir());
-        let note = at(&checks, PUSH);
-        assert!(!note.is_broken(), "{note:?}");
-        assert!(note.note().contains("said nothing"), "{note:?}");
-
-        // And the operator is told the part that is theirs. The hook exiting 0 is not
-        // the message arriving, and a report that let those read the same would be the
-        // silence this whole command exists to break.
-        let out = render(&checks);
-        assert!(out.contains("only you can check"), "{out}");
-    }
-
-    #[test]
-    fn a_notify_hook_that_fails_is_reported_with_what_it_complained_about() {
-        let checks = drill(
-            &company("\n[notify]\ncommand = \"echo could not resolve host >&2; exit 6\"\n"),
-            &dir(),
-        );
-        let note = at(&checks, PUSH);
-        assert!(note.is_broken(), "{note:?}");
-        assert!(note.note().contains("exited 6"), "{note:?}");
-        assert!(note.note().contains("could not resolve host"), "{note:?}");
-        // The report's own mark, not the loop's: `⚠ notify:` inside a `✗` line is the
-        // same fact printed twice.
-        assert!(!note.note().contains('⚠'), "{note:?}");
-    }
-
-    #[test]
-    fn a_hook_that_exits_well_and_says_something_is_not_taken_for_a_delivery() {
-        // The drill's whole reason to exist, in one case: `curl` carrying a `400 chat
-        // not found` exits 0 having done exactly what it was asked. Read under the same
-        // rule the loop reads it by, so the answer here is the answer at 02:14.
-        let checks = drill(
-            &company("\n[notify]\ncommand = \"echo Bad Request: chat not found\"\n"),
-            &dir(),
-        );
-        let note = at(&checks, PUSH);
-        assert!(note.is_broken(), "{note:?}");
-        assert!(note.note().contains("chat not found"), "{note:?}");
-    }
-
-    #[test]
-    fn a_notify_hook_the_charter_forbids_is_reported_and_not_run() {
-        let checks = drill(
-            &company(
-                "\n[invariants]\nnever_run = [\"curl *\"]\n\n[notify]\ncommand = \"curl example.invalid\"\n",
-            ),
-            &dir(),
-        );
-        assert!(at(&checks, PUSH).note().contains("never_run"), "{checks:?}");
-    }
-
-    #[test]
-    fn a_fetch_that_answers_is_read_and_counted() {
-        let checks = drill(
-            &company(
-                "\n[telegram]\nfetch = \"echo {\\\\\\\"ok\\\\\\\":true,\\\\\\\"result\\\\\\\":[]}\"\n",
-            ),
-            &dir(),
-        );
-        let note = at(&checks, PULL);
-        assert!(!note.is_broken(), "{note:?}");
-        assert!(note.note().contains("0 updates"), "{note:?}");
-        assert!(note.note().contains("none acted on"), "{note:?}");
-    }
-
-    #[test]
-    fn a_token_that_is_refused_is_broken_rather_than_a_quiet_channel() {
-        // The failure the parse is here for. The command exits 0 — it did what it was
-        // asked — and the body says the question was never answered. Reading that as
-        // "no replies" is a healthy report to an operator whose channel is dead.
-        let checks = drill(
-            &company(
-                "\n[telegram]\nfetch = \"echo {\\\\\\\"ok\\\\\\\":false,\\\\\\\"description\\\\\\\":\\\\\\\"Unauthorized\\\\\\\"}\"\n",
-            ),
-            &dir(),
-        );
-        let note = at(&checks, PULL);
-        assert!(note.is_broken(), "{note:?}");
-        assert!(note.note().contains("Unauthorized"), "{note:?}");
-    }
-
-    #[test]
-    fn a_fetch_that_cannot_run_is_broken_and_says_why() {
-        let checks = drill(
-            &company("\n[telegram]\nfetch = \"echo no route to host >&2; exit 7\"\n"),
-            &dir(),
-        );
-        let note = at(&checks, PULL);
-        assert!(note.is_broken(), "{note:?}");
-        assert!(note.note().contains("no route to host"), "{note:?}");
-    }
-
-    #[test]
-    fn an_answer_line_is_checked_against_the_charter_without_being_run() {
-        // It cannot be run: `answerCallbackQuery` wants a callback id that only a real
-        // tap has. So the report says `not run` in the case that is fine, and the one
-        // thing that can be judged from the text is judged.
-        let ok = drill(
-            &company("\n[telegram]\nfetch = \"true\"\nanswer = \"true\"\n"),
-            &dir(),
-        );
-        assert!(at(&ok, ACK).note().contains("not run"), "{ok:?}");
-        assert!(!at(&ok, ACK).is_broken());
-
-        let forbidden = drill(
-            &company(
-                "\n[invariants]\nnever_run = [\"curl *\"]\n\n[telegram]\nfetch = \"true\"\nanswer = \"curl example.invalid\"\n",
-            ),
-            &dir(),
-        );
-        assert!(at(&forbidden, ACK).is_broken());
-        assert!(at(&forbidden, ACK).note().contains("never_run"));
-    }
-
-    #[test]
-    fn a_channel_nobody_can_answer_from_is_broken_rather_than_absent() {
-        // The silent half. A `fetch` that works and no account claiming a seat is a
-        // channel read every pass and answered from never — there is no fallback seat,
-        // deliberately, so every reply resolves to nobody.
-        let checks = drill(&company("\n[telegram]\nfetch = \"true\"\n"), &dir());
-        let note = at(&checks, WHO);
-        assert!(note.is_broken(), "{note:?}");
-        assert!(note.note().contains("resolves to nobody"), "{note:?}");
-
-        // With no channel at all it is an absence, not a fault: an id nothing reads is
-        // not a misconfiguration.
-        let none = drill(&company(""), &dir());
-        assert!(at(&none, WHO).is_absent());
-    }
-
-    #[test]
-    fn a_seat_that_may_answer_is_named_with_what_it_may_sign() {
-        let checks = drill(
-            &company(
-                "\n[roles.boss]\napprove = [\"merge\", \"admission\"]\n\n\
-                 [[posts]]\nname = \"chief\"\nrole = \"boss\"\n\n\
-                 [[users]]\nname = \"you\"\npost = \"chief\"\ntelegram = \"481\"\n\n\
-                 [telegram]\nfetch = \"true\"\n",
-            ),
-            &dir(),
-        );
-        let note = at(&checks, WHO);
-        assert!(!note.is_broken(), "{note:?}");
-        assert!(note.note().contains("you (chief)"), "{note:?}");
-        assert!(note.note().contains("merge"), "{note:?}");
-        assert!(note.note().contains("admission"), "{note:?}");
-        // Named because it is not held: the list is what this seat may sign, and a
-        // report that padded it would be describing a different seat.
-        assert!(!note.note().contains("design"), "{note:?}");
-    }
-
-    #[test]
-    fn a_seat_that_may_sign_nothing_is_broken_one_step_later() {
-        // The reply is read, attributed and refused. Its own mark, because the fix is
-        // in the roles block rather than in the channel.
-        let checks = drill(
-            &company(
-                "\n[[posts]]\nname = \"impl\"\nrole = \"engineer\"\n\n\
-                 [[users]]\nname = \"you\"\npost = \"impl\"\ntelegram = \"481\"\n\n\
-                 [telegram]\nfetch = \"true\"\n",
-            ),
-            &dir(),
-        );
-        let note = at(&checks, WHO);
-        assert!(note.is_broken(), "{note:?}");
-        assert!(note.note().contains("may sign nothing"), "{note:?}");
-    }
-
-    #[test]
-    fn every_check_is_reported_under_the_name_it_is_written_down_as() {
-        // The report is a to-do list against `company.toml`. A heading the operator
-        // cannot grep for is a finding they have to translate first.
-        let out = render(&drill(&company(""), &dir()));
-        for at in [PUSH, PULL, ACK, WHO] {
-            assert!(out.contains(at), "{at} is missing from:\n{out}");
-        }
-    }
-
-    #[test]
-    fn what_is_set_and_what_is_missing_carry_different_marks() {
-        let checks = drill(&company("\n[notify]\ncommand = \"exit 3\"\n"), &dir());
-        let out = render(&checks);
-        assert!(out.contains("✗ [notify] command"), "{out}");
-        assert!(out.contains("· [telegram] fetch"), "{out}");
-    }
-
-    #[test]
-    fn a_hook_warning_is_quoted_without_the_marks_the_report_already_has() {
-        assert_eq!(complaint("⚠ notify: `x` exited 3"), "`x` exited 3");
-        assert_eq!(complaint("  ⚠ notify: killed after 1s  \n"), "killed after 1s");
-        // Anything that is not the loop's own prefix survives whole: what a hook said
-        // for itself is the reason, and trimming into it would eat the answer.
-        assert_eq!(
-            complaint("notify: daemon is not running"),
-            "notify: daemon is not running"
-        );
-    }
 
     #[test]
     fn a_count_a_person_reads_agrees_with_itself() {
         assert_eq!(plural(0, "update"), "0 updates");
         assert_eq!(plural(1, "update"), "1 update");
         assert_eq!(plural(2, "update"), "2 updates");
+    }
+
+    #[test]
+    fn one_column_is_wide_enough_for_the_longest_heading_in_the_whole_report() {
+        // Both halves are read down the same left edge. A section that measured only
+        // its own rows would step in and out where the heading changed, which is the
+        // one thing a column of marks is for.
+        let out = render(&[
+            Section {
+                title: "machine",
+                checks: vec![Check::new(
+                    "[agents.claude-code] env_allowlist",
+                    Outcome::Sound("all set".into()),
+                )],
+                note: String::new(),
+            },
+            Section {
+                title: "hooks",
+                checks: vec![Check::new("git", Outcome::Absent("nothing".into()))],
+                note: String::new(),
+            },
+        ]);
+        // Counted in characters and not in bytes: `✓` is three bytes and `·` is two, so
+        // a byte offset says these two rows disagree on a report that lines up.
+        let column = |line: &str, note: &str| {
+            line.find(note)
+                .map(|byte| line[..byte].chars().count())
+                .unwrap_or_else(|| panic!("no {note} in {line}"))
+        };
+        let rows: Vec<&str> = out.lines().filter(|l| l.starts_with("  ")).collect();
+        assert_eq!(rows.len(), 2, "{out}");
+        assert_eq!(
+            column(rows[0], "all set"),
+            column(rows[1], "nothing"),
+            "the notes do not start in the same column:\n{out}"
+        );
     }
 }

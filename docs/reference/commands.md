@@ -22,9 +22,10 @@ SETUP
         a bare name lands in ~/.wecode/workspaces/<name>
   wecode templates                        list available templates
   wecode company show                     profile, posts, invariants
-  wecode doctor                           run the hooks that reach you, now
-        fires [notify] command for real and reads [telegram] fetch back; signs
-        nothing, consumes no reply, and exits non-zero if what is set is broken
+  wecode doctor                           check this machine can do the work
+        resolves git, the worktree root, every [[repos]] path and [agents.*]
+        command, then fires [notify] command and reads [telegram] fetch back;
+        signs nothing, consumes no reply, non-zero if what is set does not work
 
   Commands find the workspace by walking up from the working directory, or via
   --org <name|dir> / $WECODE_ORG / the default set by `wecode use`.
@@ -412,20 +413,39 @@ wecode computes for that task.
 projects and archived tasks alike. Put it last — the argument parser takes the next token
 as a flag's value, so `board --all migration` loses the positional.
 
-**`wecode doctor`** runs the two commands that carry a wait to a person and an answer
-back, so the operator finds out what they do before a task depends on them. `[notify]
-command` and `[telegram] fetch` are lines written by hand into `company.toml`, and
-nothing ran either of them until a real task stopped for a real person — both the worst
-moment to discover a wrong chat id and the moment the failure is invisible, since a hook
-that never fired and a queue with nothing in it are the same silence.
+**`wecode doctor`** exercises what a task will depend on, before a task depends on it.
+Two halves, in the order they are needed: whether this **machine** can do the work at
+all, and whether the way back to the **operator** carries a wait and an answer. Both are
+hand-written `company.toml` — a path, a command name, a token — true on the machine they
+were typed on and believed everywhere else until something leans on them.
 
-It sends a real notification, for a task that does not exist, and reads the channel back.
+The two cost differently when they are wrong, which is why one command covers both.
+A broken **hook** is silent: a hook that never fired and a queue with nothing in it are
+the same silence from where the operator is standing. A broken **machine** is loud in the
+wrong place — the dispatch fails *after* admission, after scheduling, with a worktree cut
+and a run recorded, so it reads back as a task that could not be done when it is really a
+`claude` that was never installed. Under `wecode loop` that repeats once per promotion,
+filing one honest-looking record per attempt for a cause none of them names.
+
 The exit status is the verdict: non-zero when what is configured does not work, so
-`wecode doctor && wecode loop` refuses to start on a broken hook. What is *not* set is
-reported and passes — an operator who watches a terminal is configured for a terminal,
-not misconfigured.
+`wecode doctor && wecode loop` starts a day's unattended work only on a machine that can
+do it and a channel that can say so. What is *not* set is reported and passes — an
+operator who watches a terminal is configured for a terminal, not misconfigured. Hence
+three marks and not two: `✓` ran, `·` nothing is set, `✗` it is set and does not work.
 
-Four lines, named as `company.toml` names them:
+The machine, in the order a dispatch needs it:
+
+| | |
+|---|---|
+| `git` | run, not resolved: a `git` that is present and cannot run — a broken symlink, a lost executable bit — is as fatal as one that is absent and looks nothing like it in a `which` |
+| `worktree root` | created and written to, then the probe removed; reported on the good day too, because *where do worktrees land* is the commonest question about a directory that sits outside both repo and workspace |
+| `[[repos]] <name>` | there, and a repository by git's own reckoning. The likeliest wrong line in a new workspace: `wecode init` ships `path = "~/projects/your-repo"`, which parses, validates and has never existed |
+| `[agents.<name>] command` | resolved the way `spawn` resolves it, and **not started** — a coding agent launched to see whether it launches is a session and a bill. Checked against the charter first: a line `never_run` forbids is refused however well installed the harness is |
+| `[agents.<name>] env_allowlist` | every name read back off the environment wecode runs in. The list is not a filter, it *is* the environment — a worker is `env_clear`ed and handed exactly what it names, so a name unset here arrives as nothing and the agent fails on its first authenticated call, having spent the budget getting there |
+
+A harness no post is staffed with launches nothing, and is reported as an absence rather
+than failed — a workspace keeping a spare configured for the day it switches is not
+broken. The way back, named as `company.toml` names it:
 
 | | |
 |---|---|
@@ -434,7 +454,7 @@ Four lines, named as `company.toml` names them:
 | `[telegram] answer` | checked against the charter and not run: `answerCallbackQuery` needs a live callback id, and a made-up one is refused whatever the token is |
 | `who may answer` | whether any `[[users]]` gives a `telegram` id, and what that person's post may sign — a channel that resolves every reply to nobody is read every pass and answered from never |
 
-Three things it will not do. It **signs nothing and consumes nothing**: no ledger record,
+Three things the hooks half will not do. It **signs nothing and consumes nothing**: no ledger record,
 no status write, and the fetch is asked from offset `0` — everything Telegram still holds,
 confirming none of it — because `getUpdates` treats an offset as an acknowledgement, and a
 drill that swallowed the reply it was checking for would be the failure it exists to find.
@@ -443,3 +463,13 @@ against and a live one in a real chat message is one `approve` away from signing
 nobody looked at. And it **cannot say the message arrived**: wecode holds no chat and sees
 no phone, so *exited 0 and said nothing* is the strongest thing knowable from this side.
 The last line of the report is the half only the operator can answer.
+
+The machine half is as restrained. It **touches nothing anybody owns** — repositories are
+asked questions and never written to, and the one file it writes is a probe in wecode's
+own run directory, carrying the process id so two drills cannot delete each other's, and
+removed either way. It **installs nothing**: every fault has a one-line repair in a file
+the operator already edits, and the note says which line, because a doctor that fixed
+things is not one you could leave in front of `wecode loop`. And the whole command
+**never opens the store** — it reads `company.toml` and nothing else, which bounds what it
+can break and equally what it can check: the toolchain a *particular* task declares as its
+acceptance lives in the plan, so what is checked here is what every task needs.
