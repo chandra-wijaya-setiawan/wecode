@@ -4,6 +4,12 @@
 //! the plan a real workspace stores — where the tasks were added by the CLI, finished
 //! by the CLI, and counted from what SQLite gave back — and whether the number this
 //! board prints is the number the other views print for the same project.
+//!
+//! Also where the two forms are held apart. `wecode tui` is the live one and cannot run
+//! here at all — a test harness has no terminal, which is exactly the condition the
+//! snapshot exists for — so what a test binary can check about it is the contract
+//! between them: that it refuses politely, names `board` as what to run instead, and
+//! answers to the name the muscle memory already has.
 
 mod support;
 
@@ -319,6 +325,52 @@ fn a_board_of_a_workspace_that_is_moving_says_nothing_about_time() {
     assert!(!out.contains("quiet"), "a workspace that just moved: {out}");
     let down = board(&org, &["board", "caching"]);
     assert!(!down.contains("quiet"), "nor on the way down: {down}");
+}
+
+#[test]
+fn the_live_cockpit_answers_to_tui_and_to_the_name_it_had_before() {
+    // One entry point, and the old spelling kept: a rename that breaks muscle memory is
+    // a tax with no revenue. Both must reach the same command, which with no terminal
+    // attached means both must fail the same way — a spelling that fell through to
+    // `unknown command` would be the regression this is here to catch.
+    let org = Org::new("tui-names", "software-company");
+    org.seed();
+    for name in ["tui", "up", "cockpit"] {
+        let r = org.run(&[name]);
+        assert!(!r.ok(), "`{name}` should refuse without a terminal:\n{}", r.all());
+        r.assert_lacks("unknown command");
+        // And it says where to go instead. A cockpit that only said *no* to a cron job,
+        // a pipe or an ssh session left the operator with nothing to run.
+        r.assert_contains("needs a terminal");
+        r.assert_contains("wecode board");
+    }
+}
+
+#[test]
+fn the_snapshot_is_the_form_that_works_where_the_cockpit_cannot() {
+    // The other half of the same contract: what `tui` points at has to be there. The
+    // suite has no tty, so this is the one of the two forms an operator on a phone, in a
+    // log, or at the end of a pipe actually gets — and it prints the same state.
+    let org = Org::new("tui-fallback", "software-company");
+    org.seed();
+    let out = board(&org, &["board"]);
+    assert!(out.contains("NEEDS YOU"), "{out}");
+    assert!(out.contains("PROJECT caching"), "{out}");
+}
+
+#[test]
+fn naming_a_screen_does_not_make_it_a_different_command() {
+    // `wecode tui <id>` chooses the screen it opens on; it is still `wecode tui`. Here
+    // that shows as the refusal being unchanged by the id — the terminal is what the
+    // command needs, and no positional makes it need one less. `wecode board <id>` is
+    // the one that *does* answer with something in a pipe, because printing is what it
+    // is for; the two must not swap places.
+    let org = Org::new("tui-opening", "software-company");
+    org.seed();
+    for named in ["caching", "cache-tests", "no-such-thing"] {
+        org.run(&["tui", named]).assert_contains("needs a terminal");
+    }
+    assert!(board(&org, &["board", "caching"]).contains("caching"));
 }
 
 #[test]

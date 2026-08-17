@@ -79,9 +79,15 @@ PLAN
         hide a project from the cockpit, or bring it back (--force if work is live)
 
 COCKPIT
-  wecode up                            live dashboard: j/k move, space fold, q quit
-        every level draws the whole task tree; z folds it all, Z opens it
-  wecode board [<id>] [--all]          the same view as a one-shot snapshot
+  wecode tui [<id>]                    one application, three screens that call
+                                       each other (`wecode up` is the same command)
+        HOME     needs-you · moving · next · landed, over the whole portfolio
+        PROJECT  one project's task tree      TASK  one task in full
+        enter opens what the cursor is on, esc goes back, q quits
+        j/k move · space fold · z/Z fold all · a archived · r reload · ? keys
+        <id> is the screen it opens on, not a mode: esc still reaches HOME
+  wecode board [<id>] [--all]          the same state printed once — for pipes,
+                                       logs, and anywhere there is no terminal
 
 WORK
   wecode assign <task> --to <post>     check the post may do it, then make it ready
@@ -117,7 +123,7 @@ WORK
 
 **Short numbers** are the same commands, typed with four keystrokes instead of twenty.
 Every project and task carries one, printed in the left column of `tree`, `ready`,
-`board` and `up` and beside the id on `show`; anywhere a command takes a project or a
+`board` and `tui` and beside the id on `show`; anywhere a command takes a project or a
 task, the number does as well. `wecode merge 4`. `wecode assign 7 --to impl`. `wecode
 audit --task 4`.
 
@@ -249,6 +255,34 @@ so a task in a project that dispatches by approval has to be signed for again: a
 given to a task that was going to ship on its own did not cover the same task shipping
 inside a sprint, on a different branch.
 
+**`wecode tui`** is one application whose screens call each other, in the way `k9s` and
+`lazygit` are: state lives in the app, and moving between screens is navigation rather
+than a fresh invocation.
+
+    HOME     the four attention groups — needs-you, moving, next, landed — over the
+             whole portfolio, with the is-part-of tree under them
+      ↓ enter
+    PROJECT  that project's task tree, to the leaves
+      ↓ enter
+    TASK     one task in full: where it sits, what it waits on, what it is doing, what
+             each attempt cost against its budget, the report it landed, its incidents
+
+`enter` opens what the cursor is on and `esc` (or backspace) goes back to the row it was
+opened from; `q` quits. `j`/`k`, `space`, `z`/`Z`, `a` and `r` mean the same thing
+wherever they are pressed — on TASK, which is a page rather than a table, `j` and `k`
+scroll it. **No screen is reachable only by restarting with a different command**, which
+is what makes this one cockpit rather than three. Nor is any screen a flag: `wecode tui
+4` opens *on* that project or task, with HOME still underneath it, so `esc` behaves there
+exactly as it does anywhere else.
+
+`wecode up` is the same command under its old name. Renaming what the hands already know
+is a tax with no revenue, so both spellings stay.
+
+**`wecode board`** is not a second cockpit. It prints the same state once and exits, for
+pipes, logs, and anywhere there is no terminal — a different consumer, not a different
+view. `wecode tui` refuses to start without a tty and says so, naming `board` as what to
+run instead.
+
 **`wecode archive task <id>`** files a task away *with its subtasks*, and
 `wecode unarchive task <id>` brings the group back. A bare id — `wecode archive caching` —
 is a project, as it always was.
@@ -277,7 +311,7 @@ mis-scoped one can be put away without first being dropped.
 
 Filing is a display decision, not a judgement about the work, so it is reversible and
 says nothing about status: `wecode archive task 4` twice reports *already archived* rather
-than failing. What it changes is every view that lists work — `board`, `up` and `tree` —
+than failing. What it changes is every view that lists work — `board`, `tui` and `tree` —
 where a filed-away group is one hidden row rather than four. `board --all`, `tree --all`
 and the cockpit's `a` bring them back, greyed on the snapshot board and marked `archived`
 in the cockpit and in `tree`. Naming a filed-away task directly (`wecode board 4`) shows
