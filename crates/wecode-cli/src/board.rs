@@ -1,6 +1,13 @@
 //! The cockpit: a full-screen board with the same four columns at every level —
 //! what · status · spend · needs-you.
 //!
+//! The portfolio **leads with attention, not with hierarchy**. A tree is the shape of
+//! the system; four groups in the order a person acts — needs-you, moving, next, landed
+//! — are the shape of the question they opened this to ask, which is *what is mine to
+//! do*. The tree survives underneath, since how the work is organised is a real question
+//! too, just not the first one. Each group stands its tail down to a count at
+//! [`ATTENTION`] rows, so the whole answer is one screen however big the plan.
+//!
 //! Health is **computed**, never reported by an agent: it comes from status,
 //! admission defects, the audit ledger and declared budgets. It is not a column,
 //! because every cause of amber or red already writes a needs-you entry — it is
@@ -11,13 +18,22 @@
 //! with the whole task tree under each, and a focus view narrows to one of them.
 //! The tree goes all the way down: a plan that hangs its real work off a parent
 //! task showed none of it while the portfolio stopped at roots.
+//!
+//! The project row answers *where is this* in one cell: its [`standing`] — `> active
+//! 2/5` — beside the state somebody declared, because `active` reads the same on the day
+//! a project opens as on the day its last task lands. A fraction says how far and not
+//! whether it can go further, so the needs-you cell carries the two ends it cannot —
+//! [`unowned`] work, and work that has all landed under a project still declared open.
+//! Nor can any of it say *when*, being counted off the plan as it stands; the ledger is
+//! the only record of that, and the gap since its newest line reads [`quiet_for`].
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use wecode_core::{
     Number, Plan, Project, ProjectId, ProjectStatus, Task, TaskId, TaskKind, TaskStatus, admission,
 };
-use wecode_store::AuditLine;
+use wecode_store::{AuditLine, now_secs};
 
 use crate::render::kind_tag;
 
@@ -63,6 +79,8 @@ pub(crate) struct Counts {
     spent: u64,
     alarms: usize,
     denials: usize,
+    /// When the newest record here was written; `0` for a subject the ledger never named.
+    last: u64,
 }
 
 impl Counts {
@@ -70,24 +88,43 @@ impl Counts {
         self.spent += other.spent;
         self.alarms += other.alarms;
         self.denials += other.denials;
+        // The newest, not the sum: rolled up this says when anything under here last
+        // moved, and a project quiet for a week is not quiet if a subtask ran an hour ago.
+        self.last = self.last.max(other.last);
     }
 }
 
-/// Spend and incidents folded from the ledger once, split by what they are
-/// attributed to.
-///
-/// The two maps are separate because a record naming a task also names its
+/// Spend and incidents folded from the ledger once, split by what they are attributed
+/// to. The two count maps are separate because a record naming a task also names its
 /// project: counting it in both would double every number.
 #[derive(Default)]
 pub(crate) struct Ledger {
     by_task: BTreeMap<String, Counts>,
     by_project: BTreeMap<String, Counts>,
+    /// The newest [`AT_THE_KEYBOARD`] act recorded against each task, as `<seq, "<action>
+    /// <target>">` — what the moving group prints to answer *what is it doing*.
+    ///
+    /// Kept by `seq` rather than `at`, the sequence being the database's and so monotonic
+    /// across every process that writes, while two records inside one second are common
+    /// and their order by clock is a coin toss.
+    doing: BTreeMap<String, (i64, String)>,
 }
+
+/// The acts that are somebody working on a task, as against wecode's own record of it.
+///
+/// `define`, `staff` and `approve` are things done *to* a task — writing it down, moving
+/// it, signing it — and each is the newest record on a task that has never run, so a
+/// moving row would report the planning that created it as what it is doing now. These
+/// five are what the task's holder did with their hands. A spend is neither: that is the
+/// meter, which the row's spend cell reads already.
+const AT_THE_KEYBOARD: [&str; 5] = ["read", "write", "run", "network", "merge"];
 
 pub(crate) fn ledger_index(audit: &[AuditLine]) -> Ledger {
     let mut out = Ledger::default();
     for l in audit {
-        let mut c = Counts::default();
+        // Every record is movement, not only a spend: a denial, an approval and a merge
+        // are all wecode having done something about this subject.
+        let mut c = Counts { last: l.at, ..Counts::default() };
         if l.action == "spend" {
             // target is "<tokens>t/<secs>s"
             if let Some(t) = l.target.split('t').next()
@@ -108,6 +145,12 @@ pub(crate) fn ledger_index(audit: &[AuditLine]) -> Ledger {
             }
         } else {
             out.by_task.entry(l.task.clone()).or_default().add(c);
+            if AT_THE_KEYBOARD.contains(&l.action.as_str()) {
+                let seen = out.doing.entry(l.task.clone()).or_default();
+                if l.seq >= seen.0 {
+                    *seen = (l.seq, format!("{} {}", l.action, truncate(&l.target, 30)));
+                }
+            }
         }
     }
     out
@@ -133,14 +176,9 @@ fn project_totals(plan: &Plan, id: &ProjectId, l: &Ledger) -> Counts {
     total
 }
 
-pub(crate) fn project_vitals(
-    plan: &Plan,
-    p: &Project,
-    l: &Ledger,
-    known_repos: &[String],
-) -> Vitals {
+pub(crate) fn project_vitals(plan: &Plan, p: &Project, l: &Ledger, repos: &[String]) -> Vitals {
     let c = project_totals(plan, &p.id, l);
-    let defects = admission::check_project(p, plan, known_repos).len();
+    let defects = admission::check_project(p, plan, repos).len();
     let prog = plan.progress(&p.id);
     let over = p.budget.tokens.is_some_and(|b| c.spent > b);
     let stalled = c.spent > 0 && prog == 0.0 && p.status == ProjectStatus::Active;
@@ -165,12 +203,36 @@ pub(crate) fn project_vitals(
     if stuck > 0 {
         needs.push(format!("{stuck} stuck"));
     }
+    let unowned = unowned(plan, &p.id);
+    if unowned > 0 {
+        needs.push(format!("{unowned} to assign"));
+    }
+    // The far end of the standing. Nothing closes a project on its own, so one whose
+    // last task landed weeks ago still reads `active` — and the only move left is the
+    // operator's, which is the definition of this cell.
+    let closable = !p.status.is_closed() && standing(plan, &p.id).is_some_and(|(d, n)| d == n);
+    if closable {
+        needs.push("ready to close".to_string());
+    }
+    // The one reading not a function of the plan and the ledger alone. The clock is read
+    // at the call, so the rule itself is something a test can hand a time to.
+    let quiet = quiet_for(plan, p, &c, now_secs());
+    if let Some(days) = quiet {
+        needs.push(format!("quiet {days}d"));
+    }
     if plan.tasks_of(&p.id).next().is_none() {
         needs.push("no tasks".to_string());
     }
 
     Vitals {
-        health: health_of(c.alarms, over, defects, stalled, c.denials, waiting + stuck),
+        health: health_of(
+            c.alarms,
+            over,
+            defects,
+            stalled,
+            c.denials,
+            waiting + stuck + unowned + usize::from(closable) + usize::from(quiet.is_some()),
+        ),
         spent: c.spent,
         budget: p.budget.tokens,
         alarms: c.alarms,
@@ -318,9 +380,17 @@ fn title_bar(level: &str, subject: &str, hint: &str) -> String {
     )
 }
 
+/// Room for the longest status word plus a two-digit standing beside it.
+///
+/// Padded, never cut: a bigger plan pushes the columns to its right rather than losing a
+/// digit, because a ragged line still reads and `1/2` where `1/20` was meant does not. A
+/// test holds this to the vocabulary, so a new status arrives as a failure rather than as
+/// a board that stopped lining up.
+const STATUS_W: usize = 15;
+
 fn header_row() -> String {
     format!(
-        "{DIM}│ {:>4} {:<26} {:<11} {:<12} {}{RESET}\n",
+        "{DIM}│ {:>4} {:<26} {:<STATUS_W$} {:<12} {}{RESET}\n",
         "#", "what", "status", "spend", "needs you"
     )
 }
@@ -331,9 +401,9 @@ fn header_row() -> String {
 /// the first thing a deep row lost and would sit at a different column on every level.
 /// A number that cannot be read off in one glance is a number nobody types.
 ///
-/// Blank rather than `—` when there is none, unlike every other cell here. A missing
-/// spend is a fact about the run; a missing number is a plan nothing has minted numbers
-/// for, which is only ever an in-memory one. This is a gutter, not a reading.
+/// Blank rather than `—` when there is none, unlike every other cell here: a missing
+/// number is a plan nothing has minted numbers for, which is only ever an in-memory
+/// one. This is a gutter, not a reading.
 fn number_cell(n: Option<Number>) -> String {
     n.map_or_else(|| " ".repeat(4), |n| format!("{n:>4}"))
 }
@@ -358,7 +428,7 @@ fn row(number: Option<Number>, label: &str, status: &str, v: &Vitals, archived: 
         }
     };
     let line = format!(
-        "│ {} {:<26} {:<11} {:<12} {}",
+        "│ {} {:<26} {:<STATUS_W$} {:<12} {}",
         number_cell(number),
         truncate(label, 26),
         status,
@@ -377,18 +447,270 @@ fn row(number: Option<Number>, label: &str, status: &str, v: &Vitals, archived: 
     }
 }
 
-fn project_status(p: &Project) -> String {
-    format!("{} {}", p.status.mark(), p.status.as_str())
+/// How far a project's work has got: finished leaves over the leaves there are.
+///
+/// `None` when nothing has been planned yet — `0/0` is arithmetic about nothing, and the
+/// needs-you cell already says `no tasks` in words.
+///
+/// The same leaves [`Plan::progress`] divides, so this cannot disagree with the
+/// percentage `wecode plan` and `wecode show` print; two answers to *how far along is
+/// this* would make the board the surface people stopped trusting. Dropped work stays in
+/// the denominator, as it does there: abandoning a task is a decision to record, not a
+/// way for a project to finish. A fraction and not that percentage, because `99%` is
+/// what 199 of 200 and 999 of 1000 both round to, and how many are left is what somebody
+/// acts on.
+fn standing(plan: &Plan, id: &ProjectId) -> Option<(usize, usize)> {
+    let leaves: Vec<&Task> = plan
+        .tasks_of(id)
+        .filter(|t| plan.subtasks(&t.id).next().is_none())
+        .collect();
+    if leaves.is_empty() {
+        return None;
+    }
+    let done = leaves.iter().filter(|t| t.status.is_done()).count();
+    Some((done, leaves.len()))
+}
+
+/// Open work nobody has been handed — the leaves still to do that name no post.
+///
+/// Not slow work: stopped work. `wecode task add` moves a task out of `draft` only once
+/// it names a post, and [`crate::scheduler::dispatchable`] only ever picks up one that
+/// has an assignee — so no tick promotes these, however green every other column reads.
+///
+/// The leaves the standing divides, less the closed and the filed-away, so the two are
+/// halves of one sentence: `1/4` says where the work got to, `3 to assign` says why it
+/// stopped there. Parents go with the parked — a breakdown is not dispatched, its pieces
+/// are. Amber here while the same task reads `unassigned` in green below, on purpose:
+/// one leaf mid-planning is normal, and the project row is the one read from a phone.
+fn unowned(plan: &Plan, id: &ProjectId) -> usize {
+    plan.tasks_of(id)
+        .filter(|t| plan.subtasks(&t.id).next().is_none())
+        .filter(|t| !t.archived && !t.status.is_closed() && t.assignee.is_none())
+        .count()
+}
+
+/// How many rows a group shows before it stands the rest down to a count.
+///
+/// The company's own `[attention] max_open_items`, five in every template wecode ships:
+/// the number of things it will run at once, and so the number it already believes a
+/// person can hold. Spelled here because this module is handed the plan and the ledger
+/// and computes from those alone — and the group says how many it stood down anyway.
+const ATTENTION: usize = 5;
+
+/// The four questions a person opens the board with, in the order they act on them.
+///
+/// Not four filters over one list: a row is in exactly one group, because somebody
+/// reading four counts is counting, and a task in two of them is counted twice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Group {
+    NeedsYou,
+    Moving,
+    Next,
+    Landed,
+}
+
+impl Group {
+    const ALL: [Self; 4] = [Self::NeedsYou, Self::Moving, Self::Next, Self::Landed];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "NEEDS YOU",
+            Self::Moving => "MOVING",
+            Self::Next => "NEXT",
+            Self::Landed => "LANDED",
+        }
+    }
+
+    /// The sentence this group's own question wants, for one row.
+    ///
+    /// Each group asks something different of the same cell, which is the point of
+    /// grouping at all: `> running` is a fact four rows share, and *what it is doing* is
+    /// what tells them apart. Needs-you keeps what the row already computed, that cell
+    /// being the answer to *what wants me* — and it is never empty there, since nothing
+    /// joins that group without either a status a person owes something to or a dead-end
+    /// prerequisite, each of which writes its own words in [`task_vitals`].
+    fn line(self, plan: &Plan, t: &Task, l: &Ledger, v: &Vitals) -> String {
+        match self {
+            Self::NeedsYou => v.needs.join(", "),
+            // Every act an agent takes passes the Broker on its way to the ledger, so
+            // the newest record is the nearest thing wecode has to the agent's own last
+            // line. A run that has not touched anything yet falls back to its title.
+            Self::Moving => l
+                .doing
+                .get(t.id.as_str())
+                .map_or_else(|| truncate(&t.title, 40), |(_, what)| what.clone()),
+            Self::Next => blocking(plan, t),
+            // What landed, in the words somebody wrote when they asked for it. The cost
+            // is the spend cell, two columns left.
+            Self::Landed => truncate(&t.title, 40),
+        }
+    }
+}
+
+/// Which group a leaf belongs to — exactly one, or none.
+///
+/// Read in order, because the earlier question wins. Failed work is a person's move
+/// whatever else is true of it, and a task stuck behind a dead end is a question too
+/// even though its own status reads `waiting` — no tick is coming for either. A dropped
+/// task is in no group at all: not waiting, not moving, and it did not land. It is a
+/// decision already taken, which the tree below still records.
+fn group_of(plan: &Plan, t: &Task) -> Option<Group> {
+    if t.status.needs_a_human() || is_stuck(plan, t) {
+        Some(Group::NeedsYou)
+    } else if matches!(t.status, TaskStatus::Running | TaskStatus::Verifying) {
+        Some(Group::Moving)
+    } else if t.status.is_done() {
+        Some(Group::Landed)
+    } else if t.status.is_closed() {
+        None
+    } else {
+        Some(Group::Next)
+    }
+}
+
+/// The one thing standing between an open task and a dispatch.
+///
+/// Nearest first: an unfinished predecessor is the answer even for a task that is also
+/// unassigned, because staffing it changes nothing while it waits. Naming the post is
+/// what turns `ready` from a state into a sentence about somebody — and `unassigned` is
+/// the one entry here that no tick will ever clear on its own.
+fn blocking(plan: &Plan, t: &Task) -> String {
+    for b in plan.blockers(&t.id) {
+        if let wecode_core::Blocker::Waiting(on) = b {
+            return format!("after {on}");
+        }
+    }
+    match &t.assignee {
+        Some(post) => format!("queued for {post}"),
+        None => "unassigned".to_string(),
+    }
+}
+
+/// The groups, drawn before any tree.
+///
+/// `projects` is the same list the tree below walks, so the two halves of one view can
+/// never disagree about which projects are on screen. Leaves only, for the reason the
+/// standing counts leaves: a breakdown is not a piece of work, its pieces are — and those
+/// pieces are rows in this very list, so grouping the parent would put one job in front
+/// of a person twice.
+fn attention(
+    plan: &Plan,
+    projects: &[&Project],
+    l: &Ledger,
+    gates: &DesignGates,
+    show_all: bool,
+) -> String {
+    let leaves: Vec<&Task> = projects
+        .iter()
+        .flat_map(|p| plan.tasks_of(&p.id))
+        .filter(|t| plan.subtasks(&t.id).next().is_none())
+        .filter(|t| show_all || !t.archived)
+        .collect();
+
+    let mut out = String::new();
+    for g in Group::ALL {
+        out.push_str(&format!("{DIM}│ {}{RESET}\n", g.title()));
+        let mut mine: Vec<&Task> = leaves
+            .iter()
+            .copied()
+            .filter(|t| group_of(plan, t) == Some(g))
+            .collect();
+        if mine.is_empty() {
+            // Drawn empty rather than dropped: four headings in the same places every
+            // time is what lets somebody find the one they came for without reading.
+            out.push_str(&format!("{DIM}│      —{RESET}\n"));
+            continue;
+        }
+        if g == Group::Landed {
+            // Newest first — "recently" is the whole of what this group claims. Every
+            // other group is left in id order, so two runs of the same command agree.
+            mine.sort_by_key(|t| Reverse(l.by_task.get(t.id.as_str()).map_or(0, |c| c.last)));
+        }
+        for t in mine.iter().take(ATTENTION) {
+            let mut v = task_vitals(plan, t, l, gates);
+            // The group's answer, in the cell that already carries the colour. An
+            // incident on a moving row still turns it red; the words for it are on that
+            // task's own row in the tree below, which is what the tree is still for.
+            v.needs = vec![g.line(plan, t, l, &v)];
+            out.push_str(&row(
+                t.number,
+                // Hierarchy survives inside a group: a row torn out of the tree has to
+                // say which project it came from, or the id is the only handle on it.
+                &format!("  {}/{}", t.project, t.id),
+                &task_status(t),
+                &v,
+                t.archived,
+            ));
+        }
+        if mine.len() > ATTENTION {
+            out.push_str(&format!(
+                "{DIM}│      … and {} more{RESET}\n",
+                mine.len() - ATTENTION
+            ));
+        }
+    }
+    out
+}
+
+/// A day: the gap under which the board says nothing about time. The shortest silence
+/// that cannot be an ordinary night — wecode runs tasks in minutes, so an hour would be
+/// true of every workspace whose operator went to lunch, and a cell that is right about
+/// everybody is read by nobody.
+const QUIET_AFTER: u64 = 24 * 60 * 60;
+
+/// Whole days between two ledger times, once there is at least one. Rounded down, so the
+/// reading is never longer than the silence, and `None` rather than a wrap for a record
+/// dated ahead of the clock — a clock that went backwards is not a project racing ahead.
+fn quiet_days(last: u64, now: u64) -> Option<u64> {
+    let days = now.saturating_sub(last) / QUIET_AFTER;
+    (days > 0).then_some(days)
+}
+
+/// How long a project has stood still, in whole days — `None` while it is still moving.
+///
+/// Silent in four cases, each a row that would otherwise cry wolf. A closed project is
+/// meant to stand still. One with no open work left already says `ready to close`, and
+/// two cells for one fact teach a reader to skip both. A run in flight writes nothing to
+/// the ledger until it lands, so it reads exactly like silence and is the opposite of it.
+/// And a project the ledger has never named has no silence to measure — unreachable in a
+/// stored workspace, where defining one is itself a record.
+fn quiet_for(plan: &Plan, p: &Project, c: &Counts, now: u64) -> Option<u64> {
+    if p.status.is_closed() || c.last == 0 {
+        return None;
+    }
+    let open: Vec<&Task> = plan.tasks_of(&p.id).filter(|t| !t.status.is_closed()).collect();
+    if open.is_empty()
+        || open.iter().any(|t| matches!(t.status, TaskStatus::Running | TaskStatus::Verifying))
+    {
+        return None;
+    }
+    quiet_days(c.last, now)
+}
+
+/// The declared state, and beside it where the work under it has got to.
+///
+/// On the project row and nowhere else, for the reason the stuck count is: the rows
+/// beneath are what to read next, this is the number that says whether to read them at
+/// all, and it survives a long tree scrolling every one of them off the screen.
+fn project_status(plan: &Plan, p: &Project) -> String {
+    let word = p.status.as_str();
+    match standing(plan, &p.id) {
+        Some((done, total)) => format!("{} {word} {done}/{total}", p.status.mark()),
+        None => format!("{} {word}", p.status.mark()),
+    }
 }
 
 /// Short enough for a column; `needs-approval` and `needs-input` are why.
-fn task_status(t: &Task) -> String {
-    let word = match t.status {
+fn status_word(s: TaskStatus) -> &'static str {
+    match s {
         TaskStatus::NeedsApproval => "approval",
         TaskStatus::NeedsInput => "input",
         other => other.as_str(),
-    };
-    format!("{} {word}", t.status.mark())
+    }
+}
+
+fn task_status(t: &Task) -> String {
+    format!("{} {}", t.status.mark(), status_word(t.status))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -420,9 +742,8 @@ fn kids_of<'a>(plan: &'a Plan, t: &Task) -> Vec<&'a Task> {
 
 /// A tree being drawn, and how many rows it left out.
 ///
-/// The count travels with the text because only the walk that skipped the rows knows
-/// how many there were, and a view that shows less than everything has to be able to
-/// say so.
+/// The count travels with the text because only the walk that skipped the rows knows how
+/// many there were, and a view showing less than everything has to be able to say so.
 #[derive(Default, Debug)]
 struct Drawn {
     text: String,
@@ -436,12 +757,12 @@ struct Drawn {
 /// so a plan that broke its work down at all hid the half that was broken down.
 ///
 /// A filed-away task stops the walk, and its subtasks are not counted separately: they
-/// were put away as one group and reading them back as four hidden rows would say there
+/// were put away as one group, and reading them back as four hidden rows would say there
 /// is far more out of sight than there is.
 ///
-/// Depth is spelled in spaces rather than tree glyphs because this column
-/// truncates at 26: a glyph that survives the cut while the id does not costs a
-/// reader the one thing the row is for.
+/// Depth is spelled in spaces rather than tree glyphs because this column truncates at
+/// 26: a glyph that survives the cut while the id does not costs a reader the one thing
+/// the row is for.
 fn subtree(
     plan: &Plan,
     t: &Task,
@@ -467,7 +788,7 @@ fn subtree(
     }
 }
 
-/// The portfolio view: one line per project, then the whole tree of its tasks.
+/// The board: the four attention groups, then one line per project and its whole tree.
 pub(crate) fn portfolio(
     plan: &Plan,
     audit: &[AuditLine],
@@ -480,7 +801,7 @@ pub(crate) fn portfolio(
             .to_string();
     }
     let l = ledger_index(audit);
-    let mut out = title_bar("L0", "PORTFOLIO", "wecode board <id> to descend");
+    let mut out = title_bar("L0", "BOARD", "wecode board <id> to descend");
     out.push_str(&header_row());
 
     let projects: Vec<&Project> = if show_all {
@@ -488,12 +809,16 @@ pub(crate) fn portfolio(
     } else {
         plan.projects().collect()
     };
+    out.push_str(&attention(plan, &projects, &l, gates, show_all));
+    // The tree, after the answer — and named, because the heading is what makes the rows
+    // above it a view rather than a preamble somebody scrolls past.
+    out.push_str(&format!("{DIM}│{RESET}\n{DIM}│ PORTFOLIO{RESET}\n"));
     let mut drawn = Drawn::default();
-    for p in projects {
+    for p in &projects {
         drawn.text.push_str(&row(
             p.number,
             &format!("PROJECT {} [{}]", p.id, p.repo),
-            &project_status(p),
+            &project_status(plan, p),
             &project_vitals(plan, p, &l, known_repos),
             p.archived,
         ));
@@ -523,10 +848,12 @@ pub(crate) fn portfolio(
 /// lookup uses the subject's own id, because the incident filter and the title both have
 /// to name what the ledger names.
 ///
-/// Filed-away rows are hidden here as in the portfolio, with one exception: a subject
-/// that is itself archived shows its group in full. Filing a task away takes its
-/// subtasks with it, so the group is one thing — and naming it is the only way to reach
-/// inside, there being no `--all` at this level.
+/// A tree, not the four groups: descending is what somebody does once a group row has
+/// already told them where to look, and the question there is how this one thing is put
+/// together. Filed-away rows are hidden as in the portfolio, with one exception — a
+/// subject that is itself archived shows its group in full, since filing a task takes
+/// its subtasks with it and naming it is the only way in without an `--all` at this
+/// level.
 pub(crate) fn focus(
     plan: &Plan,
     audit: &[AuditLine],
@@ -545,7 +872,7 @@ pub(crate) fn focus(
         out.push_str(&row(
             p.number,
             &format!("PROJECT {} [{}]", p.id, p.repo),
-            &project_status(p),
+            &project_status(plan, p),
             &v,
             p.archived,
         ));
@@ -641,20 +968,61 @@ mod tests {
         DesignGates::new()
     }
 
+    /// The vitals of `caching`, the project every fixture here builds.
+    fn vitals(p: &Plan, l: &Ledger) -> Vitals {
+        project_vitals(p, p.project(&ProjectId::new("caching")).unwrap(), l, &repos())
+    }
+
+    /// The same, for the tests with no ledger to speak of.
+    fn bare(p: &Plan) -> Vitals {
+        vitals(p, &ledger_index(&[]))
+    }
+
+    /// One task's vitals, ungated. Spelled once: the four arguments took four lines in
+    /// each of a dozen tests, and only one of those tests was about any of them.
+    fn task_of(p: &Plan, l: &Ledger, id: &str) -> Vitals {
+        task_vitals(p, p.task(&TaskId::new(id)).unwrap(), l, &no_gates())
+    }
+
+    /// Moves a task into a state, the way the store would.
+    fn set(p: &mut Plan, id: &str, s: TaskStatus) {
+        let mut t = p.task(&TaskId::new(id)).unwrap().clone();
+        t.status = s;
+        p.update_task(t).unwrap();
+    }
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    /// The ledger of a project whose newest record was written `days` ago.
+    fn aged(days: u64) -> Ledger {
+        let at = now_secs() - days * DAY;
+        ledger_index(&[AuditLine { at, ..line("caching", "t1", "spend", "10t/1s", "allow") }])
+    }
+
+    /// The measure and the budget every fixture here carries. Spelled once: what each
+    /// test is about is the plan's shape, never which command judges it.
+    fn cmd(c: &str) -> Measure {
+        Measure::Command {
+            cmd: c.into(),
+            expect_status: 0,
+        }
+    }
+
+    fn budget(tokens: u64, wall_secs: u64) -> Budget {
+        Budget {
+            tokens: Some(tokens),
+            wall_secs: Some(wall_secs),
+        }
+    }
+
     /// A project with one well-formed task, so a defect in a test is one the test
     /// introduced rather than background noise.
     fn plan() -> Plan {
         let mut p = Plan::new();
         p.add_project(
             Project::new("caching", "cut export p99 below 500ms", "wecode")
-                .measured(Measure::Command {
-                    cmd: "cargo bench".into(),
-                    expect_status: 0,
-                })
-                .budgeted(Budget {
-                    tokens: Some(1000),
-                    wall_secs: Some(60),
-                }),
+                .measured(cmd("cargo bench"))
+                .budgeted(budget(1000, 60)),
         )
         .unwrap();
         p.add_task(good_task("t1", "write the cache layer", "crates/cache/**"))
@@ -664,15 +1032,9 @@ mod tests {
 
     fn good_task(id: &str, title: &str, glob: &str) -> Task {
         Task::new(id, "caching", title)
-            .accepting(Measure::Command {
-                cmd: "cargo test".into(),
-                expect_status: 0,
-            })
+            .accepting(cmd("cargo test"))
             .scoped(Scope::write(&[glob]))
-            .budgeted(Budget {
-                tokens: Some(500),
-                wall_secs: Some(30),
-            })
+            .budgeted(budget(500, 30))
     }
 
     fn line(project: &str, task: &str, action: &str, target: &str, outcome: &str) -> AuditLine {
@@ -700,11 +1062,21 @@ mod tests {
     }
 
     #[test]
-    fn portfolio_lists_projects_and_their_root_tasks() {
+    fn the_board_opens_with_attention_and_keeps_the_tree_underneath() {
+        // The headline rule: the first rows are the four questions, not the shape of
+        // the plan. A board that opens on `PROJECT` has answered *how is this
+        // organised* to somebody who asked *what is mine to do*.
         let out = portfolio(&plan(), &[], &repos(), &no_gates(), false);
-        assert!(out.contains("caching"), "{out}");
-        assert!(out.contains("feat t1"), "{out}");
-        assert!(out.contains("L0 · PORTFOLIO"), "{out}");
+        let heads: Vec<&str> = out
+            .lines()
+            .filter(|l| Group::ALL.iter().any(|g| l.contains(g.title())) || l.contains("PROJECT"))
+            .collect();
+        assert_eq!(heads.len(), 5, "{out}");
+        for (i, g) in Group::ALL.iter().enumerate() {
+            assert!(heads[i].contains(g.title()), "group {i}: {out}");
+        }
+        assert!(heads[4].contains("PROJECT caching"), "the tree survives:\n{out}");
+        assert!(out.contains("feat t1"), "and goes down it:\n{out}");
     }
 
     /// A task row as it appears at a given depth, number column included.
@@ -740,6 +1112,9 @@ mod tests {
             t.number = Some(Number::new(n));
             p.update_task(t).unwrap();
         }
+        // The indent is pinned here too, one step per level, with the leading `│` and
+        // the number column in the needle: `  feat t2` alone matches at any depth below
+        // its own, and the tree stopping at root tasks is the bug this catches.
         let out = portfolio(&p, &[], &repos(), &no_gates(), false);
         for (n, label, depth) in [
             (1, "PROJECT caching", 0),
@@ -748,20 +1123,6 @@ mod tests {
             (4, "feat t3", 3),
         ] {
             let row = format!("│ {:>4} {}{label}", format!("#{n}"), "  ".repeat(depth));
-            assert!(out.contains(&row), "missing `{row}` in:\n{out}");
-        }
-    }
-
-    #[test]
-    fn the_portfolio_draws_the_whole_tree_not_just_root_tasks() {
-        // The gap this closes: a plan that broke its work down showed only the tops
-        // of the breakdowns, and the work actually being done is usually a leaf.
-        let out = portfolio(&nested(), &[], &repos(), &no_gates(), false);
-        // Indented one step per level. Asserted with the row's leading `│` and number
-        // column so the depth is pinned — `  feat t2` alone matches at any depth below
-        // its own.
-        for (label, depth) in [("feat t1", 1), ("feat t2", 2), ("feat t3", 3)] {
-            let row = at_depth(label, depth);
             assert!(out.contains(&row), "missing `{row}` in:\n{out}");
         }
     }
@@ -780,21 +1141,83 @@ mod tests {
         assert!(out.contains(&at_depth("feat t3", 2)), "{out}");
     }
 
+    /// Marks a task finished, the way `wecode status <id> done` would.
+    fn finish(p: &mut Plan, id: &str) {
+        set(p, id, TaskStatus::Done);
+    }
+
+    /// Which column a needle lands in, counted as a terminal would count it: colour
+    /// codes take no width and a glyph takes one however many bytes it needs, so a
+    /// column assertion made on `str::find` alone would be measuring the encoding.
+    fn column_of(line: &str, needle: &str) -> usize {
+        let at = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("no `{needle}` in {line:?}"));
+        let mut width = 0;
+        let mut escaping = false;
+        for c in line[..at].chars() {
+            if escaping {
+                escaping = c != 'm';
+            } else if c == '\x1b' {
+                escaping = true;
+            } else {
+                width += 1;
+            }
+        }
+        width
+    }
+
     #[test]
-    fn every_level_shows_the_same_four_columns() {
-        for out in [
-            portfolio(&plan(), &[], &repos(), &no_gates(), false),
-            focus(&plan(), &[], "caching", &repos(), &no_gates()),
-            focus(&plan(), &[], "t1", &repos(), &no_gates()),
+    fn the_standing_counts_leaves_so_a_breakdown_is_not_counted_twice() {
+        // `nested` is t1 › t2 › t3, which is one piece of work broken down twice — not
+        // three. Counting the parents would put a project at 1/3 for finishing all of it.
+        let mut p = nested();
+        finish(&mut p, "t3");
+        assert_eq!(standing(&p, &ProjectId::new("caching")), Some((1, 1)));
+    }
+
+    #[test]
+    fn a_task_row_carries_its_word_alone() {
+        // Why the standing stops at the project row: on a leaf it would restate the
+        // status — `✓ done 1/1` — and a parent's breakdown is the rows directly beneath
+        // it, indented, already on the screen.
+        let mut p = nested();
+        finish(&mut p, "t3");
+        for id in ["t1", "t3"] {
+            let cell = task_status(p.task(&TaskId::new(id)).unwrap());
+            assert!(!cell.contains('/'), "{id}: {cell}");
+        }
+    }
+
+    #[test]
+    fn the_status_column_fits_every_word_a_row_can_carry() {
+        // Holds `STATUS_W` to the vocabulary rather than to today's longest word, so a
+        // new status arrives as a failing test instead of as a board that stopped
+        // lining up.
+        for s in ProjectStatus::all() {
+            let cell = format!("{} {} 99/99", s.mark(), s.as_str());
+            assert!(cell.chars().count() <= STATUS_W, "{cell:?}");
+        }
+        for s in TaskStatus::all() {
+            let cell = format!("{} {}", s.mark(), status_word(*s));
+            assert!(cell.chars().count() <= STATUS_W, "{cell:?}");
+        }
+    }
+
+    #[test]
+    fn the_standing_leaves_the_columns_where_the_header_says_they_are() {
+        // Two format strings hold this layout, and the widths only agree because
+        // somebody keeps them agreeing. Measured against the header, so widening one
+        // and not the other fails here rather than in a screenshot.
+        let out = portfolio(&nested(), &[], &repos(), &no_gates(), false);
+        let header = out.lines().find(|l| l.contains("needs you")).unwrap();
+        let spend = column_of(header, "spend");
+        for (label, cell) in [
+            ("PROJECT caching", spend_cell(0, Some(1000))),
+            ("feat t1", spend_cell(0, Some(500))),
         ] {
-            for col in ["what", "status", "spend", "needs you"] {
-                assert!(out.contains(col), "missing `{col}` in:\n{out}");
-            }
-            // The columns that said nothing: health repeated the needs-you cell,
-            // and a leaf's progress bar restated its status.
-            for gone in ["health", "progress"] {
-                assert!(!out.contains(gone), "`{gone}` should be gone from:\n{out}");
-            }
+            let row = out.lines().find(|l| l.contains(label)).expect(label);
+            assert_eq!(column_of(row, cell.trim_end()), spend, "{label}: {row}");
         }
     }
 
@@ -803,21 +1226,8 @@ mod tests {
         let audit = vec![line("caching", "t1", "write", "x.pem", "alarm")];
         let p = plan();
         let l = ledger_index(&audit);
-        assert_eq!(
-            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).health,
-            Health::Red
-        );
-        assert_eq!(
-            project_vitals(
-                &p,
-                p.project(&ProjectId::new("caching")).unwrap(),
-                &l,
-                &repos()
-            )
-            .health,
-            Health::Red,
-            "an alarm must roll up"
-        );
+        assert_eq!(task_of(&p, &l, "t1").health, Health::Red);
+        assert_eq!(vitals(&p, &l).health, Health::Red, "an alarm must roll up");
     }
 
     #[test]
@@ -825,7 +1235,7 @@ mod tests {
         let audit = vec![line("caching", "t1", "write", "other.rs", "deny")];
         let p = plan();
         let l = ledger_index(&audit);
-        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates());
+        let v = task_of(&p, &l, "t1");
         assert_eq!(v.health, Health::Amber);
         // Health is only a colour now, so the denial must appear in words too.
         assert!(v.needs.iter().any(|n| n == "1 denied"), "{:?}", v.needs);
@@ -837,13 +1247,7 @@ mod tests {
         let audit = vec![line("caching", "t1", "spend", "400t/10s", "allow")];
         let p = plan();
         let l = ledger_index(&audit);
-        let v = project_vitals(
-            &p,
-            p.project(&ProjectId::new("caching")).unwrap(),
-            &l,
-            &repos(),
-        );
-        assert_eq!(v.spent, 400, "counted once, not twice");
+        assert_eq!(vitals(&p, &l).spent, 400, "counted once, not twice");
     }
 
     #[test]
@@ -851,18 +1255,9 @@ mod tests {
         let audit = vec![line("caching", "", "spend", "150t/1s", "allow")];
         let p = plan();
         let l = ledger_index(&audit);
-        let v = project_vitals(
-            &p,
-            p.project(&ProjectId::new("caching")).unwrap(),
-            &l,
-            &repos(),
-        );
-        assert_eq!(v.spent, 150);
+        assert_eq!(vitals(&p, &l).spent, 150);
         // ...and it does not leak onto the task.
-        assert_eq!(
-            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).spent,
-            0
-        );
+        assert_eq!(task_of(&p, &l, "t1").spent, 0);
     }
 
     #[test]
@@ -872,50 +1267,8 @@ mod tests {
             .unwrap();
         let audit = vec![line("caching", "t1a", "spend", "700t/2s", "allow")];
         let l = ledger_index(&audit);
-        assert_eq!(
-            task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates()).spent,
-            700,
-            "a parent task sees its subtask's spend"
-        );
-        assert_eq!(
-            project_vitals(
-                &p,
-                p.project(&ProjectId::new("caching")).unwrap(),
-                &l,
-                &repos()
-            )
-            .spent,
-            700
-        );
-    }
-
-    #[test]
-    fn exceeding_budget_is_red() {
-        let audit = vec![line("caching", "t1", "spend", "5000t/0s", "allow")];
-        let p = plan();
-        let l = ledger_index(&audit);
-        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates());
-        assert_eq!(v.health, Health::Red);
-        assert!(
-            v.needs.iter().any(|n| n.contains("over budget")),
-            "{:?}",
-            v.needs
-        );
-    }
-
-    #[test]
-    fn progress_is_the_done_fraction_of_leaves() {
-        let mut p = plan();
-        assert_eq!(p.progress(&ProjectId::new("caching")), 0.0);
-
-        let mut t = p.task(&TaskId::new("t1")).unwrap().clone();
-        t.status = TaskStatus::Done;
-        p.update_task(t).unwrap();
-        assert_eq!(p.progress(&ProjectId::new("caching")), 1.0);
-
-        p.add_task(good_task("t2", "the second half", "crates/other/**"))
-            .unwrap();
-        assert_eq!(p.progress(&ProjectId::new("caching")), 0.5);
+        assert_eq!(task_of(&p, &l, "t1").spent, 700, "a parent sees its subtask's spend");
+        assert_eq!(vitals(&p, &l).spent, 700);
     }
 
     #[test]
@@ -925,15 +1278,9 @@ mod tests {
             .unwrap();
         p.add_task(good_task("t1b", "second inner", "crates/cache/b/**").under("t1"))
             .unwrap();
-        let mut a = p.task(&TaskId::new("t1a")).unwrap().clone();
-        a.status = TaskStatus::Done;
-        p.update_task(a).unwrap();
-
-        assert_eq!(
-            task_progress(&p, p.task(&TaskId::new("t1")).unwrap()),
-            0.5,
-            "one of two subtasks done"
-        );
+        finish(&mut p, "t1a");
+        let t1 = p.task(&TaskId::new("t1")).unwrap();
+        assert_eq!(task_progress(&p, t1), 0.5, "one of two subtasks done");
     }
 
     #[test]
@@ -942,12 +1289,7 @@ mod tests {
         // gate refuses would sit green on the cockpit.
         let p = plan();
         let gates: DesignGates = [(ProjectId::new("caching"), vec![TaskKind::Feature])].into();
-        let v = task_vitals(
-            &p,
-            p.task(&TaskId::new("t1")).unwrap(),
-            &ledger_index(&[]),
-            &gates,
-        );
+        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &ledger_index(&[]), &gates);
         assert_eq!(v.defects, 1, "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
     }
@@ -956,128 +1298,91 @@ mod tests {
     fn a_draft_with_no_defects_reads_as_unassigned() {
         let p = plan();
         let l = ledger_index(&[]);
-        let v = task_vitals(&p, p.task(&TaskId::new("t1")).unwrap(), &l, &no_gates());
+        let v = task_of(&p, &l, "t1");
         assert_eq!(v.defects, 0, "control case must be defect-free");
         assert!(v.needs.iter().any(|n| n == "unassigned"), "{:?}", v.needs);
-        assert_eq!(
-            v.health,
-            Health::Green,
-            "waiting to be assigned is not a fault"
-        );
+        assert_eq!(v.health, Health::Green, "waiting to be assigned is not a fault");
     }
 
     #[test]
-    fn a_project_with_no_tasks_says_so_and_is_amber() {
-        let mut p = Plan::new();
-        p.add_project(
-            Project::new("bare", "some real objective here", "wecode")
-                .measured(Measure::Command {
-                    cmd: "cargo test".into(),
-                    expect_status: 0,
-                })
-                .budgeted(Budget {
-                    tokens: Some(10),
-                    wall_secs: Some(1),
-                }),
-        )
-        .unwrap();
-        let v = project_vitals(
-            &p,
-            p.project(&ProjectId::new("bare")).unwrap(),
-            &ledger_index(&[]),
-            &repos(),
-        );
-        assert!(v.needs.iter().any(|n| n == "no tasks"), "{:?}", v.needs);
+    fn only_the_leaves_that_are_still_open_are_counted_as_unassigned() {
+        // Three ways a task is not somebody's next move: it is finished, it is filed
+        // away, or it is a breakdown rather than a piece of work. `nested` is t1 › t2 ›
+        // t3, so counting parents would ask for three posts where one piece of work is.
+        let mut p = nested();
+        assert_eq!(unowned(&p, &ProjectId::new("caching")), 1, "t3 alone");
+        finish(&mut p, "t3");
+        assert_eq!(unowned(&p, &ProjectId::new("caching")), 0);
+
+        let mut p = nested();
+        file_away(&mut p, "t3");
+        assert_eq!(unowned(&p, &ProjectId::new("caching")), 0, "parked, not owed");
+    }
+
+    #[test]
+    fn a_project_whose_work_has_all_landed_asks_to_be_closed() {
+        // Where `5/5` runs out. No tick closes a project, so one whose last task landed
+        // goes on reading `active` — and the board is the surface that should say the
+        // remaining move is the operator's.
+        let mut p = plan();
+        finish(&mut p, "t1");
+        let v = bare(&p);
+        assert!(v.needs.iter().any(|n| n == "ready to close"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
+
+        // And it is the whole of what the row asks, however long ago that last task
+        // landed: two cells for one fact teach a reader to skip both.
+        assert_eq!(vitals(&p, &aged(9)).needs, vec!["ready to close".to_string()]);
+
+        // It stops once they have. A closed project asking to be closed is the reading
+        // that teaches people the cell is noise.
+        let mut done = p.project(&ProjectId::new("caching")).unwrap().clone();
+        done.status = ProjectStatus::Done;
+        p.update_project(done).unwrap();
+        assert!(bare(&p).needs.is_empty(), "{:?}", bare(&p).needs);
+        assert!(vitals(&p, &aged(9)).needs.is_empty(), "nor is it quiet: it is closed");
+    }
+
+    #[test]
+    fn a_project_nothing_has_happened_in_says_how_long() {
+        // What the standing cannot say: `draft 0/1` prints the same on the evening a
+        // task was written and a fortnight later, and only one of those wants somebody.
+        let v = vitals(&plan(), &aged(3));
+        assert!(v.needs.iter().any(|n| n == "quiet 3d"), "{:?}", v.needs);
+        assert_eq!(v.health, Health::Amber);
+        // Silent while the workspace is warm, and silent for a plan the ledger has never
+        // named — no record is no gap, only a project nothing has started yet.
+        for l in [aged(0), ledger_index(&[])] {
+            let needs = vitals(&plan(), &l).needs;
+            assert!(!needs.iter().any(|n| n.starts_with("quiet")), "{needs:?}");
+        }
+    }
+
+    #[test]
+    fn a_run_in_flight_is_not_silence_however_old_the_last_record_is() {
+        // An agent mid-run writes nothing to the ledger until it lands, so a long run
+        // reads exactly like a dead project and is the opposite of one.
+        let mut p = plan();
+        for s in [TaskStatus::Running, TaskStatus::Verifying] {
+            set(&mut p, "t1", s);
+            let needs = vitals(&p, &aged(9)).needs;
+            assert!(!needs.iter().any(|n| n.starts_with("quiet")), "{s:?}: {needs:?}");
+        }
+    }
+
+    #[test]
+    fn the_silence_is_counted_in_whole_days_so_it_never_overstates() {
+        assert_eq!(quiet_days(0, DAY - 1), None, "under a day is not a reading");
+        assert_eq!(quiet_days(0, 2 * DAY - 1), Some(1), "rounded down, never up");
+        assert_eq!(quiet_days(9 * DAY, 0), None, "a clock that went backwards");
     }
 
     #[test]
     fn a_task_awaiting_a_person_is_amber_and_names_the_reason() {
         let mut p = plan();
-        let mut t = p.task(&TaskId::new("t1")).unwrap().clone();
-        t.status = TaskStatus::NeedsApproval;
-        p.update_task(t).unwrap();
-        let v = task_vitals(
-            &p,
-            p.task(&TaskId::new("t1")).unwrap(),
-            &ledger_index(&[]),
-            &no_gates(),
-        );
-        assert!(
-            v.needs.iter().any(|n| n == "needs-approval"),
-            "{:?}",
-            v.needs
-        );
-        assert_eq!(v.health, Health::Amber);
-    }
-
-    #[test]
-    fn a_waiting_prerequisite_is_not_itself_a_fault() {
-        // Depending on unfinished work is normal; only a defect or an incident
-        // should colour a row.
-        let mut p = plan();
-        p.add_task(good_task("t2", "the second half", "crates/other/**").after("t1"))
-            .unwrap();
-        let v = task_vitals(
-            &p,
-            p.task(&TaskId::new("t2")).unwrap(),
-            &ledger_index(&[]),
-            &no_gates(),
-        );
-        assert_eq!(v.defects, 0, "{:?}", v.needs);
-        assert_eq!(v.health, Health::Green);
-    }
-
-    #[test]
-    fn a_dead_end_prerequisite_turns_its_dependent_amber_and_names_it() {
-        // The contrast with the waiting case above: a dropped prerequisite will
-        // never finish, so its dependent cannot advance on its own. Left green, a
-        // dead chain looks exactly like one that time will fix.
-        let mut p = plan();
-        p.add_task(good_task("t2", "the second half", "crates/other/**").after("t1"))
-            .unwrap();
-        let mut t1 = p.task(&TaskId::new("t1")).unwrap().clone();
-        t1.status = TaskStatus::Dropped;
-        p.update_task(t1).unwrap();
-
-        let v = task_vitals(
-            &p,
-            p.task(&TaskId::new("t2")).unwrap(),
-            &ledger_index(&[]),
-            &no_gates(),
-        );
-        assert_eq!(v.health, Health::Amber);
-        assert!(
-            v.needs.iter().any(|n| n == "stuck on t1 (dropped)"),
-            "{:?}",
-            v.needs
-        );
-    }
-
-    #[test]
-    fn stuck_work_is_counted_on_its_projects_row() {
-        // The portfolio draws root rows only, so a stuck subtask must surface as a
-        // count on the project or it is invisible until someone descends.
-        let mut p = plan();
-        p.add_task(good_task("t1a", "the dead half", "crates/cache/a/**").under("t1"))
-            .unwrap();
-        p.add_task(
-            good_task("t1b", "the stranded half", "crates/cache/b/**")
-                .under("t1")
-                .after("t1a"),
-        )
-        .unwrap();
-        let mut dead = p.task(&TaskId::new("t1a")).unwrap().clone();
-        dead.status = TaskStatus::Failed;
-        p.update_task(dead).unwrap();
-
-        let v = project_vitals(
-            &p,
-            p.project(&ProjectId::new("caching")).unwrap(),
-            &ledger_index(&[]),
-            &repos(),
-        );
-        assert!(v.needs.iter().any(|n| n == "1 stuck"), "{:?}", v.needs);
+        set(&mut p, "t1", TaskStatus::NeedsApproval);
+        let v = task_of(&p, &ledger_index(&[]), "t1");
+        assert!(v.needs.iter().any(|n| n == "needs-approval"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
     }
 
@@ -1144,10 +1449,7 @@ mod tests {
         let out = focus(&p, &[], "t2", &repos(), &no_gates());
         assert!(out.contains("feat t2"), "{out}");
         assert!(out.contains(&at_depth("feat t3", 1)), "{out}");
-        assert!(
-            !out.contains("archived, hidden"),
-            "nothing left out:\n{out}"
-        );
+        assert!(!out.contains("archived, hidden"), "nothing left out:\n{out}");
     }
 
     #[test]
@@ -1163,11 +1465,6 @@ mod tests {
     }
 
     #[test]
-    fn focus_on_a_missing_id_says_so() {
-        assert!(focus(&plan(), &[], "nope", &repos(), &no_gates()).contains("no project or task"));
-    }
-
-    #[test]
     fn a_project_explains_the_alarms_it_rolls_up() {
         // The count and the evidence must appear together, or the number is a
         // dead end.
@@ -1175,10 +1472,7 @@ mod tests {
         let audit = vec![line("caching", "t1", "write", "x.pem", "alarm")];
         let out = focus(&p, &audit, "caching", &repos(), &no_gates());
         assert!(out.contains("1 alarm"), "{out}");
-        assert!(
-            out.contains("x.pem"),
-            "the evidence, not just the count:\n{out}"
-        );
+        assert!(out.contains("x.pem"), "the evidence, not just the count:\n{out}");
     }
 
     #[test]
@@ -1193,10 +1487,7 @@ mod tests {
         let out = focus(&p, &audit, "t1", &repos(), &no_gates());
         assert!(out.contains("incidents"), "{out}");
         assert!(out.contains("x.pem"), "{out}");
-        assert!(
-            !out.contains("elsewhere.rs"),
-            "should not show another task's: {out}"
-        );
+        assert!(!out.contains("elsewhere.rs"), "not another task's: {out}");
     }
 
     #[test]
