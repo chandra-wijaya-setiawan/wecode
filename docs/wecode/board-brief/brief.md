@@ -57,3 +57,12 @@ There are no attention groups — no **needs you / moving / next / landed** lead
 view, no ordering by what a person acts on, no handful-per-group ceiling. "Group by
 attention, not by hierarchy" is the owner's headline ask and the reason this task
 exists; the rest was supporting detail. Attempt 2 is about that section alone.
+
+## Attempt 4 is only this
+
+Open the portfolio with four attention groups before any tree:
+NEEDS YOU (signatures, blocks, questions) · MOVING (running, with the agent's latest
+stream line) · NEXT (ready/waiting, naming what unblocks each) · LANDED (last few
+merges, one line and cost each). Handful of rows per group, "… and N more" for tails.
+The tree survives below or behind the focus views. Acceptance for the eye:
+`wecode board` must not open with `PROJECT` as its first row.
