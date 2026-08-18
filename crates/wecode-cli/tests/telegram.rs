@@ -82,8 +82,9 @@ fn tapped_orphaned(id: i64, from: &str, data: &str) -> String {
 /// real `answerCallbackQuery` would prove that only on a machine with a bot token on it.
 ///
 /// The whole environment on one line, in the order a hook uses it: what to acknowledge,
-/// which message to edit, and what to say. `at:/` with nothing after it is the shape of a
-/// button that cannot be taken off anything — see [`tapped_orphaned`].
+/// which message to edit, which task was decided, and what to say. `at:/` with nothing
+/// after it is the shape of a button that cannot be taken off anything — see
+/// [`tapped_orphaned`] — and an empty callback is the shape of a decision nobody tapped.
 fn acknowledging(org: &Org) -> PathBuf {
     let said = org.path("answered.txt");
     let conf = org.path("company.toml");
@@ -92,7 +93,7 @@ fn acknowledging(org: &Org) -> PathBuf {
     std::fs::write(
         &conf,
         format!(
-            "{text}answer = \"echo \\\"$WECODE_TELEGRAM_CALLBACK at:$WECODE_TELEGRAM_CHAT/$WECODE_TELEGRAM_MESSAGE $WECODE_TELEGRAM_ANSWER\\\" >> {}\"\n",
+            "{text}answer = \"echo \\\"cb:$WECODE_TELEGRAM_CALLBACK at:$WECODE_TELEGRAM_CHAT/$WECODE_TELEGRAM_MESSAGE for:$WECODE_TASK#$WECODE_TASK_NUMBER $WECODE_TELEGRAM_ANSWER\\\" >> {}\"\n",
             said.display()
         ),
     )
@@ -217,6 +218,101 @@ fn a_decided_button_is_told_where_it_is_so_it_can_stop_looking_like_an_offer() {
     assert!(back.contains("cb700126"), "{back}");
     assert!(back.contains("at:48210934/1"), "{back}");
     assert!(back.contains("approved merge"), "{back}");
+    // And which task it was, under the names the notify hook was given when it sent the
+    // message: a hook that noted its own message id per task is the hook that clears the
+    // row, and a receipt that cannot name the task cannot clear anything.
+    assert!(back.contains("for:t#2"), "{back}");
+}
+
+#[test]
+fn a_signature_typed_at_a_terminal_stops_the_phone_asking() {
+    // The other half of the same failure. A tap that signs turns the message it came from
+    // into a record; a signature typed where the operator happens to be standing said
+    // nothing into the chat at all, so the notification went on offering a decision that
+    // had been taken — and the next thumb to land on it decided a settled question.
+    let (org, _) = mergeable("tg-typed-at-terminal", "approved");
+    landed_task(&org, "t");
+    chatting(&org, "48210934");
+    let said = acknowledging(&org);
+
+    org.run(&["approve", "merge", "--task", "t"])
+        .assert_ok("sign it where the operator is standing")
+        .assert_contains("approved merge");
+
+    let back = std::fs::read_to_string(&said).expect("the chat was told");
+    // No callback and no address, and empty is the answer rather than half of one: nothing
+    // was tapped, so no spinner is waiting on this — and wecode never learns the id its own
+    // notification landed as, because the hook that sent it is what was told that.
+    assert!(back.contains("cb: at:/"), "{back}");
+    // So the task is what the message is found by, named the way the notify hook was told
+    // it. This is the only handle a decision taken away from the chat has.
+    assert!(back.contains("for:t#2"), "{back}");
+    assert!(back.contains("approved merge"), "{back}");
+}
+
+#[test]
+fn work_landed_at_a_terminal_stops_the_phone_asking_too() {
+    // The case with no signature anywhere in it. An `auto` project lands verified work
+    // without one, and the notification that announced it carried *Approve* all the same —
+    // so nothing else in the run would ever tell the chat the question had gone away.
+    let (org, _) = mergeable("tg-merged-at-terminal", "auto");
+    landed_task(&org, "t");
+    chatting(&org, "48210934");
+    let said = acknowledging(&org);
+
+    org.run(&["merge", "t"])
+        .assert_ok("land it")
+        .assert_contains("MERGED  t → dev");
+
+    let back = std::fs::read_to_string(&said).expect("the chat was told");
+    assert!(back.contains("for:t#2"), "{back}");
+    // One sentence and not the report: what is being turned from an offer into a record
+    // has a caption's worth of room, and what it has to say is that this is done.
+    assert!(back.contains("merged t → dev"), "{back}");
+}
+
+#[test]
+fn a_terminal_signature_says_nothing_where_there_is_nothing_to_say_it_with() {
+    // A workspace that reads replies but has no line to answer with keeps working, and
+    // quietly: warning about a chat nobody asked to be told would make `[telegram] answer`
+    // effectively compulsory for anyone who ever typed `wecode approve`.
+    let (org, _) = mergeable("tg-terminal-quiet", "approved");
+    landed_task(&org, "t");
+    chatting(&org, "48210934");
+
+    org.run(&["approve", "merge", "--task", "t"])
+        .assert_ok("sign")
+        .assert_contains("approved merge")
+        .assert_lacks("⚠");
+    org.run(&["merge", "t"]).assert_ok("the signature stands");
+}
+
+#[test]
+fn a_terminal_signature_a_chat_could_not_be_told_about_is_still_a_signature() {
+    // The order the two happen in, and it is the whole of why this is a warning: the
+    // ledger first, the chat second. A `wecode approve` that failed because a `curl` did
+    // would leave the operator believing they had not signed something they had — and
+    // exiting non-zero over a receipt is how that belief gets formed.
+    let (org, _) = mergeable("tg-terminal-mute", "approved");
+    landed_task(&org, "t");
+    chatting(&org, "48210934");
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        format!("{text}answer = \"echo chat not found >&2; exit 6\"\n"),
+    )
+    .unwrap();
+
+    org.run(&["approve", "merge", "--task", "t"])
+        .assert_ok("a receipt that bounced is a report, not a crash")
+        .assert_contains("approved merge")
+        // Said under the signature, so it is clear which of the two failed.
+        .assert_contains("could not say so in the chat")
+        .assert_contains("chat not found");
+    org.run(&["merge", "t"])
+        .assert_ok("the signature stands")
+        .assert_contains("MERGED  t → dev");
 }
 
 #[test]
