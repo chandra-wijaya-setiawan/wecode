@@ -62,7 +62,3 @@ One feature, two proofs it is needed. The asks compose rather than compete:
   **Complete** is the signature, **Hold** is a recorded refusal, optional acceptance
   probes run on Complete, and the digest carries untapped ones as reminders.
 
-One correction to #224 as filed: its write scope names
-`crates/wecode-cli/src/scheduler.rs`, which does not exist in this tree — likely
-drawn from a stale binary's-eye view. The design step should name the real dispatch
-path (`crates/wecode-cli/src/commands/exec.rs`) and the telegram/notify surface.
