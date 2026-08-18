@@ -73,6 +73,9 @@ PLAN
 
   wecode task add <id> --project <p> \"<title>\"
         --kind <feature|bug|refactor|chore|spike|design|docs>   default: feature
+        --by <agent|person>      who does the work; default: agent. `manual` and
+                                 `human` say person. Not yet recordable — the
+                                 store has no column for it, so this is refused
         --parent <task>          is part of that task
         --after <task>           must come after it (repeatable)
         --accept-cmd \"<cmd>\"     executable acceptance (repeatable)

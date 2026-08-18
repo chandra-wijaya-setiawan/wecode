@@ -36,56 +36,27 @@ fn a_vague_project_is_refused_with_specific_questions() {
 #[test]
 fn force_admits_a_defective_project_and_says_so() {
     let org = Org::new("force", "solo");
-    org.run(&[
-        "project",
-        "add",
-        "speedup",
-        "make the export faster",
-        "--repo",
-        "app",
-        "--force",
-    ])
-    .assert_ok("forced add")
-    .assert_contains("forced")
-    .assert_contains("saved");
+    org.run(&["project", "add", "speedup", "make the export faster", "--repo", "app",
+              "--force"])
+        .assert_ok("forced add").assert_contains("forced").assert_contains("saved");
     org.run(&["tree"]).assert_contains("speedup");
 }
 
 #[test]
 fn a_project_must_name_a_repo_the_company_knows() {
     let org = Org::new("repo-unknown", "solo");
-    let r = org.run(&[
-        "project",
-        "add",
-        "x",
-        "add response caching to the export endpoint",
-        "--repo",
-        "nonexistent",
-        "--measure-cmd",
-        "cargo test",
-        "--tokens",
-        "100",
-    ]);
+    let r = org.run(&["project", "add", "x", "add response caching to the export endpoint",
+                      "--repo", "nonexistent", "--measure-cmd", "cargo test",
+                      "--tokens", "100"]);
     r.assert_contains("not admitted").assert_contains("app");
 }
 
 #[test]
 fn a_task_needs_a_project_that_exists() {
     let org = Org::new("task-orphan", "solo");
-    let r = org.run(&[
-        "task",
-        "add",
-        "t",
-        "do the thing",
-        "--project",
-        "ghost",
-        "--accept-cmd",
-        "cargo test",
-        "--write",
-        "src/**",
-        "--tokens",
-        "10",
-    ]);
+    let r = org.run(&["task", "add", "t", "do the thing", "--project", "ghost",
+                      "--accept-cmd", "cargo test", "--write", "src/**",
+                      "--tokens", "10"]);
     assert!(!r.ok(), "should be refused");
     r.assert_contains("no such project");
 }
@@ -111,23 +82,10 @@ fn a_spike_is_the_only_kind_admitted_without_a_write_scope() {
     .assert_contains("not admitted");
 
     // ...but a spike produces no code, so it needs no write scope.
-    org.run(&[
-        "task",
-        "add",
-        "s",
-        "investigate the eviction strategies",
-        "--project",
-        "caching",
-        "--kind",
-        "spike",
-        "--accept-cmd",
-        "cargo test",
-        "--tokens",
-        "10",
-    ])
-    .assert_ok("spike")
-    .assert_contains("admitted")
-    .assert_contains("saved");
+    org.run(&["task", "add", "s", "investigate the eviction strategies",
+              "--project", "caching", "--kind", "spike", "--accept-cmd", "cargo test",
+              "--tokens", "10"])
+        .assert_ok("spike").assert_contains("admitted").assert_contains("saved");
 }
 
 #[test]
@@ -1297,4 +1255,37 @@ fn a_task_the_playbook_would_not_have_written_is_told_so_and_still_admitted() {
     // The control that matters most for a warning: a declaration that states nothing
     // takes all of it from the playbook, so there is nothing to say about it.
     add("quiet", "docs/**", &[]).assert_ok("add").assert_lacks("would have written");
+}
+
+// ------------------------------------------------------------------ doer -------
+
+#[test]
+fn who_does_the_work_is_read_but_cannot_be_recorded_yet() {
+    // The flag parses here and nowhere else, so a typo has to be named as a typo: an
+    // operator who wrote `--by prson` is owed that, not a lecture about a column.
+    let org = Org::new("by-doer", "solo");
+    org.seed();
+    let add = |id: &str, by: &str| {
+        org.run(&["task", "add", id, "mint the API token", "--project", "caching",
+                  "--by", by])
+    };
+    add("mint", "nobody").assert_contains("unknown doer `nobody`")
+        .assert_contains("manual").assert_lacks("cannot be recorded");
+
+    // Refused for the right reason, and by every word an operator reaches for. Without
+    // the column a task saved as a person's reads back as an agent's and is dispatched
+    // to one — admitted with no scope, no budget and no acceptance, because admission
+    // asked for none. Nothing is written, which is the half that matters.
+    for word in ["person", "manual", "human"] {
+        add("mint", word).assert_contains("cannot be recorded yet")
+            .assert_contains("none for its doer")
+            .assert_contains("dispatched to an agent");
+    }
+    org.run(&["tree"]).assert_lacks("mint");
+
+    // The default is untouched, and saying it out loud changes nothing.
+    org.run(&["task", "add", "mint", "mint the API token", "--project", "caching",
+              "--by", "agent", "--write", "src/mint/**", "--accept-cmd", "cargo test",
+              "--tokens", "1000"])
+        .assert_ok("an agent's task").assert_contains("saved task mint");
 }

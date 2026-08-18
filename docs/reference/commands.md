@@ -44,6 +44,9 @@ PLAN
 
   wecode task add <id> --project <p> "<title>"
         --kind <feature|bug|refactor|chore|spike|design|docs>   default: feature
+        --by <agent|person>      who does the work; default: agent. `manual` and
+                                 `human` say person. Not yet recordable — the
+                                 store has no column for it, so this is refused
         --parent <task>          is part of that task
         --after <task>           must come after it (repeatable)
         --accept-cmd "<cmd>"     executable acceptance (repeatable)
@@ -204,6 +207,30 @@ Amending a budget records a `define`, exactly as `task scope` does, so a task in
 project that dispatches by approval has to be signed for again: a signature given to a
 task budgeted at 100k did not cover the same task at 400k. What it spent already stays
 in the ledger either way — `wecode audit --task <id>`.
+
+**`wecode task add --by <agent|person>`** says whose hands are on the work. `agent` is the
+default and everything wecode dispatches; `person` is a step no agent is launched for — a
+console click, a token only the owner can mint. `manual` and `human` are accepted for it,
+because the work is named by what it is *not* dispatched to. It is a separate axis from
+`--kind`, deliberately: provisioning a bucket by hand is still a chore, and folding the
+two together would lose which chore it was.
+
+**Declaring a person is currently refused, and the refusal is the point.** The `tasks`
+table has a column for a task's kind and none for its doer, so a manual task does not
+survive being written down. Everything above the store already reads it — admission
+relaxes the write scope, budget and acceptance a dispatch needs and a person's work has
+none of; the tick stops such a task on the operator instead of dispatching it; `show`,
+the tree and the board all say so. What that adds up to without the column is the one
+outcome the flag exists to prevent: a task admitted with no scope, no budget and no
+acceptance, saved as an ordinary agent's, promoted to `ready` on the next tick, and
+handed to an agent — with the operator holding a receipt that said `done by a person`.
+Failing closed is strictly better than that, and better than the flag's absence, which
+refused the task for three things it was never supposed to need.
+
+What is missing is one column: a migration in `crates/wecode-store/src/schema.rs`, and
+`save_task`/`load_plan` in `crates/wecode-store/src/plan.rs`. The refusal in
+`commands/plan/task.rs` goes in the same commit. `--amend` does not read `--by` at all
+yet, and that is the second half of the same door.
 
 **`wecode task add <id> --amend`** reshapes the plan without taking anything out of it.
 It changes where a task *sits* — `--parent <task>` puts it inside a sprint, `--top` lifts
