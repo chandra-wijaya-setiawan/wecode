@@ -66,6 +66,23 @@ The **chief** post is special in one way: it may not write files or run commands
 loading a company whose chief can is a validation error. An agent that can both set the
 criteria and satisfy them is not governed.
 
+A task also says who does it — an **agent** by default, or a **person**. A task whose
+doer is a person is what an operator calls a *manual* task, and it is the one kind of
+work wecode never dispatches: no worktree, no branch, no envelope, no agent. Unblocked,
+it stops on the operator instead, and only a signature moves it on.
+
+That is deliberately not the same axis as the kind. Provisioning a bucket by hand is
+still a chore and rotating a signing key is still a chore; folding the two together
+would cost a manual task the ability to say which it was. It is not the same as the
+*assignee* either — a manual task can name a post or leave it empty, and neither
+filling the seat nor leaving it open should be able to change who holds the keyboard.
+
+The point of the kind is what it lets a plan hold. A step that needs a console click, a
+token only its owner can mint, or a card only its holder can enter is a real dependency
+of the work around it. Before this it lived in conversation: untracked, unreminded, and
+invisible to the graph built to hold exactly that. Now it is a node like any other —
+dependents wait on it, the board counts it, and no agent is ever handed the credential.
+
 ## Authority
 
 A **grant** says what a role may do: read and write globs, runnable commands, merge
@@ -88,6 +105,19 @@ change** (scope). Both are checked before the work is admitted, not after.
 Acceptance must be **executable** — a command and its expected exit code. A judged
 measure is legal on a project's objective and illegal on a task, so nothing can be
 marked done because someone was satisfied.
+
+A manual task is asked for neither. A write scope bounds a worktree, a budget bounds a
+run, and an executable measure is a command run over the result — all three describe a
+dispatch, and there is none. Demanding them anyway would only teach operators to declare
+a glob nothing writes to get past the gate, and a gate answered with fiction has stopped
+measuring anything. What is still demanded is the title: a person needs to know which
+single thing is being asked of them as much as an agent does.
+
+A manual task *may* still carry acceptance commands, and where a check is cheap it
+should — `test -n "$SOME_TOKEN"` is a legitimate probe. `wecode verify` will run them,
+but it cannot finish the task on the strength of them passing. Tap-says-done and
+probe-agrees is the strongest state this reaches, and the tap is the half no command
+can supply.
 
 ## Status is declared; health is computed
 

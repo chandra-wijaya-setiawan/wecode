@@ -152,6 +152,19 @@ pub(crate) fn prepare(
         )
         .into());
     }
+    // Nothing here has anything to prepare for a manual task: no worktree, no branch,
+    // no envelope, and above all no agent. Refused at the one door `run` and `start`
+    // both come through rather than in each of them — the scheduler already keeps this
+    // work out of the queue, and this is what holds when something reaches past it. It
+    // is the whole point of the kind: a step that touches a real console, or a token
+    // only its owner can mint, must never arrive at something that would try.
+    if task.is_done_by_a_person() {
+        return Err(format!(
+            "{id} is done by a person — nothing is dispatched to it and no tree is cut\n  \
+             it sits in needs-approval until a signature reports the work done"
+        )
+        .into());
+    }
     let project = plan
         .project(&task.project)
         .ok_or_else(|| format!("no such project: {}", task.project))?;
@@ -1008,10 +1021,15 @@ fn judge(a: &Args) -> Result<(String, Option<String>), Box<dyn std::error::Error
     // exists, which is all a command can check, and whether it is the *right* design
     // is exactly the part no command can. Dependents must not start on the strength of
     // a file being present.
+    //
+    // Asked of the task rather than of its kind, because a manual task reaches the same
+    // gate from the other side: its probes may well pass — checking that the bucket
+    // exists is exactly the cheap check worth having — but passing is not the work being
+    // reported, and only the person who did it can report that.
     let owns_a_branch = owner.id == id && dir.starts_with(work::run_root());
     let next = if !v.passed() {
         TaskStatus::Failed
-    } else if task.kind.needs_a_signature() || owns_a_branch {
+    } else if task.needs_a_signature() || owns_a_branch {
         TaskStatus::NeedsApproval
     } else {
         TaskStatus::Done

@@ -265,6 +265,26 @@ impl Task {
         self.doer == Doer::Person
     }
 
+    /// Whether wecode dispatches this at all.
+    ///
+    /// The negation of [`Task::is_done_by_a_person`], named for what follows from it,
+    /// because the admission gate turns on it three times for one reason. A write scope
+    /// bounds what a worktree may change, a budget bounds what a run may spend, and an
+    /// acceptance command is something a harness executes over the result. All three
+    /// describe a dispatch, and a manual task has none: no tree is cut, no agent is
+    /// launched, nothing is metered. Demanding them anyway would teach operators to
+    /// declare a glob nothing writes and a token count nothing spends in order to get
+    /// past the gate, and a gate answered with fiction has stopped measuring anything.
+    ///
+    /// What is left is not weaker. The title still has to be singular, the dependencies
+    /// still have to exist, and the deliverable — a fact in the world rather than a diff
+    /// — is reported by a person's signature, which is the one piece of evidence in this
+    /// system that was never an agent's word about itself.
+    #[must_use]
+    pub fn is_dispatched(&self) -> bool {
+        !self.is_done_by_a_person()
+    }
+
     /// Whether a recorded signature is the only thing that can finish this.
     ///
     /// A design is signed because passing is not enough: nothing downstream should
@@ -365,6 +385,7 @@ mod tests {
             .done_by(Doer::Person);
         assert_eq!(t.kind, TaskKind::Chore);
         assert!(t.is_done_by_a_person());
+        assert!(!t.is_dispatched(), "a chore is still nobody's to launch");
     }
 
     #[test]
@@ -410,6 +431,7 @@ mod tests {
             Doer::Agent,
             "work is an agent's unless said otherwise"
         );
+        assert!(t.is_dispatched());
         assert!(!t.needs_a_signature());
         assert_eq!(t.status, TaskStatus::Draft);
         assert!(t.parent.is_none());

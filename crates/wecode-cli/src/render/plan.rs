@@ -168,6 +168,12 @@ fn render_task(plan: &Plan, t: &Task, depth: usize, parent_filed: bool, out: &mu
     if let Some(a) = &t.assignee {
         suffix.push_str(&format!(" → {a}"));
     }
+    // Beside the post rather than in the tag column, because it is not what the work is
+    // — a manual chore is still a chore. What it changes is who the arrow points at: no
+    // agent will ever be launched for this row, whatever post is named on it.
+    if t.is_done_by_a_person() {
+        suffix.push_str(" by hand");
+    }
     // Last on the line, as on a project: this column is already the widest thing here,
     // and a marker in front of the status mark would indent every task by one.
     if t.archived {
@@ -337,6 +343,12 @@ pub(crate) fn task_detail(plan: &Plan, id: &TaskId) -> String {
     if let Some(a) = &t.assignee {
         out.push_str(&format!("  assignee   {a}\n"));
     }
+    // Printed only when it is a person's, and directly under the post it qualifies: an
+    // assignee reads as "who this is dispatched to", and for a manual task that is
+    // exactly what it is not. Silence means the ordinary case, as it does for a kind.
+    if t.is_done_by_a_person() {
+        out.push_str("  done by    a person — no agent is dispatched\n");
+    }
 
     // Where it sits: the is-part-of chain, root first.
     let mut chain: Vec<String> = plan
@@ -472,6 +484,13 @@ pub(crate) fn task_heading(t: &Task) -> String {
         t.title,
         t.project
     );
+    // Said first among the qualifiers, because it is what explains the absences below
+    // it: a manual task is admitted with no write scope, no budget and no acceptance at
+    // all, and a heading that showed only the empty lines would read as a task missing
+    // three things rather than one asked for none of them.
+    if t.is_done_by_a_person() {
+        h.push_str("\n  done by    a person");
+    }
     for m in &t.acceptance {
         h.push_str(&format!("\n  acceptance {}", m.describe()));
     }
@@ -947,6 +966,48 @@ mod tests {
         assert!(out.contains("admitted"), "{out}");
         assert!(out.contains("cargo test cache"), "{out}");
         assert!(out.contains("crates/export/**"), "{out}");
+    }
+
+    /// The plan with `cache` turned into a person's job, stripped of everything a
+    /// dispatch would have needed — which is how a manual task is actually declared.
+    fn manual_plan() -> Plan {
+        let mut p = plan();
+        let mut t = p.task(&TaskId::new("cache")).unwrap().clone();
+        t.doer = wecode_core::task::Doer::Person;
+        t.acceptance.clear();
+        t.scope = Scope::default();
+        t.budget = Budget::default();
+        t.assignee = Some("owner".into());
+        p.update_task(t).unwrap();
+        p
+    }
+
+    #[test]
+    fn the_tree_says_which_rows_no_agent_will_ever_be_launched_for() {
+        let out = tree(&manual_plan(), false);
+        let line = out.lines().find(|l| l.contains("response cache")).unwrap();
+        assert!(line.contains("by hand"), "{line:?}");
+        // Beside the post, not instead of it: somebody still owns the job.
+        assert!(line.contains("→ owner"), "{line:?}");
+        let other = out.lines().find(|l| l.contains("benchmark")).unwrap();
+        assert!(!other.contains("by hand"), "an agent's task says nothing");
+    }
+
+    #[test]
+    fn a_manual_task_reads_as_admitted_rather_than_as_three_things_missing() {
+        // The gate asks it for no scope, no budget and no acceptance, so the heading
+        // has to say why it is short of all three — otherwise "admitted" over an empty
+        // heading looks like the gate went to sleep.
+        let p = manual_plan();
+        let t = p.task(&TaskId::new("cache")).unwrap();
+        let defects = admission::check_task(t, &p, &[]);
+        assert!(defects.is_empty(), "{defects:?}");
+        let out = admission(&task_heading(t), &defects, None);
+        assert!(out.contains("admitted"), "{out}");
+        assert!(out.contains("done by    a person"), "{out}");
+
+        let detail = task_detail(&p, &TaskId::new("cache"));
+        assert!(detail.contains("no agent is dispatched"), "{detail}");
     }
 
     #[test]

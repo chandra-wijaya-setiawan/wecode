@@ -23,7 +23,24 @@ pub(crate) mod org;
 pub(crate) mod plan;
 pub(crate) mod playbook;
 
-use wecode_core::TaskKind;
+use wecode_core::{Task, TaskKind, TaskStatus};
+
+/// What a row that has stopped is asking of the person reading it.
+///
+/// Almost always the status itself, which is already the honest answer: `failed` and
+/// `needs-input` say what they want. `needs-approval` is the one that comes apart. On an
+/// agent's task it means *look at what I did*; on a manual task it means the opposite —
+/// nothing has been done, and the doing is the reader's. One status, two requests, and a
+/// board that printed the same word for both would send an operator to look for a diff
+/// that was never going to exist.
+#[must_use]
+pub(crate) fn waiting_word(t: &Task) -> String {
+    if t.is_done_by_a_person() && t.status == TaskStatus::NeedsApproval {
+        "yours to do".to_string()
+    } else {
+        t.status.as_str().to_string()
+    }
+}
 
 #[must_use]
 pub(crate) fn kind_tag(kind: TaskKind) -> &'static str {
@@ -60,5 +77,45 @@ pub(crate) fn truncate_cmd(s: &str, max: usize) -> String {
     } else {
         let cut: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{cut}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wecode_core::task::Doer;
+
+    fn stopped(doer: Doer, status: TaskStatus) -> String {
+        let mut t = Task::new("t", "p", "x").done_by(doer);
+        t.status = status;
+        waiting_word(&t)
+    }
+
+    #[test]
+    fn one_status_asks_two_different_things_of_the_reader() {
+        assert_eq!(
+            stopped(Doer::Agent, TaskStatus::NeedsApproval),
+            "needs-approval",
+            "an agent's finished work is waiting to be looked at"
+        );
+        assert_eq!(
+            stopped(Doer::Person, TaskStatus::NeedsApproval),
+            "yours to do",
+            "nothing has been done — this is the job itself"
+        );
+    }
+
+    #[test]
+    fn every_other_stop_says_what_it_already_said() {
+        // Only `needs-approval` is ambiguous. A manual task that failed its probes, or
+        // that asked a question, wants exactly what those words already ask for.
+        for s in [
+            TaskStatus::Failed,
+            TaskStatus::NeedsInput,
+            TaskStatus::Running,
+        ] {
+            assert_eq!(stopped(Doer::Person, s), s.as_str(), "{s:?}");
+            assert_eq!(stopped(Doer::Agent, s), s.as_str(), "{s:?}");
+        }
     }
 }
