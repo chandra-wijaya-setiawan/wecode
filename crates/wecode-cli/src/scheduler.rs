@@ -7,12 +7,12 @@
 //! Archived projects are skipped. Archiving parks a project, so its tasks stop being
 //! promoted as well as stop being shown.
 //!
-//! One kind is promoted somewhere else entirely. A manual task's agent is a person, so
-//! an unblocked one becomes the operator's to do rather than the queue's: the tick
-//! moves it to `needs-approval` and nothing dispatches it, ever. That is the only
-//! status this module authors outside the `Waiting`/`Ready` pair, and it is authored
-//! here for the same reason the pair is — prerequisites have to be honoured before the
-//! work is anyone's, and the graph is what knows.
+//! Manual work is promoted somewhere else entirely. A task whose doer is a person is
+//! never dispatched — an unblocked one becomes the operator's to do rather than the
+//! queue's, so the tick moves it to `needs-approval` and leaves it there. That is the
+//! only status this module authors outside the `Waiting`/`Ready` pair, and it is
+//! authored here for the same reason the pair is: prerequisites have to be honoured
+//! before the work is anyone's, and the graph is what knows.
 
 use std::time::Duration;
 
@@ -37,16 +37,16 @@ pub(crate) fn transitions(plan: &Plan) -> Vec<Move> {
         .filter_map(|t| {
             let ready = plan.is_ready(&t.id);
             match t.status {
-                // Work whose agent is a person does not join the queue it would never
-                // be taken from. Unblocked, it stops on the operator instead — from
-                // `Waiting` directly, without a tick spent in a `Ready` that would be
-                // a lie about what could start it.
+                // Work a person does never joins the queue it would never be taken
+                // from. Unblocked, it stops on the operator instead — straight from
+                // `Waiting`, without a tick spent in a `Ready` that would be a lie
+                // about what could start it.
                 //
                 // Its prerequisites are honoured first, and that is the whole reason
                 // this lives in the tick rather than at the door: a console step
                 // waiting on the task that tells the operator what to do in the
-                // console must not go off before that task finishes.
-                s if s.is_schedulable() && ready && t.kind.is_done_by_a_person() => {
+                // console must not go off before that task has finished.
+                s if s.is_schedulable() && ready && t.is_done_by_a_person() => {
                     Some(TaskStatus::NeedsApproval)
                 }
                 TaskStatus::Waiting if ready => Some(TaskStatus::Ready),
@@ -98,7 +98,7 @@ pub(crate) fn dispatchable(plan: &Plan, slots: usize) -> Vec<&Task> {
     let mut out: Vec<&Task> = plan
         .tasks()
         .filter(|t| t.status == TaskStatus::Ready && t.assignee.is_some())
-        .filter(|t| !t.kind.is_done_by_a_person())
+        .filter(|t| !t.is_done_by_a_person())
         .filter(|t| plan.project(&t.project).is_some_and(|p| !p.archived))
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -135,7 +135,8 @@ pub(crate) const INTERVAL: Duration = Duration::from_secs(5);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wecode_core::{Budget, Measure, Project, Scope, Task, TaskKind};
+    use wecode_core::task::Doer;
+    use wecode_core::{Budget, Measure, Project, Scope, Task};
 
     fn task(id: &str) -> Task {
         Task::new(id, "p", "do something specific here")
@@ -172,7 +173,7 @@ mod tests {
 
     fn make_manual(p: &mut Plan, id: &str) {
         let mut t = p.task(&TaskId::new(id)).unwrap().clone();
-        t.kind = TaskKind::Manual;
+        t.doer = Doer::Person;
         p.update_task(t).unwrap();
     }
 

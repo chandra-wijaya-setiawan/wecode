@@ -30,15 +30,6 @@ pub enum TaskKind {
     /// is not finished when it passes. It is finished when someone signs it.
     Design,
     Docs,
-    /// Work whose agent is a person. The console step, the token only the owner can
-    /// mint, the button only a human may press.
-    ///
-    /// Every other kind is dispatched to a harness; this one is dispatched to nobody.
-    /// It stops on a person the moment its prerequisites are done, and advances only
-    /// on a recorded signature. That is the point: the dependency is real work that
-    /// the graph should hold, and holding it must not mean handing an agent the
-    /// credentials to do it instead.
-    Manual,
 }
 
 impl TaskKind {
@@ -52,7 +43,6 @@ impl TaskKind {
             Self::Spike => "spike",
             Self::Design => "design",
             Self::Docs => "docs",
-            Self::Manual => "manual",
         }
     }
 
@@ -65,7 +55,6 @@ impl TaskKind {
             "spike" => Self::Spike,
             "design" => Self::Design,
             "docs" | "doc" => Self::Docs,
-            "manual" | "human" => Self::Manual,
             _ => return None,
         })
     }
@@ -75,16 +64,9 @@ impl TaskKind {
     ///
     /// A design is not exempt: it writes a document, and that document is the whole
     /// deliverable. A design task with no write scope has nothing to show for itself.
-    ///
-    /// A manual task is exempt for a different reason again: its deliverable is a fact
-    /// in the world — a resource that exists, a token that has been minted — and no
-    /// file in this repository records it. Nothing writes, so there is nothing to
-    /// fence. Its acceptance still has to be a command, because admission takes one
-    /// from every task, and that is the useful discipline here: the probe that checks
-    /// the fact is what stops "I did it" from being the only evidence.
     #[must_use]
     pub fn requires_write_scope(self) -> bool {
-        !matches!(self, Self::Spike | Self::Manual)
+        !matches!(self, Self::Spike)
     }
 
     /// Whether passing verification finishes the work, or only makes it reviewable.
@@ -93,35 +75,11 @@ impl TaskKind {
     /// document existing — the point of writing it down is that a human can disagree
     /// with it while disagreeing is still cheap. So verification moves a design to
     /// `needs-approval`, and only a recorded signature moves it to `done`.
-    ///
-    /// A manual task arrives at the same gate from the other side. There is no
-    /// verification to pass, because nothing ran: the signature is not a review of the
-    /// work, it *is* the work being reported. Same state, same signing path, so the
-    /// operator has one gesture to learn and the ledger one shape to record.
     #[must_use]
     pub fn needs_a_signature(self) -> bool {
-        matches!(self, Self::Design | Self::Manual)
+        matches!(self, Self::Design)
     }
 
-    /// Whether the work is a person's to do rather than an agent's.
-    ///
-    /// The scheduler asks this twice, and the two answers are what the kind is for:
-    /// such a task is never dispatched, and it stops on a person as soon as it is
-    /// unblocked. Asked as a question about the *kind*, not about the assignee, so
-    /// the answer cannot be lost by leaving a post unfilled.
-    #[must_use]
-    pub fn is_done_by_a_person(self) -> bool {
-        matches!(self, Self::Manual)
-    }
-
-    /// Every kind a project writes a playbook section for — which is every kind an
-    /// agent is dispatched for.
-    ///
-    /// `Manual` is deliberately absent. A playbook section is guidance for a worker:
-    /// the worktree it gets, the commands that judge it, the prose it is told. A
-    /// manual task has no worker to guide, so a `[manual]` section would be advice
-    /// addressed to nobody, and the starter that must cover every entry here would
-    /// have to invent some.
     #[must_use]
     pub fn all() -> &'static [TaskKind] {
         &[
@@ -136,6 +94,51 @@ impl TaskKind {
     }
 }
 
+/// Who does the work: a harness, or a person. A task whose doer is a person is what
+/// an operator calls a **manual** task.
+///
+/// Kept apart from [`TaskKind`] on purpose, and for the reason this module opens with.
+/// The kind says *what* the work is; this says whose hands are on it. Provisioning a
+/// bucket by hand is still a chore and rotating a key is still a chore — fold the two
+/// axes into one enum and a manual task loses the ability to say which it was, exactly
+/// the conflation `parent` and `depends_on` are kept apart to avoid, one field over.
+///
+/// The distinction earns its place by what follows from it. An agent's task is
+/// dispatched into a worktree under a scope and a budget; a person's is dispatched to
+/// nobody. It stops on the operator the moment its prerequisites are done, and nothing
+/// advances it but a signature. That is how a plan can hold a step that touches real
+/// cloud resources — a console click, a token only the owner can mint — without an
+/// agent ever being handed the credentials to do it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
+pub enum Doer {
+    /// A coding agent, run under supervision. Everything wecode dispatches.
+    #[default]
+    Agent,
+    /// A person, working where nothing here can watch. What the work leaves behind is
+    /// a fact in the world rather than a diff, so the report of it is a signature.
+    Person,
+}
+
+impl Doer {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Person => "person",
+        }
+    }
+
+    /// `manual` and `human` are accepted because they are the words an operator
+    /// reaches for: the work is named by what it is *not* dispatched to.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "agent" | "auto" => Self::Agent,
+            "person" | "manual" | "human" => Self::Person,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Task {
     pub id: TaskId,
@@ -145,6 +148,14 @@ pub struct Task {
     pub project: ProjectId,
     pub title: String,
     pub kind: TaskKind,
+    /// Who does it. `Agent` unless someone says otherwise; see [`Doer`].
+    ///
+    /// Not carried by the store yet, so a plan read back out of SQLite reads `Agent`:
+    /// the `tasks` table has a column for a task's kind and none for its doer. The
+    /// rule lands here and in the tick first, because the tick is what has to honour
+    /// it, and the column, the flag that sets it and the tag the board prints are what
+    /// carry it the rest of the way.
+    pub doer: Doer,
     /// Hierarchy: the task this is a part of. Not a scheduling constraint.
     pub parent: Option<TaskId>,
     /// Scheduling: tasks that must finish first. Not a hierarchy.
@@ -180,6 +191,7 @@ impl Task {
             project: project.into(),
             title: title.into(),
             kind: TaskKind::Feature,
+            doer: Doer::Agent,
             parent: None,
             depends_on: Vec::new(),
             acceptance: Vec::new(),
@@ -194,6 +206,12 @@ impl Task {
     #[must_use]
     pub fn of_kind(mut self, kind: TaskKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    #[must_use]
+    pub fn done_by(mut self, doer: Doer) -> Self {
+        self.doer = doer;
         self
     }
 
@@ -236,6 +254,31 @@ impl Task {
         self
     }
 
+    /// Whether the work is a person's to do rather than an agent's.
+    ///
+    /// The scheduler asks this twice, and the two answers are what the flag is for: a
+    /// manual task is never dispatched, and it stops on a person as soon as it is
+    /// unblocked. Asked of the task and not of its assignee, so the answer cannot be
+    /// lost by leaving a post unfilled — nor invented by filling one.
+    #[must_use]
+    pub fn is_done_by_a_person(&self) -> bool {
+        self.doer == Doer::Person
+    }
+
+    /// Whether a recorded signature is the only thing that can finish this.
+    ///
+    /// A design is signed because passing is not enough: nothing downstream should
+    /// proceed on the strength of a document existing. A manual task arrives at the
+    /// same gate from the other side — there is no verification to pass, because
+    /// nothing ran. The signature is not a review of the work, it *is* the work being
+    /// reported, and a person saying so is the only evidence there was ever going to
+    /// be. Same state and same gesture either way, so the operator has one thing to
+    /// learn and the ledger one shape to record.
+    #[must_use]
+    pub fn needs_a_signature(&self) -> bool {
+        self.kind.needs_a_signature() || self.is_done_by_a_person()
+    }
+
     #[must_use]
     pub fn has_executable_acceptance(&self) -> bool {
         self.acceptance.iter().any(Measure::is_executable)
@@ -267,19 +310,11 @@ mod tests {
         for k in TaskKind::all() {
             assert_eq!(TaskKind::parse(k.as_str()), Some(*k));
         }
-        // Named separately because `all()` is the playbook's list, not the enum's:
-        // manual has no section to write, but it is still a kind an operator types.
-        let manual = TaskKind::Manual;
-        assert_eq!(TaskKind::parse(manual.as_str()), Some(manual));
-        assert_eq!(TaskKind::parse("human"), Some(manual), "the brief's own word");
     }
 
     #[test]
     fn a_spike_needs_no_write_scope_but_others_do() {
         assert!(!TaskKind::Spike.requires_write_scope());
-        // A manual task's deliverable is a fact in the world; nothing in the tree
-        // changes, so there is nothing to fence.
-        assert!(!TaskKind::Manual.requires_write_scope());
         // A refactor changes code, so it needs a scope like any other change.
         assert!(TaskKind::Refactor.requires_write_scope());
         for k in [
@@ -294,32 +329,59 @@ mod tests {
     }
 
     #[test]
+    fn a_doer_round_trips_and_answers_to_the_operators_words() {
+        for d in [Doer::Agent, Doer::Person] {
+            assert_eq!(Doer::parse(d.as_str()), Some(d));
+        }
+        assert_eq!(Doer::parse("manual"), Some(Doer::Person));
+        assert_eq!(
+            Doer::parse("human"),
+            Some(Doer::Person),
+            "the brief's own word"
+        );
+        assert_eq!(Doer::parse("nobody"), None);
+    }
+
+    #[test]
     fn only_a_manual_task_is_a_persons_to_do() {
-        assert!(TaskKind::Manual.is_done_by_a_person());
+        let t = Task::new("t", "p", "x").done_by(Doer::Person);
+        assert!(t.is_done_by_a_person());
         // A design is written by an agent and only *judged* by a person: the
         // distinction the scheduler turns on is who does the work, not who signs.
-        for k in TaskKind::all() {
-            assert!(!k.is_done_by_a_person(), "{k:?} is dispatched to a harness");
-        }
+        let design = Task::new("t", "p", "x").of_kind(TaskKind::Design);
+        assert!(
+            !design.is_done_by_a_person(),
+            "a design is dispatched to a harness"
+        );
+    }
+
+    #[test]
+    fn who_does_the_work_says_nothing_about_what_the_work_is() {
+        // The point of two axes: a manual task is still a chore, or a docs task, or
+        // whatever it was — nothing about the kind is spent on saying who holds the
+        // keyboard.
+        let t = Task::new("rotate", "p", "rotate the signing key")
+            .of_kind(TaskKind::Chore)
+            .done_by(Doer::Person);
+        assert_eq!(t.kind, TaskKind::Chore);
+        assert!(t.is_done_by_a_person());
     }
 
     #[test]
     fn a_manual_task_advances_only_on_a_signature() {
         // Same gate as a design, reached for the opposite reason: a design is signed
         // because passing is not enough, a manual task because nothing ran at all.
-        assert!(TaskKind::Manual.needs_a_signature());
-        assert!(TaskKind::Design.needs_a_signature());
+        let manual = Task::new("t", "p", "x").done_by(Doer::Person);
+        assert!(manual.needs_a_signature());
+        assert!(
+            Task::new("t", "p", "x")
+                .of_kind(TaskKind::Design)
+                .needs_a_signature()
+        );
         for k in [TaskKind::Feature, TaskKind::Bug, TaskKind::Spike] {
-            assert!(!k.needs_a_signature(), "{k:?} is finished by passing");
+            let t = Task::new("t", "p", "x").of_kind(k);
+            assert!(!t.needs_a_signature(), "{k:?} is finished by passing");
         }
-    }
-
-    #[test]
-    fn the_playbook_list_holds_only_kinds_with_a_worker_to_guide() {
-        // The starter must carry a section for every entry, and there is no useful
-        // guidance to give a task with no agent — so the absence is the rule, not an
-        // oversight to be tidied up by adding it.
-        assert!(!TaskKind::all().contains(&TaskKind::Manual));
     }
 
     #[test]
@@ -343,6 +405,12 @@ mod tests {
     fn a_new_task_assumes_nothing() {
         let t = Task::new("t", "p", "x");
         assert_eq!(t.kind, TaskKind::Feature);
+        assert_eq!(
+            t.doer,
+            Doer::Agent,
+            "work is an agent's unless said otherwise"
+        );
+        assert!(!t.needs_a_signature());
         assert_eq!(t.status, TaskStatus::Draft);
         assert!(t.parent.is_none());
         assert!(t.depends_on.is_empty());
