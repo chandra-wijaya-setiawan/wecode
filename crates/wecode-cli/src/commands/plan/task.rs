@@ -199,34 +199,6 @@ pub(crate) fn task_add(a: &Args) -> Res {
         .into());
     }
 
-    // Refused because the declaration would not survive being written down. The store
-    // has a column for a task's kind and none for its doer, so this task reads back as
-    // an agent's on the very next tick — and the reading that is lost is the one that
-    // relaxed the gate it just passed. `wecode task add x --by person` with no scope,
-    // no budget and no acceptance is admitted as a manual task, saved as an ordinary
-    // one, promoted to `ready`, and dispatched to precisely the agent the flag exists
-    // to keep away from the work. Failing open on this flag is worse than not having
-    // it: today the flag is unknown and the task is refused for the three things it is
-    // missing, which is at least the safe answer.
-    //
-    // Delete this the commit the column lands in. Nothing above the store is waiting on
-    // anything else — admission, the tick, `show`, the tree and the board all read the
-    // doer already, and this command now parses it.
-    if t.is_done_by_a_person() {
-        return Err(format!(
-            "`--by {by}` is understood but cannot be recorded yet\n  \
-             the `tasks` table has a column for a task's kind and none for its doer, so \
-             {id} would be read back as an agent's work on the next tick — admitted with \
-             no write scope, no budget and no acceptance, then dispatched to an agent\n  \
-             what is missing is that column: a migration in \
-             `crates/wecode-store/src/schema.rs`, and `save_task`/`load_plan` in \
-             `crates/wecode-store/src/plan.rs`\n  \
-             until then, leave the flag off and hold the step yourself",
-            by = a.get("by").unwrap_or("person"),
-            id = t.id
-        )
-        .into());
-    }
 
     if !store.project_exists(&t.project)? {
         return Err(format!(
