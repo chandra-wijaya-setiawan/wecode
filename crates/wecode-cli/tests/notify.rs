@@ -4,8 +4,9 @@ mod support;
 
 use std::path::{Path, PathBuf};
 
-use support::Org;
 use support::agent::{a_task, a_task_in_src, signs_first, with_agent};
+use support::merge::{landed_task, mergeable};
+use support::{Org, git_out};
 
 // ---------------------------------------------------------------- notify ------
 
@@ -190,6 +191,56 @@ fn the_message_carries_the_change_and_not_only_the_shape_of_it() {
 }
 
 #[test]
+fn the_message_carries_the_report_the_record_will_keep() {
+    // The last thing the operator was still doing by hand. The names say what was
+    // touched and the diff says what happened in it, and adding those up — how much of
+    // it there is, what it was held to, what has been queued behind it — was left to a
+    // person holding a phone. wecode already writes that document; it wrote it *after*
+    // the merge, which is after the decision it exists to inform.
+    let (org, _) = with_agent("notify-report", "echo done >> a.txt");
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+    let log = notified(&org, "echo \\\"$WECODE_REPORT\\\"");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed");
+    let said = announcements(&log).join("\n");
+    assert!(said.contains("summary"), "no summary: {said}");
+    assert!(said.contains("1 file, +1 −0"), "the change unadded-up: {said}");
+    assert!(said.contains("a.txt"), "the file is not named: {said}");
+    // What it was held to, which no diff contains and which is half of deciding.
+    assert!(said.contains("acceptance"), "nothing to hold it to: {said}");
+    assert!(said.contains("grep -q done a.txt"), "not the measure: {said}");
+    // Listed and not ticked: the report goes out on `failed` waits too, and a tick
+    // belongs to the record, which is written after a verdict that passed.
+    assert!(!said.contains('✓'), "a proposal has passed nothing yet: {said}");
+}
+
+#[test]
+fn the_report_and_the_record_are_one_document_and_not_two() {
+    // The reason it is rendered from the merge record's own functions. An operator who
+    // approved from a phone and the repository they approved it into have to agree about
+    // what was signed; two renderers are two accounts of one change, free to drift, and
+    // the shape of that bug is a signature given against a summary the record contradicts.
+    let (org, repo) = mergeable("notify-report-kept", "auto");
+    let log = notified(&org, "echo \\\"$WECODE_REPORT\\\"");
+    landed_task(&org, "t");
+    org.run(&["merge", "t"]).assert_ok("land it");
+
+    let before = announcements(&log).join("\n");
+    let after = git_out(&repo, &["show", "dev:docs/wecode/t/report.md"]);
+    for shared in [
+        "1 file, +1 −0",
+        "what changed",
+        "src/app.txt",
+        "grep -q landed src/app.txt",
+    ] {
+        assert!(before.contains(shared), "missing before the merge: {before}");
+        assert!(after.contains(shared), "missing after it: {after}");
+    }
+}
+
+#[test]
 fn the_names_are_capped_where_the_operator_says_and_the_count_never_is() {
     // Why the count is its own variable. The bound is on what an environment should
     // carry to a channel with one line in it; a message that answered "how much
@@ -213,18 +264,19 @@ fn the_names_are_capped_where_the_operator_says_and_the_count_never_is() {
 fn a_wait_for_permission_to_start_has_nothing_to_show_yet() {
     // `signature` is the one wait that comes before any work, and empty is what says
     // so. Reporting `0` here would have the notification describing an empty diff
-    // that nothing produced.
+    // that nothing produced — and a report of it would be worse still, since a report
+    // is a document and an empty one reads as a finding rather than as an absence.
     let org = signs_first("notify-unmade", "echo done >> src/app.txt");
     a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
     let log = notified(
         &org,
-        "echo $WECODE_WAITING_FOR [$WECODE_CHANGED_COUNT] [$WECODE_WORKTREE]",
+        "echo $WECODE_WAITING_FOR [$WECODE_CHANGED_COUNT] [$WECODE_WORKTREE] [$WECODE_REPORT]",
     );
 
     org.run(&["loop", "--once"])
         .assert_ok("one pass")
         .assert_contains("⏸ t needs your signature");
-    assert_eq!(announcements(&log), vec!["signature [] []"]);
+    assert_eq!(announcements(&log), vec!["signature [] [] []"]);
 }
 
 #[test]

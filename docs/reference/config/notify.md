@@ -19,6 +19,7 @@ default, nothing is run and waits are silent. It is one half of a round trip:
 | `WECODE_CHANGED_COUNT` | how many paths the task changed |
 | `WECODE_CHANGED_FILES` | those paths, one per line, at most `max_files` of them |
 | `WECODE_DIFF` | what changed in them, as a diff, to 4000 characters |
+| `WECODE_REPORT` | the change added up — the merge record, before the merge |
 | `WECODE_WORKTREE` | the tree the work is in |
 
 `WECODE_WAITING_FOR` is the one to branch on. `signature` is the dispatch gate holding a
@@ -63,11 +64,11 @@ channel behind it accepts.
 
 **Say what it produced.** A message that only names the task answers *you are wanted* and
 not *for what*, and deciding whether to sign a diff then means opening a terminal to look
-at it — which is the trip the hook exists to save. The four artifact variables are the
-diff in the message, one per size of channel: a desktop line has room for
-`$WECODE_CHANGED_COUNT files`, a chat message has room for the names and `$WECODE_DIFF`
-under them, and a script wanting more than that is handed `$WECODE_WORKTREE` and can ask
-git anything.
+at it — which is the trip the hook exists to save. The five artifact variables are the
+work in the message, one per size of channel: a desktop line has room for
+`$WECODE_CHANGED_COUNT files`, a chat message has room for `$WECODE_REPORT` or for the
+names and `$WECODE_DIFF` under them, and a script wanting more than that is handed
+`$WECODE_WORKTREE` and can ask git anything.
 
 ```toml
 [notify]
@@ -106,17 +107,77 @@ claim, and a notification carrying a claim is one more thing to go and check. It
 uncommitted diff, which is exactly the one `wecode verify` judged, because an attempt is
 committed only after the verdict.
 
-`max_files` (default `20`) bounds the **names** and never the count, so a hook handed ten
-paths of forty can still say forty. `0` is legal and means the count alone. The bound
-exists because an environment is not the place to put a thousand paths, and it is yours
-to set because the channel is: a desktop notification has a line where a log file has room
-for everything.
+**Put the report in front of the signature that needs it.** The names say what the change
+reached and the diff says what it did, and between them a person holding a phone is still
+left adding it up: how much of it there is, which corners of the tree it fell in, what the
+work was held to, and what has been queued behind it waiting for exactly this signature.
+wecode already writes that document — it is the merge report, committed to
+`docs/wecode/<task>/report.md` when the work lands — and it used to write it *after* the
+merge, which is after the decision it would have informed. `WECODE_REPORT` is the same
+body, rendered by the same code before the merge instead of after it:
 
-All four are **empty** when there is nothing yet to show — no worktree, because the task
+```text
+summary
+  4 files, +392 −8
+  unblocks   envelope-guidance
+
+what changed
+  crates/wecode-cli/src/notify.rs                      +204   −2
+  crates/wecode-cli/src/record.rs                      +60    −0
+  crates/wecode-cli/tests/notify.rs                    +72    −0
+  docs/reference/config/notify.md                      +56    −6
+
+by area
+  crates/wecode-cli/src        2 files, +264 −2
+  crates/wecode-cli/tests      1 file, +72 −0
+  docs/reference/config        1 file, +56 −6
+
+acceptance
+  · `cargo test --workspace` exits 0
+```
+
+`by area` is printed only where it groups — one row per file under that heading would be
+the list above it a second time.
+
+Two parts of it are things no diff contains and only wecode knows: `unblocks`, which is
+what signing this releases, and `acceptance`, which is what the work was held to. The
+acceptance lines are marked `·` and not `✓`, because the report goes out on every wait
+with a tree behind it — `failed` included — and a tick beside the command that has just
+refused the work would be the message contradicting the reason it was sent. The `✓`
+belongs to the copy committed at the merge, which is written downstream of a verdict that
+passed.
+
+Everything else in it is what the record will say, word for word, because it comes from
+the same generator: what an operator approved from a phone and what the repository keeps
+about what they approved cannot drift apart. What is missing is only what a merge creates
+— no merge sha, no `target was`, no `undo`, no `how`. Those are not left out for brevity;
+they do not exist yet, and printing a shape for them would make a proposal read as a
+receipt.
+
+```toml
+[notify]
+command = "curl -sS -m 20 https://api.telegram.org/bot$TG_TOKEN/sendMessage \
+  -d chat_id=$TG_CHAT --data-urlencode \
+  \"text=#$WECODE_TASK_NUMBER $WECODE_TASK_TITLE — $WECODE_WAITING_FOR
+$WECODE_REPORT\""
+```
+
+`max_files` (default `20`) bounds the **names** and never the count, so a hook handed ten
+paths of forty can still say forty. `0` is legal and means the count alone. It bounds the
+`what changed` rows of `WECODE_REPORT` too — the same list of paths, into the same
+channel — and a report that was cut says `… and N more` rather than ending quietly, while
+the tally above it and the `by area` block below stay whole. That is most of what `by
+area` is for: a cut list still says where the change fell. The bound exists because an
+environment is not the place to put a thousand paths, and it is yours to set because the
+channel is: a desktop notification has a line where a log file has room for everything.
+
+All five are **empty** when there is nothing yet to show — no worktree, because the task
 has not started. That is the ordinary case for `signature`, which is a wait for permission
 to begin. Empty rather than `0`: *has written nothing* and *has not run* are different
 things to be woken up for, and a hook that reported the second as the first would be
-describing an empty diff nobody produced.
+describing an empty diff nobody produced. An empty report is worse still, since a document
+that arrived saying nothing reads as a finding rather than as an absence — so none is sent
+at all, and a tree that was worked in and left unchanged says so in words instead.
 
 The line runs through `sh -c`, in the workspace, with your environment: it is your own
 command, and a desktop notifier needs the session it was configured in. The task is

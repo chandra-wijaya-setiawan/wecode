@@ -48,6 +48,14 @@
 //! is not one where the operator is standing. See [`diff_of`] for what is sent instead,
 //! and [`DIFF`] for how much of it.
 //!
+//! And **the report**, which is neither of those. A diff is the evidence and the names
+//! are the shape, and between them they still leave the signer adding the change up
+//! themselves: how much of it there is, which corners of the tree it fell in, what it
+//! was held to, and what has been waiting behind it. wecode already writes that document
+//! — [`crate::record`] commits it beside the merge — and it wrote it *after* the merge,
+//! which is after the decision it would have informed. So the same body is rendered
+//! here, from the same functions, and handed over in `WECODE_REPORT`. See [`Produced`].
+//!
 //! And **what may be signed, and by whom** — see [`signing`] and [`signers`]. A message
 //! that says *you are wanted* under an *Approve* button is offering a decision, and the
 //! hook writing that button knew neither of the two things that decide whether it is
@@ -69,7 +77,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use wecode_core::{Task, TaskId, TaskStatus};
+use wecode_core::{Plan, Task, TaskId, TaskStatus};
 use wecode_gov::ActionKind;
 use wecode_org::{Company, Workspace};
 use wecode_store::Store;
@@ -266,7 +274,7 @@ pub(crate) const DRILL: &str = "doctor-drill";
 /// It carries **no number**: `WECODE_TASK_NUMBER` is the handle a reply is typed
 /// against, and a drill that put a live number into a real chat message would be one
 /// `approve` away from signing work nobody had looked at. And it has no worktree, so
-/// the four artifact variables arrive empty — the shape a `signature` wait has anyway.
+/// the five artifact variables arrive empty — the shape a `signature` wait has anyway.
 /// What the operator receives is therefore a thinner message than a real one, in
 /// exactly the fields that could do damage.
 ///
@@ -317,6 +325,15 @@ fn number_env(task: &Task) -> String {
 /// triggered it describe the same work by construction. A hook wanting more than this —
 /// the rest of a diff past [`DIFF`], the attempts before this one — is handed the tree
 /// and can ask git anything.
+/// And **the report**: the change added up, the way the merge record adds it up.
+///
+/// The three above are raw material — a directory, a list, a patch — and a person
+/// deciding whether to sign has to do the arithmetic on them. The report is that
+/// arithmetic, and wecode was already doing it: [`crate::record::merged`] renders it
+/// for the file committed beside the merge. Rendering it here too, from the same
+/// functions, means the signer and the repository read one document rather than two
+/// tellings of one change — and it carries the two facts no diff contains, which are
+/// what the task was held to and what has been waiting behind it.
 #[derive(Debug)]
 struct Produced {
     /// The worktree the work happened in.
@@ -325,6 +342,8 @@ struct Produced {
     files: Vec<String>,
     /// What changed in them, as a bounded diff — see [`diff_of`].
     diff: String,
+    /// The change as the merge record will state it — see [`crate::record::proposed`].
+    report: String,
 }
 
 impl Produced {
@@ -336,11 +355,27 @@ impl Produced {
     /// because "has not started" and "started and wrote nothing" are different things
     /// to be woken up for, and a notification that spelled the first as the second
     /// would be reporting an empty diff nobody produced.
-    fn of(org: &Path, task: &Task) -> Option<Self> {
-        let dir = tree_of(org, task)?;
+    ///
+    /// The plan is loaded once and used twice: it is how the tree is found at all — a
+    /// subtask works in its parent's — and it is the only thing that knows what is
+    /// queued behind this task, which is a line of the report.
+    fn of(org: &Path, task: &Task, most: u64) -> Option<Self> {
+        let plan = plan_at(org)?;
+        let dir = tree_of(&plan, org, task)?;
         let files = crate::git::changed_files(&dir).ok()?;
         let diff = diff_of(&dir);
-        Some(Self { dir, files, diff })
+        let report = crate::record::proposed(
+            task,
+            &plan,
+            &counted(&dir),
+            usize::try_from(most).unwrap_or(usize::MAX),
+        );
+        Some(Self {
+            dir,
+            files,
+            diff,
+            report,
+        })
     }
 
     /// How many paths there are, however few of them are listed.
@@ -366,26 +401,79 @@ impl Produced {
     }
 }
 
+/// The workspace's plan, and `None` when there is no workspace to read one out of.
+///
+/// Read-only, and only when a database is already there: [`Store::open`] creates and
+/// migrates, and a notification must not bring a workspace into being.
+fn plan_at(org: &Path) -> Option<Plan> {
+    let db = Workspace::at(org).db_path();
+    if !db.is_file() {
+        return None;
+    }
+    Store::open(&db).ok()?.load_plan().ok()
+}
+
 /// The tree this task's work is in, and `None` when there is not one.
 ///
 /// A subtask works in its parent's tree, so *which* tree is a question about the plan
 /// rather than about the task in hand — which is why an announcement reads the
-/// workspace database. Read-only, and only when one is already there: [`Store::open`]
-/// creates and migrates, and a notification must not bring a workspace into being.
+/// workspace database at all.
 ///
 /// A task whose playbook said it needed no worktree is reported as nothing rather than
 /// as the repository, deliberately. The operator's own checkout holds the operator's
 /// own uncommitted work, and handing that over as *what the task produced* would be the
 /// notification inventing a diff.
-fn tree_of(org: &Path, task: &Task) -> Option<PathBuf> {
-    let db = Workspace::at(org).db_path();
-    if !db.is_file() {
-        return None;
-    }
-    let plan = Store::open(&db).ok()?.load_plan().ok()?;
-    let owner = crate::work::owner(&plan, &task.id)?;
+fn tree_of(plan: &Plan, org: &Path, task: &Task) -> Option<PathBuf> {
+    let owner = crate::work::owner(plan, &task.id)?;
     let dir = crate::work::worktree_for(&crate::work::org_name(org), &owner.id);
     dir.is_dir().then_some(dir)
+}
+
+/// Every changed path in `dir` with what it gained and lost, untracked files included.
+///
+/// The same change [`diff_of`] renders, counted instead of quoted, and against the same
+/// base — a report whose arithmetic disagreed with the diff printed under it would be
+/// worse than one that said nothing. Untracked files are asked for one at a time,
+/// because that is the only way git will speak about a file it has never seen, and they
+/// are recorded under the path this asked about rather than the one git echoes back:
+/// the name is already known here, and parsing it out of a `--no-index` header is a
+/// second chance to get it wrong. A new file has no deletions by construction.
+///
+/// Never an error — see [`asked`]. A tree git will not answer about counts as nothing
+/// changed, which is what the rest of the announcement already does with it.
+fn counted(dir: &Path) -> Vec<(String, u32, u32)> {
+    let mut files = numstat(&asked(dir, &["diff", "--numstat", "HEAD"]));
+    for path in asked(dir, &["ls-files", "--others", "--exclude-standard"]).lines() {
+        let out = asked(
+            dir,
+            &["diff", "--numstat", "--no-index", "--", "/dev/null", path],
+        );
+        let added = out.split('\t').next().and_then(|n| n.parse().ok());
+        files.push((path.to_string(), added.unwrap_or(0), 0));
+    }
+    // Sorted, so the report lists what `changed_files` lists in the order it lists it.
+    files.sort();
+    files
+}
+
+/// git's `--numstat` as the counts it means.
+///
+/// A binary file reports `-` rather than a number and is carried as a zero: it changed,
+/// it is in the list, and there is no line count to be had for it.
+fn numstat(out: &str) -> Vec<(String, u32, u32)> {
+    out.lines()
+        .filter_map(|line| {
+            let mut f = line.split('\t');
+            let add = f.next()?;
+            let del = f.next()?;
+            let path = f.next()?;
+            Some((
+                path.to_string(),
+                add.parse().unwrap_or(0),
+                del.parse().unwrap_or(0),
+            ))
+        })
+        .collect()
 }
 
 /// The uncommitted diff of `dir`, bounded to [`DIFF`] characters — the change itself,
@@ -477,7 +565,7 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
     // the charter forbids — pays nothing for it. Resolved here rather than passed in by
     // the caller because there is no call site that already holds it: every other one is
     // a status write, and a signature wait is not a status write at all.
-    let made = Produced::of(org, task);
+    let made = Produced::of(org, task, company.notify.max_files);
     // What this wait can actually be answered with, and by whom. Resolved here for the
     // reason `made` is: it is a fact about the wait rather than about the status write,
     // and no call site holds it.
@@ -518,12 +606,12 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
         // So a hook can call wecode back — `wecode show "$WECODE_TASK"` — from whatever
         // directory it happens to be started in.
         .env("WECODE_ORG", org)
-        // What the task produced. Four variables and not one string, because a hook
+        // What the task produced. Five variables and not one string, because a hook
         // composes its own message and every channel has a different amount of room: a
-        // desktop line holds the count, a chat message holds the names and the diff
-        // under them, and a script wanting more than the diff is handed the directory.
+        // desktop line holds the count, a chat message holds the report or the diff, and
+        // a script wanting more than either is handed the directory.
         //
-        // All four empty means there is nothing to say — see [`Produced::of`]. That is
+        // All five empty means there is nothing to say — see [`Produced::of`]. That is
         // the normal case for `signature`, which is a wait for permission to *start*.
         .env(
             "WECODE_WORKTREE",
@@ -544,6 +632,13 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
         // between a worktree and an environment should be a message's worth of diff and
         // not a repository's.
         .env("WECODE_DIFF", made.as_ref().map_or("", |m| m.diff.as_str()))
+        // And the one that answers *is this worth waking me for* — the change added up
+        // the way the merge record adds it up, so the summary a signature is given
+        // against is the summary the repository will keep of it.
+        .env(
+            "WECODE_REPORT",
+            made.as_ref().map_or("", |m| m.report.as_str()),
+        )
         .stdin(Stdio::null());
 
     // Caught rather than inherited. Letting a notifier write straight into the loop's
@@ -1029,12 +1124,46 @@ mod tests {
             dir: dir(),
             files: vec!["a.rs".into(), "b.rs".into(), "c.rs".into()],
             diff: String::new(),
+            report: String::new(),
         };
         assert_eq!(made.count(), "3");
         assert_eq!(made.listed(2), "a.rs\nb.rs");
         assert_eq!(made.listed(9), "a.rs\nb.rs\nc.rs");
         assert_eq!(made.listed(0), "", "names off; the count still goes");
         assert_eq!(made.listed(u64::MAX), "a.rs\nb.rs\nc.rs", "no overflow");
+    }
+
+    #[test]
+    fn the_counts_cover_the_files_the_names_do_and_no_others() {
+        // The arithmetic under the report, against the list the names come from. A file
+        // git has never seen is in `changed_files` and so in the count the hook is
+        // handed — a tally that left it out would print `1 file` above a message naming
+        // two, and the operator would be reading two reports of one change.
+        let r = repo("counted");
+        std::fs::write(r.join("kept.txt"), "one\ntwo\n").expect("edit the tracked file");
+        std::fs::write(r.join("fresh.txt"), "a\nb\nc\n").expect("write a new one");
+
+        assert_eq!(
+            counted(&r),
+            vec![
+                ("fresh.txt".to_string(), 3, 0),
+                ("kept.txt".to_string(), 1, 0),
+            ],
+            "sorted, and the new file counted as three lines added and none removed"
+        );
+        // The same paths `changed_files` reports, in the same order: the report and the
+        // names beside it are two views of one change.
+        assert_eq!(
+            counted(&r).into_iter().map(|(p, ..)| p).collect::<Vec<_>>(),
+            crate::git::changed_files(&r).expect("git answers")
+        );
+    }
+
+    #[test]
+    fn a_tree_git_will_not_answer_about_is_counted_as_nothing_rather_than_guessed_at() {
+        // The module's rule one function further in again. There is no report to be had
+        // from a directory git refuses, and a notification is still owed.
+        assert!(counted(&dir().join("wecode-notify-no-such-tree")).is_empty());
     }
 
     #[test]
