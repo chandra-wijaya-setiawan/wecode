@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use rusqlite::{OptionalExtension, params};
+use wecode_core::task::Doer;
 use wecode_core::{
     Budget, Cmp, Measure, Number, Plan, Project, ProjectId, ProjectStatus, Scope, Task, TaskId,
     TaskKind, TaskStatus,
@@ -119,11 +120,12 @@ impl Store {
         // `Plan`'s own checks can run on insert. Ordering by parent then id gets
         // parents first; dependencies are attached afterwards for the same reason.
         let mut stmt = self.conn().prepare(
-            "SELECT id, project_id, kind, title, parent_id, status, assignee,
+            "SELECT id, project_id, kind, doer, title, parent_id, status, assignee,
                     budget_tokens, budget_wall, archived
              FROM tasks ORDER BY (parent_id IS NOT NULL), id",
         )?;
         type Row = (
+            String,
             String,
             String,
             String,
@@ -148,16 +150,28 @@ impl Store {
                     r.get(7)?,
                     r.get(8)?,
                     r.get(9)?,
+                    r.get(10)?,
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
 
-        for (id, project, kind, title, parent, status, assignee, tokens, wall, archived) in rows {
+        for (id, project, kind, doer, title, parent, status, assignee, tokens, wall, archived) in
+            rows
+        {
             let mut t = Task::new(TaskId::new(&id), ProjectId::new(&project), title);
             t.number = task_numbers.get(&id).copied();
             t.kind = TaskKind::parse(&kind).ok_or_else(|| StoreError::Corrupt {
                 what: "task kind",
                 value: kind.clone(),
+            })?;
+            // Parsed as strictly as the kind above it, and here that strictness is not
+            // merely consistency: the word this build cannot read might be the one that
+            // says *not an agent*, so falling back to the column's default would
+            // dispatch precisely the work the row was written to keep an agent off.
+            // Failing the whole load is the loud version of the same answer.
+            t.doer = Doer::parse(&doer).ok_or_else(|| StoreError::Corrupt {
+                what: "task doer",
+                value: doer.clone(),
             })?;
             t.status = TaskStatus::parse(&status).ok_or_else(|| StoreError::Corrupt {
                 what: "task status",
@@ -317,17 +331,18 @@ impl Store {
     pub fn save_task(&self, t: &Task) -> Result<(), StoreError> {
         let c = self.conn();
         c.execute(
-            "INSERT INTO tasks (id, project_id, kind, title, parent_id, status, assignee,
+            "INSERT INTO tasks (id, project_id, kind, doer, title, parent_id, status, assignee,
                                 budget_tokens, budget_wall, archived)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
-                project_id = ?2, kind = ?3, title = ?4, parent_id = ?5,
-                status = ?6, assignee = ?7, budget_tokens = ?8, budget_wall = ?9,
-                archived = ?10",
+                project_id = ?2, kind = ?3, doer = ?4, title = ?5, parent_id = ?6,
+                status = ?7, assignee = ?8, budget_tokens = ?9, budget_wall = ?10,
+                archived = ?11",
             params![
                 t.id.as_str(),
                 t.project.as_str(),
                 t.kind.as_str(),
+                t.doer.as_str(),
                 t.title,
                 t.parent.as_ref().map(TaskId::as_str),
                 t.status.as_str(),
@@ -1055,6 +1070,104 @@ mod tests {
             Err(StoreError::Corrupt { what, value }) => {
                 assert_eq!(what, "project status");
                 assert_eq!(value, "sideways");
+            }
+            other => panic!("expected a corruption error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_persons_task_is_still_a_persons_after_a_restart() {
+        // The whole point of the column. Everything above the store already reads the
+        // doer — admission relaxes the scope, budget and acceptance a dispatch needs;
+        // the tick stops the task on the operator instead of dispatching it — and all of
+        // that is decided from a plan read back out of SQLite. A task that came back as
+        // an agent's would be promoted and handed to an agent on the very next tick,
+        // holding a receipt that said a person would do it.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        let t = Task::new("rotate-key", "caching", "rotate the signing key")
+            .of_kind(TaskKind::Chore)
+            .done_by(Doer::Person);
+        s.save_task(&t).unwrap();
+
+        let back = s
+            .load_plan()
+            .unwrap()
+            .task(&"rotate-key".into())
+            .unwrap()
+            .clone();
+        assert_eq!(back.doer, Doer::Person);
+        assert!(back.is_done_by_a_person());
+        // The two axes stay apart through storage, which is why this is not a kind:
+        // rotating a key by hand is still a chore, and the row says which chore it was.
+        assert_eq!(back.kind, TaskKind::Chore);
+    }
+
+    #[test]
+    fn a_task_that_says_nothing_comes_back_an_agents() {
+        // The default, and the reading every task written before the column existed
+        // gets. `task()` declares no doer, so this is also what the rest of this file
+        // has been asserting implicitly all along.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("layer")).unwrap();
+
+        let back = s
+            .load_plan()
+            .unwrap()
+            .task(&"layer".into())
+            .unwrap()
+            .clone();
+        assert_eq!(back.doer, Doer::Agent);
+        assert!(back.is_dispatched());
+    }
+
+    #[test]
+    fn the_narrow_writes_leave_the_doer_alone() {
+        // A person's task moves through the plan like any other — it is promoted, it is
+        // signed, it can be reshaped — and every one of those is a narrow UPDATE. The
+        // column has to survive all of them, because the restart that reads it back is
+        // usually the one after a status change.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("sprint")).unwrap();
+        let t = Task::new("mint-token", "caching", "mint the deploy token").done_by(Doer::Person);
+        s.save_task(&t).unwrap();
+
+        s.set_task_status(&"mint-token".into(), TaskStatus::Ready)
+            .unwrap();
+        s.set_task_shape(&"mint-token".into(), Some(&"sprint".into()), &[])
+            .unwrap();
+        s.set_task_archived(&"mint-token".into(), true).unwrap();
+
+        let back = s
+            .load_plan()
+            .unwrap()
+            .task(&"mint-token".into())
+            .unwrap()
+            .clone();
+        assert_eq!(back.doer, Doer::Person, "still nobody's to dispatch");
+        assert_eq!(back.status, TaskStatus::Ready);
+        assert_eq!(back.parent, Some(TaskId::new("sprint")));
+        assert!(back.archived);
+    }
+
+    #[test]
+    fn a_doer_the_domain_does_not_know_is_refused_rather_than_guessed() {
+        // The one field where falling back to the default is the unsafe answer: a word
+        // this build cannot read might be the word that says *not an agent*, and
+        // guessing `agent` would dispatch the work the row was written to protect.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("layer")).unwrap();
+        s.conn()
+            .execute("UPDATE tasks SET doer = 'contractor'", [])
+            .unwrap();
+
+        match s.load_plan() {
+            Err(StoreError::Corrupt { what, value }) => {
+                assert_eq!(what, "task doer");
+                assert_eq!(value, "contractor");
             }
             other => panic!("expected a corruption error, got {other:?}"),
         }
