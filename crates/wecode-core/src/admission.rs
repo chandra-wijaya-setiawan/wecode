@@ -18,32 +18,9 @@ use crate::task::{Task, TaskKind};
 /// Words that name a direction without naming a target. Their presence means we
 /// cannot tell when the work is done, so we ask.
 const VAGUE_TERMS: &[&str] = &[
-    "faster",
-    "slower",
-    "better",
-    "improve",
-    "improved",
-    "optimize",
-    "optimise",
-    "robust",
-    "clean",
-    "cleaner",
-    "cleanup",
-    "nice",
-    "nicer",
-    "modern",
-    "scalable",
-    "simple",
-    "simpler",
-    "good",
-    "bad",
-    "various",
-    "stuff",
-    "things",
-    "somehow",
-    "properly",
-    "correctly",
-    "etc",
+    "faster", "slower", "better", "improve", "improved", "optimize", "optimise", "robust",
+    "clean", "cleaner", "cleanup", "nice", "nicer", "modern", "scalable", "simple", "simpler",
+    "good", "bad", "various", "stuff", "things", "somehow", "properly", "correctly", "etc",
 ];
 
 /// Separators that suggest more than one outcome in a single statement.
@@ -114,17 +91,11 @@ impl Defect {
                 "{term:?} names a direction, not a target. {term} compared to what, and by how much?"
             ),
             Self::RepoMissing => "Which repository does this project work in?".into(),
+            Self::RepoUnknown { repo, known } if known.is_empty() => {
+                format!("Repo {repo:?} is not registered. Add it under [[repos]] in company.toml.")
+            }
             Self::RepoUnknown { repo, known } => {
-                if known.is_empty() {
-                    format!(
-                        "Repo {repo:?} is not registered. Add it under [[repos]] in company.toml."
-                    )
-                } else {
-                    format!(
-                        "Repo {repo:?} is not registered. Known: {}.",
-                        known.join(", ")
-                    )
-                }
+                format!("Repo {repo:?} is not registered. Known: {}.", known.join(", "))
             }
             Self::MeasureMissing => {
                 "How will we know this is done? Give a command, or a metric with a target.".into()
@@ -166,9 +137,7 @@ impl Defect {
             Self::ProjectHasNoTasks => {
                 "This project has no tasks. Break it down before starting it.".into()
             }
-            Self::DependencyMissing { on } => {
-                format!("This waits on `{on}`, which does not exist.")
-            }
+            Self::DependencyMissing { on } => format!("This waits on `{on}`, which does not exist."),
         }
     }
 
@@ -574,6 +543,16 @@ pub enum Divergence {
     /// its own quietly takes the wall limit off, and a run with no wall limit stops
     /// when somebody notices.
     BudgetUnset { measure: &'static str, expected: u64 },
+    /// A figure larger than the whole project's own.
+    ///
+    /// The only one of these that is not read off a playbook. A playbook says what
+    /// work of a kind usually costs; the project says what *this* piece of work was
+    /// given, and the two are written by different people at different times — so a
+    /// kind's default can quietly exceed the project it is applied in, and does. It
+    /// is advice for the same reason the rest is: raising the project's budget is a
+    /// decision an operator is entitled to make. Making it one task at a time,
+    /// without ever saying so, is how a project's stated cost stops meaning anything.
+    AboveProjectBudget { measure: &'static str, declared: u64, project: ProjectId, allowed: u64 },
     /// A kind this project breaks down, declared whole.
     NotDecomposed { steps: Vec<String> },
 }
@@ -598,6 +577,10 @@ impl Divergence {
             Self::BudgetUnset { measure, expected } => format!(
                 "this kind is written for {expected} {measure} and this task declares none. \
                  Naming either figure takes the whole default off."
+            ),
+            Self::AboveProjectBudget { measure, declared, project, allowed } => format!(
+                "this asks for {declared} {measure}, and project `{project}` was given {allowed} \
+                 for all of its work. Raising the project's budget is the honest repair."
             ),
             Self::NotDecomposed { steps } => format!(
                 "this kind breaks into {}, and this task has no steps. `--expand` on a fresh \
@@ -669,6 +652,24 @@ pub fn advise(t: &Task, plan: &Plan, expected: &Expected) -> Vec<Divergence> {
         }
     }
 
+    // And what the project said about itself, which no playbook knows: a task is part
+    // of a project and its figures come out of the same pot, so one that alone asks
+    // for more than the project was given has outgrown the thing it belongs to. Read
+    // from the plan rather than from `expected`, because it is not the playbook's
+    // opinion. Silent when either figure is absent — an unstated budget is
+    // `BudgetMissing`, which the gate is already asking about on both.
+    if let Some(p) = plan.project(&t.project) {
+        for (measure, declared, ceiling) in [
+            ("tokens", t.budget.tokens, p.budget.tokens),
+            ("seconds of wall time", t.budget.wall_secs, p.budget.wall_secs),
+        ] {
+            if let (Some(declared), Some(allowed)) = (declared, ceiling) && declared > allowed {
+                let project = t.project.clone();
+                out.push(Divergence::AboveProjectBudget { measure, declared, project, allowed });
+            }
+        }
+    }
+
     // A kind the project decomposes, declared whole. Not said to a task that is
     // already a step of somebody else's expansion: a template whose step takes the
     // kind being expanded would otherwise advise every one of them to expand again.
@@ -691,31 +692,17 @@ mod tests {
     }
 
     fn budget() -> Budget {
-        Budget {
-            tokens: Some(1000),
-            wall_secs: Some(60),
-        }
+        Budget { tokens: Some(1000), wall_secs: Some(60) }
     }
 
     fn cmd() -> Measure {
-        Measure::Command {
-            cmd: "cargo test".into(),
-            expect_status: 0,
-        }
+        Measure::Command { cmd: "cargo test".into(), expect_status: 0 }
     }
 
     fn good_project() -> Project {
-        Project::new(
-            "caching",
-            "add response caching to the export endpoint",
-            "wecode",
-        )
-        .measured(Measure::Metric {
-            name: "p99_ms".into(),
-            target: 500.0,
-            cmp: Cmp::Lt,
-        })
-        .budgeted(budget())
+        Project::new("caching", "add response caching to the export endpoint", "wecode")
+            .measured(Measure::Metric { name: "p99_ms".into(), target: 500.0, cmp: Cmp::Lt })
+            .budgeted(budget())
     }
 
     fn good_task() -> Task {
@@ -899,9 +886,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unordered_task_still_collides() {
-        // The guard above must not swallow the check it guards: with no path between
-        // them, the same two scopes are a genuine conflict.
+    fn an_unordered_unrelated_task_still_collides() {
+        // The control on both exemptions above, which were the same test written
+        // twice: neither ordering nor nesting may become a blanket pass. With no path
+        // between two tasks and no parent relation either, the same two scopes are a
+        // genuine conflict.
         let mut plan = seeded();
         plan.add_task(good_task()).unwrap();
 
@@ -913,7 +902,7 @@ mod tests {
             check_task(&loose, &plan, &[])
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
-            "two tasks with no ordering between them still compete"
+            "two concurrent siblings on the same paths is a real conflict"
         );
     }
 
@@ -933,24 +922,6 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
             "a subtask works inside its parent, it does not compete with it"
-        );
-    }
-
-    #[test]
-    fn unrelated_siblings_still_collide() {
-        // The control: nesting must not become a blanket exemption.
-        let mut plan = seeded();
-        plan.add_task(good_task()).unwrap();
-
-        let rival = Task::new("other", "caching", "rewrite the export writer")
-            .accepting(cmd())
-            .scoped(Scope::write(&["crates/export/**"]))
-            .budgeted(budget());
-        assert!(
-            check_task(&rival, &plan, &[])
-                .iter()
-                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
-            "two concurrent siblings on the same paths is a real conflict"
         );
     }
 
@@ -1024,9 +995,7 @@ mod tests {
     }
 
     fn overlap(defects: &[Defect]) -> Option<&Defect> {
-        defects
-            .iter()
-            .find(|d| matches!(d, Defect::ScopeOverlaps { .. }))
+        defects.iter().find(|d| matches!(d, Defect::ScopeOverlaps { .. }))
     }
 
     #[test]
@@ -1346,11 +1315,8 @@ mod tests {
     /// `good_task` itself, so a note in these tests is always a real divergence.
     fn written() -> Expected {
         Expected {
-            accept: vec!["cargo test".into()],
-            assign_to: Some("impl".into()),
-            tokens: Some(1000),
-            wall_secs: Some(60),
-            steps: Vec::new(),
+            accept: vec!["cargo test".into()], assign_to: Some("impl".into()),
+            tokens: Some(1000), wall_secs: Some(60), steps: Vec::new(),
         }
     }
 
@@ -1420,9 +1386,11 @@ mod tests {
             measure: "tokens", declared: 100, expected: 1000,
         }));
 
-        let mut generous = good_task().assigned_to("impl");
-        generous.budget = Budget { tokens: Some(100_000), wall_secs: Some(6000) };
-        assert!(advise(&generous, &seeded(), &written()).is_empty());
+        // Over, read from the other side: the same task against guidance written for
+        // less. Raising the task's own figures would now cross the project's ceiling
+        // as well, which is a different note about a different thing.
+        let modest = Expected { tokens: Some(10), wall_secs: Some(5), ..written() };
+        assert!(advise(&good_task().assigned_to("impl"), &seeded(), &modest).is_empty());
     }
 
     #[test]
@@ -1431,7 +1399,8 @@ mod tests {
         // playbook's budget is filled only when nothing was stated. The gate is
         // satisfied — a budget *is* set — and the run has no ceiling on its clock.
         let mut t = good_task().assigned_to("impl");
-        t.budget = Budget { tokens: Some(5000), wall_secs: None };
+        // The project's own ceiling, so the wall limit is the only thing departed from.
+        t.budget = Budget { tokens: Some(1000), wall_secs: None };
         assert!(check_task(&t, &seeded(), &[]).is_empty(), "the gate is happy");
         assert_eq!(
             advise(&t, &seeded(), &written()),
@@ -1470,6 +1439,34 @@ mod tests {
             let notes = advise(t, &plan, &decomposed());
             assert!(!notes.iter().any(|d| matches!(d, Divergence::NotDecomposed { .. })), "{notes:?}");
         }
+    }
+
+    #[test]
+    fn a_task_worth_more_than_the_whole_project_is_told_so() {
+        // The one thing here that no playbook knows, and the reason it is worth
+        // saying: a kind's default budget is written once, in a repository, and
+        // applied in every project on it — so the figure filled in for a task can
+        // exceed what its project was given without anyone typing a number at all.
+        // Nothing read the project's own budget at planning time before this; the
+        // contradiction turned up as spend on the board, after it had been paid.
+        let mut t = good_task().assigned_to("impl");
+        t.budget = Budget { tokens: Some(5000), wall_secs: Some(60) };
+        assert_eq!(
+            advise(&t, &seeded(), &written()),
+            vec![Divergence::AboveProjectBudget {
+                measure: "tokens", declared: 5000, project: "caching".into(), allowed: 1000,
+            }],
+            "the wall figure is equal, and equal has not outgrown anything"
+        );
+        assert!(check_task(&t, &seeded(), &[]).is_empty(), "and nothing is refused for it");
+
+        // A project that states no budget is no ceiling — that absence is
+        // `BudgetMissing`, which the gate is asking about on the project itself.
+        let mut open_ended = Plan::new();
+        let mut p = good_project();
+        p.budget = Budget::default();
+        open_ended.add_project(p).unwrap();
+        assert!(advise(&t, &open_ended, &written()).is_empty());
     }
 
     #[test]
