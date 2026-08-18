@@ -6,6 +6,13 @@
 //!
 //! Archived projects are skipped. Archiving parks a project, so its tasks stop being
 //! promoted as well as stop being shown.
+//!
+//! One kind is promoted somewhere else entirely. A manual task's agent is a person, so
+//! an unblocked one becomes the operator's to do rather than the queue's: the tick
+//! moves it to `needs-approval` and nothing dispatches it, ever. That is the only
+//! status this module authors outside the `Waiting`/`Ready` pair, and it is authored
+//! here for the same reason the pair is — prerequisites have to be honoured before the
+//! work is anyone's, and the graph is what knows.
 
 use std::time::Duration;
 
@@ -30,6 +37,18 @@ pub(crate) fn transitions(plan: &Plan) -> Vec<Move> {
         .filter_map(|t| {
             let ready = plan.is_ready(&t.id);
             match t.status {
+                // Work whose agent is a person does not join the queue it would never
+                // be taken from. Unblocked, it stops on the operator instead — from
+                // `Waiting` directly, without a tick spent in a `Ready` that would be
+                // a lie about what could start it.
+                //
+                // Its prerequisites are honoured first, and that is the whole reason
+                // this lives in the tick rather than at the door: a console step
+                // waiting on the task that tells the operator what to do in the
+                // console must not go off before that task finishes.
+                s if s.is_schedulable() && ready && t.kind.is_done_by_a_person() => {
+                    Some(TaskStatus::NeedsApproval)
+                }
                 TaskStatus::Waiting if ready => Some(TaskStatus::Ready),
                 // Demotion matters as much as promotion. Reopening a finished
                 // prerequisite must put its dependents back, or the queue offers work
@@ -65,6 +84,13 @@ pub(crate) fn parallelism(max_open_items: u64, cores: usize) -> usize {
 ///
 /// Only `Ready`. A `Waiting` task has not been promoted yet, and promoting and
 /// dispatching in the same breath would skip the record of it becoming startable.
+///
+/// Never a manual task, whatever its stored status says. The tick moves those to
+/// `needs-approval` before they could be picked up, so this filter should never be
+/// the thing that catches one — which is exactly why it is here. The status is a
+/// cache and this is the guardrail: a hand-set `ready`, a stale plan read, a tick
+/// that has not run yet, and the difference is an agent being handed the console
+/// step a person was supposed to do.
 pub(crate) fn dispatchable(plan: &Plan, slots: usize) -> Vec<&Task> {
     if slots == 0 {
         return Vec::new();
@@ -72,6 +98,7 @@ pub(crate) fn dispatchable(plan: &Plan, slots: usize) -> Vec<&Task> {
     let mut out: Vec<&Task> = plan
         .tasks()
         .filter(|t| t.status == TaskStatus::Ready && t.assignee.is_some())
+        .filter(|t| !t.kind.is_done_by_a_person())
         .filter(|t| plan.project(&t.project).is_some_and(|p| !p.archived))
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -108,7 +135,7 @@ pub(crate) const INTERVAL: Duration = Duration::from_secs(5);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wecode_core::{Budget, Measure, Project, Scope, Task};
+    use wecode_core::{Budget, Measure, Project, Scope, Task, TaskKind};
 
     fn task(id: &str) -> Task {
         Task::new(id, "p", "do something specific here")
@@ -140,6 +167,12 @@ mod tests {
     fn set(p: &mut Plan, id: &str, s: TaskStatus) {
         let mut t = p.task(&TaskId::new(id)).unwrap().clone();
         t.status = s;
+        p.update_task(t).unwrap();
+    }
+
+    fn make_manual(p: &mut Plan, id: &str) {
+        let mut t = p.task(&TaskId::new(id)).unwrap().clone();
+        t.kind = TaskKind::Manual;
         p.update_task(t).unwrap();
     }
 
@@ -292,6 +325,85 @@ mod tests {
         p.update_project(proj).unwrap();
         assert!(dispatchable(&p, 10).is_empty());
         assert!(awaiting_a_human(&p).is_empty());
+    }
+
+    #[test]
+    fn an_unblocked_manual_task_stops_on_a_person_instead_of_joining_the_queue() {
+        let mut p = plan();
+        make_manual(&mut p, "a");
+        let m = transitions(&p);
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert_eq!(m[0].task.as_str(), "a");
+        assert_eq!(m[0].from, TaskStatus::Waiting);
+        assert_eq!(
+            m[0].to,
+            TaskStatus::NeedsApproval,
+            "a person's work never passes through ready"
+        );
+    }
+
+    #[test]
+    fn a_manual_task_waits_for_its_prerequisites_like_any_other() {
+        // The reason this belongs in the tick: a console step whose instructions come
+        // from an earlier task must not reach the operator before that task finishes.
+        let mut p = plan();
+        make_manual(&mut p, "b");
+        assert!(
+            !transitions(&p).iter().any(|m| m.task.as_str() == "b"),
+            "b is blocked on a"
+        );
+
+        set(&mut p, "a", TaskStatus::Done);
+        let m = transitions(&p);
+        let b = m.iter().find(|x| x.task.as_str() == "b").unwrap();
+        assert_eq!(b.to, TaskStatus::NeedsApproval);
+    }
+
+    #[test]
+    fn a_manual_task_already_stored_as_ready_is_taken_out_of_the_queue() {
+        // Whatever put it there — a hand-edited status, a kind changed after
+        // promotion — the tick corrects it rather than leaving it dispatchable.
+        let mut p = plan();
+        make_manual(&mut p, "a");
+        set(&mut p, "a", TaskStatus::Ready);
+        let m = transitions(&p);
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert_eq!(m[0].from, TaskStatus::Ready);
+        assert_eq!(m[0].to, TaskStatus::NeedsApproval);
+    }
+
+    #[test]
+    fn a_manual_task_blocked_again_is_demoted_rather_than_handed_over() {
+        // Demotion still wins over the stop-for-a-person rule: unfinished groundwork
+        // is not something to go and ask the operator about.
+        let mut p = plan();
+        make_manual(&mut p, "b");
+        set(&mut p, "b", TaskStatus::Ready);
+        let m = transitions(&p);
+        let b = m.iter().find(|x| x.task.as_str() == "b").unwrap();
+        assert_eq!(b.to, TaskStatus::Waiting);
+    }
+
+    #[test]
+    fn a_manual_task_is_never_dispatched_and_the_tick_settles() {
+        let mut p = plan();
+        make_manual(&mut p, "a");
+        let mut a = p.task(&TaskId::new("a")).unwrap().clone();
+        a.status = TaskStatus::Ready;
+        // Assigned to a post and unblocked: everything a dispatch needs, except that
+        // the work is a person's. The guardrail holds without the tick having run.
+        a.assignee = Some("owner".into());
+        p.update_task(a).unwrap();
+        assert!(
+            dispatchable(&p, 10).is_empty(),
+            "no agent is handed a person's task"
+        );
+
+        // Once the tick has moved it, it is the operator's and nothing else runs.
+        set(&mut p, "a", TaskStatus::NeedsApproval);
+        assert!(transitions(&p).is_empty(), "settled on the person");
+        let waiting: Vec<&str> = awaiting_a_human(&p).iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(waiting, vec!["a"]);
     }
 
     #[test]

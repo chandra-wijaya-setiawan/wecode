@@ -30,6 +30,15 @@ pub enum TaskKind {
     /// is not finished when it passes. It is finished when someone signs it.
     Design,
     Docs,
+    /// Work whose agent is a person. The console step, the token only the owner can
+    /// mint, the button only a human may press.
+    ///
+    /// Every other kind is dispatched to a harness; this one is dispatched to nobody.
+    /// It stops on a person the moment its prerequisites are done, and advances only
+    /// on a recorded signature. That is the point: the dependency is real work that
+    /// the graph should hold, and holding it must not mean handing an agent the
+    /// credentials to do it instead.
+    Manual,
 }
 
 impl TaskKind {
@@ -43,6 +52,7 @@ impl TaskKind {
             Self::Spike => "spike",
             Self::Design => "design",
             Self::Docs => "docs",
+            Self::Manual => "manual",
         }
     }
 
@@ -55,6 +65,7 @@ impl TaskKind {
             "spike" => Self::Spike,
             "design" => Self::Design,
             "docs" | "doc" => Self::Docs,
+            "manual" | "human" => Self::Manual,
             _ => return None,
         })
     }
@@ -64,9 +75,16 @@ impl TaskKind {
     ///
     /// A design is not exempt: it writes a document, and that document is the whole
     /// deliverable. A design task with no write scope has nothing to show for itself.
+    ///
+    /// A manual task is exempt for a different reason again: its deliverable is a fact
+    /// in the world — a resource that exists, a token that has been minted — and no
+    /// file in this repository records it. Nothing writes, so there is nothing to
+    /// fence. Its acceptance still has to be a command, because admission takes one
+    /// from every task, and that is the useful discipline here: the probe that checks
+    /// the fact is what stops "I did it" from being the only evidence.
     #[must_use]
     pub fn requires_write_scope(self) -> bool {
-        !matches!(self, Self::Spike)
+        !matches!(self, Self::Spike | Self::Manual)
     }
 
     /// Whether passing verification finishes the work, or only makes it reviewable.
@@ -75,11 +93,35 @@ impl TaskKind {
     /// document existing — the point of writing it down is that a human can disagree
     /// with it while disagreeing is still cheap. So verification moves a design to
     /// `needs-approval`, and only a recorded signature moves it to `done`.
+    ///
+    /// A manual task arrives at the same gate from the other side. There is no
+    /// verification to pass, because nothing ran: the signature is not a review of the
+    /// work, it *is* the work being reported. Same state, same signing path, so the
+    /// operator has one gesture to learn and the ledger one shape to record.
     #[must_use]
     pub fn needs_a_signature(self) -> bool {
-        matches!(self, Self::Design)
+        matches!(self, Self::Design | Self::Manual)
     }
 
+    /// Whether the work is a person's to do rather than an agent's.
+    ///
+    /// The scheduler asks this twice, and the two answers are what the kind is for:
+    /// such a task is never dispatched, and it stops on a person as soon as it is
+    /// unblocked. Asked as a question about the *kind*, not about the assignee, so
+    /// the answer cannot be lost by leaving a post unfilled.
+    #[must_use]
+    pub fn is_done_by_a_person(self) -> bool {
+        matches!(self, Self::Manual)
+    }
+
+    /// Every kind a project writes a playbook section for — which is every kind an
+    /// agent is dispatched for.
+    ///
+    /// `Manual` is deliberately absent. A playbook section is guidance for a worker:
+    /// the worktree it gets, the commands that judge it, the prose it is told. A
+    /// manual task has no worker to guide, so a `[manual]` section would be advice
+    /// addressed to nobody, and the starter that must cover every entry here would
+    /// have to invent some.
     #[must_use]
     pub fn all() -> &'static [TaskKind] {
         &[
@@ -225,11 +267,19 @@ mod tests {
         for k in TaskKind::all() {
             assert_eq!(TaskKind::parse(k.as_str()), Some(*k));
         }
+        // Named separately because `all()` is the playbook's list, not the enum's:
+        // manual has no section to write, but it is still a kind an operator types.
+        let manual = TaskKind::Manual;
+        assert_eq!(TaskKind::parse(manual.as_str()), Some(manual));
+        assert_eq!(TaskKind::parse("human"), Some(manual), "the brief's own word");
     }
 
     #[test]
     fn a_spike_needs_no_write_scope_but_others_do() {
         assert!(!TaskKind::Spike.requires_write_scope());
+        // A manual task's deliverable is a fact in the world; nothing in the tree
+        // changes, so there is nothing to fence.
+        assert!(!TaskKind::Manual.requires_write_scope());
         // A refactor changes code, so it needs a scope like any other change.
         assert!(TaskKind::Refactor.requires_write_scope());
         for k in [
@@ -241,6 +291,35 @@ mod tests {
         ] {
             assert!(k.requires_write_scope(), "{k:?} should need a scope");
         }
+    }
+
+    #[test]
+    fn only_a_manual_task_is_a_persons_to_do() {
+        assert!(TaskKind::Manual.is_done_by_a_person());
+        // A design is written by an agent and only *judged* by a person: the
+        // distinction the scheduler turns on is who does the work, not who signs.
+        for k in TaskKind::all() {
+            assert!(!k.is_done_by_a_person(), "{k:?} is dispatched to a harness");
+        }
+    }
+
+    #[test]
+    fn a_manual_task_advances_only_on_a_signature() {
+        // Same gate as a design, reached for the opposite reason: a design is signed
+        // because passing is not enough, a manual task because nothing ran at all.
+        assert!(TaskKind::Manual.needs_a_signature());
+        assert!(TaskKind::Design.needs_a_signature());
+        for k in [TaskKind::Feature, TaskKind::Bug, TaskKind::Spike] {
+            assert!(!k.needs_a_signature(), "{k:?} is finished by passing");
+        }
+    }
+
+    #[test]
+    fn the_playbook_list_holds_only_kinds_with_a_worker_to_guide() {
+        // The starter must carry a section for every entry, and there is no useful
+        // guidance to give a task with no agent — so the absence is the rule, not an
+        // oversight to be tidied up by adding it.
+        assert!(!TaskKind::all().contains(&TaskKind::Manual));
     }
 
     #[test]
