@@ -30,6 +30,15 @@
 //! commits it, [`record_line`] says where it went — and [`rolled_back`] is the other
 //! half of the same promise, since a report that could not be undone would be a claim
 //! rather than a record.
+//!
+//! One reader was still being left out: **the person who has to sign the merge.** The
+//! report is the document that says what a task did, and until [`proposed`] it was only
+//! ever produced *after* the decision it exists to inform — filed where the operator
+//! could read it once it no longer mattered, while the notification asking them to
+//! approve carried a diff and a file list and nothing that added them up. So the same
+//! body is rendered before the merge as well, from the same functions, minus every line
+//! that is a fact a merge creates: no merge sha, no undo, no `how`. What the signer
+//! reads is what the repository will say about what they signed.
 
 use std::path::Path;
 
@@ -111,34 +120,14 @@ pub(crate) fn merged(
     swept: &Swept,
 ) -> String {
     let short = |sha: &str| sha.chars().take(9).collect::<String>();
-    let unblocked: Vec<&Task> = plan
-        .tasks()
-        .filter(|t| t.depends_on.contains(&task.id) && !t.status.is_closed())
-        .collect();
 
     let mut out = format!("MERGED  {} → {target}\n\nsummary\n", task.id);
-    out.push_str(&format!(
-        "  {} file{}, +{} −{}\n",
-        m.files.len(),
-        if m.files.len() == 1 { "" } else { "s" },
-        m.insertions(),
-        m.deletions()
-    ));
+    out.push_str(&tally(m.files.len(), m.insertions(), m.deletions()));
     out.push_str(&format!(
         "  how        {}\n",
         if signed { "signed off" } else { "automatic" }
     ));
-    if !unblocked.is_empty() {
-        // The thing only wecode knows: what this merge lets start.
-        out.push_str(&format!(
-            "  unblocks   {}\n",
-            unblocked
-                .iter()
-                .map(|t| t.id.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
+    out.push_str(&unblocks(task, plan));
     out.push_str(&teardown_line(swept));
     out.push_str(&format!(
         "  undo       wecode rollback {}   (was {})\n",
@@ -146,44 +135,149 @@ pub(crate) fn merged(
         short(&m.was)
     ));
 
-    out.push_str("\nwhat changed\n");
-    if m.files.is_empty() {
-        out.push_str("  nothing — the branch held no changes against the target\n");
-    }
-    for (path, add, del) in &m.files {
-        out.push_str(&format!(
-            "  {:<52} +{add:<5} −{del}\n",
-            render::truncate_cmd(path, 52)
-        ));
-    }
-
-    // Only when it actually groups. One line per file under a heading called "by
-    // area" is the same list twice.
-    let areas = by_area(&m.files);
-    if areas.len() > 1 && areas.len() < m.files.len() {
-        out.push_str("\nby area\n");
-        for (area, files, add, del) in areas {
-            out.push_str(&format!(
-                "  {:<24} {files} file{}, +{add} −{del}\n",
-                area,
-                if files == 1 { "" } else { "s" }
-            ));
-        }
-    }
-
-    out.push_str("\nacceptance\n");
-    if task.acceptance.is_empty() {
-        out.push_str("  none declared\n");
-    }
-    for a in &task.acceptance {
-        out.push_str(&format!("  ✓ {}\n", a.describe()));
-    }
+    // Every file, however many there are: a file in a repository has room for the
+    // whole list, which is the one thing it has over the message that asked for the
+    // signature. See [`proposed`] for the end of that bargain.
+    out.push_str(&changes(
+        &m.files,
+        usize::MAX,
+        "nothing — the branch held no changes against the target",
+    ));
+    // Ticked, because it landed: a merge is downstream of a passing verdict, so the
+    // mark is a statement about what happened rather than a list of conditions.
+    out.push_str(&acceptance(task, "✓"));
 
     out.push_str(&format!(
         "\nprovenance\n  branch     {branch}\n  merge      {}\n  target was {}\n",
         short(&m.sha),
         short(&m.was)
     ));
+    out
+}
+
+/// The same report, before the merge instead of after it — what a notification hands
+/// the person whose signature the merge is waiting on.
+///
+/// Every line of it comes from the functions [`merged`] uses, and that is the whole
+/// point: an operator approving from a phone and the repository they approved it into
+/// are reading one document, not two accounts of one change. A second renderer here
+/// would be free to drift, and the shape of that bug is a signature given against a
+/// summary the record then contradicts.
+///
+/// What is missing is exactly what a merge creates and nothing else: no merge sha, no
+/// `target was`, no `undo`, no `how`. Those are not omitted for brevity — they do not
+/// exist yet, and inventing a line for them is how a proposal starts reading like a
+/// receipt.
+///
+/// `most` bounds the file rows, because this one goes into an environment and out to a
+/// channel with a ceiling — it is the operator's own `max_files`, applied to the same
+/// list of paths for the same reason. The counts above the rows are never bounded, so a
+/// report showing ten rows of forty still says forty.
+#[must_use]
+pub(crate) fn proposed(
+    task: &Task,
+    plan: &Plan,
+    files: &[(String, u32, u32)],
+    most: usize,
+) -> String {
+    let mut out = String::from("summary\n");
+    out.push_str(&tally(
+        files.len(),
+        files.iter().map(|(_, a, _)| a).sum(),
+        files.iter().map(|(_, _, d)| d).sum(),
+    ));
+    out.push_str(&unblocks(task, plan));
+    out.push_str(&changes(
+        files,
+        most,
+        "nothing yet — the attempt has written no files",
+    ));
+    // Listed, not ticked. This report goes out on every wait that has a tree behind it,
+    // and one of those is `failed` — a `✓` beside the command that just refused the work
+    // would be the report contradicting the reason it was sent.
+    out.push_str(&acceptance(task, "·"));
+    out
+}
+
+/// How much this is: files, and what they gained and lost between them.
+///
+/// Given the three numbers rather than the list, because a merge already has them from
+/// git's own accounting of it and a proposal has to add them up — one line, told the
+/// same way, from whichever side knows.
+fn tally(count: usize, add: u32, del: u32) -> String {
+    format!(
+        "  {count} file{}, +{add} −{del}\n",
+        if count == 1 { "" } else { "s" }
+    )
+}
+
+/// What landing this lets start, and nothing at all when it lets nothing start.
+///
+/// The thing only wecode knows. git can say what a change touched; only the plan can
+/// say that three tasks have been sitting behind it.
+fn unblocks(task: &Task, plan: &Plan) -> String {
+    let waiting: Vec<String> = plan
+        .tasks()
+        .filter(|t| t.depends_on.contains(&task.id) && !t.status.is_closed())
+        .map(|t| t.id.to_string())
+        .collect();
+    if waiting.is_empty() {
+        return String::new();
+    }
+    format!("  unblocks   {}\n", waiting.join(", "))
+}
+
+/// The change itself: every file with its line counts, and the areas they fall in.
+///
+/// `most` rows at the outside, and the overflow is *named as an overflow* rather than
+/// dropped — the count in [`tally`] above is the true one, so a reader handed a cut list
+/// has to be able to tell that it was cut.
+fn changes(files: &[(String, u32, u32)], most: usize, empty: &str) -> String {
+    let mut out = String::from("\nwhat changed\n");
+    if files.is_empty() {
+        out.push_str(&format!("  {empty}\n"));
+    }
+    for (path, add, del) in files.iter().take(most) {
+        out.push_str(&format!(
+            "  {:<52} +{add:<5} −{del}\n",
+            render::truncate_cmd(path, 52)
+        ));
+    }
+    if let Some(rest) = files.len().checked_sub(most).filter(|n| *n > 0) {
+        out.push_str(&format!("  … and {rest} more\n"));
+    }
+
+    // Only when it actually groups. One line per file under a heading called "by
+    // area" is the same list twice. It survives a bound the list did not, which is
+    // most of why it is worth printing at all: a cut list of forty paths still says
+    // which corners of the tree they were in.
+    let areas = by_area(files);
+    if areas.len() > 1 && areas.len() < files.len() {
+        out.push_str("\nby area\n");
+        for (area, n, add, del) in areas {
+            out.push_str(&format!(
+                "  {:<24} {n} file{}, +{add} −{del}\n",
+                area,
+                if n == 1 { "" } else { "s" }
+            ));
+        }
+    }
+    out
+}
+
+/// What the work is held to, each line marked with `mark`.
+///
+/// The mark is the caller's because the same list means two things at two moments: a
+/// tick is a claim that these passed, and only a report written after a verdict may
+/// make it.
+fn acceptance(task: &Task, mark: &str) -> String {
+    let mut out = String::from("\nacceptance\n");
+    if task.acceptance.is_empty() {
+        out.push_str("  none declared\n");
+    }
+    for a in &task.acceptance {
+        out.push_str(&format!("  {mark} {}\n", a.describe()));
+    }
     out
 }
 
@@ -280,6 +374,132 @@ pub(crate) fn rolled_back(task: &Task, target: &str, merge: &str, revert: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wecode_core::{Measure, Project};
+
+    /// A task with two acceptance commands, and a plan with one task still queued
+    /// behind it.
+    fn work() -> (Task, Plan) {
+        let mut plan = Plan::new();
+        plan.add_project(Project::new("proj", "an objective sentence", "repo"))
+            .unwrap();
+        let task = Task::new("notify-report", "proj", "put the report in front")
+            .accepting(Measure::Command {
+                cmd: "cargo test --workspace".into(),
+                expect_status: 0,
+            })
+            .accepting(Measure::Command {
+                cmd: "bash scripts/max-lines.sh".into(),
+                expect_status: 0,
+            });
+        plan.add_task(task.clone()).unwrap();
+        plan.add_task(Task::new("next", "proj", "waiting on it").after("notify-report"))
+            .unwrap();
+        (task, plan)
+    }
+
+    /// Four files over three directories, so `by area` has something to group.
+    fn changed() -> Vec<(String, u32, u32)> {
+        vec![
+            ("crates/wecode-cli/src/notify.rs".to_string(), 120, 4),
+            ("crates/wecode-cli/src/record.rs".to_string(), 80, 6),
+            ("crates/wecode-cli/tests/notify.rs".to_string(), 40, 0),
+            ("docs/reference/config/notify.md".to_string(), 12, 3),
+        ]
+    }
+
+    #[test]
+    fn the_report_a_signature_is_asked_against_is_the_one_the_record_will_keep() {
+        // The whole point of rendering it here. An operator approving from a phone and
+        // the repository they approved it into have to be reading one document: a second
+        // renderer would be free to drift, and the shape of that bug is a signature
+        // given against a summary the record then contradicts.
+        let (task, plan) = work();
+        let before = proposed(&task, &plan, &changed(), usize::MAX);
+        let after = merged(
+            &task,
+            &plan,
+            "master",
+            "wecode/notify-report",
+            &git::Merged {
+                was: "c010c2bdb1".into(),
+                sha: "7fee207901".into(),
+                files: changed(),
+            },
+            true,
+            &Swept::Nothing,
+        );
+        for shared in [
+            "  4 files, +252 −13\n",
+            "  unblocks   next\n",
+            "crates/wecode-cli/src/notify.rs",
+            "\nby area\n",
+            "2 files, +200 −10\n",
+            "cargo test --workspace",
+        ] {
+            assert!(before.contains(shared), "missing from the proposal: {before}");
+            assert!(after.contains(shared), "missing from the record: {after}");
+        }
+    }
+
+    #[test]
+    fn a_proposal_carries_nothing_a_merge_has_not_done_yet() {
+        // Not brevity: those lines do not exist. A merge sha, the commit the target was
+        // on, the undo that reverses it and whether it was signed off are all facts a
+        // merge creates, and a proposal that printed a shape for them would read like a
+        // receipt for something nobody has decided.
+        let (task, plan) = work();
+        let before = proposed(&task, &plan, &changed(), usize::MAX);
+        for absent in ["MERGED", "undo", "provenance", "how  ", "target was"] {
+            assert!(!before.contains(absent), "{absent} is not a fact yet: {before}");
+        }
+    }
+
+    #[test]
+    fn what_a_proposal_must_satisfy_is_listed_and_not_ticked() {
+        // The report goes out on every wait with a tree behind it, and one of those is
+        // `failed`. A `✓` beside the command that just refused the work would have the
+        // report contradicting the reason it was sent — so the tick belongs to the
+        // record, which is written downstream of a verdict that passed.
+        let (task, plan) = work();
+        let before = proposed(&task, &plan, &changed(), usize::MAX);
+        assert!(before.contains("  · `cargo test --workspace` exits 0"), "{before}");
+        assert!(!before.contains('✓'), "a proposal has passed nothing yet: {before}");
+    }
+
+    #[test]
+    fn a_file_list_cut_to_fit_a_message_says_that_it_was_cut() {
+        // The same honesty the count beside the names has, and the same reason: a reader
+        // handed part of a list must be able to tell it is a part. The tally above is the
+        // true number either way, and `by area` survives the bound — which is most of why
+        // it is worth printing, since a cut list of paths still says where they fell.
+        let (task, plan) = work();
+        let cut = proposed(&task, &plan, &changed(), 1);
+        assert!(cut.contains("  4 files, +252 −13\n"), "{cut}");
+        assert!(cut.contains("crates/wecode-cli/src/notify.rs"), "{cut}");
+        assert!(cut.contains("  … and 3 more\n"), "{cut}");
+        assert!(!cut.contains("docs/reference/config/notify.md"), "{cut}");
+        assert!(cut.contains("\nby area\n"), "{cut}");
+        assert!(cut.contains("2 files, +200 −10\n"), "where they fell: {cut}");
+
+        // `max_files = 0` is legal and means the count alone. The rows go; nothing
+        // claims there were none.
+        let none = proposed(&task, &plan, &changed(), 0);
+        assert!(none.contains("  4 files, +252 −13\n"), "{none}");
+        assert!(none.contains("  … and 4 more\n"), "{none}");
+        assert!(!none.contains("crates/wecode-cli/src/notify.rs"), "{none}");
+    }
+
+    #[test]
+    fn a_tree_nothing_has_been_written_in_yet_says_so_in_words() {
+        // Distinct from *has not started*, which is the notification sending no report
+        // at all. This is an attempt that ran and produced nothing, which is a thing a
+        // person is genuinely being woken up to decide about.
+        let (task, plan) = work();
+        let empty = proposed(&task, &plan, &[], usize::MAX);
+        assert!(empty.contains("  0 files, +0 −0\n"), "{empty}");
+        assert!(empty.contains("the attempt has written no files"), "{empty}");
+        assert!(!empty.contains("… and"), "nothing was held back: {empty}");
+    }
 
     #[test]
     fn the_record_sits_beside_the_design_the_gate_looks_for() {
