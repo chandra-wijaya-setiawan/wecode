@@ -62,3 +62,12 @@ One feature, two proofs it is needed. The asks compose rather than compete:
   **Complete** is the signature, **Hold** is a recorded refusal, optional acceptance
   probes run on Complete, and the digest carries untapped ones as reminders.
 
+
+## Review of the landed feature — one inch short
+
+Delivered: `Doer` on the task (agent|person, parsing "manual" and "human" as the words
+an operator reaches for), the scheduler promoting person-tasks to blocked-on-human
+instead of dispatching, render and admission aware. Missing: the door. No `task add`
+flag sets the doer, so no operator can create the thing everything else handles.
+The follow-up delivers exactly `--by person` (accepting manual/human), shown in help
+beside --kind, recorded like any declaration. Nothing else.
