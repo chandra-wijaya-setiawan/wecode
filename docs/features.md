@@ -525,6 +525,25 @@ stopping to ask, and a subprocess CLI that has paused generally cannot be resume
 anyway. Both remain in the vocabulary because the A2A mapping needs them and the board
 renders them.
 
+## A manual task cannot yet be created or signed from the command line
+
+`Task::doer` says whether a person or an agent does the work, and everything that reads
+it honours it: the tick sends an unblocked manual task to `needs-approval` instead of
+into the queue, `dispatchable` and `prepare` both refuse to hand one to an agent, the
+gate stops asking it for a scope, a budget and an executable measure, and the views say
+`by hand` and `yours to do` rather than pretending it is ordinary work.
+
+Three pieces of the path around it are missing. The `tasks` table has a column for a
+kind and none for a doer, so a plan read back out of `wecode.db` reads `agent` for
+everything. `wecode task add` has no flag that sets it. And `wecode approve` asks
+`task.kind.needs_a_signature()` — true of a design, false of a manual chore — so it
+refuses the signature that is meant to be the only thing that advances one.
+
+The breakage is in the safe direction: work stops in front of a person and no agent is
+handed a credential. But until the column, the flag and the doer-aware signature land, a
+manual task exists in the model and not on the command line. See
+[wecode/manual-task-kind/design.md](wecode/manual-task-kind/design.md).
+
 ## A plan more than two levels deep may not load again
 
 `Plan` puts no limit on how deep the is-part-of tree goes, and every view now draws it

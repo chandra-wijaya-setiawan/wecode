@@ -277,7 +277,7 @@ pub(crate) fn task_vitals(plan: &Plan, t: &Task, l: &Ledger, gates: &DesignGates
     push_common(&mut needs, c.alarms, defects, over, stalled, c.denials);
     let mut awaiting = usize::from(t.status.needs_a_human());
     if t.status.needs_a_human() {
-        needs.push(t.status.as_str().to_string());
+        needs.push(crate::render::waiting_word(t));
     }
     if t.status == TaskStatus::Draft && defects == 0 && t.assignee.is_none() {
         needs.push("unassigned".to_string());

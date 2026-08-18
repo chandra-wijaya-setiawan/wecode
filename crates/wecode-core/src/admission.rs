@@ -247,24 +247,22 @@ pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defec
     let mut out = Vec::new();
     check_statement(&t.title, &mut out);
 
-    if t.acceptance.is_empty() {
+    if t.is_dispatched() && t.acceptance.is_empty() {
         out.push(Defect::MeasureMissing);
-    } else if !t.has_executable_acceptance() {
+    } else if t.is_dispatched() && !t.has_executable_acceptance() {
         out.push(Defect::MeasureNotExecutable);
     }
 
-    if t.kind.requires_write_scope() {
+    if t.is_dispatched() && t.kind.requires_write_scope() {
         if t.scope.write.is_empty() {
             out.push(Defect::ScopeMissing);
-        } else {
-            for glob in &t.scope.write {
-                if is_too_broad(glob) {
-                    out.push(Defect::ScopeTooBroad { glob: glob.clone() });
-                }
-            }
+        }
+        // No `else`: an empty list has nothing to walk, so the two are not alternatives.
+        for glob in t.scope.write.iter().filter(|g| is_too_broad(g)) {
+            out.push(Defect::ScopeTooBroad { glob: glob.clone() });
         }
     }
-    if !t.budget.is_set() {
+    if t.is_dispatched() && !t.budget.is_set() {
         out.push(Defect::BudgetMissing);
     }
 
@@ -685,7 +683,7 @@ pub fn advise(t: &Task, plan: &Plan, expected: &Expected) -> Vec<Divergence> {
 mod tests {
     use super::*;
     use crate::common::{Budget, Cmp, Measure, Scope, TaskStatus};
-    use crate::task::TaskKind;
+    use crate::task::{Doer, TaskKind};
 
     fn repos() -> Vec<String> {
         vec!["wecode".to_string()]
@@ -720,18 +718,24 @@ mod tests {
 
     #[test]
     fn a_well_formed_project_and_task_admit() {
-        let empty = Plan::new();
-        assert!(
-            check_project(&good_project(), &empty, &repos()).is_empty(),
-            "{:?}",
-            check_project(&good_project(), &empty, &repos())
-        );
-        let plan = seeded();
-        assert!(
-            check_task(&good_task(), &plan, &[]).is_empty(),
-            "{:?}",
-            check_task(&good_task(), &plan, &[])
-        );
+        let d = check_project(&good_project(), &Plan::new(), &repos());
+        assert!(d.is_empty(), "{d:?}");
+        let d = check_task(&good_task(), &seeded(), &[]);
+        assert!(d.is_empty(), "{d:?}");
+    }
+
+    #[test]
+    fn a_manual_task_is_asked_for_none_of_what_a_dispatch_needs() {
+        // A scope, a budget and a command over the result all describe a dispatch that
+        // never happens. The title does not, and is held to the standard every one is.
+        let mut t = good_task().done_by(Doer::Person);
+        t.scope = Scope::default();
+        t.budget = Budget::default();
+        t.acceptance.clear();
+        let d = check_task(&t, &seeded(), &[]);
+        assert!(d.is_empty(), "{d:?}");
+        t.title = "sort out the tokens and improve the setup".into();
+        assert!(!check_task(&t, &seeded(), &[]).is_empty());
     }
 
     #[test]
@@ -750,11 +754,9 @@ mod tests {
     fn a_compound_title_is_caught() {
         let mut t = good_task();
         t.title = "write the cache and rewrite the client".into();
-        assert!(
-            check_task(&t, &seeded(), &[])
-                .iter()
-                .any(|d| matches!(d, Defect::StatementCompound { .. }))
-        );
+        let d = check_task(&t, &seeded(), &[]);
+        let compound = |x: &Defect| matches!(x, Defect::StatementCompound { .. });
+        assert!(d.iter().any(compound), "{d:?}");
     }
 
     #[test]
@@ -813,11 +815,8 @@ mod tests {
 
     #[test]
     fn a_missing_dependency_is_reported() {
-        let t = good_task().after("ghost");
-        assert!(
-            check_task(&t, &seeded(), &[])
-                .contains(&Defect::DependencyMissing { on: "ghost".into() })
-        );
+        let d = check_task(&good_task().after("ghost"), &seeded(), &[]);
+        assert!(d.contains(&Defect::DependencyMissing { on: "ghost".into() }));
     }
 
     #[test]
