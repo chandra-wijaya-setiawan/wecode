@@ -4,7 +4,7 @@ One file per workspace, `wecode.db`. Everything machine-written lives here; ever
 hand-edited lives in `company.toml` (see [config/company.md](config/company.md)), because a binary blob
 cannot be diffed, reviewed or opened in an editor.
 
-Currently **schema version 7**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
+Currently **schema version 10**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
 
 ## Shape
 
@@ -93,6 +93,13 @@ where the only things without handles are the things already in it — which is 
 workspace that has been used. Projects first, then tasks, each in id order, so the same
 file restored on another machine is numbered the same way.
 
+The 9→10 step adds `tasks.doer` with `DEFAULT 'agent'`, and that default is a record
+rather than a guess — the same distinction 8→9 turns on, read from the other side. Until
+this column existed there was no way to say *a person does this*: the flag that says it
+refused the task outright instead of recording half of it. So every task already in the
+file is an agent's, writing that down claims nothing about the past, and it is the reading
+that leaves the scheduler doing tomorrow exactly what it did yesterday.
+
 ## Full DDL
 
 The schema as it actually is, extracted from `crates/wecode-store/src/schema.rs`:
@@ -115,10 +122,24 @@ CREATE TABLE tasks (
     id            TEXT PRIMARY KEY,
     project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     kind          TEXT NOT NULL,
+    -- 'agent' | 'person'. Who does the work, which is a different axis from what the
+    -- work is: provisioning a bucket by hand is still a chore. Its own column for
+    -- exactly that reason, rather than another `kind`.
+    --
+    -- The one column here that authority depends on. A task read back as an agent's is
+    -- one the tick promotes and dispatches, so a person's task losing this on a restart
+    -- hands an agent the step that exists to keep the credentials away from it. Hence
+    -- `NOT NULL`: absent must not be able to mean `agent` by accident, only by default.
+    doer          TEXT NOT NULL DEFAULT 'agent',
     title         TEXT NOT NULL,
     -- hierarchy: is part of. At most one parent, hence a column.
     parent_id     TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     status        TEXT NOT NULL,
+    -- Filed away by the operator, with everything that is part of it. Display only,
+    -- and here that is the whole of it: unlike `projects.archived`, nothing in the
+    -- domain reads this, so an archived task is still dispatchable. The command that
+    -- sets it is what refuses to hide work that could still move.
+    archived      INTEGER NOT NULL DEFAULT 0,
     assignee      TEXT,               -- a [[posts]] name; checked in code
     budget_tokens INTEGER,
     budget_wall   INTEGER
@@ -305,6 +326,42 @@ CREATE TABLE short_numbers (
     UNIQUE (kind, id)
 ) STRICT;
 ```
+
+## Who does the work, and why that is a column
+
+`tasks.doer` holds `agent` or `person`. It is the only column on `tasks` that authority
+depends on, and it is the reason the table has two words for one task where it could have
+had one.
+
+It is not a `kind`. The kind says what the work *is* and the doer says whose hands are on
+it, and the two vary independently: provisioning a bucket by hand is a chore, and so is
+rotating a key by hand. Folding them together would buy one column and lose which chore
+it was — the same conflation `parent_id` and `task_depends_on` are kept apart to avoid,
+one column over.
+
+The column exists because a plan is read back out of SQLite on every tick. Everything
+above the store already reads the doer: admission stops demanding the write scope, budget
+and acceptance that describe a dispatch, since a person's task has none; the scheduler
+stops such a task on the operator instead of launching anything; `show`, the tree and the
+board all say so. All of that is decided from the loaded plan, so before this column a
+manual task read back as an agent's on the next tick — admitted with no scope, no budget
+and no acceptance, promoted to `ready`, and handed to precisely the agent the declaration
+existed to keep away from the work, while the operator held a receipt saying a person
+would do it. `wecode task add --by person` refused the task outright rather than record
+half of it, which was the safe answer and not a usable one. The column is what makes it
+recordable; the refusal in `commands/plan/task.rs` and the message it prints about a
+missing column are stale from here, and come out with the flag's own door.
+
+A word this build does not recognise is **corruption, not a default**. Every other
+enum-shaped column read out of `tasks` is parsed the same strict way, but here falling
+back would be actively unsafe: the unreadable word might be the one that says *not an
+agent*, and guessing `agent` dispatches the work the row was written to protect. The whole
+plan fails to load instead, which is the loud version of the same answer.
+
+Nothing narrows the write. `set_task_status`, `set_task_budget`, `set_task_shape` and
+`set_task_archived` leave the doer alone, so a person's task keeps its doer through
+promotion, signature, reshaping and filing — and the restart that reads it back is usually
+the one right after a status change.
 
 ## A number is a name, not a position
 

@@ -17,8 +17,9 @@ use rusqlite::Connection;
 /// `task_executions.spent_tokens`, once something wrote it. 5 adds `worktrees`.
 /// 6 adds `inbox_cursor`. 7 adds `short_numbers`. 8 adds `tasks.archived`.
 /// 9 adds `task_executions.replayed_tokens`, on the same rule as 4: the count was
-/// being read off the agent's output and printed, and nothing kept it.
-pub const VERSION: i64 = 9;
+/// being read off the agent's output and printed, and nothing kept it. 10 adds
+/// `tasks.doer`, without which a manual task read as an agent's on the next tick.
+pub const VERSION: i64 = 10;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -37,6 +38,15 @@ CREATE TABLE tasks (
     id            TEXT PRIMARY KEY,
     project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     kind          TEXT NOT NULL,
+    -- 'agent' | 'person'. Who does the work, which is a different axis from what the
+    -- work is: provisioning a bucket by hand is still a chore. Its own column for
+    -- exactly that reason, rather than another `kind`.
+    --
+    -- The one column here that authority depends on. A task read back as an agent's is
+    -- one the tick promotes and dispatches, so a person's task losing this on a restart
+    -- hands an agent the step that exists to keep the credentials away from it. Hence
+    -- `NOT NULL`: absent must not be able to mean `agent` by accident, only by default.
+    doer          TEXT NOT NULL DEFAULT 'agent',
     title         TEXT NOT NULL,
     -- hierarchy: is part of. At most one parent, hence a column.
     parent_id     TEXT REFERENCES tasks(id) ON DELETE SET NULL,
@@ -392,6 +402,19 @@ const UPGRADES: &[(i64, &str)] = &[
         8,
         "ALTER TABLE task_executions ADD COLUMN replayed_tokens INTEGER",
     ),
+    // Every task in the file is an agent's, and here that is a fact rather than a
+    // default standing in for one: until this column existed there was no way to say
+    // otherwise, and the command that says it refused the task outright. So `DEFAULT
+    // 'agent'` records what happened, unlike 8→9 above, where the same shape of default
+    // would have invented a figure.
+    //
+    // The default also has to be there for the `NOT NULL` to be addable at all, which
+    // is a smaller reason but points the same way: the safe reading of a task written
+    // before anyone could declare a person is that no person was declared.
+    (
+        9,
+        "ALTER TABLE tasks ADD COLUMN doer TEXT NOT NULL DEFAULT 'agent'",
+    ),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -535,6 +558,10 @@ mod tests {
             )
             .expect("task_executions.replayed_tokens exists after 8→9");
         assert_eq!(replayed, 0);
+        let doers: i64 = c
+            .query_row("SELECT count(doer) FROM tasks", [], |r| r.get(0))
+            .expect("tasks.doer exists after 9→10");
+        assert_eq!(doers, 0);
     }
 
     #[test]
@@ -550,6 +577,7 @@ mod tests {
             "DROP TABLE inbox_cursor;
              DROP TABLE short_numbers;
              ALTER TABLE tasks DROP COLUMN archived;
+             ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
         )
         .unwrap();
@@ -575,6 +603,7 @@ mod tests {
              DROP TABLE inbox_cursor;
              DROP TABLE short_numbers;
              ALTER TABLE tasks DROP COLUMN archived;
+             ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
         )
         .unwrap();
@@ -609,6 +638,7 @@ mod tests {
         c.execute_batch(
             "DROP TABLE short_numbers;
              ALTER TABLE tasks DROP COLUMN archived;
+             ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
         )
         .unwrap();
@@ -653,6 +683,7 @@ mod tests {
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
             "ALTER TABLE tasks DROP COLUMN archived;
+             ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
         )
         .unwrap();
@@ -687,8 +718,11 @@ mod tests {
         // exactly the claim a nullable column is here to avoid making.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("ALTER TABLE task_executions DROP COLUMN replayed_tokens")
-            .unwrap();
+        c.execute_batch(
+            "ALTER TABLE task_executions DROP COLUMN replayed_tokens;
+             ALTER TABLE tasks DROP COLUMN doer;",
+        )
+        .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
              VALUES ('p','wecode','an objective','active');
@@ -712,6 +746,59 @@ mod tests {
             .expect("task_executions.replayed_tokens exists");
         assert_eq!(spent, Some(90), "what it added survived");
         assert_eq!(replayed, None, "what it re-read was never recorded");
+    }
+
+    #[test]
+    fn a_database_that_predates_the_doer_reads_its_tasks_as_an_agents_work() {
+        // The upgrade a workspace in use takes to reach this build, and the one step
+        // here where the default is the *safe* reading as well as the honest one. A task
+        // written before this column existed cannot have declared a person — the command
+        // that says so refused the task outright rather than recording half of it — so
+        // `agent` is what happened, and it is also what leaves the tick doing tomorrow
+        // exactly what it did yesterday.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("ALTER TABLE tasks DROP COLUMN doer")
+            .unwrap();
+        c.execute_batch(
+            "INSERT INTO projects (id, repo, objective, status)
+             VALUES ('p','wecode','an objective','active');
+             INSERT INTO tasks (id, project_id, kind, title, status)
+             VALUES ('rotate','p','chore','rotate the signing key','done');",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 9i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let (title, doer): (String, String) = c
+            .query_row(
+                "SELECT title, doer FROM tasks WHERE id = 'rotate'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("tasks.doer exists");
+        assert_eq!(title, "rotate the signing key", "the plan survived");
+        assert_eq!(doer, "agent", "nobody is assumed to have been asked");
+    }
+
+    #[test]
+    fn a_task_saying_nothing_about_its_doer_is_an_agents() {
+        // The column's default read straight off a fresh install, because that is what
+        // every raw insert in the rest of this file relies on — and what the row for a
+        // task created before the flag existed will read as forever.
+        let c = db();
+        seed_project(&c);
+        c.execute(
+            "INSERT INTO tasks (id, project_id, kind, title, status)
+             VALUES ('a','p','feature','x','draft')",
+            [],
+        )
+        .unwrap();
+        let doer: String = c
+            .query_row("SELECT doer FROM tasks WHERE id = 'a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(doer, "agent");
     }
 
     #[test]
@@ -744,7 +831,8 @@ mod tests {
              DROP TABLE worktrees;
              DROP TABLE inbox_cursor;
              DROP TABLE short_numbers;
-             ALTER TABLE tasks DROP COLUMN archived;",
+             ALTER TABLE tasks DROP COLUMN archived;
+             ALTER TABLE tasks DROP COLUMN doer;",
         )
         .unwrap();
         c.execute_batch(
