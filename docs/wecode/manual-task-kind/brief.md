@@ -48,3 +48,21 @@ No separate nag machinery.
 - Not delegation to arbitrary humans: the solo profile has one user; posts already
   model more when they come.
 - Not forms, not multi-step wizards in chat. One task, one Complete.
+
+## Convergence note
+
+Two sessions asked for this independently: this brief (claude-code, from the
+Travelpayouts-token dependency) and task #224 manual-task-kind (opencode, from the
+cloud-credentials work, where "a human must create the resource" is the same shape).
+One feature, two proofs it is needed. The asks compose rather than compete:
+
+- #224 contributes the state: a kind that reaches **blocked-on-human** instead of
+  dispatching, and advances only on an operator signature.
+- this brief contributes the surface: the steps travel in the Telegram message,
+  **Complete** is the signature, **Hold** is a recorded refusal, optional acceptance
+  probes run on Complete, and the digest carries untapped ones as reminders.
+
+One correction to #224 as filed: its write scope names
+`crates/wecode-cli/src/scheduler.rs`, which does not exist in this tree — likely
+drawn from a stale binary's-eye view. The design step should name the real dispatch
+path (`crates/wecode-cli/src/commands/exec.rs`) and the telegram/notify surface.
