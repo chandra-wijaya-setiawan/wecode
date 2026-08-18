@@ -276,7 +276,12 @@ fn a_wait_for_permission_to_start_has_nothing_to_show_yet() {
     org.run(&["loop", "--once"])
         .assert_ok("one pass")
         .assert_contains("⏸ t needs your signature");
-    assert_eq!(announcements(&log), vec!["signature [] [] []"]);
+    // The digest of that same pass is in front of it, and empty in the same fields for
+    // the same reason: nothing has run, so there is nothing either could show.
+    assert_eq!(
+        announcements(&log),
+        vec!["digest [] [] []", "signature [] [] []"]
+    );
 }
 
 #[test]
@@ -308,7 +313,12 @@ fn the_gate_names_the_signature_it_is_holding_out_for() {
     org.run(&["loop", "--once"])
         .assert_ok("one pass")
         .assert_contains("⏸ t needs your signature");
-    assert_eq!(announcements(&log), vec!["signature [admission] [you]"]);
+    // The pass's digest first — it names no single task, so it offers no signature of
+    // its own — and then the wait itself, which does.
+    assert_eq!(
+        announcements(&log),
+        vec!["digest [] []", "signature [admission] [you]"]
+    );
 }
 
 #[test]
@@ -375,7 +385,89 @@ fn the_loop_announces_a_task_it_is_holding_for_a_signature() {
     org.run(&["loop", "--once"])
         .assert_ok("one pass")
         .assert_contains("⏸ t needs your signature");
-    assert_eq!(announcements(&log), vec!["t signature ready"]);
+    // With the pass's digest in front of it, which is about the queue and so names no
+    // task, no reason of its own, and no status.
+    assert_eq!(announcements(&log), vec!["digest", "t signature ready"]);
+}
+
+// ---------------------------------------------------------------- digest ------
+
+#[test]
+fn the_loop_sends_the_standing_condition_on_the_rhythm_the_config_promises() {
+    // The half an edge cannot cover. A wait is announced once, as it begins; an hour
+    // later nothing has said so again, and the operator is not standing at the terminal
+    // the loop prints its pauses to. `[attention] digest_interval_mins` has promised a
+    // rhythm since the first company.toml, and until now nothing kept it.
+    let org = Org::new("notify-digest", "solo");
+    org.seed();
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("stop it for a person");
+    // Hooked after the wait began, so what reaches the log is the digest by itself.
+    let log = notified(&org, "echo [$WECODE_WAITING_FOR] \\\"$WECODE_DIGEST\\\"");
+
+    org.run(&["loop", "--once"]).assert_ok("one pass");
+    let said = announcements(&log).join("\n");
+    // A fifth word, not one of the four: this message is about no single task, and a
+    // hook that branches on the reason is handed one it does not know rather than one
+    // that is wrong.
+    assert!(said.contains("[digest]"), "not marked as a digest: {said}");
+    assert!(said.contains("1 waiting on you"), "no tally: {said}");
+    assert!(said.contains("cache-tests"), "which work is it: {said}");
+    // Answerable from where it arrives, which is the whole point of sending it: the
+    // number to name and the word that goes after `approve`.
+    assert!(said.contains("approve merge #2"), "not answerable: {said}");
+}
+
+#[test]
+fn the_digest_carries_the_dispatch_gate_beside_the_statuses() {
+    // Both halves of a stopped queue, because they are one thing from where the operator
+    // stands. The gate holds a task that is `ready` — no status says it is waiting — so a
+    // digest built from the board alone would report an empty queue while nothing moved.
+    let org = signs_first("notify-digest-gate", "echo done >> src/app.txt");
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+    let log = notified(&org, "echo [$WECODE_WAITING_FOR] \\\"$WECODE_DIGEST\\\"");
+
+    org.run(&["loop", "--once"])
+        .assert_ok("one pass")
+        .assert_contains("⏸ t needs your signature");
+    let said = announcements(&log).join("\n");
+    assert!(said.contains("[digest]"), "no digest: {said}");
+    assert!(said.contains("t "), "the task is not in it: {said}");
+    assert!(said.contains("approve admission #"), "not answerable: {said}");
+    // And the wait's own announcement still went out beside it. The digest is the state
+    // and does not replace the edge — a task that stops at 02:14 still says so at 02:14.
+    assert!(said.contains("[signature]"), "the edge is missing: {said}");
+}
+
+#[test]
+fn a_digest_is_not_sent_when_nothing_is_standing() {
+    // A message that arrived to report an empty queue is an interruption spent saying
+    // there was no reason to interrupt, which is how a notifier gets switched off.
+    let org = Org::new("notify-digest-quiet", "solo");
+    org.seed();
+    let log = notified(&org, "echo $WECODE_WAITING_FOR");
+
+    org.run(&["loop", "--once"]).assert_ok("one pass");
+    assert!(announcements(&log).is_empty(), "{:?}", announcements(&log));
+}
+
+#[test]
+fn a_zero_interval_is_a_digest_switched_off() {
+    // `0` cannot mean one every pass: the loop passes every five seconds, and a
+    // notification that repeats until it is silenced is the failure this file is about.
+    let org = Org::new("notify-digest-off", "solo");
+    org.seed();
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("stop it for a person");
+    let log = notified(&org, "echo $WECODE_WAITING_FOR");
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    let off = text.replace("digest_interval_mins = 20", "digest_interval_mins = 0");
+    assert_ne!(off, text, "the template's interval was not replaced");
+    std::fs::write(&conf, off).unwrap();
+
+    org.run(&["loop", "--once"]).assert_ok("one pass");
+    assert!(announcements(&log).is_empty(), "{:?}", announcements(&log));
 }
 
 #[test]

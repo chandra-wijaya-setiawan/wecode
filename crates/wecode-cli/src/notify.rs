@@ -14,9 +14,10 @@
 //! Four things are load-bearing:
 //!
 //! - **The edge, not the state.** It fires on the *transition* into waiting, so a task
-//!   that has been waiting a week fires once rather than every tick. The loop already
-//!   prints the standing condition every pass; a notifier that did the same would be
-//!   the thing you turn off.
+//!   that has been waiting a week fires once rather than every tick — a notifier saying
+//!   so every five seconds is the thing you turn off. The state goes out on its own clock
+//!   instead, as one message about everything standing: [`on_digest`], keeping the rhythm
+//!   `[attention] digest_interval_mins` has always promised.
 //! - **It cannot fail the work.** A hook that exits non-zero, hangs, or does not exist
 //!   is reported and stepped over. A task is not less finished because a notification
 //!   did not arrive, and a supervisor that fell over telling you about a success would
@@ -109,6 +110,10 @@ const QUOTE: usize = 120;
 /// and the count beside it stays true either way; a diff is not shorter for being cut,
 /// it is only less of a diff. A hook that wants all of it is handed the tree.
 const DIFF: usize = 4000;
+
+/// How many waits a digest names. The rest are counted and not listed, the bargain the
+/// file list makes: the tally above them is never bounded, so twenty of forty says forty.
+const STANDING: usize = 20;
 
 /// Why a task is waiting on a person.
 ///
@@ -304,6 +309,57 @@ pub(crate) fn rehearse(company: &Company, org: &Path) -> String {
         TaskStatus::NeedsApproval,
         Waiting::Approval,
     )
+}
+
+/// Announces everything standing in front of a person at once, on [`Rhythm`]'s clock.
+///
+/// The counterpart to [`fire`] and deliberately not a repeat of it. An announcement is an
+/// edge: it fires as a wait begins and never again, which keeps a notifier worth leaving
+/// on and leaves the wait that began at 02:14 unmentioned ever after. This is the state,
+/// both halves of it — the tasks whose status stopped for somebody, and the ones the
+/// dispatch gate holds, which have no status to be read off the board. Each line carries
+/// the words that end that wait, from the same function that will judge them, so a digest
+/// cannot offer what the channel behind it refuses.
+///
+/// It is about no single task and says so, in a fifth `WECODE_WAITING_FOR` rather than one
+/// of the four: a message about five waits carrying one of their numbers is one a bare
+/// `approve` answers wrongly, so the number to reply with is on each line instead. And
+/// nothing is sent when nothing is standing — a digest of an empty queue is an
+/// interruption spent saying there was no reason to interrupt.
+pub(crate) fn on_digest(company: &Company, org: &Path, stuck: &[&Task], gated: &[&Task]) -> String {
+    let stopped = stuck.iter().filter_map(|t| Waiting::of(t.status).map(|w| (*t, w)));
+    let waits: Vec<(&Task, Waiting)> = stopped
+        .chain(gated.iter().map(|t| (*t, Waiting::Signature)))
+        .collect();
+    // No hook, or nothing standing in front of anybody: either way, no message.
+    let Some(command) = company.notify.command.as_deref().filter(|_| !waits.is_empty()) else {
+        return String::new();
+    };
+    let mut body = format!("{} waiting on you\n\n", waits.len());
+    for (task, why) in waits.iter().take(STANDING) {
+        // What a reply is typed against: four characters against a slug spelled exactly.
+        let reply = task.number.map_or_else(|| task.id.to_string(), |n| n.to_string());
+        let ends = signing(task, task.status, *why).map_or_else(
+            || "nothing to sign".to_string(),
+            |kind| format!("approve {} {reply}", kind.as_str()),
+        );
+        let row = format!("{:<26} {:<10}", task.id.as_str(), why.as_str());
+        body.push_str(&format!("  {reply:<6} {row} {ends}\n"));
+    }
+    if let Some(rest) = waits.len().checked_sub(STANDING).filter(|n| *n > 0) {
+        body.push_str(&format!("  … and {rest} more\n"));
+    }
+
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(org)
+        .env("WECODE_ORG", org)
+        .env("WECODE_COMPANY", &company.name)
+        .env("WECODE_WAITING_FOR", "digest")
+        .env("WECODE_DIGEST", &body)
+        .stdin(Stdio::null());
+    spoke(company, command, &mut cmd)
 }
 
 /// The task's short number for the hook's environment, or empty when it has none.
@@ -551,20 +607,9 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
         return String::new();
     };
 
-    // The same charter check the agent launch line gets, from the same function, so
-    // the two cannot drift apart. An invariant outranks every grant, and a config is
-    // not an exception: `never_run` is the operator telling themselves no, and a
-    // notify hook is one more place the operator writes a command line.
-    if let Some(pattern) = crate::commands::exec::forbidden_by_charter(company, command) {
-        return warn(&format!(
-            "`{command}` is forbidden by the charter: never_run {pattern}"
-        ));
-    }
-
-    // Asked for after the two refusals above, so a workspace with no hook — and a hook
-    // the charter forbids — pays nothing for it. Resolved here rather than passed in by
-    // the caller because there is no call site that already holds it: every other one is
-    // a status write, and a signature wait is not a status write at all.
+    // Asked for after the refusal above, so a workspace with no hook pays nothing for it.
+    // Resolved here rather than passed in because no call site already holds it: every
+    // other one is a status write, and a signature wait is not a status write at all.
     let made = Produced::of(org, task, company.notify.max_files);
     // What this wait can actually be answered with, and by whom. Resolved here for the
     // reason `made` is: it is a fact about the wait rather than about the status write,
@@ -640,6 +685,21 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
             made.as_ref().map_or("", |m| m.report.as_str()),
         )
         .stdin(Stdio::null());
+    spoke(company, command, &mut cmd)
+}
+
+/// Runs the hook and says what came of it: nothing when it ran clean, one line when it
+/// did not. Shared by the two things there are to say — one wait beginning, and the
+/// standing list of every wait that already has — so a digest is refused, bounded, killed
+/// and quoted back under exactly the rules an announcement is. The charter check is here
+/// for that reason, at the point the line is run: the same check the agent launch line
+/// gets, because an invariant outranks every grant and a config is no exception.
+fn spoke(company: &Company, command: &str, cmd: &mut Command) -> String {
+    if let Some(pattern) = crate::commands::exec::forbidden_by_charter(company, command) {
+        return warn(&format!(
+            "`{command}` is forbidden by the charter: never_run {pattern}"
+        ));
+    }
 
     // Caught rather than inherited. Letting a notifier write straight into the loop's
     // output interleaved chatter with the record of the work and made both unreadable;
@@ -850,6 +910,37 @@ impl Announced {
     /// rejected back into the queue is announced again rather than silently held.
     pub(crate) fn keep_only(&mut self, still: &[TaskId]) {
         self.0.retain(|id| still.contains(id));
+    }
+}
+
+/// The digest's clock: `[attention] digest_interval_mins` is the promise, this is what
+/// keeps it. Held by the loop, like [`Announced`] and for the same reason — nothing in
+/// the database is the edge of a rhythm. It starts **due**, so a loop just started says
+/// what it is holding rather than waiting an interval out first. `0` is off, not one
+/// every pass five seconds apart, which is the notifier an operator turns off.
+#[derive(Debug)]
+pub(crate) struct Rhythm {
+    every: Duration,
+    next: Option<Instant>,
+}
+
+impl Rhythm {
+    pub(crate) fn of(company: &Company) -> Self {
+        Self {
+            every: Duration::from_secs(company.attention.digest_interval_mins.saturating_mul(60)),
+            next: None,
+        }
+    }
+
+    /// Whether the beat has come round, taking it if it has — sent or not, because the
+    /// rhythm belongs to the clock and not to the work: an interval that passed over an
+    /// empty queue leaves nothing primed to fire the second something stops.
+    pub(crate) fn due(&mut self, now: Instant) -> bool {
+        if self.every.is_zero() || self.next.is_some_and(|at| now < at) {
+            return false;
+        }
+        self.next = Some(now + self.every);
+        true
     }
 }
 
@@ -1392,5 +1483,18 @@ mod tests {
         seen.keep_only(std::slice::from_ref(&b));
         assert!(!seen.first_time(&b), "b never stopped waiting");
         assert!(seen.first_time(&a), "a is a new wait, not the old one");
+    }
+
+    #[test]
+    fn the_digest_keeps_the_interval_and_not_the_pass() {
+        // `wecode loop` passes every five seconds, and a digest per pass is the notifier
+        // an operator silences within a day.
+        let (mut r, t) = (Rhythm::of(&company("")), Instant::now());
+        assert_eq!(r.every, Duration::from_secs(20 * 60), "the default, in minutes");
+        assert!(r.due(t), "a loop just started says what it holds");
+        assert!(!r.due(t + Duration::from_secs(19 * 60)), "not yet");
+        assert!(r.due(t + Duration::from_secs(20 * 60)), "the next beat");
+        r.every = Duration::ZERO;
+        assert!(!r.due(t + Duration::from_secs(99 * 60)), "off, not every pass");
     }
 }
