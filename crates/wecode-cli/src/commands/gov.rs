@@ -59,7 +59,7 @@ pub(crate) fn guard(a: &Args) -> Res {
 
 /// A holder signs off on something the Broker gated.
 pub(crate) fn approve(a: &Args) -> Res {
-    let (store, company) = open(a)?;
+    let (ws, store, company) = open_full(a)?;
     let want = require(a.cmd(1), "what to approve")?;
     let kind = ActionKind::parse(want).ok_or_else(|| {
         format!(
@@ -83,7 +83,7 @@ pub(crate) fn approve(a: &Args) -> Res {
     let who = actor(a, &store, &company)?;
     let on = attribution(a, &plan);
 
-    sign(
+    let mut out = sign(
         &store,
         &company,
         &plan,
@@ -94,7 +94,21 @@ pub(crate) fn approve(a: &Args) -> Res {
             note: a.cmd(2),
             on,
         },
-    )
+    )?;
+
+    // The signature is given; the message that asked for it is still on a phone, still
+    // carrying *Approve*. Answered here rather than inside `sign`, which the chat's own
+    // path also calls: that path answers the tap it read, with the button's address on it,
+    // and one function saying it under both would say it twice about a tap and with half
+    // an address about this.
+    //
+    // Only for a signature about a task, because a notification is about one: a budget
+    // approved for a whole project names no message anybody could be looking at.
+    if let Some(t) = &task {
+        let told = telegram::settled(&company, ws.root(), t, &out);
+        out.push_str(&told);
+    }
+    Ok(out)
 }
 
 /// What is being signed: the kind, the task it is about, the note the signer left, and
@@ -405,7 +419,21 @@ pub(crate) fn merge_task(a: &Args) -> Res {
         &branch,
         &record::report_file(&id, &target, &report),
     );
-    Ok(report + &record::record_line(&kept))
+
+    // And the chat, for the same reason the signature tells it: a task that reached
+    // `needs-approval` was announced with a button on it, and an `auto` project lands the
+    // work without any signature to carry that news — so the offer would outlive the merge
+    // by however long it took somebody to look at a terminal.
+    //
+    // One sentence rather than the report. What is being turned from an offer into a record
+    // has a caption's worth of room, and what it has to say is that this is done.
+    let told = telegram::settled(
+        &company,
+        ws.root(),
+        &task,
+        &format!("merged {id} → {target}"),
+    );
+    Ok(report + &record::record_line(&kept) + &told)
 }
 
 /// Undoes a merge that should not have happened.

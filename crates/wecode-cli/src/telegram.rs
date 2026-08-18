@@ -19,7 +19,7 @@
 //! is not a second way to sign anything. It is the same sentence, delivered without a
 //! keyboard, through the same identity check and the same Broker call.
 //!
-//! Seven things are load-bearing:
+//! Eight things are load-bearing:
 //!
 //! - **wecode holds no token and speaks no HTTP.** `[telegram] fetch` is a command the
 //!   operator writes — a `curl` of the Bot API's `getUpdates` — and what it prints is
@@ -67,6 +67,17 @@
 //!   keyboard turns the offer into a record. Without them the operator's hook has to keep
 //!   its own map from task to message and guess which row a receipt belongs to — a second
 //!   store of what wecode was already holding, wrong whenever the guess is.
+//! - **A decision is a decision wherever it was taken.** The same failure arrives from the
+//!   other side: `wecode approve merge` and `wecode merge` settle exactly what the keyboard
+//!   is offering, and the message on the phone used to hear nothing about it — going on
+//!   asking for a signature to work that landed hours ago. So [`settled`] runs the same
+//!   `answer` line for a decision taken anywhere, with no callback in front of it, there
+//!   being no spinner to stop. What it names is the **task** rather than the message,
+//!   because wecode cannot name the message here: the notification was sent by the
+//!   operator's own hook and the id came back to that hook, which makes it the one thing
+//!   that can find it again. That is what the map above is *for*. What it was missing was
+//!   being told which task had been decided at the moment of the deciding, rather than only
+//!   when a button was pressed.
 //!
 //! What is deliberately *not* here is a second gate. A reply is not a weaker signature
 //! than a typed one — it is the same record, and the reason to trust it is the same
@@ -435,9 +446,9 @@ pub(crate) fn fetch(company: &Company, org: &Path, offset: i64) -> Result<String
     )
 }
 
-/// Tells the chat what came of a tap — and says where the button was, so the line that
-/// says it can also stop it offering. Does nothing at all when no `[telegram] answer` is
-/// configured.
+/// Tells the chat that a decision has been taken — and says where the button was, so the
+/// line that says it can also stop it offering. Does nothing at all when no `[telegram]
+/// answer` is configured.
 ///
 /// Reported and not raised, which is the notify hook's argument rather than [`fetch`]'s:
 /// an acknowledgement that did not arrive does not un-sign the signature it was about,
@@ -447,23 +458,48 @@ pub(crate) fn fetch(company: &Company, org: &Path, offset: i64) -> Result<String
 /// One command and not two. Editing the message and answering the callback are one act
 /// from where the operator is standing — *this decision has been taken* — and two hooks
 /// would be two places for one of them to be missing, with a live *Approve* on a merged
-/// task as the failure. The whole tap is put in the environment and what the line does
-/// with it is the line's business.
-fn answer(company: &Company, org: &Path, tap: &Tap, said: &str) -> Result<(), String> {
+/// task as the failure. The whole decision is put in the environment and what the line
+/// does with it is the line's business.
+///
+/// Both halves of what it is told are optional, and neither can be read off the other: a
+/// tap on a keyboard whose message names no task still has a spinner to stop, and a
+/// signature typed at a terminal names its task with no button behind it — see [`settled`].
+fn answer(
+    company: &Company,
+    org: &Path,
+    task: Option<&Task>,
+    tap: Option<&Tap>,
+    said: &str,
+) -> Result<(), String> {
     let Some(command) = company.telegram.answer.as_deref() else {
         return Ok(());
     };
+    // All three empty when nothing was tapped, the way the address alone is empty when
+    // Telegram will not name the message: one test on one variable is the whole check a hook
+    // needs, and there is nothing here to acknowledge.
+    let (callback, chat, message) = tap.map_or(("", "", ""), |t| {
+        (t.callback.as_str(), t.chat.as_str(), t.message.as_str())
+    });
+    let number = task
+        .and_then(|t| t.number)
+        .map_or_else(String::new, |n| n.get().to_string());
     run(
         company,
         org,
         command,
         &[
-            ("WECODE_TELEGRAM_CALLBACK", &tap.callback),
+            ("WECODE_TELEGRAM_CALLBACK", callback),
             // The keyboard's address, empty together when Telegram will not name the
             // message. Handed over as they arrived: an id is compared and pasted, never
             // arithmetic, so nothing here needs it to be a number.
-            ("WECODE_TELEGRAM_CHAT", &tap.chat),
-            ("WECODE_TELEGRAM_MESSAGE", &tap.message),
+            ("WECODE_TELEGRAM_CHAT", chat),
+            ("WECODE_TELEGRAM_MESSAGE", message),
+            // What was decided, under the two names the notify hook was given when it sent
+            // the message this is about — which is the whole point of them being these
+            // names: a hook that noted its own message id per task looks the row up under
+            // the key it filed it under. Empty when nothing named a task at all.
+            ("WECODE_TASK", task.map_or("", |t| t.id.as_str())),
+            ("WECODE_TASK_NUMBER", &number),
             // Flattened and bounded like everything else that is quoted anywhere, and
             // for one more reason here: this is a value in a command's environment, and
             // a newline in it could end the line the operator wrote.
@@ -471,6 +507,24 @@ fn answer(company: &Company, org: &Path, tap: &Tap, said: &str) -> Result<(), St
         ],
     )
     .map(|_| ())
+}
+
+/// Says into the chat that a decision has been taken somewhere the chat cannot see: a
+/// signature typed at a terminal, or work landed by hand.
+///
+/// The module's eighth reason. The same line as a tap's acknowledgement with no callback in
+/// front of it — nothing is waiting on a spinner — because what is left to do is the half
+/// that outlives the toast anyway: a message still offering a decision already taken.
+///
+/// Returns the warning rather than printing or raising it, which is [`answer`]'s bargain one
+/// step out. The signature is on the ledger before this runs, so a chat that could not be
+/// reached is not a decision that did not happen — and the command that took it still has
+/// to say which of the two failed.
+pub(crate) fn settled(company: &Company, org: &Path, task: &Task, said: &str) -> String {
+    match answer(company, org, Some(task), None, said) {
+        Ok(()) => String::new(),
+        Err(e) => format!("  ⚠ telegram: could not say so in the chat: {e}\n"),
+    }
 }
 
 /// How much of an outcome a tap is told. Telegram's own ceiling for the text of an
@@ -682,11 +736,23 @@ fn apply(store: &Store, company: &Company, org: &Path, msg: &Message, dry: bool)
         echo(&msg.from),
         echo(&msg.text)
     );
+    // What the tap was about, named beside its address for the reason a terminal decision
+    // is named at all: the hook keeping a note of which message it sent per task is the
+    // hook that has to clear the row once one is decided. Resolved here rather than carried
+    // out of `decided`, which resolves it behind an account check this side does not
+    // repeat — and only for a tap that is going to be answered.
+    let about = (msg.tap.is_some() && !dry)
+        .then(|| store.load_plan().ok())
+        .flatten();
+    let about = about
+        .as_ref()
+        .and_then(|plan| target(msg, plan).ok().and_then(|id| plan.task(&id)));
+
     // Every tap, whatever it came to, and no typed reply ever — the module's fifth
     // reason. Not in a dry run: what it moves is the chat, and a dry run moves nothing.
     if let Some(tap) = &msg.tap
         && !dry
-        && let Err(e) = answer(company, org, tap, &outcome)
+        && let Err(e) = answer(company, org, about, Some(tap), &outcome)
     {
         // Reported under the outcome rather than in place of it. The signature is
         // already given; what failed is saying so, and an operator whose taps have gone
@@ -929,6 +995,18 @@ mod tests {
       ]
     }"#;
 
+    /// What a tap is answered with, spelled once: a return address and no task named
+    /// beside it, which is the half of [`answer`] the tests below are about.
+    fn answering(company: &Company, said: &str) -> Result<(), String> {
+        answer(
+            company,
+            &std::env::temp_dir(),
+            None,
+            Some(&tap("4382abc")),
+            said,
+        )
+    }
+
     /// A tap's return address, as one arrives from a keyboard on a live message.
     fn tap(callback: &str) -> Tap {
         Tap {
@@ -1084,7 +1162,26 @@ mod tests {
         // The channel still works one-way: taps sign, and the operator finds out in a
         // terminal. Worse than configuring it, better than refusing to read the channel.
         let c = company("\n[telegram]\nfetch = \"true\"\n");
-        assert!(answer(&c, &std::env::temp_dir(), &tap("4382abc"), "signed").is_ok());
+        assert!(answering(&c, "signed").is_ok());
+    }
+
+    #[test]
+    fn a_decision_taken_elsewhere_reports_a_chat_it_could_not_reach() {
+        // Reported rather than raised, one step further out than a tap's receipt is: by the
+        // time this runs the signature is on the ledger, and a `wecode approve` that failed
+        // because the chat did would be an approval undone by its own receipt.
+        let c = company(
+            "\n[telegram]\nfetch = \"true\"\nanswer = \"echo chat not found >&2; exit 6\"\n",
+        );
+        let t = task("cache-tests", TaskKind::Chore);
+        let out = settled(&c, &std::env::temp_dir(), &t, "approved merge");
+        assert!(out.contains("could not say so in the chat"), "{out}");
+        assert!(out.contains("exited 6"), "{out}");
+
+        // And nothing said at all where there is no line to say it with. A workspace that
+        // never wired a chat up pays nothing for a signature typed at its own terminal.
+        let quiet = company("\n[telegram]\nfetch = \"true\"\n");
+        assert!(settled(&quiet, &std::env::temp_dir(), &t, "approved merge").is_empty());
     }
 
     #[test]
@@ -1094,7 +1191,7 @@ mod tests {
         let c = company(
             "\n[invariants]\nnever_run = [\"curl *\"]\n\n[telegram]\nfetch = \"true\"\nanswer = \"curl example.invalid\"\n",
         );
-        let e = answer(&c, &std::env::temp_dir(), &tap("4382abc"), "signed").unwrap_err();
+        let e = answering(&c, "signed").unwrap_err();
         assert!(e.contains("never_run"), "{e}");
     }
 
@@ -1105,7 +1202,7 @@ mod tests {
         let c = company(
             "\n[telegram]\nfetch = \"true\"\nanswer = \"echo query is too old >&2; exit 6\"\n",
         );
-        let e = answer(&c, &std::env::temp_dir(), &tap("4382abc"), "signed").unwrap_err();
+        let e = answering(&c, "signed").unwrap_err();
         assert!(e.contains("exited 6"), "{e}");
         assert!(e.contains("query is too old"), "{e}");
     }
