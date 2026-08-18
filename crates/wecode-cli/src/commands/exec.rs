@@ -4,7 +4,7 @@
 //! what should be true, the other finds out what is.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wecode_core::{Plan, Task, TaskId, TaskStatus, WORKER_DIR, admission};
 use wecode_gov::{Action, ActionKind, Broker, Session, glob};
@@ -478,8 +478,10 @@ pub(crate) fn serve(a: &Args) -> Res {
     let limit = scheduler::parallelism(company.attention.max_open_items, cores);
     let once = a.has("once");
     // The dispatch gate is the one wait with nothing in the database to be the edge
-    // of, so the loop that recomputes it keeps the edge itself.
+    // of, so the loop that recomputes it keeps the edge itself. The digest's clock is
+    // held here for the same reason: a rhythm has no edge in the database either.
     let mut announced = notify::Announced::default();
+    let mut digest = notify::Rhythm::of(&company);
 
     println!(
         "  watching {} · {limit} at a time ({} open items, {cores} cores)\n  ctrl-c to stop\n",
@@ -531,6 +533,23 @@ pub(crate) fn serve(a: &Args) -> Res {
         // Nothing new while a person is holding something. More work in flight does
         // not help an unanswered question, and the attention budget is the point.
         let blocked = scheduler::awaiting_a_human(&plan);
+        // Asked on every pass and not only on the ones that dispatch: work held behind
+        // an unsigned gate is standing in front of the operator either way, and the
+        // digest below is one message about all of it.
+        let slots = scheduler::free_slots(&plan, limit);
+        let (ready, awaiting_a_signature) = triage(&store, &company, &plan, slots)?;
+        let gated: Vec<&Task> = awaiting_a_signature
+            .iter()
+            .filter_map(|id| plan.task(id))
+            .collect();
+
+        // The standing condition, on the rhythm `[attention] digest_interval_mins`
+        // promises. Every announcement around it fires on an edge and never again; this
+        // is what is still waiting an hour later, sent where the operator actually is.
+        if digest.due(Instant::now()) {
+            print!("{}", notify::on_digest(&company, ws.root(), &blocked, &gated));
+        }
+
         if !blocked.is_empty() {
             // Printed every pass, and announced on none of them: each of these was
             // announced as it stopped, by whatever wrote the status. This is the
@@ -540,8 +559,6 @@ pub(crate) fn serve(a: &Args) -> Res {
                 println!("  ⏸ {} needs you — {}", t.id, t.status.as_str());
             }
         } else {
-            let slots = scheduler::free_slots(&plan, limit);
-            let (ready, awaiting_a_signature) = triage(&store, &company, &plan, slots)?;
             // Named every pass, like the tasks that need an answer: the queue standing
             // still because nobody has signed is the operator's business, and a silent
             // idle loop looks like a loop with nothing to do.
