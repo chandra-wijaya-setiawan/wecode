@@ -19,6 +19,21 @@
 //! `result.json` is useful for a summary and inadmissible as evidence, so nothing in
 //! this module reads it.
 //!
+//! Acceptance comes in two tiers and the second is not run unless somebody asks. Most
+//! of it is what a checkout can answer alone: a suite, a linter, a script over the
+//! tree. Some of what a task is owed cannot be — whether the bucket exists, whether the
+//! queue drains — and a check for that needs live infrastructure and a credential to
+//! reach it. A command marked `live:` is the second tier: deferred by default, run when
+//! the person judging asks for it in that one invocation. See [`Tier`].
+//!
+//! Which is how a task does real work against cloud resources with no agent ever
+//! holding a key. The tiers split *who runs what*: everything here runs after the agent
+//! has exited, in wecode's process, under the operator's own environment — while the
+//! agent was spawned into one built from an allowlist ([`crate::spawn::run`]). The
+//! credential is in this process and was never in that one. The agent is told the check
+//! exists, since the marker travels in the command text the envelope prints, and being
+//! told is all it gets.
+//!
 //! Post-hoc rather than intercepted, because wecode cannot hook another process's
 //! writes. Confinement is the worktree; this is the check afterwards. It is why a
 //! write outside scope is *sanctioned* — recoverable — rather than prevented.
@@ -42,10 +57,17 @@ use crate::render::{kind_tag, truncate_cmd};
 /// One acceptance command, run.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Check {
+    /// The command as it was run, tier marker stripped: the marker is wecode's word
+    /// about the check and never part of what `sh` was given, and this is the line the
+    /// ledger records as the argv and a failure reason quotes.
     pub(crate) cmd: String,
     /// `None` when the command could not be started at all.
     pub(crate) status: Option<i32>,
     pub(crate) expected: i32,
+    /// Whether this belongs to the live tier — see [`Tier`]. It changes nothing about
+    /// the verdict a check earns; it is here so the render can say which of them
+    /// touched something outside the checkout.
+    pub(crate) live: bool,
 }
 
 /// `sh` reports a command it could not find this way. Worth separating: the check
@@ -69,6 +91,86 @@ impl Check {
             Some(c) => format!("exit {c}, wanted {}", self.expected),
             None => "did not start".to_string(),
         }
+    }
+}
+
+/// What an acceptance command marked as needing live infrastructure starts with.
+///
+/// On the command line because there is nowhere else: a [`Measure::Command`] is a line
+/// and an expected status, in the plan and in the store both. Read case-insensitively
+/// for one reason — a marker that failed to match leaves the check in the *first* tier,
+/// where it runs on every verdict, against the real bucket, unasked.
+const LIVE_MARK: &str = "live:";
+
+/// The variable that asks for the live tier, and the value `1` asks with.
+const LIVE_ENV: &str = "WECODE_LIVE";
+
+/// Which tier of acceptance a verdict is being asked for.
+///
+/// The request is per invocation and read from the environment — the same door
+/// `WECODE_CONFIG` and `WECODE_AGENT` come through — and that is the property worth
+/// having rather than a convenience. A tier written into the plan, the task or the
+/// playbook would be a standing instruction: every judgement the board loop makes from
+/// then on would reach for real infrastructure, days after the person who wrote it
+/// stopped watching. In the environment of one command it cannot outlive the command.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum Tier {
+    /// Everything a checkout can answer on its own, and nothing else. The default, and
+    /// what every unattended verdict is made of.
+    #[default]
+    Offline,
+    /// The offline tier and the live one together. Only ever by request.
+    Live,
+}
+
+impl Tier {
+    /// What this invocation was asked for.
+    fn requested() -> Self {
+        Self::asked_by(std::env::var(LIVE_ENV).ok().as_deref())
+    }
+
+    /// Whether a value of [`LIVE_ENV`] is a request. Off unless something affirmative
+    /// is set: someone who exported the variable to turn the tier *off* said the more
+    /// deliberate of the two things, and reading the mere presence of the name as
+    /// consent would do the opposite of what they wrote.
+    fn asked_by(v: Option<&str>) -> Self {
+        let Some(v) = v.map(str::trim) else {
+            return Self::Offline;
+        };
+        if ["", "0", "false", "no", "off"]
+            .iter()
+            .any(|off| v.eq_ignore_ascii_case(off))
+        {
+            Self::Offline
+        } else {
+            Self::Live
+        }
+    }
+
+    /// Whether a check of this kind runs under this tier.
+    fn runs(self, live: bool) -> bool {
+        !live || self == Self::Live
+    }
+}
+
+/// Splits the tier marker off an acceptance command: whether it is live, and the line
+/// to actually run.
+///
+/// A marker with nothing behind it is not a marker. `live:` alone is an operator error,
+/// and handing it to `sh` unchanged returns it as a command that was not found —
+/// visibly broken where they wrote it. Read as a tier it would be a check that runs the
+/// empty string, which exits 0: a pass earned by asking nothing, which is the one
+/// outcome this module refuses everywhere else.
+fn tier_of(cmd: &str) -> (bool, &str) {
+    let line = cmd.trim_start();
+    let Some(mark) = line.get(..LIVE_MARK.len()) else {
+        return (false, cmd);
+    };
+    let rest = line[LIVE_MARK.len()..].trim_start();
+    if mark.eq_ignore_ascii_case(LIVE_MARK) && !rest.is_empty() {
+        (true, rest)
+    } else {
+        (false, cmd)
     }
 }
 
@@ -166,6 +268,13 @@ pub(crate) struct Verdict {
     /// admission gate refuses `Judged` on a task — so this stays empty in practice
     /// and exists so the count is never silently wrong.
     pub(crate) unjudgeable: Vec<String>,
+    /// Live checks this verdict did not run, as they would have been run.
+    ///
+    /// Kept rather than dropped, which is the whole of why the tier is a list and not
+    /// an `if`. A check nobody asked for neither failed nor passed — it is a question
+    /// this verdict did not put, and leaving it out silently would make the offline
+    /// tier look like the whole of what the task was held to.
+    pub(crate) deferred: Vec<String>,
 }
 
 impl Verdict {
@@ -185,6 +294,13 @@ impl Verdict {
     /// the quietest way for work to be marked delivered — quieter than a failing check,
     /// which at least says something is wrong — and `passed` is what sends a branch to
     /// `needs-approval` and from there to a merge.
+    ///
+    /// A deferred live check is not counted against the work, because nothing asked it.
+    /// The alternative reads well and is unusable: a task carrying one could then pass
+    /// only where the credentials for it are, and the tier would be a way of writing
+    /// acceptance that can only fail. A pass here is therefore *passed what was asked*,
+    /// and since that changes with the invocation, [`verdict`] says which was asked
+    /// rather than leaving the reader to assume the larger one.
     pub(crate) fn passed(&self) -> bool {
         self.violations.is_empty()
             && self.unjudgeable.is_empty()
@@ -374,27 +490,51 @@ fn commits_here(dir: &Path) -> bool {
 /// operator's own, run by wecode, and they need the toolchain the operator has. The
 /// declared variables are laid over it, so a project's answer for this repository beats
 /// whatever the shell was carrying.
+/// The tier is whatever this invocation was asked for — [`Tier::requested`].
 pub(crate) fn run_acceptance(
     dir: &Path,
     measures: &[Measure],
     env: &[(String, std::path::PathBuf)],
 ) -> Verdict {
+    run_tier(dir, measures, env, Tier::requested())
+}
+
+/// The same, with the tier named by the caller rather than read off the environment.
+///
+/// Split out because a tier read from the ambient environment is one a test cannot set:
+/// `set_var` is unsafe, this workspace forbids unsafe outright, and a variable one test
+/// exports is one every other test in the process now runs under. The decision lives
+/// one function up, where a `--live` flag would set it too.
+pub(crate) fn run_tier(
+    dir: &Path,
+    measures: &[Measure],
+    env: &[(String, std::path::PathBuf)],
+    tier: Tier,
+) -> Verdict {
     let mut v = Verdict::default();
     for m in measures {
         match m {
             Measure::Command { cmd, expect_status } => {
+                let (live, line) = tier_of(cmd);
+                // Not run, and said so. The command is never started, which is the
+                // point of the tier: nothing reaches the infrastructure it names.
+                if !tier.runs(live) {
+                    v.deferred.push(line.to_string());
+                    continue;
+                }
                 let status = Command::new("sh")
                     .arg("-c")
-                    .arg(cmd)
+                    .arg(line)
                     .current_dir(dir)
                     .envs(env.iter().map(|(k, v)| (k, v)))
                     .status()
                     .ok()
                     .and_then(|s| s.code());
                 v.checks.push(Check {
-                    cmd: cmd.clone(),
+                    cmd: line.to_string(),
                     status,
                     expected: *expect_status,
+                    live,
                 });
             }
             // Nothing here can settle these. Naming them beats counting a task as
@@ -412,6 +552,10 @@ pub(crate) fn run_acceptance(
 /// the one thing a reader cannot get from the status word alone: a main task that
 /// passed is waiting to be landed, a step of one has already put its commits where
 /// they land from.
+///
+/// The tier is the second thing the status word cannot carry, and it is said here for
+/// the same reason: `passed` is now `passed what was asked`, and which of the two tiers
+/// was asked is a property of the invocation rather than of the task.
 #[must_use]
 pub(crate) fn verdict(
     task: &Task,
@@ -476,10 +620,14 @@ pub(crate) fn verdict(
         out.push_str("\nacceptance\n");
         for c in &v.checks {
             out.push_str(&format!(
-                "  {} {:<44} {}\n",
+                "  {} {:<44} {}{}\n",
                 if c.passed() { "✓" } else { "✗" },
                 truncate_cmd(&c.cmd, 44),
-                c.describe()
+                c.describe(),
+                // A green line that reached real infrastructure and a green line that
+                // read a file are worth different amounts, and only one of them is
+                // reproducible by whoever reads this next.
+                if c.live { "   live" } else { "" }
             ));
         }
     }
@@ -487,9 +635,38 @@ pub(crate) fn verdict(
         out.push_str(&format!("  ? {u}   no command can settle this\n"));
     }
 
+    if !v.deferred.is_empty() {
+        // Where the missing checks would have been, so nobody counts the acceptance
+        // block above and concludes it was all of them.
+        out.push_str(&format!(
+            "\nlive — {} check{} not run\n",
+            v.deferred.len(),
+            if v.deferred.len() == 1 { "" } else { "s" }
+        ));
+        for cmd in &v.deferred {
+            out.push_str(&format!("  · {}\n", truncate_cmd(cmd, 44)));
+        }
+        out.push_str(&format!(
+            "  a live check reaches infrastructure a checkout has not got, so none was asked\n\
+             \x20 {LIVE_ENV}=1 wecode verify {}   asks for the tier, on your own credentials\n",
+            task.id
+        ));
+    }
+
     out.push('\n');
     if v.passed() {
         out.push_str("  ✓ passed\n");
+        if !v.deferred.is_empty() {
+            // The tick above is about to be read as the whole verdict, because that is
+            // what it has always meant. It now means *what was asked*, and the reader
+            // has no way of knowing which invocation this was.
+            let n = v.deferred.len();
+            out.push_str(&format!(
+                "    the offline tier only — {n} live check{} {} not asked for\n",
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "was" } else { "were" }
+            ));
+        }
         // Three things a pass can mean, and the status word distinguishes only two of
         // them. Said here because the next command differs in each case, and the
         // wrong guess is expensive: `merge` on a step is refused, and waiting for a
@@ -544,7 +721,16 @@ pub(crate) fn verdict(
             ));
         }
         if v.checks.is_empty() && v.violations.is_empty() && !v.changed.delivered_nothing() {
-            out.push_str("  ✗ nothing to judge by\n");
+            // A task whose acceptance is entirely live has the same empty check list as
+            // one with no acceptance at all, and they are not the same failure: the
+            // first was given something to be held to and nobody asked it. Sending that
+            // reader off to look for a missing measure would be the wrong turn.
+            out.push_str(if v.deferred.is_empty() {
+                "  ✗ nothing to judge by\n"
+            } else {
+                "  ✗ nothing to judge by — every check this task has is live, \
+                 and none was asked for\n"
+            });
         }
     }
     out.push_str(&format!("  {}\n", next.as_str()));
@@ -588,8 +774,17 @@ mod tests {
     }
 
     /// Acceptance with no shared cache — what a project that declares none gets.
+    ///
+    /// The tier is named rather than left to [`Tier::requested`], so a `WECODE_LIVE`
+    /// exported in whatever shell runs the suite cannot decide what these tests are
+    /// asserting about.
     fn ran(dir: &Path, measures: &[Measure]) -> Verdict {
-        run_acceptance(dir, measures, &[])
+        run_tier(dir, measures, &[], Tier::Offline)
+    }
+
+    /// The same, with the second tier asked for.
+    fn ran_live(dir: &Path, measures: &[Measure]) -> Verdict {
+        run_tier(dir, measures, &[], Tier::Live)
     }
 
     fn cmd(line: &str) -> Measure {
@@ -908,13 +1103,14 @@ mod tests {
     fn the_shared_build_cache_is_set_on_the_acceptance_commands_too() {
         // Acceptance is the second cold build a worktree pays for, and usually the
         // larger one: the agent may have run `cargo check`, this runs the suite.
-        let v = run_acceptance(
+        let v = run_tier(
             &std::env::temp_dir(),
             &[cmd("test \"$CARGO_TARGET_DIR\" = /tmp/shared-target")],
             &[(
                 "CARGO_TARGET_DIR".to_string(),
                 std::path::PathBuf::from("/tmp/shared-target"),
             )],
+            Tier::Offline,
         );
         assert!(v.passed(), "{:?}", v.checks);
     }
@@ -924,13 +1120,14 @@ mod tests {
         // Unlike a spawned agent's, this environment is not built from an allowlist:
         // the commands are the operator's own, and one without `PATH` could not find
         // the toolchain it is supposed to be judging with.
-        let v = run_acceptance(
+        let v = run_tier(
             &std::env::temp_dir(),
             &[cmd("test -n \"$PATH\"")],
             &[(
                 "CARGO_TARGET_DIR".to_string(),
                 std::path::PathBuf::from("/tmp/shared-target"),
             )],
+            Tier::Offline,
         );
         assert!(v.passed(), "{:?}", v.checks);
     }
@@ -1197,5 +1394,202 @@ mod tests {
         // the strength of having asked nothing.
         let v = ran(&std::env::temp_dir(), &[]);
         assert!(!v.passed());
+    }
+
+    // ------------------------------------------------------- the second tier ------
+
+    /// A live measure, written the way a project writes one.
+    fn live(line: &str) -> Measure {
+        Measure::Command {
+            cmd: format!("live: {line}"),
+            expect_status: 0,
+        }
+    }
+
+    /// An empty directory to run acceptance in. Side effects are how these tests tell
+    /// *did not run* from *ran and passed*: a command never started leaves no file
+    /// behind, where asserting on the verdict alone would pass just as well against a
+    /// tier that quietly ran everything and reported half of it.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wecode-tier-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_live_check_is_not_started_at_all_unless_it_was_asked_for() {
+        // The whole point of the tier, and the only assertion that can carry it: not
+        // that the check was reported as skipped, but that nothing ran. A live check
+        // reaches real infrastructure with the credentials of whoever is judging, and
+        // every unattended verdict — a board tick's, a retry's — is one nobody asked.
+        let dir = scratch("not-asked");
+        let v = ran(&dir, &[cmd("true"), live("touch it-ran")]);
+
+        assert!(!dir.join("it-ran").exists(), "the live check was started");
+        assert_eq!(v.checks.len(), 1, "{:?}", v.checks);
+        assert_eq!(v.deferred, ["touch it-ran"]);
+    }
+
+    #[test]
+    fn asking_for_it_runs_it() {
+        // The other half, or the tier would be a way of writing acceptance that never
+        // runs — which is indistinguishable from not writing it.
+        let dir = scratch("asked");
+        let v = ran_live(&dir, &[cmd("true"), live("touch it-ran")]);
+
+        assert!(dir.join("it-ran").exists(), "{:?}", v.checks);
+        assert!(v.deferred.is_empty(), "{:?}", v.deferred);
+        assert_eq!(v.checks.len(), 2);
+        assert!(v.checks[1].live);
+    }
+
+    #[test]
+    fn the_marker_is_never_part_of_what_the_shell_is_given() {
+        // `sh -c "live: test -f marker"` is a command not found, so this passing is the
+        // proof that the marker was taken off first — and `cmd` holds the line that
+        // actually ran, which is what the ledger records and what a failure quotes.
+        let dir = scratch("stripped");
+        std::fs::write(dir.join("marker"), "x").unwrap();
+        let v = ran_live(&dir, &[live("test -f marker")]);
+
+        assert!(v.passed(), "{:?}", v.checks);
+        assert_eq!(v.checks[0].cmd, "test -f marker");
+    }
+
+    #[test]
+    fn the_marker_is_read_however_it_was_spelled() {
+        // Leniency in the direction that is cheap to be wrong in: a marker that failed
+        // to match leaves the check in the first tier, where it runs on every verdict,
+        // against the real thing. `Live:` is a typo; running it is not a consequence
+        // anyone signed up for.
+        let dir = scratch("spelling");
+        let v = ran(
+            &dir,
+            &[
+                Measure::Command {
+                    cmd: "LIVE: touch upper".into(),
+                    expect_status: 0,
+                },
+                Measure::Command {
+                    cmd: "  live:   touch spaced".into(),
+                    expect_status: 0,
+                },
+            ],
+        );
+
+        assert!(!dir.join("upper").exists() && !dir.join("spaced").exists());
+        assert_eq!(v.deferred, ["touch upper", "touch spaced"]);
+    }
+
+    #[test]
+    fn a_marker_with_nothing_behind_it_is_not_a_marker() {
+        // `live:` alone would otherwise be a check that runs the empty string, which
+        // exits 0 — a pass earned by asking nothing, in the one module that exists to
+        // refuse those. Handed to `sh` unchanged it comes back as 127, visibly broken
+        // where the operator wrote it.
+        assert_eq!(tier_of("live:"), (false, "live:"));
+        assert_eq!(tier_of("live:   "), (false, "live:   "));
+
+        let v = ran(
+            &std::env::temp_dir(),
+            &[Measure::Command {
+                cmd: "live:".into(),
+                expect_status: 0,
+            }],
+        );
+        assert!(!v.passed());
+        assert!(v.deferred.is_empty(), "not deferred — it is malformed");
+        assert_eq!(v.unrunnable().len(), 1);
+    }
+
+    #[test]
+    fn only_an_affirmative_value_asks_for_the_tier() {
+        // A variable exported to turn the tier off is the more deliberate of the two
+        // things a person can write, and reading the mere presence of the name as
+        // consent would do the opposite of what they wrote.
+        assert_eq!(Tier::asked_by(None), Tier::Offline);
+        for off in ["", "  ", "0", "false", "FALSE", "no", "off"] {
+            assert_eq!(Tier::asked_by(Some(off)), Tier::Offline, "{off:?}");
+        }
+        for on in ["1", "yes", "true", "please"] {
+            assert_eq!(Tier::asked_by(Some(on)), Tier::Live, "{on:?}");
+        }
+    }
+
+    #[test]
+    fn a_deferred_check_is_not_counted_against_the_work() {
+        // The reading that fails closed is unusable: a task carrying a live check would
+        // then pass only where the credentials for it are. Acceptance that can only
+        // fail is acceptance nobody writes.
+        let dir = scratch("not-against");
+        let mut v = ran(&dir, &[cmd("true"), live("aws s3 ls s3://nope")]);
+        v.changed = touched(&["src/a.rs"]);
+        v.violations = violations(&v.changed, &scope(&["src/**"]));
+
+        assert_eq!(v.deferred.len(), 1);
+        assert!(v.passed(), "{v:?}");
+    }
+
+    #[test]
+    fn a_live_check_that_ran_and_failed_fails_like_any_other() {
+        // Once it has been asked, it is a check. The tier decides whether the question
+        // is put, never what the answer counts for.
+        let v = ran_live(&scratch("live-red"), &[cmd("true"), live("exit 3")]);
+        assert!(!v.passed());
+        assert!(v.checks[1].describe().contains("wanted 0"), "{:?}", v.checks);
+    }
+
+    #[test]
+    fn a_task_whose_every_check_is_live_does_not_pass_by_default() {
+        // And is not told it has no acceptance. The two have the same empty check list
+        // and are not the same failure: one was never given anything to be held to, the
+        // other was and nobody asked it.
+        let task = Task::new("t1", "cloud", "the bucket").scoped(scope(&["src/**"]));
+        let dir = scratch("all-live");
+        let mut v = ran(&dir, &[live("aws s3api head-bucket --bucket b")]);
+        v.changed = touched(&["src/a.rs"]);
+        v.violations = violations(&v.changed, &task.scope);
+        let out = verdict(&task, &task.id, &dir, &v, TaskStatus::Failed);
+
+        assert!(!v.passed(), "{v:?}");
+        assert!(out.contains("every check this task has is live"), "{out}");
+    }
+
+    #[test]
+    fn the_verdict_says_which_tier_the_tick_was_earned_against() {
+        // `✓ passed` has meant one thing for as long as there was one tier, and now
+        // means *passed what was asked*. Which was asked is a property of the
+        // invocation rather than of the task, so the reader cannot recover it from
+        // anything else on the page.
+        let task = Task::new("t1", "cloud", "the bucket").scoped(scope(&["src/**"]));
+        let dir = scratch("render-deferred");
+        let mut v = ran(&dir, &[cmd("true"), live("bash scripts/smoke-cloud.sh")]);
+        v.changed = touched(&["src/a.rs"]);
+        v.violations = violations(&v.changed, &task.scope);
+        let out = verdict(&task, &task.id, &dir, &v, TaskStatus::NeedsApproval);
+
+        assert!(out.contains("✓ passed"), "{out}");
+        assert!(out.contains("the offline tier only"), "{out}");
+        assert!(out.contains("live — 1 check not run"), "{out}");
+        assert!(out.contains("· bash scripts/smoke-cloud.sh"), "{out}");
+        // The way back to the answer, in the invocation that would get it.
+        assert!(out.contains("WECODE_LIVE=1 wecode verify t1"), "{out}");
+    }
+
+    #[test]
+    fn a_check_that_reached_the_real_thing_is_marked_as_one() {
+        // Two green lines are worth different amounts, and only one of them is
+        // reproducible by whoever reads the verdict next.
+        let task = Task::new("t1", "cloud", "the bucket").scoped(scope(&["src/**"]));
+        let dir = scratch("render-live");
+        let mut v = ran_live(&dir, &[cmd("true"), live("true")]);
+        v.changed = touched(&["src/a.rs"]);
+        v.violations = violations(&v.changed, &task.scope);
+        let out = verdict(&task, &task.id, &dir, &v, TaskStatus::NeedsApproval);
+
+        assert_eq!(out.matches("   live").count(), 1, "{out}");
+        assert!(!out.contains("the offline tier only"), "{out}");
+        assert!(!out.contains("not run"), "{out}");
     }
 }
