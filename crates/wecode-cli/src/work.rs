@@ -3,11 +3,34 @@
 //! One worktree per *main* task. Subtasks share their parent's tree, which is what
 //! makes the two relations pull their weight separately — `parent` decides which tree
 //! you work in, `depends_on` decides when you may start.
+//!
+//! One refusal lives here too, and it is the one that has to come *before* any of that:
+//! a task whose declared credentials expire sooner than the run it is about to be given
+//! is not dispatched at all. It is a question about a task and its clock rather than
+//! about a process, which is why it is asked here and not in [`crate::spawn`] — see
+//! [`admits_secrets`].
+//!
+//! **Not wired yet.** [`admits_secrets`] is the whole check; joining it to dispatch is two
+//! lines in `commands::exec::run_task`, which this task was not allowed to write. Lift
+//! `let limits = limits_for(&template, &task);` above the `prepare` call — it is pure, and
+//! both halves it reads are already in hand there — and put
+//! `work::admits_secrets(&company, &id, &secrets, limits)?` underneath it, above `prepare`
+//! for the reason the `unsigned` check is above it: preparation has side effects on the
+//! repository, and a tree cut for a run that cannot legally start is a tree left standing.
+//! `secrets` is what the task declared — `Task::secrets` once core carries it, and
+//! `a.all("needs-secret")` until then — and it must be the same slice
+//! [`crate::spawn::run_holding`] is handed, or the front gate and the resolver are being
+//! told different things. The `allow(dead_code)` below says the same thing, and the change
+//! that adds those two lines deletes it.
 
 use std::path::{Path, PathBuf};
 
 use wecode_core::{Plan, Task, TaskId, TaskStatus};
+use wecode_org::Company;
+use wecode_org::company::SecretDef;
 use wecode_org::workspace::expand_home;
+
+use crate::spawn::Limits;
 
 /// Where worktrees live: `$WECODE_CONFIG/run`, else `~/.wecode/run`.
 ///
@@ -74,6 +97,65 @@ pub(crate) fn org_name(workspace_root: &Path) -> String {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "default".to_string())
+}
+
+/// Refuses a dispatch whose run could outlive a credential it would hold.
+///
+/// The argument for refusing at the front rather than re-resolving mid-run belongs to
+/// [`SecretDef::admits`], which is also what decides it. What is added here is the two
+/// things only dispatch can supply: the check happening early enough to matter — before
+/// the worktree, before the envelope, before a token is spent — and the task's name on the
+/// refusal, because what the operator typed was `wecode run <task>`.
+///
+/// **The wall is `limits.wall`, not `task.budget.wall_secs`.** The figure a `ttl` has to
+/// survive is the clock the run will *actually* be held to: the task's, capped by the
+/// harness template's, as `commands::exec::limits_for` computes it. Taking the whole
+/// [`Limits`] the supervisor is handed is what keeps the two from drifting — whatever ever
+/// tightens that clock, this reads the same struct the run is held to. The task's own
+/// figure would be the wrong one whenever a template caps it: a two-hour task under a
+/// half-hour harness cannot outlive a one-hour credential, and refusing it would be
+/// refusing arithmetic. `max_wall_secs` is deliberately not in the figure — it is a
+/// cumulative session invariant judged on `Action::Spend` after the fact, so it can end a
+/// run early but can never make this run's clock longer than the template's.
+///
+/// No clock is no refusal, matching [`Company::hold`]: a wall nothing declared is one no
+/// `ttl` can be shorter than. A run with no bound at all is a budget defect, and it
+/// belongs to the admission gate rather than to this one — reported here it would read as
+/// a problem with the credential.
+///
+/// Nothing is resolved: no resolver runs, no value exists, no login lands in anybody's
+/// audit trail. So this costs nothing when it passes, cannot itself leak, and is safe to
+/// ask before every dispatch whether or not the task declared anything. It does not
+/// replace the same check inside [`Company::hold`] — that one guards the mint, and stays
+/// where the values are.
+#[allow(
+    dead_code,
+    reason = "the call site in commands::exec is out of this task's scope"
+)]
+pub(crate) fn admits_secrets(
+    company: &Company,
+    task: &TaskId,
+    ids: &[String],
+    limits: Limits,
+) -> Result<(), String> {
+    let refuse = |why: String| format!("cannot start {task}: {why}");
+    // Every id resolved to its block before any of them is judged, so a typo in the
+    // second is reported as a typo rather than as whatever the first one's ttl happened to
+    // be. Refused rather than skipped: the block is where the `ttl` is, and an id with no
+    // block would otherwise pass a gate that never measured it and fail at the resolver,
+    // which is the far end of the run this exists to keep it away from.
+    let defs = ids
+        .iter()
+        .map(|id| company.secret(id))
+        .collect::<Result<Vec<&SecretDef>, String>>()
+        .map_err(&refuse)?;
+    let Some(wall) = limits.wall else {
+        return Ok(());
+    };
+    for def in defs {
+        def.admits(wall).map_err(&refuse)?;
+    }
+    Ok(())
 }
 
 /// Who a listed worktree belongs to.
@@ -191,6 +273,7 @@ fn worktree_tally(repos: &[RepoTrees], total: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use wecode_core::{Project, ProjectId};
 
     fn plan() -> Plan {
@@ -283,6 +366,132 @@ mod tests {
             worktree_for("other", &TaskId::new("t1"))
         );
         let _ = ProjectId::new("unused");
+    }
+
+    /// A workspace declaring two credentials of very different lifetimes: a session
+    /// credential worth an hour, and a token good for a month.
+    fn workspace() -> Company {
+        Company::parse(
+            "[company]\nname = \"cws\"\n\
+             \n[secrets.aws-cloud-test]\n\
+             command = \"aws configure export-credentials --format env-no-export\"\n\
+             vars = [\"AWS_SESSION_TOKEN\"]\n\
+             ttl = \"1h\"\n\
+             \n[secrets.travelpayouts]\n\
+             command = \"pass show travelpayouts/token\"\n\
+             vars = [\"TRAVELPAYOUTS_TOKEN\"]\n\
+             ttl = \"30d\"\n",
+        )
+        .expect("the profile parses")
+    }
+
+    /// The clock a run is held to, as `limits_for` would have already tightened it.
+    fn held_for(secs: u64) -> Limits {
+        Limits {
+            wall: Some(Duration::from_secs(secs)),
+            ..Limits::default()
+        }
+    }
+
+    fn ids(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn a_credential_that_dies_before_the_run_can_end_refuses_the_dispatch() {
+        // The whole message, because it is the whole product of this gate: an operator
+        // who reads it must be able to fix the run without opening either file. The
+        // alternative it replaces is an `ExpiredToken` at minute 60 of 90, by which time
+        // the budget is gone and it reads as a broken test.
+        let why = admits_secrets(
+            &workspace(),
+            &TaskId::new("ste-p2-w4f"),
+            &ids(&["aws-cloud-test"]),
+            held_for(5400),
+        )
+        .expect_err("an hour of credential cannot cover ninety minutes of run");
+        assert_eq!(
+            why,
+            "cannot start ste-p2-w4f: aws-cloud-test lives 1h and the run may take 1h30m\n  \
+             shorten the wall budget to 1h, or declare a longer-lived credential"
+        );
+    }
+
+    #[test]
+    fn a_credential_that_lasts_the_whole_run_is_admitted() {
+        let c = workspace();
+        let t = TaskId::new("ste-p2-w4f");
+        // Comfortably longer, and exactly as long. The boundary belongs to
+        // `SecretDef::admits`, and it is asserted here because an operator who set both
+        // figures to `1h` did the arithmetic right and must not be refused for it.
+        for wall in [1800, 3600] {
+            assert!(
+                admits_secrets(&c, &t, &ids(&["aws-cloud-test"]), held_for(wall)).is_ok(),
+                "a 1h credential covers a {wall}s run"
+            );
+        }
+        let both = ids(&["aws-cloud-test", "travelpayouts"]);
+        assert!(admits_secrets(&c, &t, &both, held_for(3600)).is_ok());
+    }
+
+    #[test]
+    fn the_credential_named_is_the_one_that_expires() {
+        // Declared second and refused first: a refusal that named whichever id came first
+        // would send the operator to edit the token that was fine.
+        let why = admits_secrets(
+            &workspace(),
+            &TaskId::new("ste-p2-w4f"),
+            &ids(&["travelpayouts", "aws-cloud-test"]),
+            held_for(7200),
+        )
+        .expect_err("two hours outlives the session credential");
+        assert!(why.contains("aws-cloud-test lives 1h"), "{why}");
+        assert!(!why.contains("travelpayouts"), "{why}");
+    }
+
+    #[test]
+    fn a_run_with_no_clock_refuses_nothing() {
+        // A wall nothing declared is one no ttl can be shorter than, which is what
+        // `Company::hold` decides too — the front gate must not be stricter than the gate
+        // it fronts. An unbounded run is a budget defect, and admission's to report.
+        assert!(
+            admits_secrets(
+                &workspace(),
+                &TaskId::new("ste-p2-w4f"),
+                &ids(&["aws-cloud-test"]),
+                Limits::default(),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_task_declaring_no_credentials_is_asked_nothing() {
+        // Every dispatch calls this, and almost none of them declare a credential. A
+        // workspace with no `[secrets.*]` at all is the common case, and it must not
+        // become a reason a docs task cannot start.
+        let bare = Company::parse("[company]\nname = \"cws\"\n").expect("the profile parses");
+        assert!(admits_secrets(&bare, &TaskId::new("docs-1"), &[], held_for(60)).is_ok());
+        assert!(admits_secrets(&workspace(), &TaskId::new("docs-1"), &[], held_for(60)).is_ok());
+    }
+
+    #[test]
+    fn an_id_no_block_declares_is_refused_here_rather_than_at_the_resolver() {
+        // Checked for every id before any ttl is judged, so the typo is reported as a
+        // typo. Judged the other way round, this dispatch would have failed on
+        // `aws-cloud-test`'s ttl and the misspelling would have surfaced a run later.
+        let why = admits_secrets(
+            &workspace(),
+            &TaskId::new("ste-p2-w4f"),
+            &ids(&["aws-clod-test", "aws-cloud-test"]),
+            held_for(5400),
+        )
+        .expect_err("no block declares that id");
+        assert_eq!(
+            why,
+            "cannot start ste-p2-w4f: unknown secret `aws-clod-test` — \
+             company.toml declares aws-cloud-test, travelpayouts"
+        );
     }
 
     #[test]
