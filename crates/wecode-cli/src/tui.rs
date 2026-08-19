@@ -52,6 +52,13 @@ use crate::commands::view::{self, Fold, RowItem, Subject, Tree, caption};
 const RELOAD: Duration = Duration::from_millis(1500);
 /// How long to block waiting for a keypress before redrawing.
 const POLL: Duration = Duration::from_millis(200);
+/// How long a reload stands aside after a keystroke.
+///
+/// The tick re-reads the whole plan and the whole audit query out of a database `wecode
+/// loop` is writing to, and rebuilds every row from it. Landing that mid-scroll costs a
+/// frame the fingers feel, so it waits for the hand to pause — which is a beat, not a
+/// mode: nothing is dropped, and the rhythm above is untouched.
+const QUIET: Duration = Duration::from_millis(300);
 /// The pane under the table: a rail to glance at, and what `p` gives it to be read.
 const ASIDE: (u16, u16) = (7, 16);
 
@@ -137,6 +144,10 @@ struct App {
     scroll: u16,
     pane: Pane,
     last_reload: Instant,
+    /// When the last key was handled, so the reload can stand aside while a hand is
+    /// still moving. `None` until one is: a keystroke nobody made is not a hand to
+    /// wait for, and the first tick of a cockpit sitting untouched is due on time.
+    last_key: Option<Instant>,
     /// Whether filed-away projects and tasks are on screen. Off by default — archiving
     /// is a request to stop seeing something.
     show_archived: bool,
@@ -176,6 +187,7 @@ impl App {
             scroll: 0,
             pane: Pane::Board,
             last_reload: Instant::now(),
+            last_key: None,
             show_archived: false,
             collapsed: HashSet::new(),
             query: String::new(),
@@ -191,6 +203,14 @@ impl App {
     /// The screen on the glass.
     fn screen(&self) -> &Screen {
         self.stack.last().expect("HOME is never popped")
+    }
+
+    /// Whether the store is due to be re-read: on the tick, but never while the keys
+    /// are still coming. Deferred rather than skipped — the moment the hand pauses the
+    /// tick is already overdue, so the next pass takes it.
+    fn reload_due(&self) -> bool {
+        self.last_reload.elapsed() >= RELOAD
+            && self.last_key.is_none_or(|k| k.elapsed() >= QUIET)
     }
 
     /// Re-reads state. Errors become a status message rather than a crash: the
@@ -501,6 +521,7 @@ impl App {
     }
 
     fn key(&mut self, k: KeyEvent) {
+        self.last_key = Some(Instant::now());
         if self.pane == Pane::Help {
             self.pane = Pane::Board;
             return;
@@ -888,14 +909,27 @@ fn event_loop(
     while !app.quit {
         terminal.draw(|f| draw(f, &mut app))?;
 
+        // One draw per burst of keys, not one key per draw. A held `j` repeats around
+        // thirty times a second and a full-frame draw is slower than that, so reading a
+        // single event per pass let the queue grow without bound: the cursor kept moving
+        // for as long after the key came up as the operator had held it down. Once the
+        // blocking poll says there is something, everything already waiting is applied
+        // first and the frame drawn once, over the state all of it left behind.
         if event::poll(POLL)? {
-            match event::read()? {
-                Event::Key(k) if k.is_press() => app.key(k),
-                Event::Resize(_, _) => {}
-                _ => {}
+            loop {
+                match event::read()? {
+                    Event::Key(k) if k.is_press() => app.key(k),
+                    Event::Resize(_, _) => {}
+                    _ => {}
+                }
+                // Quitting stops here rather than draining what came after it: the keys
+                // behind a `q` were typed at a cockpit that is going away.
+                if app.quit || !event::poll(Duration::ZERO)? {
+                    break;
+                }
             }
         }
-        if app.last_reload.elapsed() >= RELOAD {
+        if app.reload_due() {
             app.reload();
         }
     }
@@ -1482,6 +1516,25 @@ mod tests {
         assert!(out.contains("0s"), "and how long ago it was:\n{out}");
         // Another task's work is not this one's, however recent.
         assert!(!out.contains("crates/cache/mod.rs"), "{out}");
+    }
+
+    #[test]
+    fn the_reload_stands_aside_while_the_keys_are_still_coming() {
+        // The tick reads the whole plan and the whole audit back out and rebuilds every
+        // row from it. Due in the middle of a scroll, it lands as a stutter under the
+        // fingers — so it waits for the hand to pause, and is never dropped for it.
+        let mut a = app();
+        a.last_reload = Instant::now() - RELOAD;
+        assert!(a.reload_due(), "overdue with nobody typing");
+
+        a.key(KeyEvent::from(KeyCode::Char('j')));
+        assert!(!a.reload_due(), "not in the middle of a scroll");
+
+        // A beat after the last key it is still overdue, and this pass takes it.
+        a.last_key = Some(Instant::now() - QUIET);
+        assert!(a.reload_due());
+        a.reload();
+        assert!(!a.reload_due(), "and the tick starts again from there");
     }
 
     #[test]
