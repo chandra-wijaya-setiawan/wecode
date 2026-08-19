@@ -109,7 +109,18 @@ pub enum Network {
 pub struct Grant {
     pub read: Vec<String>,
     pub write: Vec<String>,
-    /// Command patterns, matched against the joined argv.
+    /// Command patterns, matched against the joined argv. A `!`-prefixed pattern
+    /// denies what it matches and outranks every allow here — see [`glob::permits`].
+    ///
+    /// Allow and deny share one list rather than sitting in two fields, and that is
+    /// the point: a reviewer reads a seat's command authority off one block, in the
+    /// order it was written, instead of holding two lists in their head and
+    /// subtracting. It is also what let this land — a second field would have been a
+    /// new key in `[roles.*]`, and the config surface is the part of this that is
+    /// hard to take back.
+    ///
+    /// The charter's `never_run` is the same idea one level up: a floor under every
+    /// seat, where this narrows one of them.
     pub run: Vec<String>,
     pub network: Network,
     pub hosts: Vec<String>,
@@ -210,7 +221,7 @@ impl Grant {
     }
 
     pub fn allows_run(&self, argv: &str) -> bool {
-        self.run.iter().any(|p| glob::wildcard(p, argv))
+        glob::permits(&self.run, argv)
     }
 
     pub fn allows_merge(&self, branch: &str) -> bool {
@@ -243,14 +254,26 @@ impl Grant {
                 (Some(c), Some(p)) => c <= p,
             }
         }
+        // Denials outrank allows, so they travel the opposite way under delegation:
+        // an allow must be no wider than one the parent holds, and a denial must be
+        // no narrower than every denial the parent carries — restated verbatim, or
+        // broadened. Dropping one is refused even where the child's allows plainly
+        // cannot reach what it denied, because establishing *that* means intersecting
+        // two globs, which is the guess [`glob::covers`] exists in order not to make.
+        // The cost is a child that repeats its parent's denials; the alternative is a
+        // delegation that quietly hands back a verb.
+        fn run_within(child: &[String], parent: &[String]) -> bool {
+            fn covered(wide: &str, narrow: &str) -> bool {
+                glob::wildcard(wide, narrow) || wide == narrow
+            }
+            glob::allows(child).all(|c| glob::allows(parent).any(|p| covered(p, c)))
+                && glob::denials(parent).all(|d| glob::denials(child).any(|c| covered(c, d)))
+        }
 
         paths_within(&self.read, &parent.read)
             && paths_within(&self.write, &parent.write)
             && paths_within(&self.merge_to, &parent.merge_to)
-            && self
-                .run
-                .iter()
-                .all(|c| parent.run.iter().any(|p| glob::wildcard(p, c) || p == c))
+            && run_within(&self.run, &parent.run)
             && self.network <= parent.network
             && cap_within(self.tokens, parent.tokens)
             && cap_within(self.wall_secs, parent.wall_secs)
@@ -454,6 +477,86 @@ mod tests {
         let mut child = Grant::writer(&["src/**"]);
         child.staff = true;
         assert!(!child.narrows(&parent));
+    }
+
+    /// The case the whole feature is for: a seat that may read cloud state and may
+    /// not change it, without anyone enumerating the read-only verbs.
+    #[test]
+    fn a_deny_rule_carves_the_destructive_verbs_out_of_an_allow() {
+        let g = Grant::writer(&["infra/**"]).with_run(&[
+            "aws *",
+            "!aws * rm *",
+            "!aws * delete-*",
+            "!aws iam *",
+        ]);
+        assert!(g.allows_run("aws s3 ls s3://logs"));
+        assert!(g.allows_run("aws ec2 describe-instances"));
+        assert!(!g.allows_run("aws s3 rm s3://logs/2026"));
+        assert!(!g.allows_run("aws ec2 delete-volume --volume-id vol-1"));
+        assert!(!g.allows_run("aws iam list-users"));
+        // Still nothing outside the allow, deny rules or no deny rules.
+        assert!(!g.allows_run("terraform apply"));
+    }
+
+    #[test]
+    fn root_holds_no_denials() {
+        assert!(Grant::root().allows_run("aws s3 rm s3://logs/2026"));
+    }
+
+    #[test]
+    fn adding_a_denial_is_narrowing() {
+        let parent = Grant::writer(&["infra/**"]).with_run(&["aws *"]);
+        let child = Grant::writer(&["infra/**"]).with_run(&["aws *", "!aws * rm *"]);
+        assert!(child.narrows(&parent));
+        assert!(parent.delegate(&child).is_ok());
+        // And it narrows the operator, which is what `company.toml` is checked against.
+        assert!(child.narrows(&Grant::root()));
+    }
+
+    #[test]
+    fn dropping_a_parents_denial_is_refused() {
+        let parent = Grant::writer(&["infra/**"]).with_run(&["aws *", "!aws * rm *"]);
+        let child = Grant::writer(&["infra/**"]).with_run(&["aws *"]);
+        assert!(!child.narrows(&parent));
+        assert_eq!(parent.delegate(&child), Err(Escalation));
+    }
+
+    #[test]
+    fn weakening_a_parents_denial_is_refused() {
+        let parent = Grant::writer(&["infra/**"]).with_run(&["aws *", "!aws * rm *"]);
+        // Denies less than the parent did: `aws s3 rm --dryrun` would come back.
+        let child = Grant::writer(&["infra/**"]).with_run(&["aws *", "!aws * rm --recursive*"]);
+        assert!(!child.narrows(&parent));
+        // Broader in one direction and narrower in another is still narrower: this
+        // denies all of `aws s3`, and gives back `aws ec2 ... rm ...`.
+        let overlap = Grant::writer(&["infra/**"]).with_run(&["aws *", "!aws s3 *"]);
+        assert!(!overlap.narrows(&parent));
+    }
+
+    #[test]
+    fn broadening_a_parents_denial_is_accepted() {
+        let parent = Grant::writer(&["infra/**"]).with_run(&["aws *", "!aws * rm *"]);
+        let child = Grant::writer(&["infra/**"]).with_run(&["aws *", "!aws *"]);
+        assert!(child.narrows(&parent));
+    }
+
+    #[test]
+    fn a_denial_does_not_widen_an_allow() {
+        // A parent's `!` line is not something a child may treat as an allow to nest
+        // under: the child asks for `aws *`, which the parent never granted.
+        let parent = Grant::writer(&["infra/**"]).with_run(&["!aws * rm *"]);
+        let child = Grant::writer(&["infra/**"]).with_run(&["aws *", "!aws * rm *"]);
+        assert!(!child.narrows(&parent));
+    }
+
+    #[test]
+    fn one_grants_denial_binds_the_intersection() {
+        let unit = Grant::writer(&["infra/**"]).with_run(&["aws *"]);
+        let role = Grant::writer(&["infra/**"]).with_run(&["aws *", "!aws * rm *"]);
+        let e = Effective::of(vec![unit, role]);
+        assert!(e.allows_run("aws s3 ls s3://logs"));
+        // Permitted by the unit grant alone. Every member must allow it.
+        assert!(!e.allows_run("aws s3 rm s3://logs/a"));
     }
 
     #[test]
