@@ -22,6 +22,12 @@
 //! same thing to a project, to a task and to an amendment, and reading it in three
 //! places is how it stops meaning the same thing.
 //!
+//! …and `--onto`, the one flag on a declaration that reaches past the store. Every other
+//! field of a task is a row; where its branch starts is a git ref, and cutting it is a
+//! side effect on the repository — so it is answered here, either side of the command
+//! rather than inside it, for the same reason the verdict below is: what is checked has
+//! to be checked before the row is written, and what is created has to be created after.
+//!
 //! …and the playbook's opinion, which belongs to two of them. The gate below decides
 //! whether a task may be worked on; the project's guidance decides nothing, and is
 //! read back out afterwards for the two commands where somebody is looking at a task
@@ -43,11 +49,17 @@ pub(crate) use project::project_add;
 pub(crate) use staff::{assign, set_status};
 pub(crate) use task::task_rm;
 
+use std::path::PathBuf;
+
 use wecode_core::admission::{self, Divergence};
-use wecode_core::{Budget, Cmp, Measure, Scope, Task};
+use wecode_core::{Budget, Cmp, Measure, Scope, Task, TaskId};
+use wecode_gov::{Action, WorkKind};
 
 use crate::args::Args;
-use crate::commands::ctx::{Res, open, playbook_of};
+use crate::commands::ctx::{
+    Res, actor, open, playbook_of, repo_path, require, require_allowed, the_task, which_project,
+};
+use crate::{git, work};
 
 pub(crate) fn parse_metric(spec: &str, flag: &str) -> Result<Measure, String> {
     let parts: Vec<&str> = spec.split(':').collect();
@@ -81,16 +93,38 @@ pub(crate) fn budget_from(a: &Args) -> Option<Budget> {
 
 // ----------------------------------------------------- the second verdict ------
 
-/// `task add`, with what the playbook would have written appended.
+/// `task add`, with `--onto` either side of it and the playbook's opinion appended.
 ///
 /// After the command rather than inside it, and that ordering is the point: the gate
 /// speaks first and decides, then the guidance speaks and decides nothing. A task
 /// refused above is not in the plan, so it draws no advice — the blocking questions
 /// are the ones to answer, and burying them under an opinion would be the wrong way
 /// round.
+///
+/// `--onto` is the one thing here that straddles the command instead of following it,
+/// for the same rule read twice: what it *checks* has to be checked before the row is
+/// written, and what it *creates* has to be created after. See [`Cut`].
 pub(crate) fn task_add(a: &Args) -> Res {
+    // Checked before the declaration is written and cut after it: see [`Cut`].
+    let cut = onto_asked(a)?;
+    // `--onto` can be the whole of an amendment, and then it has to run without one.
+    // `task_amend` requires one of its own flags and refuses a command naming none, so
+    // it only runs when it has something to do — the same split `--steps` makes, one
+    // module over, for the same reason.
+    let alone = cut.is_some()
+        && a.has("amend")
+        && !["parent", "top", "after", "no-after", "steps"]
+            .iter()
+            .any(|f| a.has(f));
+    let mut out = if alone {
+        String::new()
+    } else {
+        task::task_add(a)?
+    };
+    if let Some(cut) = cut {
+        out.push_str(&cut.apply(a, alone)?);
+    }
     // The id names the task being declared, so it is read as a task and nothing else.
-    let mut out = task::task_add(a)?;
     out.push_str(&advice_on(a, a.cmd(2), false)?);
     Ok(out)
 }
@@ -154,6 +188,180 @@ fn advisory(t: &Task, notes: &[Divergence]) -> String {
     out
 }
 
+// -------------------------------------------------------- the per-task base ------
+
+/// Where one task's branch starts, once `--onto` has named it and git has agreed.
+///
+/// Split from the cutting on purpose, and the ordering is the whole of it. Resolving the
+/// base is a question — is that a revision this repository has? — and a question about a
+/// declaration belongs *before* the row is written, or a typo costs the operator a saved
+/// task whose branch is not where the command said. Cutting the ref is a side effect, and
+/// belongs *after*: a declaration the gate refused is not a task, and a `wecode/<id>`
+/// standing for one is a ref no teardown will ever come for.
+///
+/// What it produces is a branch and no worktree. That is not an optimisation — it is
+/// where the flag gets its effect from. Preparation reuses a branch that is already
+/// standing and ignores the base it computed, so a ref cut here *is* the base the
+/// worktree lands on, and the project-wide `merge_to` goes on being the answer for every
+/// task that named nothing. Nothing downstream had to learn a new field to honour it.
+#[derive(Debug)]
+struct Cut {
+    repo: PathBuf,
+    /// The task's own branch — `wecode/<id>` is the per-task ref this is all about.
+    branch: String,
+    /// The revision as the operator typed it, kept for what is printed back.
+    onto: String,
+    /// What it resolved to. Compared against a branch already standing, so `--onto`
+    /// naming where the branch already is reads as nothing to do rather than as a
+    /// refusal.
+    base: String,
+}
+
+/// `--onto <branch>`: the base, resolved and checked, before anything is written.
+///
+/// `None` when the flag is absent, which is the ordinary case and the one that changes
+/// nothing.
+fn onto_asked(a: &Args) -> Result<Option<Cut>, Box<dyn std::error::Error>> {
+    if !a.has("onto") {
+        return Ok(None);
+    }
+    let onto = require(a.get("onto").unwrap_or(""), "--onto <branch>")?;
+    let (store, company) = open(a)?;
+    let plan = store.load_plan()?;
+    let typed = require(a.cmd(2), "task id")?;
+    // An amendment names work that exists, so a name that resolves to nothing is refused
+    // here rather than passed on: this reader is the whole command in that case, and
+    // would otherwise answer a mistyped id by doing nothing and saying so quietly.
+    let existing = if a.has("amend") {
+        Some(the_task(&plan, typed)?)
+    } else {
+        plan.task_ref(typed)
+    };
+
+    // A subtask has no branch of its own — it shares its parent's worktree, and
+    // [`crate::verify`] reads the *absence* of a `wecode/<id>` as what says a commit came
+    // from a step rather than from behind the task. Cutting one here would take that
+    // reading away, for a ref nothing would ever check out.
+    if a.has("parent") || existing.is_some_and(|t| t.parent.is_some() && !a.has("top")) {
+        return Err(format!(
+            "--onto: {typed} is part of another task and shares its worktree — a step has \
+             no branch of its own to cut\n  \
+             name the main task instead; the base it is given is the one every step works on"
+        )
+        .into());
+    }
+
+    let project = match existing {
+        Some(t) => plan
+            .project(&t.project)
+            .cloned()
+            .ok_or_else(|| format!("{typed} names project `{}`, which is not there", t.project))?,
+        None => which_project(a, &plan)?,
+    };
+    let repo = repo_path(&company, &project)?;
+    if !git::is_repo(&repo) {
+        return Err(format!(
+            "--onto {onto}: {} is not a git repository, so there is nothing to cut a branch in",
+            repo.display()
+        )
+        .into());
+    }
+    // Resolved rather than taken on trust. A base is only useful if it exists *now* — the
+    // ref is cut in a moment — and the common way to get this wrong is naming a branch
+    // that only exists on the remote, which is worth saying rather than leaving to git.
+    let base = git::commit_at(&repo, onto).ok_or_else(|| {
+        format!(
+            "--onto {onto}: no such branch or revision in {}\n  \
+             a branch that is only on the remote is named `origin/{onto}` until it is fetched",
+            repo.display()
+        )
+    })?;
+
+    let id = existing.map_or_else(|| TaskId::new(typed), |t| t.id.clone());
+    let branch = work::branch_for(&id);
+    if let Some(tip) = git::commit_at(&repo, &format!("refs/heads/{branch}"))
+        && tip != base
+    {
+        return Err(format!(
+            "--onto {onto}: `{branch}` is already cut, and not there\n  \
+             its commits are {id}'s work, and moving the branch would leave them behind\n  \
+             moving it anyway is git's, not planning's: `wecode worktree remove {id}` frees \
+             the branch, then `git branch -f {branch} {onto}`"
+        )
+        .into());
+    }
+    Ok(Some(Cut {
+        repo,
+        branch,
+        onto: onto.to_string(),
+        base,
+    }))
+}
+
+impl Cut {
+    /// Cuts the branch, now that the task it belongs to is in the plan.
+    ///
+    /// `authorise` is for the amendment that is only this: re-declaring where a task's
+    /// branch starts is a `define` like every other amendment, and on the path where
+    /// `task_amend` was skipped there is nothing else to have recorded one.
+    fn apply(&self, a: &Args, authorise: bool) -> Res {
+        let (store, company) = open(a)?;
+        let plan = store.load_plan()?;
+        // Read back out of the plan rather than trusted from the flags, which is what
+        // makes a refused declaration cut nothing: the gate above already printed why,
+        // and there is no task here to own a ref.
+        let Some(t) = plan.task_ref(a.cmd(2)) else {
+            return Ok(String::new());
+        };
+        if authorise {
+            let who = actor(a, &store, &company)?;
+            require_allowed(
+                &store,
+                &company,
+                &who,
+                (Some(t.project.to_string()), Some(t.id.to_string())),
+                &Action::Define {
+                    kind: WorkKind::Task,
+                },
+                "re-declaring where a task's branch starts",
+            )?;
+        }
+        if git::branch_exists(&self.repo, &self.branch) {
+            return Ok(format!(
+                "  onto      {} — `{}` is already there, so nothing was cut\n",
+                self.onto, self.branch
+            ));
+        }
+        git::branch_at(&self.repo, &self.branch, &self.base)?;
+        let mut out = format!(
+            "  onto      {} ({})\n  \
+             branch    {} cut there — `wecode start {}` opens its worktree on it, not on \
+             the project's integration branch\n",
+            self.onto,
+            self.base.get(..7).unwrap_or(&self.base),
+            self.branch,
+            t.id
+        );
+        // Named back, like every other substitution this module makes. A dependent task
+        // is otherwise cut from its predecessor's branch so that it *has* the work it
+        // comes after; a base declared here wins over that, and an operator who did not
+        // mean to say so should hear it now rather than read it off a conflict.
+        if !t.depends_on.is_empty() {
+            out.push_str(&format!(
+                "  note      it comes after {} — this base wins over their branches, so \
+                 their work is here only if {} already carries it\n",
+                t.depends_on
+                    .iter()
+                    .map(TaskId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.onto
+            ));
+        }
+        Ok(out)
+    }
+}
+
 pub(crate) fn scope_from(a: &Args) -> Option<Scope> {
     let read: Vec<&str> = a.all("read");
     let write: Vec<&str> = a.all("write");
@@ -198,5 +406,28 @@ mod tests {
         let s = scope_from(&parse(&["--write", "src/**", "--write", "tests/**"])).unwrap();
         assert_eq!(s.write.len(), 2);
         assert!(s.read.is_empty());
+    }
+
+    #[test]
+    fn a_declaration_without_onto_opens_nothing() {
+        // The absent case answers before the workspace is touched, which is what keeps
+        // `task add` a store write and nothing else for every task that named no base.
+        assert!(
+            onto_asked(&parse(&["task", "add", "t1", "a title"]))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn onto_without_a_branch_is_refused_by_name() {
+        // `--onto` followed by another flag parses as a boolean, and a base of "" would
+        // otherwise reach git as `HEAD`-ish nonsense.
+        let e = onto_asked(&parse(&[
+            "task", "add", "t1", "a title", "--onto", "--force",
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("--onto <branch>"), "{e}");
     }
 }
