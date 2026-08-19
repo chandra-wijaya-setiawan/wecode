@@ -432,12 +432,35 @@ pub(crate) fn start(a: &Args) -> Res {
     Ok(out)
 }
 
+/// What a promotion has to tell a person, for the two callers that make one.
+///
+/// Most moves a tick makes are between two statuses nobody is waiting on, and
+/// [`notify::on_status_change`] is the thing that knows it: `waiting → ready` announces
+/// nothing, and this is only ever a message for the one move that stops on somebody.
+/// That move is a manual task's — see [`scheduler::transitions`] — and it is the wait
+/// with nothing behind it, so the announcement *is* the dispatch. Without it a person's
+/// task became theirs in a database, and the operator found out by opening the board.
+///
+/// Shared by [`tick`] and [`serve`] rather than written twice, because the two apply the
+/// same moves and a notification only one of them made would be an operator whose phone
+/// depends on which command is running.
+fn on_promotion(
+    company: &Company,
+    org: &std::path::Path,
+    plan: &Plan,
+    m: &scheduler::Move,
+) -> String {
+    plan.task(&m.task).map_or_else(String::new, |task| {
+        notify::on_status_change(company, org, task, m.from, m.to)
+    })
+}
+
 /// One pass of the scheduler: bring stored statuses in line with the graph.
 ///
 /// Separate from dispatch so it can be run, read and trusted on its own. The loop
 /// calls the same function.
 pub(crate) fn tick(a: &Args) -> Res {
-    let (_, store, company) = open_full(a)?;
+    let (ws, store, company) = open_full(a)?;
     let plan = store.load_plan()?;
     let moves = scheduler::transitions(&plan);
     if moves.is_empty() {
@@ -472,6 +495,9 @@ pub(crate) fn tick(a: &Args) -> Res {
             m.from.as_str(),
             m.to.as_str()
         ));
+        // After the write, like every other announcement: the message names a status,
+        // and a hook that fired first could be answered before the status was true.
+        out.push_str(&on_promotion(&company, ws.root(), &plan, m));
     }
     store.append_records(broker.ledger())?;
     Ok(out)
@@ -510,6 +536,12 @@ pub(crate) fn serve(a: &Args) -> Res {
         for m in &moves {
             store.set_task_status(&m.task, m.to)?;
             println!("  {}  {} → {}", m.task, m.from.as_str(), m.to.as_str());
+            // The loop announces its own promotions, which is what makes the claim
+            // below — that everything in `blocked` was announced by whatever wrote its
+            // status — true of a manual task as well. It was not: the tick wrote that
+            // status and said nothing, so the one wait whose message is the work itself
+            // was the only wait nobody was told about.
+            print!("{}", on_promotion(&company, ws.root(), &plan, m));
         }
 
         let mut stale = !moves.is_empty();
