@@ -5,11 +5,16 @@
 //! controls left are the clock, what the agent says it has spent, and a signal — so
 //! those are what this module provides.
 //!
-//! Seven details are load-bearing:
+//! Eight details are load-bearing:
 //!
 //! - **The environment is built, not inherited.** A coding CLI inherits every secret
 //!   in the shell otherwise. Absent a container this is the only network control
 //!   there is.
+//! - **A credential is per dispatch, not per environment.** What the task declared is
+//!   minted here, laid over the built environment of this one process, and written to no
+//!   file that could outlive it. The allowlist keeps saying what may be *inherited* —
+//!   `PATH`, `HOME`, the harness's own API key — and never what an AWS account is worth.
+//!   See [`run_holding`].
 //! - **A new process group.** Coding CLIs spawn children; signalling only the parent
 //!   leaves them orphaned and still running.
 //! - **Idle, not just wall.** An agent that has stopped producing output has usually
@@ -43,7 +48,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wecode_core::Task;
-use wecode_org::{AgentTemplate, Post};
+use wecode_org::company::{Held, SecretDef};
+use wecode_org::{AgentTemplate, Company, Post};
 
 use crate::render::{kind_tag, truncate_cmd};
 use crate::usage::Meter;
@@ -309,6 +315,47 @@ pub(crate) fn run(
     env: &[(String, std::path::PathBuf)],
     limits: Limits,
 ) -> std::io::Result<Outcome> {
+    run_holding(t, prompt, tools, model, cwd, env, None, limits)
+}
+
+/// The same run, holding the credentials its task declared with `--needs-secret`.
+///
+/// `declared` is the workspace those ids are defined in and the ids themselves; `None` is
+/// a dispatch that declared none, which is every run this module supervised before
+/// credentials existed.
+///
+/// Resolved **once**, here, and held in memory for the life of this dispatch: two
+/// resolutions would mean two logins, two entries in the provider's own audit trail for
+/// one task, and two expiry times where [`SecretDef::admits`] needs one. Every *attempt*
+/// resolves again, though — a retry after a kill must not reuse a credential that has
+/// already been alive for the whole of the first attempt.
+///
+/// A refusal arrives as an [`std::io::Error`] with nothing started: an unknown id, a
+/// credential that would expire mid-run, or a resolver that printed the wrong thing costs
+/// a login at worst. Earlier still would be better — before the worktree, which the
+/// caller made — and that is where the same check belongs once dispatch consults it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "`run` plus the one parameter that carries the credentials"
+)]
+pub(crate) fn run_holding(
+    t: &AgentTemplate,
+    prompt: &str,
+    tools: &str,
+    model: Option<&str>,
+    cwd: &Path,
+    env: &[(String, std::path::PathBuf)],
+    declared: Option<(&Company, &[String])>,
+    limits: Limits,
+) -> std::io::Result<Outcome> {
+    // `limits.wall` is the clock this run will actually be held to — the task's, capped
+    // by the harness template's — which is the figure a ttl has to survive.
+    let held = match declared {
+        Some((company, ids)) => company
+            .hold(ids, limits.wall, mint)
+            .map_err(std::io::Error::other)?,
+        None => Held::default(),
+    };
     let args: Vec<String> = argv(t, prompt, tools, model).into_iter().skip(1).collect();
 
     let mut cmd = Command::new(&t.command);
@@ -333,6 +380,12 @@ pub(crate) fn run(
     for (key, dir) in env {
         cmd.env(key, dir);
     }
+    // Last, and for the same reason the cache beats the allowlist: a stale `AWS_*`
+    // inherited from the operator's shell must not beat the credential minted for this
+    // dispatch. This is the only place any of these values are written.
+    for (key, value) in held.env() {
+        cmd.env(key, value);
+    }
 
     let started = Instant::now();
     let mut child = cmd.spawn()?;
@@ -343,14 +396,16 @@ pub(crate) fn run(
     // Shared by both streams: a harness free to write its usage report to either one
     // should be counted the same way whichever it picks.
     let meter = Arc::new(Mutex::new(Meter::for_protocol(&t.protocol)));
+    // Shared with both readers, which is where a value that came back out is caught.
+    let held = Arc::new(held);
     let (tick_tx, tick_rx) = channel::<()>();
 
     let mut readers = Vec::new();
     if let Some(o) = child.stdout.take() {
-        readers.push(reader(o, &buf, &truncated, &meter, tick_tx.clone()));
+        readers.push(reader(o, &buf, &truncated, &meter, &held, tick_tx.clone()));
     }
     if let Some(e) = child.stderr.take() {
-        readers.push(reader(e, &buf, &truncated, &meter, tick_tx.clone()));
+        readers.push(reader(e, &buf, &truncated, &meter, &held, tick_tx.clone()));
     }
     drop(tick_tx);
 
@@ -387,15 +442,21 @@ fn reader<R: Read + Send + 'static>(
     buf: &Arc<Mutex<String>>,
     truncated: &Arc<Mutex<bool>>,
     meter: &Arc<Mutex<Meter>>,
+    held: &Arc<Held>,
     tick: std::sync::mpsc::Sender<()>,
 ) -> thread::JoinHandle<()> {
     let buf = Arc::clone(buf);
     let truncated = Arc::clone(truncated);
     let meter = Arc::clone(meter);
+    let held = Arc::clone(held);
     thread::spawn(move || {
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
             // Ping first: a line that overflows the cap is still evidence of life.
             let _ = tick.send(());
+            // Scrubbed at the top of the loop, before the meter and before the buffer,
+            // because every copy this line reaches afterwards is one somebody may read.
+            // A net over accidents, not a control — see [`Held::redact`].
+            let line = held.redact(line);
             // Metered before the cap is consulted, and deliberately: the line that
             // states what the run cost is the last one, which is precisely the line
             // a full buffer discards.
@@ -413,6 +474,71 @@ fn reader<R: Read + Send + 'static>(
         }
     })
 }
+
+/// Runs one resolver and returns what it printed on stdout.
+///
+/// Two streams, two rules, and the asymmetry is the point of having it. **stdout** is the
+/// credential: it goes back to be checked against what the block declared and set on one
+/// process, and it is never logged, recorded, or quoted back — including by a refusal.
+/// **stderr** is the operator's, and rides on the refusal, because a resolver that
+/// explained itself must not be silenced by the one process that read it.
+///
+/// Stdin is `/dev/null`. A resolver cannot ask for an MFA code, and a credential that
+/// genuinely needs a person at the keyboard is a `person` task rather than a dispatch
+/// hung on a pipe nobody is reading.
+fn mint(def: &SecretDef) -> Result<String, String> {
+    let refuse = |why: String| format!("{}: {why}", def.id);
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(&def.command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| refuse(format!("the resolver would not start: {e}")))?;
+    // Both streams read on threads of their own, because nothing reads either until the
+    // process is gone: a resolver that filled one pipe while this waited on the other
+    // would deadlock *against* the timeout rather than under it.
+    let out = child.stdout.take().map(sip);
+    let err = child.stderr.take().map(sip);
+    // The bound `[notify]` and the reply fetch are held to, for the same reason: an
+    // operator-written command line that must not be able to hold wecode open.
+    let code = crate::notify::wait_for(&mut child, def.timeout)
+        .map_err(|e| refuse(format!("the resolver could not be waited on: {e}")))?;
+    match code {
+        Some(0) => Ok(out.map(sipped).unwrap_or_default()),
+        // Its last complaint, taken the way a failed run's is: the whole of stderr on a
+        // refusal line would be somebody's stack trace across an operator's terminal.
+        Some(c) => {
+            let said = err.map(sipped).unwrap_or_default();
+            Err(refuse(
+                match said.lines().rev().map(str::trim).find(|l| !l.is_empty()) {
+                    Some(l) => format!("the resolver exited {c} — {}", clip(l, LAST_WORDS_CAP)),
+                    None => format!("the resolver exited {c}"),
+                },
+            ))
+        }
+        None => Err(refuse(format!(
+            "the resolver did not finish inside {}s",
+            def.timeout.as_secs()
+        ))),
+    }
+}
+
+/// Reads a stream to the end on a thread of its own.
+fn sip<R: Read + Send + 'static>(mut stream: R) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stream.read_to_string(&mut buf);
+        buf
+    })
+}
+
+/// What such a thread read, and nothing when it panicked part-way through.
+fn sipped(h: thread::JoinHandle<String>) -> String {
+    h.join().unwrap_or_default()
+}
+
 
 /// Waits for the readers to finish, and stops waiting if they will not.
 ///
