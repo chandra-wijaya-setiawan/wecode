@@ -4,7 +4,7 @@ One file per workspace, `wecode.db`. Everything machine-written lives here; ever
 hand-edited lives in `company.toml` (see [config/company.md](config/company.md)), because a binary blob
 cannot be diffed, reviewed or opened in an editor.
 
-Currently **schema version 10**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
+Currently **schema version 11**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
 
 ## Shape
 
@@ -100,6 +100,14 @@ refused the task outright instead of recording half of it. So every task already
 file is an agent's, writing that down claims nothing about the past, and it is the reading
 that leaves the scheduler doing tomorrow exactly what it did yesterday.
 
+The 10→11 step adds `tasks.steps` and leaves it NULL, which is 8→9's rule again rather
+than 9→10's — one step apart, opposite answers, and the difference is whether a default
+would be a record. A task already in the file *was* described to whoever did it: in a
+conversation, in an issue, in the envelope an agent is handed at dispatch. None of that
+was ever in this column, and there is no value here that would be true of it. Writing the
+title in would turn *nobody wrote instructions* into *the instructions are the title
+again*, which is the exact distinction the column exists to make.
+
 ## Full DDL
 
 The schema as it actually is, extracted from `crates/wecode-store/src/schema.rs`:
@@ -132,6 +140,15 @@ CREATE TABLE tasks (
     -- `NOT NULL`: absent must not be able to mean `agent` by accident, only by default.
     doer          TEXT NOT NULL DEFAULT 'agent',
     title         TEXT NOT NULL,
+    -- What whoever does this is told to do, as written. Beside the title because it is
+    -- the same thing at length: an agent's task is described to it at dispatch, out of
+    -- the plan and the repository, and a person's task has no dispatch to be described
+    -- at — the notification *is* the briefing, so the words have to exist before it.
+    --
+    -- NULL, not '': the absence is a real state and a reported one, since a person's
+    -- task with nothing here reaches a phone as a bare title. Nothing writes an empty
+    -- string, so nothing has to tell the two apart.
+    steps         TEXT,
     -- hierarchy: is part of. At most one parent, hence a column.
     parent_id     TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     status        TEXT NOT NULL,
@@ -348,9 +365,8 @@ manual task read back as an agent's on the next tick — admitted with no scope,
 and no acceptance, promoted to `ready`, and handed to precisely the agent the declaration
 existed to keep away from the work, while the operator held a receipt saying a person
 would do it. `wecode task add --by person` refused the task outright rather than record
-half of it, which was the safe answer and not a usable one. The column is what makes it
-recordable; the refusal in `commands/plan/task.rs` and the message it prints about a
-missing column are stale from here, and come out with the flag's own door.
+half of it, which was the safe answer and not a usable one. The column is what made it
+recordable, and the refusal came out with it: the flag now saves what it says.
 
 A word this build does not recognise is **corruption, not a default**. Every other
 enum-shaped column read out of `tasks` is parsed the same strict way, but here falling
@@ -362,6 +378,40 @@ Nothing narrows the write. `set_task_status`, `set_task_budget`, `set_task_shape
 `set_task_archived` leave the doer alone, so a person's task keeps its doer through
 promotion, signature, reshaping and filing — and the restart that reads it back is usually
 the one right after a status change.
+
+## What a person is told to do, and why the plan does not carry it
+
+`tasks.steps` holds the instructions the task carries, as written — the runbook for the
+console step, the six lines that say which token to mint where. It is the other half of
+`doer`: that column stops an agent being handed the work, and this one is how a person
+is handed it instead.
+
+An agent is described its task at dispatch. wecode assembles the envelope — the
+objective, the playbook, the scope, the repository map — and none of it is stored here,
+because all of it is derived at the moment of the run. A person's task has no dispatch to
+be described at. The notification *is* the briefing, so the words have to have been
+written before it, which means they have to be somewhere: `wecode task add --steps
+<file>` reads a file and this is where it lands.
+
+**Stored as text, not as a path.** The file the operator wrote is read once, at
+declaration, and copied in. A path would be a promise about a filesystem kept by the
+notification that goes out days later, from a loop on a machine that may have moved,
+against a branch that may have been merged; the store is the record and a path is a
+lookup that can fail after the fact.
+
+**Not in the loaded plan.** `load_plan` does not select this column, and `Task` has no
+field for it. The plan is read on every tick, by the board, by the cockpit and by every
+command that resolves a short number — none of which show a runbook, and all of which
+would carry every one of them in memory to do it. Two things read it, both holding a
+single task: `Store::task_steps`, asked by the command that prints a task in full and by
+the notification hook. Writing goes the same way, through `Store::set_task_steps`,
+narrow for the reason `set_task_budget` is narrow — a task's instructions must not be
+able to move what it is judged by.
+
+That is also why `save_task` cannot lose them. Its `INSERT … ON CONFLICT DO UPDATE`
+names every column it means to write, `steps` is not one of them, and so assigning a
+person's task or re-declaring it leaves the briefing where it was. A `REPLACE` would
+take the instructions out from under the notification.
 
 ## A number is a name, not a position
 

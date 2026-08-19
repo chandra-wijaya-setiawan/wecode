@@ -390,6 +390,117 @@ fn the_loop_announces_a_task_it_is_holding_for_a_signature() {
     assert_eq!(announcements(&log), vec!["digest", "t signature ready"]);
 }
 
+// ----------------------------------------------------------------- steps ------
+
+/// A person's task with a briefing, waiting on the operator.
+///
+/// `--steps` at declaration and `status` to make it wait, which is the path the operator
+/// has today: the tick promotes a manual task to `needs-approval` on its own, but the
+/// promotion loop is not one of the places that calls the hook yet.
+fn a_manual_task(org: &Org, id: &str, steps: &str) {
+    let file = org.path(&format!("{id}-steps.md"));
+    std::fs::write(&file, steps).unwrap();
+    org.run(&[
+        "task",
+        "add",
+        id,
+        "mint the fares token",
+        "--project",
+        "caching",
+        "--by",
+        "person",
+        "--steps",
+        file.to_str().unwrap(),
+    ])
+    .assert_ok("a person's task with its steps");
+    org.run(&["status", id, "needs-approval"])
+        .assert_ok("stop it for a person");
+}
+
+#[test]
+fn a_persons_task_hands_the_hook_the_work_itself() {
+    // The complaint this answers, in the owner's words: "I don't have instruction on the
+    // ticket — what should I do step by step?" Every other wait has a diff behind it and
+    // the message is about work already done; this one has nothing behind it, so the
+    // instructions *are* the message. A title and a number is an operator being woken up
+    // and asked to guess.
+    let org = Org::new("notify-steps", "solo");
+    org.seed();
+    let log = notified(&org, "echo [$WECODE_STEPS]");
+    a_manual_task(&org, "mint", "1. open the console\n2. create a token\n");
+
+    let said = announcements(&log).join("\n");
+    assert!(said.contains("1. open the console"), "no steps: {said}");
+    assert!(said.contains("2. create a token"), "cut short: {said}");
+}
+
+#[test]
+fn the_steps_go_over_as_a_document_as_well_as_a_message() {
+    // Both shapes, because a runbook longer than a chat message is exactly the one worth
+    // sending — and a manual task has no worktree, so a hook that wanted to attach the
+    // document had nothing to attach. The file is wecode's, written for the length of the
+    // hook and taken away after it: what it holds is the whole of the steps, uncut.
+    let org = Org::new("notify-steps-doc", "solo");
+    org.seed();
+    // One pipeline, because the redirect `notified` appends belongs to the last command
+    // in it: the path first, then the document itself read back out of the file.
+    let log = notified(&org, "echo [$WECODE_STEPS_FILE] | cat - $WECODE_STEPS_FILE");
+    let steps = "1. open the console\n2. create a token\n3. paste it into the vault\n";
+    a_manual_task(&org, "mint", steps);
+
+    let said = announcements(&log).join("\n");
+    assert!(said.contains("3. paste it into the vault"), "not it: {said}");
+    // The path the hook was handed, and the file is gone by now: it is a handle for one
+    // `sendDocument`, not a second place the steps live.
+    let path = said
+        .rsplit('[')
+        .next()
+        .and_then(|s| s.split(']').next())
+        .expect("the path was handed over");
+    assert!(path.contains("wecode-steps"), "not wecode's file: {said}");
+    assert!(
+        !Path::new(path).exists(),
+        "the handed-over document outlived the notification: {path}"
+    );
+}
+
+#[test]
+fn a_briefing_longer_than_a_message_is_marked_and_not_quietly_cut() {
+    // The bound is the channel's — Telegram refuses a message over 4096 characters — and
+    // the cut has to say so, for the reason the diff's does: a person reading step 40 of
+    // 60 has to know there are 60. Unlike a diff, where the rest is only in the tree, the
+    // rest of this is in the file named in the same breath.
+    let org = Org::new("notify-steps-long", "solo");
+    org.seed();
+    let log = notified(&org, "echo \\\"$WECODE_STEPS\\\" | tail -2");
+    let long: String = (1..=300).map(|n| format!("{n}. do the next thing\n")).collect();
+    assert!(long.len() > 4000, "the fixture has to exceed the bound");
+    a_manual_task(&org, "mint", &long);
+
+    let said = announcements(&log).join("\n");
+    assert!(said.contains("truncated"), "cut without saying so: {said}");
+    assert!(
+        said.contains("WECODE_STEPS_FILE"),
+        "cut off mid-instruction with nowhere to look: {said}"
+    );
+}
+
+#[test]
+fn an_agents_wait_carries_no_steps_at_all() {
+    // The control. An agent is told what to do at dispatch, out of the plan and the
+    // repository, and `--steps` is refused on its task — so both variables are empty for
+    // every wait wecode was announcing before this existed. Empty rather than a title
+    // repeated back: a hook that put a heading over these would be printing an empty
+    // document as instructions.
+    let org = Org::new("notify-steps-none", "solo");
+    org.seed();
+    let log = notified(&org, "echo [$WECODE_STEPS][$WECODE_STEPS_FILE]");
+
+    org.run(&["status", "cache-tests", "needs-approval"])
+        .assert_ok("stop it for a person");
+    assert_eq!(announcements(&log), vec!["[][]"]);
+}
+
 // ---------------------------------------------------------------- digest ------
 
 #[test]

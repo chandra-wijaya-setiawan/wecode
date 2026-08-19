@@ -19,7 +19,9 @@ use rusqlite::Connection;
 /// 9 adds `task_executions.replayed_tokens`, on the same rule as 4: the count was
 /// being read off the agent's output and printed, and nothing kept it. 10 adds
 /// `tasks.doer`, without which a manual task read as an agent's on the next tick.
-pub const VERSION: i64 = 10;
+/// 11 adds `tasks.steps`: a person's task is dispatched by being described, and until
+/// this column existed there was nowhere for the description to live.
+pub const VERSION: i64 = 11;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -48,6 +50,15 @@ CREATE TABLE tasks (
     -- `NOT NULL`: absent must not be able to mean `agent` by accident, only by default.
     doer          TEXT NOT NULL DEFAULT 'agent',
     title         TEXT NOT NULL,
+    -- What whoever does this is told to do, as written. Beside the title because it is
+    -- the same thing at length: an agent's task is described to it at dispatch, out of
+    -- the plan and the repository, and a person's task has no dispatch to be described
+    -- at — the notification *is* the briefing, so the words have to exist before it.
+    --
+    -- NULL, not '': the absence is a real state and a reported one, since a person's
+    -- task with nothing here reaches a phone as a bare title. Nothing writes an empty
+    -- string, so nothing has to tell the two apart.
+    steps         TEXT,
     -- hierarchy: is part of. At most one parent, hence a column.
     parent_id     TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     status        TEXT NOT NULL,
@@ -415,6 +426,13 @@ const UPGRADES: &[(i64, &str)] = &[
         9,
         "ALTER TABLE tasks ADD COLUMN doer TEXT NOT NULL DEFAULT 'agent'",
     ),
+    // Nullable and nothing backfilled, on the 8→9 rule rather than the 9→10 one: there
+    // is no default that would be true. A task already in the file was described to
+    // whoever did it somewhere else — in a conversation, in an issue, in the envelope an
+    // agent is handed at dispatch — and writing the title in here would turn *nobody
+    // wrote instructions* into *the instructions are the title again*, which is the one
+    // thing the column exists to tell apart.
+    (10, "ALTER TABLE tasks ADD COLUMN steps TEXT"),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -562,6 +580,10 @@ mod tests {
             .query_row("SELECT count(doer) FROM tasks", [], |r| r.get(0))
             .expect("tasks.doer exists after 9→10");
         assert_eq!(doers, 0);
+        let described: i64 = c
+            .query_row("SELECT count(steps) FROM tasks", [], |r| r.get(0))
+            .expect("tasks.steps exists after 10→11");
+        assert_eq!(described, 0);
     }
 
     #[test]
@@ -578,6 +600,7 @@ mod tests {
              DROP TABLE short_numbers;
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
+             ALTER TABLE tasks DROP COLUMN steps;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
         )
         .unwrap();
@@ -604,6 +627,7 @@ mod tests {
              DROP TABLE short_numbers;
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
+             ALTER TABLE tasks DROP COLUMN steps;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
         )
         .unwrap();
@@ -639,6 +663,7 @@ mod tests {
             "DROP TABLE short_numbers;
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
+             ALTER TABLE tasks DROP COLUMN steps;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
         )
         .unwrap();
@@ -684,6 +709,7 @@ mod tests {
         c.execute_batch(
             "ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
+             ALTER TABLE tasks DROP COLUMN steps;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
         )
         .unwrap();
@@ -720,7 +746,8 @@ mod tests {
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
             "ALTER TABLE task_executions DROP COLUMN replayed_tokens;
-             ALTER TABLE tasks DROP COLUMN doer;",
+             ALTER TABLE tasks DROP COLUMN doer;
+             ALTER TABLE tasks DROP COLUMN steps;",
         )
         .unwrap();
         c.execute_batch(
@@ -758,8 +785,11 @@ mod tests {
         // exactly what it did yesterday.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("ALTER TABLE tasks DROP COLUMN doer")
-            .unwrap();
+        c.execute_batch(
+            "ALTER TABLE tasks DROP COLUMN doer;
+             ALTER TABLE tasks DROP COLUMN steps;",
+        )
+        .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
              VALUES ('p','wecode','an objective','active');
@@ -780,6 +810,38 @@ mod tests {
             .expect("tasks.doer exists");
         assert_eq!(title, "rotate the signing key", "the plan survived");
         assert_eq!(doer, "agent", "nobody is assumed to have been asked");
+    }
+
+    #[test]
+    fn a_database_that_predates_the_steps_reads_them_as_never_written() {
+        // The upgrade a workspace in use takes to reach this build, and the opposite
+        // judgement to 9→10 one step above: there the default was the history, here
+        // there is no default that would be. A task already in the file was described
+        // to whoever did it somewhere this database never saw, so NULL is the only
+        // honest answer — and the command that reads it back says *no steps* rather
+        // than handing a phone a document nobody wrote.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("ALTER TABLE tasks DROP COLUMN steps")
+            .unwrap();
+        c.execute_batch(
+            "INSERT INTO projects (id, repo, objective, status)
+             VALUES ('p','wecode','an objective','active');
+             INSERT INTO tasks (id, project_id, kind, title, status)
+             VALUES ('mint','p','chore','mint the fares token','needs-approval');",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 10i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let (title, steps): (String, Option<String>) = c
+            .query_row("SELECT title, steps FROM tasks WHERE id = 'mint'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .expect("tasks.steps exists");
+        assert_eq!(title, "mint the fares token", "the plan survived");
+        assert_eq!(steps, None, "the title is not passed off as instructions");
     }
 
     #[test]
@@ -832,7 +894,8 @@ mod tests {
              DROP TABLE inbox_cursor;
              DROP TABLE short_numbers;
              ALTER TABLE tasks DROP COLUMN archived;
-             ALTER TABLE tasks DROP COLUMN doer;",
+             ALTER TABLE tasks DROP COLUMN doer;
+             ALTER TABLE tasks DROP COLUMN steps;",
         )
         .unwrap();
         c.execute_batch(

@@ -496,6 +496,53 @@ impl Store {
         Ok(())
     }
 
+    /// What whoever does this task is told to do, and `None` when nothing was written.
+    ///
+    /// Read on its own rather than as a field of [`Self::load_plan`], and the reason is
+    /// who asks. The plan is loaded on every tick, by the board, by the cockpit, by
+    /// every command that resolves a short number — none of which show a runbook, and
+    /// all of which would carry every one of them in memory to do it. Two things read
+    /// this: the command that prints a task in full, and the notification that hands a
+    /// person their instructions. Both hold one task and ask about it.
+    ///
+    /// `None` is also what a task that does not exist reads as. The caller that needs to
+    /// tell those apart is asking the plan, which knows; nothing that has instructions
+    /// to show is better off for a second way to hear that the id was a typo.
+    pub fn task_steps(&self, id: &TaskId) -> Result<Option<String>, StoreError> {
+        let steps: Option<Option<String>> = self
+            .conn()
+            .query_row("SELECT steps FROM tasks WHERE id = ?1", [id.as_str()], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(steps.flatten())
+    }
+
+    /// Records what whoever does this task is told to do. Blank erases it.
+    ///
+    /// One column rather than a whole [`Self::save_task`], for the reason
+    /// [`Self::set_task_budget`] is narrow: a save replaces acceptance, scope and
+    /// dependencies out of whatever the caller was holding, and acceptance is frozen
+    /// once a task has been dispatched. Writing a task's instructions must not be able
+    /// to move what it is judged by.
+    ///
+    /// It is also the only way the column can be written at all: the domain's [`Task`]
+    /// has no field for this, and deliberately — a document is not something the
+    /// scheduler, the admission gate or the overlap check has any use for, and putting
+    /// it on the type every one of them passes around would mean carrying it through all
+    /// of them to be read in two places.
+    ///
+    /// Blank collapses to `NULL` so the column has one spelling for nothing. A steps
+    /// document of whitespace is not a briefing, and a caller that wants the absence
+    /// back — an operator who wrote the wrong file — has one way to say so.
+    pub fn set_task_steps(&self, id: &TaskId, steps: &str) -> Result<(), StoreError> {
+        self.conn().execute(
+            "UPDATE tasks SET steps = ?2 WHERE id = ?1",
+            params![id.as_str(), (!steps.trim().is_empty()).then_some(steps)],
+        )?;
+        Ok(())
+    }
+
     /// Sets where a task sits — what it is part of, and what it comes after — without
     /// rewriting the rest of it.
     ///
@@ -1171,6 +1218,93 @@ mod tests {
             }
             other => panic!("expected a corruption error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn what_a_person_is_told_to_do_survives_a_restart() {
+        // The point of the column, and the same point the doer's has: a person's task is
+        // dispatched by being described, so the description has to outlive the process
+        // that took it down. The notification that carries it is sent by a loop started
+        // days later.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        let t = Task::new("mint-token", "caching", "mint the fares token")
+            .of_kind(TaskKind::Chore)
+            .done_by(Doer::Person);
+        s.save_task(&t).unwrap();
+        let steps = "1. open the Travelpayouts console\n2. create a token\n";
+        s.set_task_steps(&"mint-token".into(), steps).unwrap();
+
+        assert_eq!(
+            s.task_steps(&"mint-token".into()).unwrap().as_deref(),
+            Some(steps),
+            "as written, newlines and all — a runbook is not a summary"
+        );
+    }
+
+    #[test]
+    fn a_task_nobody_wrote_steps_for_says_so() {
+        // Three absences that must all read the same way, because the command that asks
+        // turns one advisory on all of them: a task with no steps, an id that is not in
+        // the plan, and steps erased by writing blank over them.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("layer")).unwrap();
+        assert_eq!(s.task_steps(&"layer".into()).unwrap(), None);
+        assert_eq!(s.task_steps(&"no-such-task".into()).unwrap(), None);
+
+        s.set_task_steps(&"layer".into(), "1. do the thing\n").unwrap();
+        assert!(s.task_steps(&"layer".into()).unwrap().is_some());
+        s.set_task_steps(&"layer".into(), "  \n").unwrap();
+        assert_eq!(
+            s.task_steps(&"layer".into()).unwrap(),
+            None,
+            "whitespace is not a briefing"
+        );
+    }
+
+    #[test]
+    fn saving_a_task_again_does_not_erase_its_steps() {
+        // `save_task` is what `assign`, `task scope` and every re-declaration go through,
+        // and the [`Task`] it is handed has no idea this column exists. An `INSERT … ON
+        // CONFLICT` naming every column *but* this one is what keeps the instructions
+        // there; a `REPLACE` would take them out from under the notification.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        let t = Task::new("mint-token", "caching", "mint the fares token").done_by(Doer::Person);
+        s.save_task(&t).unwrap();
+        s.set_task_steps(&"mint-token".into(), "1. open the console\n")
+            .unwrap();
+
+        let mut again = t.clone();
+        again.status = TaskStatus::Waiting;
+        again.assignee = Some("chief".to_string());
+        s.save_task(&again).unwrap();
+
+        assert_eq!(
+            s.task_steps(&"mint-token".into()).unwrap().as_deref(),
+            Some("1. open the console\n"),
+            "assigning a person's task did not un-brief it"
+        );
+    }
+
+    #[test]
+    fn removing_a_task_takes_its_steps_with_it() {
+        // The column lives on the row, so nothing extra clears it — asserted rather than
+        // assumed, because the same was once true of a table that had to be swept by
+        // hand, and a task id can be used again.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("layer")).unwrap();
+        s.set_task_steps(&"layer".into(), "1. do the thing\n").unwrap();
+        s.delete_task(&"layer".into()).unwrap();
+
+        s.save_task(&task("layer")).unwrap();
+        assert_eq!(
+            s.task_steps(&"layer".into()).unwrap(),
+            None,
+            "a reused id does not inherit the last occupant's instructions"
+        );
     }
 
     #[test]

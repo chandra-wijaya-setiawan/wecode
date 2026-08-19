@@ -68,6 +68,11 @@
 //! operator is not standing at. Both are known here, before the message goes out, and
 //! both are handed over: a hook can put the button only where a thumb decides something,
 //! and address it to somebody who can.
+//!
+//! And, for the one kind of task nobody dispatches, **the instructions themselves** — see
+//! [`Sheet`]. A person's task waits for the opposite reason to every other wait: nothing
+//! has been done and the doing is theirs, so there is no diff to read and what the message
+//! must carry is the work. `WECODE_STEPS` holds it, `WECODE_STEPS_FILE` the whole of it.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -110,6 +115,11 @@ const QUOTE: usize = 120;
 /// and the count beside it stays true either way; a diff is not shorter for being cut,
 /// it is only less of a diff. A hook that wants all of it is handed the tree.
 const DIFF: usize = 4000;
+
+/// How much of a task's steps the message carries, in characters. [`DIFF`]'s figure by
+/// [`DIFF`]'s arithmetic and for the same channel, but a cheaper cut: the whole document
+/// goes over as a file beside it.
+const STEPS: usize = 4000;
 
 /// How many waits a digest names. The rest are counted and not listed, the bargain the
 /// file list makes: the tally above them is never bounded, so twenty of forty says forty.
@@ -457,16 +467,93 @@ impl Produced {
     }
 }
 
-/// The workspace's plan, and `None` when there is no workspace to read one out of.
+/// The workspace's database, and `None` when there is no workspace to read one out of.
 ///
-/// Read-only, and only when a database is already there: [`Store::open`] creates and
-/// migrates, and a notification must not bring a workspace into being.
-fn plan_at(org: &Path) -> Option<Plan> {
+/// Read-only, and only when a file is already there: [`Store::open`] creates and migrates,
+/// and a notification must not bring a workspace into being. One place that knows it, for
+/// the two things here that read the store — the plan a task's tree is found through, and
+/// the steps a person's task carries.
+fn store_at(org: &Path) -> Option<Store> {
     let db = Workspace::at(org).db_path();
     if !db.is_file() {
         return None;
     }
-    Store::open(&db).ok()?.load_plan().ok()
+    Store::open(&db).ok()
+}
+
+/// The workspace's plan, and `None` when there is none to read.
+fn plan_at(org: &Path) -> Option<Plan> {
+    store_at(org)?.load_plan().ok()
+}
+
+/// What a person's task tells the person, in the two shapes a channel has room for.
+///
+/// The message and the document, because both already exist on the hook's side and each
+/// suits a different briefing: three bullet points belong in the message, a forty-line
+/// console runbook attached to it. Text alone would leave a long one cut off on a phone
+/// with nowhere else to look — a manual task has no worktree to be told to go and read.
+/// The words come back out of the store, as written at `task add --steps`.
+struct Sheet {
+    /// The steps as written, bounded to [`STEPS`] characters.
+    body: String,
+    /// The whole of them, in a file the hook may attach. `None` when one could not be
+    /// written — which costs the document, not the notification.
+    file: Option<PathBuf>,
+}
+
+impl Sheet {
+    /// What this task tells whoever does it, and `None` when nothing was written for it:
+    /// every agent's task, described at dispatch instead, and a person's until somebody
+    /// writes the steps — an operator woken for a task that says only its own name.
+    fn of(org: &Path, task: &Task) -> Option<Self> {
+        let steps = store_at(org)?.task_steps(&task.id).ok().flatten()?;
+        let file = Self::written(&steps);
+        let body = match steps.char_indices().nth(STEPS) {
+            // Marked, and pointing at the whole copy rather than only saying there is
+            // more: a person cut off mid-instruction has to know where the rest is, and
+            // unlike a diff the rest is right there.
+            Some((at, _)) => format!(
+                "{}\n… truncated — the whole of it is the file in WECODE_STEPS_FILE",
+                &steps[..at]
+            ),
+            None => steps,
+        };
+        Some(Self { body, file })
+    }
+
+    /// The document on disk, and `None` if it could not be written. A temp file for the
+    /// length of one notification, removed when this is dropped — after the hook has been
+    /// waited for. The store is where the steps live; this is a handle for a `sendDocument`
+    /// and has no business outliving one.
+    ///
+    /// Named for the process and a counter, like [`Caught`] and for its reason: two loops
+    /// share a temp directory and one pass announces several tasks, so a name either could
+    /// pick twice is an operator receiving another task's instructions.
+    fn written(steps: &str) -> Option<PathBuf> {
+        static NTH: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "wecode-steps-{}-{}.md",
+            std::process::id(),
+            NTH.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, steps).ok()?;
+        Some(path)
+    }
+
+    /// Where that document is, for the hook's environment. Empty when there is none.
+    fn path(&self) -> OsString {
+        self.file
+            .clone()
+            .map_or_else(OsString::new, PathBuf::into_os_string)
+    }
+}
+
+impl Drop for Sheet {
+    fn drop(&mut self) {
+        if let Some(path) = &self.file {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// The tree this task's work is in, and `None` when there is not one.
@@ -615,6 +702,10 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
     // reason `made` is: it is a fact about the wait rather than about the status write,
     // and no call site holds it.
     let sign = signing(task, status, why);
+    // And what the person is being asked to do, where the task is a person's. A binding
+    // rather than an inline call so the document outlives the hook: the file goes away
+    // when this is dropped, which is after `spoke` has waited.
+    let sheet = Sheet::of(org, task);
 
     // Through `sh -c`, like acceptance: what an operator writes here is a shell line —
     // a pipe, a quoted argument, a `||` fallback — not an argv this could split.
@@ -683,6 +774,14 @@ fn fire(company: &Company, org: &Path, task: &Task, status: TaskStatus, why: Wai
         .env(
             "WECODE_REPORT",
             made.as_ref().map_or("", |m| m.report.as_str()),
+        )
+        // The work itself, for the wait where the work has not happened yet — a person's
+        // task, whose notification is its dispatch. Two variables for the two shapes a
+        // channel has, and both empty for everything an agent does. See [`Sheet`].
+        .env("WECODE_STEPS", sheet.as_ref().map_or("", |s| s.body.as_str()))
+        .env(
+            "WECODE_STEPS_FILE",
+            sheet.as_ref().map_or_else(OsString::new, Sheet::path),
         )
         .stdin(Stdio::null());
     spoke(company, command, &mut cmd)

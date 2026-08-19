@@ -21,6 +21,8 @@ default, nothing is run and waits are silent. It is one half of a round trip:
 | `WECODE_DIFF` | what changed in them, as a diff, to 4000 characters |
 | `WECODE_REPORT` | the change added up — the merge record, before the merge |
 | `WECODE_WORKTREE` | the tree the work is in |
+| `WECODE_STEPS` | what a person's task asks them to do, to 4000 characters; empty for an agent's |
+| `WECODE_STEPS_FILE` | the whole of it as a file, to attach rather than quote |
 
 `WECODE_WAITING_FOR` is the one to branch on. `signature` is the dispatch gate holding a
 task that is otherwise `ready`, which no status can express — the other three restate
@@ -178,6 +180,59 @@ things to be woken up for, and a hook that reported the second as the first woul
 describing an empty diff nobody produced. An empty report is worse still, since a document
 that arrived saying nothing reads as a finding rather than as an absence — so none is sent
 at all, and a tree that was worked in and left unchanged says so in words instead.
+
+**Send a person the work, not a reference to it.** Everything above is about a wait that
+comes *after* something happened: there is a tree, a diff, a report, and the message is
+asking whether it may land. A task whose doer is a person is the other kind. Nothing has
+been done, the doing is the operator's, and the notification is not a summons to go and
+look at work — it is the dispatch. `WECODE_STEPS` is what makes it one: the instructions
+written at `wecode task add --steps <file>` (see
+[commands](../commands.md#the-ones-worth-explaining)), stored with the task and handed over
+as written.
+
+Without them the message is a title and a number, which is somebody woken up at 02:14 and
+asked to guess what they were woken up for. That is the complaint this exists to answer, so
+`wecode task add --by person` says so when no steps are declared — an advisory, not a
+refusal, since a task whose whole instruction is its own title is a real task.
+
+```sh
+# in your [notify] command: a person's task is briefed by the message
+if [ -n "$WECODE_STEPS" ]; then
+  body="$WECODE_TASK_TITLE
+
+$WECODE_STEPS"
+else
+  body="$WECODE_TASK_TITLE — $WECODE_WAITING_FOR ($WECODE_CHANGED_COUNT files)"
+fi
+```
+
+`WECODE_STEPS_FILE` is the same document as a file, for the channel that would rather
+attach it than quote it — Telegram's `sendDocument` takes a caption and buttons, so the
+runbook and the **Complete** that answers it are one message. Use it when the steps are
+long: `WECODE_STEPS` is cut at 4000 characters like the diff and for the same channel, and
+says `… truncated — the whole of it is the file in WECODE_STEPS_FILE` when it was, because
+a person reading step 40 of 60 has to know there are 60. There is no worktree behind a
+manual task, so this file is the only document there is to send.
+
+wecode writes it for the length of the notification and removes it afterwards. It is a
+handle for one `sendDocument`, not a second place the steps live — the store is that — so a
+hook that wants to keep a copy should copy it while it runs.
+
+Both are **empty for every task wecode dispatches**. An agent is told what to do at
+dispatch, out of the plan, the playbook and the repository, and `--steps` is refused on its
+task rather than stored where nothing would read it. Empty, not the title again: a hook that
+printed a heading over these would be presenting an absence as a briefing.
+
+**What does not send them yet.** A manual task reaches `needs-approval` by being promoted
+in the tick — straight from `waiting`, as soon as its prerequisites are done — and the tick
+is the one place that writes a status without calling this hook. Nothing needed it to before:
+every promotion it made was to `ready`, which no person is waiting on. So the briefing goes
+out today when the status is set by hand (`wecode status <id> needs-approval`), and it goes
+out with everything else on the digest's rhythm, but the moment the graph decides a person is
+wanted is announced by nothing. The fix is one `notify::on_status_change` in the promotion
+loop in `crates/wecode-cli/src/commands/exec.rs`, guarded the way every other call site is —
+`crossing` already returns `None` for a promotion no person is waiting on, so it cannot
+become noise.
 
 The line runs through `sh -c`, in the workspace, with your environment: it is your own
 command, and a desktop notifier needs the session it was configured in. The task is
