@@ -215,22 +215,41 @@ because the work is named by what it is *not* dispatched to. It is a separate ax
 `--kind`, deliberately: provisioning a bucket by hand is still a chore, and folding the
 two together would lose which chore it was.
 
-**Declaring a person is currently refused, and the refusal is the point.** The `tasks`
-table has a column for a task's kind and none for its doer, so a manual task does not
-survive being written down. Everything above the store already reads it — admission
-relaxes the write scope, budget and acceptance a dispatch needs and a person's work has
-none of; the tick stops such a task on the operator instead of dispatching it; `show`,
-the tree and the board all say so. What that adds up to without the column is the one
-outcome the flag exists to prevent: a task admitted with no scope, no budget and no
-acceptance, saved as an ordinary agent's, promoted to `ready` on the next tick, and
-handed to an agent — with the operator holding a receipt that said `done by a person`.
-Failing closed is strictly better than that, and better than the flag's absence, which
-refused the task for three things it was never supposed to need.
+It records, and everything downstream honours it. `tasks.doer` is the column, so a plan read
+back after a restart still knows the work is somebody's to do by hand: admission stops
+demanding the write scope, budget and acceptance a dispatch needs and a person's work has
+none of; the tick stops such a task on the operator instead of dispatching it; `show`, the
+tree and the board all say so. The usage block above still calls the flag refused, which it
+was for two commits — that text is `wecode help` verbatim, and the last stale copy of the
+sentence is the usage constant in `crates/wecode-cli/src/main.rs`.
 
-What is missing is one column: a migration in `crates/wecode-store/src/schema.rs`, and
-`save_task`/`load_plan` in `crates/wecode-store/src/plan.rs`. The refusal in
-`commands/plan/task.rs` goes in the same commit. `--amend` does not read `--by` at all
-yet, and that is the second half of the same door.
+**`wecode task add --steps <file>`** is the other half of declaring a person's task: what
+they are actually being asked to do. An agent is described its task at dispatch — the
+objective, the playbook, the scope, the repository — and a person's task has no dispatch, so
+the notification *is* the briefing and the words have to exist before it. The file is read
+at declaration and stored with the task, as text: the message goes out days later, from a
+loop on a machine where the path may have moved or been merged away, so a path would be a
+promise this cannot keep. It reaches the person in `WECODE_STEPS`, and as an attached
+document in `WECODE_STEPS_FILE` — see [the notify hook](config/notify.md).
+
+The file is named rather than found. The obvious alternative is a convention —
+`docs/wecode/<task>/steps.md`, picked up when it happens to be there — and it is wrong
+twice: that path is inside the *repository* while this command runs in the workspace, so
+resolving it means knowing which repo the project names and where it is checked out, and the
+same declaration would read a different document on another machine. And it would arrive
+silently, which for instructions is the worst possible default: the task looks briefed and
+the briefing is a file somebody forgot they wrote. The convention still works, typed —
+`--steps docs/wecode/mint-token/steps.md`.
+
+A path that cannot be read, and a document with nothing in it, are both refused before
+anything is saved: a task claiming a briefing it has not got is the failure the flag exists
+to end. `--steps` on an agent's task is refused too, since nothing would ever read it. And a
+person's task declared with no steps draws an advisory naming `--amend --steps` — nothing is
+refused, because a task whose whole instruction is its own title is a real task, but a bare
+one reaches a phone as a title and a number, which is somebody woken up and asked to guess.
+
+`wecode task add <id> --amend --steps <file>` re-declares them, beside or instead of a move,
+and prints what it replaced. `wecode show` does not print them yet.
 
 **`wecode task add <id> --amend`** reshapes the plan without taking anything out of it.
 It changes where a task *sits* — `--parent <task>` puts it inside a sprint, `--top` lifts

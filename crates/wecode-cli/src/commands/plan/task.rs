@@ -10,6 +10,12 @@
 //! `task rm` is the other half of the same decision. It says a task should never have
 //! existed; amending one that should is [`super::amend`], and recording that it was
 //! considered and abandoned is `status <id> dropped`.
+//!
+//! One flag here is not a property of the work but the work's own briefing: `--steps`.
+//! An agent's task is described to it at dispatch, out of the plan and the repository
+//! (see [`crate::handoff`]); a person's task has no dispatch, so the notification is the
+//! briefing and the words have to be written at declaration or they do not exist. See
+//! [`steps_from`] for why a file, and [`briefed`] for what is said when one is missing.
 
 use wecode_core::task::Doer;
 use wecode_core::{
@@ -172,12 +178,158 @@ enum Assignment {
     Refused(String),
 }
 
+/// The instructions a task carries, read off `--steps <file>`, and `None` when the flag
+/// was not given.
+///
+/// **A file the operator names, rather than a path wecode guesses.** The obvious
+/// alternative is a convention — `docs/wecode/<task>/steps.md`, picked up when it happens
+/// to be there — and it is wrong twice over. That path is inside the *repository*, and
+/// this command runs in the workspace: resolving it means knowing which repo the project
+/// names and where that repo is checked out on this machine, so the same declaration
+/// would read a different document on somebody else's laptop and none at all on a
+/// machine that has not cloned it. And it would arrive silently. Every other substitution
+/// this module makes is named back to the caller, on the rule that a default nobody is
+/// told about is a default nobody checks — instructions are the worst possible thing to
+/// acquire that way, because the task looks briefed and the briefing is a file the
+/// operator forgot they wrote. Naming it costs one argument, and the convention still
+/// works: `--steps docs/wecode/mint-token/steps.md` is exactly that convention, typed.
+///
+/// Read here and stored as text, so what goes out on the phone is what was declared
+/// rather than whatever that path holds days later — see `Store::set_task_steps`.
+///
+/// An unreadable path and an empty document are both refused, before anything is
+/// written. A briefing nobody can read is the complaint this flag answers, arriving as
+/// a task that claims to have one.
+fn steps_from(a: &Args) -> Result<Option<(String, String)>, Box<dyn std::error::Error>> {
+    let Some(path) = a.get("steps") else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        format!(
+            "--steps {path}: {e}\n  \
+             the file is read now and stored with the task, so it has to be here now"
+        )
+    })?;
+    if text.trim().is_empty() {
+        return Err(format!(
+            "--steps {path}: nothing in it\n  \
+             a person's task is its own briefing, and an empty one reaches a phone as a bare title"
+        )
+        .into());
+    }
+    Ok(Some((path.to_string(), text)))
+}
+
+/// Refuses `--steps` on work wecode dispatches.
+///
+/// Not a formality. An agent is told what to do at dispatch, out of the plan, the
+/// playbook and the repository — [`crate::handoff`] assembles it — and nothing there
+/// reads this column. Storing the file anyway would leave an operator holding a receipt
+/// for instructions that were never going to be delivered to anybody, which is a worse
+/// outcome than the refusal and the same shape of failure the flag exists to fix.
+fn steps_are_a_persons(t: &Task) -> Result<(), String> {
+    if t.is_dispatched() {
+        return Err(format!(
+            "--steps is a person's briefing, and {id} is an agent's task\n  \
+             an agent is told what to do at dispatch, from the plan and the repository, \
+             so nothing would read this file\n  \
+             `--by person` says the work is somebody's to do by hand",
+            id = t.id
+        ));
+    }
+    Ok(())
+}
+
+/// What to say about a task's steps once it is saved: the briefing it got, or the
+/// advisory for the one it did not.
+///
+/// The advisory is this task's whole complaint, caught at the door. A person's task with
+/// nothing written on it reaches a phone as a title and a number, which is an operator
+/// being woken up and asked to guess — and the flag that fixes it is not in `wecode
+/// help`, so the moment it is missed is the moment to name it.
+///
+/// Nothing is refused for it, deliberately. A step whose instructions are a sentence in
+/// the title (`rotate the signing key`) is a real task and its operator knows what to do;
+/// the gate asks for what a task cannot work without, and this is worth saying rather
+/// than worth blocking.
+fn briefed(t: &Task, steps: Option<&(String, String)>) -> String {
+    match steps {
+        Some((path, text)) => format!(
+            "  steps     {} lines from {path} — the notification carries them\n",
+            text.lines().count()
+        ),
+        None if t.is_done_by_a_person() => format!(
+            "\n  no steps — a person's task is its own dispatch message, and this one \
+             reaches a phone as a bare title\n  \
+             `wecode task add {id} --amend --steps <file>` writes them; nothing is \
+             refused for this\n",
+            id = t.id
+        ),
+        None => String::new(),
+    }
+}
+
+/// `--amend`, and the briefing that may come with it.
+///
+/// The re-declaration itself is [`task_amend`]'s. `--steps` is answered here because
+/// this is the module that reads the flag, and because the advisory above points an
+/// operator at exactly this sentence: a person's task created before its runbook was
+/// written needs somewhere to put the runbook, and the command they were shown has to
+/// work. Re-declaring a briefing is a `define` like every other amendment — the same
+/// capability that created the task, on the same reasoning as `task scope`: what a
+/// person was asked to do is what they will report having done.
+fn task_amend_and_brief(a: &Args) -> Res {
+    let steps = steps_from(a)?;
+    // `task_amend` requires one of its own flags and says so. Passing `--steps` alone
+    // through would be refused for naming none of them, so it only goes there when it
+    // has something to do — or when there are no steps either, which is the empty
+    // amendment its own message is the right answer to.
+    let moves = ["parent", "top", "after", "no-after"]
+        .iter()
+        .any(|f| a.has(f));
+    let mut out = if moves || steps.is_none() {
+        task_amend(a)?
+    } else {
+        String::new()
+    };
+
+    if let Some((path, text)) = steps {
+        let (store, company) = open(a)?;
+        let plan = store.load_plan()?;
+        let t = the_task(&plan, require(a.cmd(2), "task id")?)?.clone();
+        steps_are_a_persons(&t)?;
+        let who = actor(a, &store, &company)?;
+        require_allowed(
+            &store,
+            &company,
+            &who,
+            (Some(t.project.to_string()), Some(t.id.to_string())),
+            &Action::Define {
+                kind: WorkKind::Task,
+            },
+            "re-declaring what a task's steps are",
+        )?;
+        let was = store.task_steps(&t.id)?;
+        store.set_task_steps(&t.id, &text)?;
+        out.push_str(&format!(
+            "  {id} steps\n    was  {}\n    now  {} lines from {path}\n",
+            was.map_or_else(
+                || "nothing — it reached a phone as a bare title".to_string(),
+                |had| format!("{} lines", had.lines().count())
+            ),
+            text.lines().count(),
+            id = t.id
+        ));
+    }
+    Ok(out)
+}
+
 pub(crate) fn task_add(a: &Args) -> Res {
     // `--amend` re-declares a task that is already in the plan, and shares this
     // command because `--parent` and `--after` are declared here: one place that knows
     // how to read them beats two that could read them differently.
     if a.has("amend") {
-        return task_amend(a);
+        return task_amend_and_brief(a);
     }
     let (store, company) = open(a)?;
     // Loaded before the task is assembled, because `--project`, `--parent` and `--after`
@@ -185,6 +337,13 @@ pub(crate) fn task_add(a: &Args) -> Res {
     let plan = store.load_plan()?;
     let mut t = build_task(a, &plan)?;
     let mut from_playbook = Vec::new();
+    // Read before anything is checked and long before anything is written: a runbook
+    // named with a typo should cost the operator the same command again, not a saved
+    // task whose briefing silently is not there.
+    let briefing = steps_from(a)?;
+    if briefing.is_some() {
+        steps_are_a_persons(&t)?;
+    }
 
     // Refused here rather than by `Plan::add_task` below, which knows the id is taken
     // and not what to do about it. Retyping the declaration under a new id is how the
@@ -279,6 +438,13 @@ pub(crate) fn task_add(a: &Args) -> Res {
         let mut probe = plan;
         probe.add_task(t.clone())?;
         store.save_task(&t)?;
+        // After the row, because the column is on it. Two writes and no transaction
+        // spanning them, like the number minted inside `save_task`: a crash between the
+        // two leaves a person's task with no briefing, which is the state the advisory
+        // below already exists to report and the operator already has a command for.
+        if let Some((_, text)) = &briefing {
+            store.set_task_steps(&t.id, text)?;
+        }
 
         if a.has("force") && !defects.is_empty() {
             out.push_str("\n  forced — defects recorded as waivers\n");
@@ -291,6 +457,7 @@ pub(crate) fn task_add(a: &Args) -> Res {
             }
             Assignment::Refused(why) => out.push_str(&format!("\n  not assigned — {why}\n")),
         }
+        out.push_str(&briefed(&t, briefing.as_ref()));
 
         if !probe.is_ready(&t.id) {
             for b in probe.blockers(&t.id) {
