@@ -85,6 +85,12 @@ digest_interval_mins = 20
 
 # Invariants outrank every grant below. A grant that would permit one of these is
 # itself the bug, so violations raise an alarm rather than a denial.
+#
+# These are the company's, and they hold for every project at once. One repository's own
+# line — paths that are nobody's task to change here — belongs in its playbook instead,
+# as `[project.refuses]`: that one is checked against a task's declared scope while the
+# plan is still being written, and is answered by narrowing it. A project may be stricter
+# than this list and never laxer.
 [invariants]
 never_touch = [".github/**", "infra/**", "**/*.pem", "**/*.key", "**/.env"]
 never_run = ["git push --force*", "npm publish*", "terraform apply*", "rm -rf /*"]
@@ -265,6 +271,9 @@ digest_interval_mins = 20
 # [telegram]
 # fetch = "curl -sS -m 20 \"https://api.telegram.org/bot$TG_TOKEN/getUpdates?offset=$WECODE_TELEGRAM_OFFSET\""
 
+# Company-wide, and enforced per write. What one repository will not have touched goes in
+# its own playbook as `[project.refuses]`, where it is checked against a task's declared
+# scope while the plan is still being written.
 [invariants]
 never_touch = [".github/**", "**/*.pem", "**/.env"]
 never_run = ["git push --force*", "npm publish*"]

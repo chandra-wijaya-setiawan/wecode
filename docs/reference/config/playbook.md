@@ -19,6 +19,10 @@ dispatch = "approved"             # auto | approved — sign each task before it
 [project.build_cache]             # directories every worktree of this project shares
 CARGO_TARGET_DIR = "~/.cache/wecode/app/target"
 
+[project.refuses]                 # paths no task here may declare it writes, and why
+"vendor/**" = "vendored code is updated by its own tool, never by hand"
+"crates/*/src/generated/**" = "regenerate it: `cargo run -p codegen`"
+
 [feature]
 worktree  = true
 design_required = true            # refuse a feature with no design task behind it
@@ -73,6 +77,57 @@ A signature covers one task, not its subtasks — each is dispatched on its own 
 each is signed on its own. And a signature older than the last `define` record for that
 task is stale: amending a scope after signing asks for the signature again, so the gate
 cannot be walked past by signing something small and then changing it.
+
+## What the project refuses
+
+`[project.refuses]` is the one thing in the file a project says about work nobody has
+declared yet: paths that are in this repository and are not any task's to change. Each key
+is a glob and each value is the reason, which is not decoration — the refusal is answered
+by narrowing a write scope, and whoever does that is usually reading a terminal a long way
+from this file. It is read back into the verdict verbatim:
+
+```text
+  ⚠ 1 defect — not admitted
+
+  1  Write scope "vendor/serde/**" reaches "vendor/**", which this project refuses:
+     "vendored code is updated by its own tool, never by hand". Which paths instead?
+```
+
+It is a **declaration** gate, and that is the whole of its shape. What it inspects is the
+`--write` scope a task states, not the diff a run produces — so it is asked at `task add`,
+at `task scope` and `task add --amend`, at `assign`, and by `check <id>`, which are the
+places a scope is written, re-written, or read back. Past those, the write scope *is* the
+guardrail: a task admitted here cannot reach a refused path, because the paths it may touch
+at all were checked against these lines first.
+
+| | |
+|---|---|
+| matching | prefix containment, both ways — the same coarse rule two tasks overlap under. `src/**` is refused by `src/generated/**`, because a task claiming the parent may write in the child |
+| the reason | optional. Omit it and the refusal is stated without one, which is a worse message and still a refusal |
+| `.wecode/run/**` | never refused. Every task is told to write its result there, in a worktree of its own; a refusal of `.wecode/**` reaches the guidance beside it and stops there |
+| read scope | not covered. Writing is the enforced guardrail, and a repository that refuses to be *read* is a `[[repos]]` question |
+| `--force` | waives it, recorded, exactly as it waives every other defect. A project's line is not the charter's |
+| a finished task | never faulted. This arrives in a playbook commit, and work that already ran cannot be re-declared against it |
+
+A line added to a playbook today is read by the next command that asks, and nothing goes
+looking for tasks that were declared before it. One already assigned and waiting keeps the
+scope it was admitted with until something re-declares it; `check <id>` is what says so, and
+`task scope` is what fixes it. That is the same way the design gate and every advisory note
+here behave, and it is deliberate — guidance arrives in a commit, and retroactively
+faulting a board full of work that was well-formed when it was written is how a gate gets
+switched off.
+
+Nothing validates the globs, on purpose: a glob matching nothing costs a line nobody trips
+over, and `"**"` — which refuses every task in the project — is discovered by the next
+`task add`, quoting the exact line that said no. That is a better teacher than a parse
+error, and the only reader that knows what this project's tasks actually claim.
+
+**Not the same instrument as [`never_touch`](company.md).** That is the company's, checked
+per write against every project at once, and a violation raises an alarm because a grant
+that permitted it is itself the bug. This is one repository's, checked against a
+declaration, and answered by editing the declaration. A project may be stricter than the
+charter and never laxer — the same rule `merge` and `dispatch` keep — so refusing a path
+the charter already forbids changes nothing except when somebody reads the verdict.
 
 ## The build cache
 

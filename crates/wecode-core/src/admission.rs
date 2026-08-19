@@ -59,6 +59,12 @@ pub enum Defect {
         glob: String,
         in_project: Option<ProjectId>,
     },
+    /// A declared write path the project's own playbook says no task of its may take.
+    ///
+    /// Both globs are carried because they are rarely the same string: `glob` is the line
+    /// to narrow, `refused` the line that said no. `why` is the playbook's own sentence,
+    /// empty when it gave none.
+    ScopeRefused { glob: String, refused: String, why: String },
     BudgetMissing,
     /// The project demands a design before work of this kind, and no task of the
     /// `design` kind stands before this one or inside it.
@@ -128,6 +134,13 @@ impl Defect {
             } => format!(
                 "Write scope {glob:?} overlaps task `{with}` in project `{other}`, which shares \
                  this repo and could run at the same time. Narrow one, or make this depend on it."
+            ),
+            // With the reason where there is one and without where there is not, the way
+            // `RepoUnknown` names the known repos only when it has any.
+            Self::ScopeRefused { glob, refused, why } => format!(
+                "Write scope {glob:?} reaches {refused:?}, which this project refuses{}. \
+                 Which paths instead?",
+                if why.is_empty() { String::new() } else { format!(": {why:?}") }
             ),
             Self::BudgetMissing => "What is the budget — tokens, wall time, or both?".into(),
             Self::DesignMissing => "This project requires a design before work of this kind. \
@@ -492,6 +505,56 @@ fn globs_overlap(a: &str, b: &str) -> bool {
 fn literal_prefix(glob: &str) -> String {
     let cut = glob.find(['*', '?', '[']).unwrap_or(glob.len());
     glob[..cut].trim_end_matches('/').to_string()
+}
+
+// ------------------------------------------------------------ refusals ------
+
+/// One path a project will not have written, and why it will not.
+///
+/// Handed in rather than read, exactly as [`Expected`] and the design gate are: a playbook
+/// is a file in somebody else's repository and core opens none. The reason travels with the
+/// glob because a refusal is answerable only if whoever reads it knows what it was for, and
+/// whoever narrows the scope is often nowhere near the repository the line was written in.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Refusal {
+    pub glob: String,
+    /// Prose. Empty is legal — a project that names the path and no reason still gets the
+    /// refusal, stated without one.
+    pub why: String,
+}
+
+/// The paths a task declares that its project refuses outright.
+///
+/// A gate beside [`check_task`] rather than a check inside it, because it is asked of one
+/// thing only: a *declaration*. Nothing but re-declaring answers it — a narrower write
+/// scope, or the playbook line coming out — so it is asked wherever a scope is written,
+/// re-written, or read back for a verdict, and those are all one command group.
+///
+/// Overlap is [`globs_overlap`], the rule two tasks compete under, coarse the same way: a
+/// task claiming `src/**` where `src/generated/**` is refused may write there whatever it
+/// intends to. Nor is the work asked whether it is dispatched — a person's task is refused
+/// the same paths, because a refusal is about the repository, not about who is typing.
+#[must_use]
+pub fn check_refusals(t: &Task, refuses: &[Refusal]) -> Vec<Defect> {
+    let mut out = Vec::new();
+    // The exemption the design gate and the overlap check both make: guidance arrives
+    // in a playbook commit, and finished work cannot be re-declared against it.
+    if t.status.is_closed() {
+        return out;
+    }
+    for glob in &t.scope.write {
+        // Every task is told to write its result here, in a worktree of its own, so it is
+        // not a project's to refuse. A refusal of `.wecode/**` still reaches the guidance
+        // beside it — the same split that keeps a worker out of the playbook.
+        if glob.starts_with(crate::WORKER_DIR) {
+            continue;
+        }
+        for r in refuses.iter().filter(|r| globs_overlap(glob, &r.glob)) {
+            let (glob, refused, why) = (glob.clone(), r.glob.clone(), r.why.clone());
+            out.push(Defect::ScopeRefused { glob, refused, why });
+        }
+    }
+    out
 }
 
 // -------------------------------------------------------------- advice ------
@@ -1485,6 +1548,44 @@ mod tests {
         t.budget = Budget { tokens: Some(1), wall_secs: Some(1) };
         assert!(!advise(&t, &seeded(), &decomposed()).is_empty());
         assert!(check_task(&t, &seeded(), &[]).is_empty());
+    }
+
+    // --------------------------------------------------------- refusals ------
+
+    fn refusing(glob: &str, why: &str) -> Vec<Refusal> {
+        vec![Refusal { glob: glob.into(), why: why.into() }]
+    }
+
+    #[test]
+    fn a_path_the_project_refuses_is_refused_with_the_reason_it_gave() {
+        let why = "the schema tool writes it";
+        let d = check_refusals(&good_task(), &refusing("crates/export/**", why));
+        assert_eq!(d, vec![Defect::ScopeRefused {
+            glob: "crates/export/**".into(), refused: "crates/export/**".into(), why: why.into(),
+        }]);
+        assert!(d[0].question().contains(why), "{d:?}");
+
+        // Coarse in the safe direction, like the overlap check it borrows: a task
+        // claiming the parent of a refused path may write inside it. And a refusal with
+        // no reason is still a refusal — said without the clause, not with an empty one.
+        let d = check_refusals(&good_task(), &refusing("crates/export/generated/**", ""));
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(!d[0].question().contains("refuses:"), "{}", d[0].question());
+    }
+
+    #[test]
+    fn nothing_is_refused_by_omission_in_the_worker_area_or_after_the_work_is_done() {
+        // Silence by omission, the way an empty design gate and an empty `known_repos`
+        // are silent. Then the two paths no project refuses: the area every task is told
+        // to write its result in, and work that finished before the line existed.
+        let no = refusing("crates/export/**", "the schema tool writes it");
+        assert!(check_refusals(&good_task(), &[]).is_empty());
+        let mut worker = good_task();
+        worker.scope = Scope::write(&[".wecode/run/**"]);
+        let mut done = good_task();
+        done.status = TaskStatus::Done;
+        assert!(check_refusals(&worker, &no).is_empty());
+        assert!(check_refusals(&done, &no).is_empty());
     }
 
     #[test]

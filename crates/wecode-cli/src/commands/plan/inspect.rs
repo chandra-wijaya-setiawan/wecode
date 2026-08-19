@@ -56,7 +56,12 @@ pub(crate) fn check(a: &Args) -> Res {
             .project(&t.project)
             .map(|p| design_gate(&company, p))
             .unwrap_or_default();
-        let defects = admission::check_task(t, &plan, &gate);
+        let mut defects = admission::check_task(t, &plan, &gate);
+        // The command an operator reaches for when something was refused and they want to
+        // know what is still outstanding, which is exactly when a project's own refusal has
+        // to be in the list. A verdict here that was quieter than the one `task add` printed
+        // would read as the refusal having gone away.
+        defects.extend(super::project::refuses(&company, &plan, t));
         return Ok(render::plan::admission(&render::plan::task_heading(t), &defects, None));
     }
     Err(format!("no project or task `{id}`").into())

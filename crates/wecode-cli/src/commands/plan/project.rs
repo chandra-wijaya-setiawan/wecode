@@ -5,14 +5,40 @@
 //! all, and the admission check that asks whether this definition can be answered. A
 //! project that names no measure is printed back with the question it left open instead
 //! of being saved, which is a cheaper conversation now than at merge.
+//!
+//! …and one thing every other module here asks of a project rather than of a task:
+//! [`refuses`], the paths its playbook says no task of its own may write. It reads like a
+//! task check and is a project's statement, made once, about work nobody has declared yet
+//! — so it is answered beside the command that declares a project, and through one
+//! function, the shape [`ctx::design_gate`] already has. A refusal each site resolved for
+//! itself would be a refusal each site could resolve differently.
+//!
+//! [`ctx::design_gate`]: crate::commands::ctx::design_gate
 
-use wecode_core::{Admission, Measure, Project, ProjectId, admission};
+use wecode_core::{Admission, Defect, Measure, Plan, Project, ProjectId, Task, admission};
 use wecode_gov::{Action, WorkKind};
+use wecode_org::Company;
 
 use super::{budget_from, parse_metric};
 use crate::args::Args;
 use crate::commands::ctx::*;
 use crate::render;
+
+/// What a task's project refuses, as defects against the scope it declares.
+///
+/// A playbook that cannot be read refuses nothing, for the reason `design_gate` gates
+/// nothing: an unregistered repo is already reported as its own defect, and a read-only
+/// verdict must not fail on it. A task naming a project the plan does not hold refuses
+/// nothing either: the guidance is a file in that project's repository, and until there is
+/// a project there is nothing that names one.
+pub(super) fn refuses(company: &Company, plan: &Plan, t: &Task) -> Vec<Defect> {
+    let stated = plan
+        .project(&t.project)
+        .and_then(|p| playbook_of(company, p).ok().flatten())
+        .map(|pb| pb.project.refuses)
+        .unwrap_or_default();
+    admission::check_refusals(t, &stated)
+}
 
 pub(crate) fn project_add(a: &Args) -> Res {
     let (store, company) = open(a)?;

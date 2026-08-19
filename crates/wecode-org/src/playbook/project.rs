@@ -1,13 +1,21 @@
 //! `[project]`: what holds for every kind of work in this repository.
 //!
-//! Four settings and a sub-table. Two of them are gates — whether a task may be
-//! dispatched before anyone signs for it, and whether verified work lands by itself —
-//! and both are preferences rather than rules: the charter outranks either, so a
-//! project may be stricter than the company and never laxer.
+//! Four settings and two sub-tables. Three of them are gates — whether a task may be
+//! dispatched before anyone signs for it, whether verified work lands by itself, and what
+//! no task here may write at all — and all three are preferences rather than rules: the
+//! charter outranks each, so a project may be stricter than the company and never laxer.
+//!
+//! `[project.refuses]` is the one that says no rather than *who says yes*, and it is the
+//! only thing in this file a project states about work it has not seen. The charter's
+//! `never_touch` is the company's version and a different instrument: it is checked per
+//! write, on every project at once, and a violation raises an alarm because a grant that
+//! permitted it is itself the bug. A refusal here is checked against a *declaration*, in
+//! one repository, and is answered by narrowing a scope.
 
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+use wecode_core::admission::Refusal;
 
 use super::PlaybookError;
 use super::cache::{self, CacheDir};
@@ -27,6 +35,12 @@ pub(super) struct ProjectBlock {
     /// variable is the identity: naming one twice is one setting, not two.
     #[serde(default)]
     build_cache: BTreeMap<String, String>,
+    /// Path to the reason it is refused. A table for the same reason `build_cache` is
+    /// one — the path is the identity, so naming it twice is one refusal — and the value
+    /// is what makes it answerable rather than a wall: whoever has to narrow the scope is
+    /// usually reading a terminal a long way from this file.
+    #[serde(default)]
+    refuses: BTreeMap<String, String>,
 }
 
 /// Settings that hold for every kind in this project.
@@ -43,6 +57,13 @@ pub struct ProjectSettings {
     pub dispatch: DispatchPolicy,
     /// Directories every worktree of this project shares, in variable order.
     pub build_cache: Vec<CacheDir>,
+    /// Paths no task of this project may declare it writes, in path order.
+    ///
+    /// The admission gate's own type rather than one of this module's, exactly as
+    /// [`super::Playbook::expected_of`] hands back `Expected`: it is what the gate takes,
+    /// and a second identical struct here would exist only to be converted at the one
+    /// place it is read.
+    pub refuses: Vec<Refusal>,
 }
 
 /// Who decides that verified work may land.
@@ -150,6 +171,20 @@ pub(super) fn settings_of(b: &ProjectBlock) -> Result<ProjectSettings, PlaybookE
             })?,
         },
         build_cache: cache::parse_build_cache(&b.build_cache)?,
+        // Nothing is refused about a refusal, deliberately. A glob that matches nothing
+        // costs a line nobody trips over, and one that matches everything is discovered
+        // by the next `task add` naming the exact line that said no — which is a better
+        // teacher than a parse error, and the only reader that knows what a project's
+        // tasks actually claim. The reason is trimmed because `""` and `"  "` are the
+        // same statement, and the gate reads an empty one as "no reason given".
+        refuses: b
+            .refuses
+            .iter()
+            .map(|(glob, why)| Refusal {
+                glob: glob.clone(),
+                why: why.trim().to_string(),
+            })
+            .collect(),
     })
 }
 
@@ -192,6 +227,34 @@ mod tests {
         assert!(msg.contains("[project] dispatch"), "{msg}");
         assert!(msg.contains("manual"), "{msg}");
         assert!(msg.contains("auto, approved"), "{msg}");
+    }
+
+    #[test]
+    fn a_project_states_the_paths_it_refuses_and_why_it_refuses_them() {
+        let p = Playbook::parse(
+            "[project.refuses]\n\
+             \"vendor/**\" = \"vendored code is updated by its own tool, never by hand\"\n\
+             \"Cargo.lock\" = \"  \"\n",
+        )
+        .unwrap();
+        assert_eq!(p.project.refuses.len(), 2);
+        // Path order, so two readings of the same file list them the same way.
+        assert_eq!(p.project.refuses[0].glob, "Cargo.lock");
+        assert_eq!(
+            p.project.refuses[1].why,
+            "vendored code is updated by its own tool, never by hand"
+        );
+        // Whitespace is no reason: the gate reads empty as "the project gave none", and
+        // two spaces must not become a refusal explained by two spaces.
+        assert!(p.project.refuses[0].why.is_empty());
+    }
+
+    #[test]
+    fn a_project_that_says_nothing_refuses_nothing() {
+        // The same rule the design gate and `known_repos` keep — a project that has not
+        // thought about it does not acquire a gate by omission — and the reason the shared
+        // sample is the fixture: it is a playbook written before this setting existed.
+        assert!(Playbook::parse(SAMPLE).unwrap().project.refuses.is_empty());
     }
 
     #[test]
