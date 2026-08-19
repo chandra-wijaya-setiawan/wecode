@@ -1260,7 +1260,7 @@ fn a_task_the_playbook_would_not_have_written_is_told_so_and_still_admitted() {
 // ------------------------------------------------------------------ doer -------
 
 #[test]
-fn who_does_the_work_is_read_but_cannot_be_recorded_yet() {
+fn who_does_the_work_is_recorded() {
     // The flag parses here and nowhere else, so a typo has to be named as a typo: an
     // operator who wrote `--by prson` is owed that, not a lecture about a column.
     let org = Org::new("by-doer", "solo");
@@ -1272,20 +1272,16 @@ fn who_does_the_work_is_read_but_cannot_be_recorded_yet() {
     add("mint", "nobody").assert_contains("unknown doer `nobody`")
         .assert_contains("manual").assert_lacks("cannot be recorded");
 
-    // Refused for the right reason, and by every word an operator reaches for. Without
-    // the column a task saved as a person's reads back as an agent's and is dispatched
-    // to one — admitted with no scope, no budget and no acceptance, because admission
-    // asked for none. Nothing is written, which is the half that matters.
-    for word in ["person", "manual", "human"] {
-        add("mint", word).assert_contains("cannot be recorded yet")
-            .assert_contains("none for its doer")
-            .assert_contains("dispatched to an agent");
-    }
-    org.run(&["tree"]).assert_lacks("mint");
+    // The column landed (manual-task-store) and the guard came out as its own comment
+    // ordered, so every word an operator reaches for now records: the task saves, no
+    // agent is dispatched, and the tree says whose it is.
+    add("mint", "person").assert_ok("a person's task")
+        .assert_contains("saved task mint");
+    org.run(&["tree"]).assert_contains("mint");
 
     // The default is untouched, and saying it out loud changes nothing.
-    org.run(&["task", "add", "mint", "mint the API token", "--project", "caching",
+    org.run(&["task", "add", "mint-auto", "mint the API token", "--project", "caching",
               "--by", "agent", "--write", "src/mint/**", "--accept-cmd", "cargo test",
               "--tokens", "1000"])
-        .assert_ok("an agent's task").assert_contains("saved task mint");
+        .assert_ok("an agent's task").assert_contains("saved task mint-auto");
 }
