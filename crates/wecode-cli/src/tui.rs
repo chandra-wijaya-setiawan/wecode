@@ -26,10 +26,9 @@
 //! Reloads from the store on a tick, so it tracks state as it changes.
 //!
 //! An **instrument** rather than a display: `/` narrows the screen to what answers a
-//! question, `:` asks it of the whole workspace and opens what it finds, the pane under
-//! the table previews the screen `enter` would open, and `t` turns that pane into the
-//! ledger as it is written — reaching one row out of a plan too long to read, or
-//! reading it without leaving where you are.
+//! question, `:` asks it of the whole workspace and opens what it finds, and `t` puts the
+//! ledger as it is written under the table — reaching one row out of a plan too long to
+//! read, or watching what an agent is doing without leaving where you are.
 
 use std::collections::HashSet;
 use std::io;
@@ -59,8 +58,8 @@ const POLL: Duration = Duration::from_millis(200);
 /// frame the fingers feel, so it waits for the hand to pause — which is a beat, not a
 /// mode: nothing is dropped, and the rhythm above is untouched.
 const QUIET: Duration = Duration::from_millis(300);
-/// The pane under the table: a rail to glance at, and what `p` gives it to be read.
-const ASIDE: (u16, u16) = (7, 16);
+/// How many rows the ledger tail takes under the table when `t` calls it up.
+const TAIL: u16 = 7;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pane {
@@ -68,14 +67,6 @@ enum Pane {
     Help,
     /// The query line has the keys: every character narrows what is on screen.
     Query,
-}
-
-/// What the pane under the table is showing: the screen `enter` would open, as far down
-/// as the pane is tall, or the ledger as it is written.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Aside {
-    Preview,
-    Tail,
 }
 
 /// Which screen is on the glass. Named rather than numbered: `L2` says how deep somebody
@@ -158,9 +149,9 @@ struct App {
     /// What the query line holds. Empty is no narrowing: a filter nobody typed is not a
     /// filter that happens to match everything.
     query: String,
-    aside: Aside,
-    /// Whether the pane under the table has room to be read rather than glanced at.
-    tall: bool,
+    /// Whether the ledger tail is under the table. Off until it is asked for: the rows a
+    /// pane takes are the tree's, and the screen `enter` opens is one keystroke away.
+    tail: bool,
     status: String,
     quit: bool,
 }
@@ -191,8 +182,7 @@ impl App {
             show_archived: false,
             collapsed: HashSet::new(),
             query: String::new(),
-            aside: Aside::Preview,
-            tall: false,
+            tail: false,
             status: "j/k move · / filter · : go to · enter open · ? help · q quit".into(),
             quit: false,
         };
@@ -318,8 +308,7 @@ impl App {
         self.rows.get(self.table.selected()?)
     }
 
-    /// Everything wecode holds about one task: the TASK screen, and what the pane under
-    /// the table previews as much of as it is tall.
+    /// Everything wecode holds about one task: the TASK screen.
     fn task_lines(&self, id: &TaskId) -> Vec<Line<'static>> {
         view::task_lines(
             &self.store,
@@ -380,8 +369,7 @@ impl App {
 
     /// The nearest row from `at` that points at something, searched the way the cursor
     /// was travelling and then back the other way. A caption is a row like any other to
-    /// the table, and resting on one empties the pane below and leaves enter with
-    /// nothing to do.
+    /// the table, and resting on one leaves enter with nothing to do.
     fn land_on(&self, at: usize, forward: bool) -> usize {
         let points = |i: &usize| self.rows.get(*i).is_some_and(|r| r.subject.is_some());
         let down = at..self.rows.len();
@@ -570,14 +558,10 @@ impl App {
                 self.stack.push(Screen::Home);
                 self.ask();
             }
-            KeyCode::Char('t') => {
-                self.aside = if self.aside == Aside::Tail {
-                    Aside::Preview
-                } else {
-                    Aside::Tail
-                };
-            }
-            KeyCode::Char('p') => self.tall = !self.tall,
+            // The ledger as it is written, under the table, and away again with the same
+            // key: what an agent is doing is worth rows the tree wants, but only while
+            // somebody is watching it happen.
+            KeyCode::Char('t') => self.tail = !self.tail,
             KeyCode::Char('?') => self.pane = Pane::Help,
             _ => {}
         }
@@ -619,16 +603,13 @@ fn needs_span(v: &Vitals) -> Span<'static> {
 fn draw(f: &mut Frame, app: &mut App) {
     // The same header and footer on every screen, because the frame is the application
     // and only the middle of it is the screen. TASK is one page and takes the whole of
-    // that middle; the other two are a table with the detail pane under it.
+    // that middle; the other two are a table, with the ledger under it while `t` holds.
     let screen = app.screen().clone();
+    let tailing = app.tail && !matches!(screen, Screen::Task(_));
     let areas = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(6),
-        Constraint::Length(match (&screen, app.tall) {
-            (Screen::Task(_), _) => 0,
-            (_, true) => ASIDE.1,
-            (_, false) => ASIDE.0,
-        }),
+        Constraint::Length(if tailing { TAIL } else { 0 }),
         Constraint::Length(1),
     ])
     .split(f.area());
@@ -638,7 +619,9 @@ fn draw(f: &mut Frame, app: &mut App) {
         page(f, areas[1], app, id);
     } else {
         table(f, areas[1], app);
-        aside(f, areas[2], app);
+        if tailing {
+            tail(f, areas[2], app);
+        }
     }
     footer(f, areas[3], app);
 
@@ -769,36 +752,12 @@ fn table(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_stateful_widget(table, area, &mut app.table);
 }
 
-/// The pane under the table: a preview of the screen `enter` would open, or the ledger
-/// as it is written. Both are readings of the selection, so `t` swaps them in place
-/// rather than adding a pane the table would have to give its rows up for.
-///
-/// The preview of a task is the TASK screen itself, cut off wherever the pane ends — the
-/// same words rather than a summary of them, so descending reads *further*. `p` gives it
-/// room when what is in it is worth more than another five rows. A caption previews
-/// nothing: there is no subject behind a heading, and the cursor does not rest on one.
-fn aside(f: &mut Frame, area: Rect, app: &App) {
-    let subject = app.selected().and_then(|r| r.subject.clone());
-    let (title, lines) = match (app.aside, &subject) {
-        (Aside::Tail, _) => (" tail ", tail(app, subject.as_ref(), area.height)),
-        (_, Some(Subject::Task(id))) => (" preview ", app.task_lines(id)),
-        (_, Some(s)) => (" preview ", view::subject_lines(&app.plan, &app.audit, s)),
-        (_, None) => (" preview ", Vec::new()),
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(Color::DarkGray))
-        .title(title);
-    f.render_widget(
-        Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-/// The ledger's newest lines about whatever the cursor is on, oldest first — the way a
-/// log reads, and the reload tick is what makes it a tail rather than a snapshot.
-fn tail(app: &App, subject: Option<&Subject>, height: u16) -> Vec<Line<'static>> {
-    let (project, task) = match subject {
+/// The pane `t` puts under the table: the ledger's newest lines about whatever the cursor
+/// is on, oldest first — the way a log reads, and the reload tick is what makes it a tail
+/// rather than a snapshot. Not a second reading of the screen `enter` opens, which is what
+/// the row already leads to; this is what an agent has actually done since.
+fn tail(f: &mut Frame, area: Rect, app: &App) {
+    let (project, task) = match app.selected().and_then(|r| r.subject.as_ref()) {
         Some(Subject::Project(id)) => (id.as_str(), ""),
         Some(Subject::Task(id)) => ("", id.as_str()),
         None => ("", ""),
@@ -807,7 +766,7 @@ fn tail(app: &App, subject: Option<&Subject>, height: u16) -> Vec<Line<'static>>
     // Coloured whole: an ordinary act is dim because the eye is here for the one that
     // is not, and a refusal or an alarm is the reading this pane exists to carry.
     let mut lines: Vec<Line<'static>> =
-        board::newest(&app.audit, project, task, height.saturating_sub(2) as usize)
+        board::newest(&app.audit, project, task, area.height.saturating_sub(2) as usize)
             .iter()
             .map(|l| {
                 let words = format!(
@@ -830,7 +789,14 @@ fn tail(app: &App, subject: Option<&Subject>, height: u16) -> Vec<Line<'static>>
     if lines.is_empty() {
         lines.push(Line::from("nothing recorded here yet".fg(Color::DarkGray)));
     }
-    lines
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::DarkGray))
+        .title(" tail ");
+    f.render_widget(
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn footer(f: &mut Frame, area: Rect, app: &App) {
@@ -861,8 +827,7 @@ fn help(f: &mut Frame, area: Rect) {
         Line::from("g / G        first / last".to_string()),
         Line::from("/            narrow this screen to what answers".to_string()),
         Line::from(":            go to anything, from anywhere".to_string()),
-        Line::from("t            preview, or the ledger as it is written".to_string()),
-        Line::from("p            room to read the pane, or a rail".to_string()),
+        Line::from("t            show or hide the ledger as it is written".to_string()),
         Line::from("a            show or hide what is filed away".to_string()),
         Line::from("r            reload now".to_string()),
         Line::from("q            quit".to_string()),
@@ -1121,8 +1086,8 @@ mod tests {
 
     #[test]
     fn the_cursor_never_rests_on_a_heading_and_clamps_at_both_ends() {
-        // A heading points at nothing: stopping on one empties the pane under the table
-        // and leaves enter with nothing to do, which reads as a cockpit that has hung.
+        // A heading points at nothing: stopping on one leaves enter with nothing to do,
+        // which reads as a cockpit that has hung.
         let mut a = app();
         let points_at_something = |a: &App| {
             let row = a.selected().expect("a selection");
@@ -1465,44 +1430,23 @@ mod tests {
     }
 
     #[test]
-    fn the_pane_previews_what_enter_would_open_or_tails_the_ledger() {
-        // The gap this closes: the pane said four lines about the selection while the
-        // screen one keystroke away said everything, so reading a task meant leaving the
-        // list of them. It is the TASK page now, cut off where the pane ends.
+    fn t_puts_the_ledger_as_it_is_written_under_the_table() {
+        // Nothing is under the table until it is asked for. A pane that previewed the
+        // screen `enter` opens lived here and was dropped: it said a second time what one
+        // keystroke says in full, for rows the tree wanted. What an agent is *doing* is
+        // not in the plan at all, which is why this one stayed.
         let mut a = app();
         a.open(on("caching"));
         select(&mut a, &leaf("keys"));
         let out = render(&mut a, 110, 24);
-        assert!(out.contains(" preview "), "the pane names itself:\n{out}");
-        assert!(out.contains("in caching / layer"), "where it sits:\n{out}");
-        assert!(!out.contains("no incidents"), "the rail ends here:\n{out}");
+        assert!(!out.contains(" tail "), "no pane nobody called up:\n{out}");
+        assert!(!out.contains("in caching / layer"), "nor the screen below:\n{out}");
 
-        // `p` gives it the room to be read where it stands — the difference between a
-        // rail somebody glances at and a pane they work from.
-        a.key(KeyEvent::from(KeyCode::Char('p')));
-        let out = render(&mut a, 110, 24);
-        assert!(out.contains("no runs yet"), "what it has cost:\n{out}");
-        assert!(out.contains("no incidents"), "and what it tripped:\n{out}");
-        // A prerequisite no tick will release reads differently from one that is met.
-        a.store
-            .save_task(&task("bench", "benchmark the cache", "benches/**").after("layer"))
-            .unwrap();
-        a.reload();
-        select(&mut a, &leaf("bench"));
-        assert!(render(&mut a, 110, 24).contains("waiting on: layer"));
-        a.store
-            .set_task_status(&TaskId::new("layer"), TaskStatus::Done)
-            .unwrap();
-        a.reload();
-        select(&mut a, &leaf("bench"));
-        assert!(render(&mut a, 110, 24).contains("prerequisites met"));
-
-        // `t` swaps the same pane for the ledger. Every act an agent takes passes the
-        // Broker on its way there, and the reload tick is what makes these a tail.
-        select(&mut a, &leaf("keys"));
+        // Every act an agent takes passes the Broker on its way to the ledger, and the
+        // reload tick is what makes these a tail rather than a snapshot.
         a.key(KeyEvent::from(KeyCode::Char('t')));
         let out = render(&mut a, 110, 24);
-        assert!(out.contains(" tail "), "{out}");
+        assert!(out.contains(" tail "), "the pane names itself:\n{out}");
         assert!(out.contains("nothing recorded here yet"), "{out}");
         a.store
             .append_records(&[
@@ -1516,6 +1460,34 @@ mod tests {
         assert!(out.contains("0s"), "and how long ago it was:\n{out}");
         // Another task's work is not this one's, however recent.
         assert!(!out.contains("crates/cache/mod.rs"), "{out}");
+
+        // And away with the same key: the rows go back to the tree.
+        a.key(KeyEvent::from(KeyCode::Char('t')));
+        let out = render(&mut a, 110, 24);
+        assert!(!out.contains(" tail "), "{out}");
+        assert!(out.contains("feat keys"), "the table has them:\n{out}");
+    }
+
+    #[test]
+    fn the_task_screen_says_what_stands_in_a_task_s_way() {
+        // A prerequisite no tick will release reads differently from one that is met —
+        // on TASK, which is now the only place either is written.
+        let mut a = app();
+        a.store
+            .save_task(&task("bench", "benchmark the cache", "benches/**").after("layer"))
+            .unwrap();
+        a.reload();
+        a.open(onto("bench"));
+        let out = render(&mut a, 110, 24);
+        assert!(out.contains("waiting on: layer"), "{out}");
+        assert!(out.contains("no runs yet"), "what it has cost:\n{out}");
+        assert!(out.contains("no incidents"), "and what it tripped:\n{out}");
+
+        a.store
+            .set_task_status(&TaskId::new("layer"), TaskStatus::Done)
+            .unwrap();
+        a.reload();
+        assert!(render(&mut a, 110, 24).contains("prerequisites met"));
     }
 
     #[test]
