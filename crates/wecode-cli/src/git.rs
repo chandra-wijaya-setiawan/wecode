@@ -75,6 +75,40 @@ pub(crate) fn branch_exists(repo: &Path, branch: &str) -> bool {
     .is_ok()
 }
 
+/// The commit `rev` names, or `None` when git can resolve none.
+///
+/// `^{commit}` rather than a bare `rev-parse`: an annotated tag answers with the commit
+/// it points at rather than the tag object, and a name git knows nothing about answers
+/// `None` instead of failing. Both are what a caller about to cut a branch there is
+/// actually asking — and the second is why the answer is an `Option` and not an error,
+/// since "no such revision" is a sentence for the operator, not a git failure to relay.
+pub(crate) fn commit_at(repo: &Path, rev: &str) -> Option<String> {
+    let sha = git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ],
+    )
+    .ok()?;
+    (!sha.is_empty()).then_some(sha)
+}
+
+/// Creates `branch` at `base`, checking it out nowhere.
+///
+/// A branch without a tree, because the two are settled at different moments: where a
+/// task's work starts is a planning decision, and the tree to do it in is cut when the
+/// task is dispatched. [`worktree_add`] below already reuses a branch that is standing
+/// and ignores the base it was handed, so a ref put here is the one preparation finds —
+/// which is how a task gets a base of its own without the project-wide integration
+/// branch stopping being the answer for every task that named none.
+pub(crate) fn branch_at(repo: &Path, branch: &str, base: &str) -> Result<(), GitError> {
+    git(repo, &["branch", branch, base])?;
+    Ok(())
+}
+
 /// Adds a worktree for `branch`, creating the branch at `base` if it does not exist.
 ///
 /// Splitting on `branch_exists` matters: `git worktree add -b` fails outright if the
@@ -655,6 +689,40 @@ mod tests {
         assert!(wt.join("a.txt").is_file());
         assert!(branch_exists(&r, "wecode/t1"));
         assert_eq!(worktree_list(&r).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_revision_resolves_to_a_commit_or_to_nothing() {
+        let r = repo("revparse");
+        assert_eq!(commit_at(&r, "main"), commit_at(&r, "HEAD"));
+        assert_eq!(commit_at(&r, "no-such-branch"), None);
+        // An annotated tag answers with the commit, not with the tag object — otherwise
+        // a branch cut there would start at something git cannot check out.
+        git(&r, &["tag", "-a", "v1", "-m", "one"]).unwrap();
+        assert_eq!(commit_at(&r, "v1"), commit_at(&r, "main"));
+    }
+
+    #[test]
+    fn a_branch_cut_ahead_of_time_is_what_the_worktree_lands_on() {
+        // The whole of `--onto`: the base is settled when the task is declared, and
+        // `worktree_add` reuses a branch that is standing rather than cutting a new one
+        // from whatever base it was handed at dispatch.
+        let r = repo("branch-at");
+        git(&r, &["checkout", "-q", "-b", "release"]).unwrap();
+        fs::write(r.join("a.txt"), "on release\n").unwrap();
+        git(&r, &["commit", "-qam", "release only"]).unwrap();
+        git(&r, &["checkout", "-q", "main"]).unwrap();
+
+        branch_at(&r, "wecode/t1", "release").unwrap();
+        let wt = r.parent().unwrap().join("wecode-git-branch-at-wt");
+        let _ = fs::remove_dir_all(&wt);
+        worktree_add(&r, &wt, "wecode/t1", Some("main")).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(wt.join("a.txt")).unwrap(),
+            "on release\n",
+            "the declared base won, not the one dispatch offered"
+        );
     }
 
     #[test]
