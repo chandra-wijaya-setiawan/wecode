@@ -293,23 +293,6 @@ pub(crate) fn board_snapshot(a: &Args) -> Res {
     }
 }
 
-/// The detail pane: what the selected row is, and what has gone wrong on it.
-///
-/// Empty for a subject the plan no longer holds — a frame drawn between a delete and
-/// the reload that notices it.
-pub(crate) fn subject_lines(
-    plan: &Plan,
-    audit: &[AuditLine],
-    subject: &Subject,
-) -> Vec<Line<'static>> {
-    let mut lines = about(plan, subject);
-    if lines.is_empty() {
-        return lines;
-    }
-    lines.extend(incidents(audit, subject, 3));
-    lines
-}
-
 /// The TASK screen: everything wecode holds about one task, in the order somebody
 /// reading it asks for — what it is, where it sits, what stands in its way, what it is
 /// doing, what it has cost, what it landed, what it tripped.
