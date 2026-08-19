@@ -392,11 +392,13 @@ fn the_loop_announces_a_task_it_is_holding_for_a_signature() {
 
 // ----------------------------------------------------------------- steps ------
 
-/// A person's task with a briefing, waiting on the operator.
+/// A person's task with a briefing, promoted by the tick the way one really arrives.
 ///
-/// `--steps` at declaration and `status` to make it wait, which is the path the operator
-/// has today: the tick promotes a manual task to `needs-approval` on its own, but the
-/// promotion loop is not one of the places that calls the hook yet.
+/// `--steps` at declaration, `waiting` to hand it to the graph, and then nothing but a
+/// tick: a manual task is never dispatched, so the promotion to `needs-approval` is the
+/// whole of it becoming somebody's. Every steps test below goes through that path rather
+/// than setting the status by hand, because a briefing that only reaches a phone when the
+/// operator moves the task themselves is a briefing for a wait they already knew about.
 fn a_manual_task(org: &Org, id: &str, steps: &str) {
     let file = org.path(&format!("{id}-steps.md"));
     std::fs::write(&file, steps).unwrap();
@@ -413,8 +415,91 @@ fn a_manual_task(org: &Org, id: &str, steps: &str) {
         file.to_str().unwrap(),
     ])
     .assert_ok("a person's task with its steps");
-    org.run(&["status", id, "needs-approval"])
-        .assert_ok("stop it for a person");
+    // Startable and stated so, which is what a declaration with a post on it would have
+    // said on its own. Announced by nothing: `waiting` is not a wait on a person.
+    org.run(&["status", id, "waiting"])
+        .assert_ok("hand it to the graph");
+    org.run(&["tick"])
+        .assert_ok("the tick hands it to a person");
+}
+
+#[test]
+fn the_tick_tells_the_person_about_the_task_it_just_made_theirs() {
+    // The promotion and the notification, closed. Nothing dispatches a person's task, so
+    // this move is not a step on the way to the work — it *is* the work being handed
+    // over, and the tick was making it silently. The operator learned they owned
+    // something by opening the board, which is the one place a notifier exists to save
+    // them from having to look.
+    let org = Org::new("notify-promoted", "solo");
+    org.seed();
+    let log = notified(
+        &org,
+        "echo $WECODE_TASK $WECODE_WAITING_FOR $WECODE_TASK_STATUS [$WECODE_STEPS]",
+    );
+
+    a_manual_task(&org, "mint", "1. open the console");
+    // The whole message, from the tick alone: what it is, what is wanted, and the work.
+    assert_eq!(
+        announcements(&log),
+        vec!["mint approval needs-approval [1. open the console]"]
+    );
+}
+
+#[test]
+fn a_promotion_into_the_queue_announces_nothing() {
+    // The control, and the reason this could be wired to every move the tick makes: an
+    // agent's task becoming startable is not a wait. A hook that fired on `waiting →
+    // ready` would announce every task in the plan on the pass that unblocked it, which
+    // is the notifier the operator switches off.
+    let org = Org::new("notify-promoted-agent", "solo");
+    org.seed();
+    let log = notified(&org, "echo $WECODE_TASK $WECODE_TASK_STATUS");
+
+    org.run(&["status", "cache-tests", "waiting"])
+        .assert_ok("hand it to the graph");
+    org.run(&["tick"])
+        .assert_ok("tick")
+        .assert_contains("waiting → ready");
+    assert!(announcements(&log).is_empty(), "{:?}", announcements(&log));
+}
+
+#[test]
+fn the_loop_announces_the_promotion_it_makes_itself() {
+    // The same move, from the command that actually runs unattended. The tick command is
+    // the one an operator types; this is the one that is running at 02:14, and a
+    // notification only the typed one sends is a notification nobody receives.
+    let org = Org::new("notify-promoted-loop", "solo");
+    org.seed();
+    let log = notified(&org, "echo $WECODE_TASK $WECODE_WAITING_FOR");
+    let file = org.path("mint-steps.md");
+    std::fs::write(&file, "1. open the console\n").unwrap();
+    org.run(&[
+        "task",
+        "add",
+        "mint",
+        "mint the fares token",
+        "--project",
+        "caching",
+        "--by",
+        "person",
+        "--steps",
+        file.to_str().unwrap(),
+    ])
+    .assert_ok("a person's task with its steps");
+    org.run(&["status", "mint", "waiting"])
+        .assert_ok("hand it to the graph");
+
+    org.run(&["loop", "--once"])
+        .assert_ok("one pass")
+        .assert_contains("mint  waiting → needs-approval");
+    // First, and before the pass's digest: the promotion is the edge, and the digest
+    // behind it is the standing condition it has just joined.
+    assert_eq!(
+        announcements(&log).first().map(String::as_str),
+        Some("mint approval"),
+        "{:?}",
+        announcements(&log)
+    );
 }
 
 #[test]

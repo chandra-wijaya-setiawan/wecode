@@ -13,6 +13,15 @@
 //! only status this module authors outside the `Waiting`/`Ready` pair, and it is
 //! authored here for the same reason the pair is: prerequisites have to be honoured
 //! before the work is anyone's, and the graph is what knows.
+//!
+//! That one move is also the only one anybody has to be *told* about, and it is the
+//! caller's to tell: everything here computes moves and writes nothing, so the
+//! announcement belongs beside the status write — see
+//! [`crate::commands::exec::on_promotion`]. Every other wait in wecode is a message
+//! about work already done, and a person could find it on the board a day later
+//! without having lost anything. This one is the dispatch. Nothing has happened yet,
+//! the doing is theirs, and a promotion that reached only the database is a task
+//! assigned to somebody who was never asked.
 
 use std::time::Duration;
 
