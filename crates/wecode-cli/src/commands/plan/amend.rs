@@ -63,10 +63,20 @@ pub(crate) fn task_scope(a: &Args) -> Res {
         .project(&task.project)
         .map(|p| design_gate(&company, p))
         .unwrap_or_default();
-    let defects = admission::check_task(&task, &probe, &gate);
+    let mut defects = admission::check_task(&task, &probe, &gate);
+    // The one command whose whole subject is the thing a project refuses, so the refusal
+    // holds it back exactly as an overlap does. A scope that is widened into paths the
+    // project said no to is the case the setting exists for: nothing else in wecode would
+    // have asked again between the declaration and the diff.
+    defects.extend(super::project::refuses(&company, &plan, &task));
     let blocking: Vec<_> = defects
         .iter()
-        .filter(|d| matches!(d, wecode_core::Defect::ScopeOverlaps { .. }))
+        .filter(|d| {
+            matches!(
+                d,
+                wecode_core::Defect::ScopeOverlaps { .. } | wecode_core::Defect::ScopeRefused { .. }
+            )
+        })
         .collect();
     if !blocking.is_empty() && !a.has("force") {
         let mut out = render::plan::admission(&render::plan::task_heading(&task), &defects, None);
@@ -171,7 +181,11 @@ pub(crate) fn task_budget(a: &Args) -> Res {
         .project(&amended.project)
         .map(|p| design_gate(&company, p))
         .unwrap_or_default();
-    let defects = admission::check_task(&amended, &probe, &gate);
+    let mut defects = admission::check_task(&amended, &probe, &gate);
+    // Reported, not blocking: a budget says nothing about paths, so a refusal here is one
+    // the task already carried. Leaving it out of a verdict that lists everything else
+    // would read as the refusal having been settled by a number.
+    defects.extend(super::project::refuses(&company, &plan, &amended));
     if !defects.is_empty() {
         out.push('\n');
         out.push_str(&render::plan::admission(
@@ -299,7 +313,10 @@ pub(crate) fn task_amend(a: &Args) -> Res {
         .project(&task.project)
         .map(|p| design_gate(&company, p))
         .unwrap_or_default();
-    let defects = admission::check_task(&now, &probe, &gate);
+    let mut defects = admission::check_task(&now, &probe, &gate);
+    // Reported for the reason a budget amendment reports it: a move re-declares where a
+    // task sits, not what it writes, so a refusal it draws is one it was already carrying.
+    defects.extend(super::project::refuses(&company, &plan, &now));
     if defects
         .iter()
         .any(|d| matches!(d, wecode_core::Defect::ScopeOverlaps { .. }))

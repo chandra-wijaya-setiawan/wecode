@@ -156,7 +156,11 @@ pub(crate) fn assign(a: &Args) -> Res {
         .project(&task.project)
         .map(|p| design_gate(&company, p))
         .unwrap_or_default();
-    let defects = admission::check_task(task, &plan, &gate);
+    let mut defects = admission::check_task(task, &plan, &gate);
+    // The last planning door a task goes through, and the one that matters for a refusal
+    // added to a playbook after the task was declared: nothing re-reads the guidance on its
+    // behalf, so the check that stops it is the one standing where it is handed to a post.
+    defects.extend(super::project::refuses(&company, &plan, task));
     if !defects.is_empty() {
         let mut out = render::plan::admission(&render::plan::task_heading(task), &defects, None);
         out.push_str("\n  not assigned — a draft cannot be dispatched\n");

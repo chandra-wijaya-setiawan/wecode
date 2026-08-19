@@ -418,6 +418,10 @@ pub(crate) fn task_add(a: &Args) -> Res {
         .map(Playbook::design_required_kinds)
         .unwrap_or_default();
     let mut defects = admission::check_task(&t, &plan, &gate);
+    // Where the project's own line about paths is asked, and the first of the four places
+    // it is: a scope is declared here, re-declared in `super::amend`, read back by `check`,
+    // and handed to a post by `assign`.
+    defects.extend(super::project::refuses(&company, &plan, &t));
     // The main task of an expansion carries its design as a subtask, and at this
     // moment the subtask exists only as a declared step. Judging the main task
     // without crediting the design about to be created would refuse the one flow
@@ -600,9 +604,19 @@ fn expand(
     // template that skips the design step its own gate demands should be refused
     // here, not discovered at dispatch.
     let gate = pb.map(Playbook::design_required_kinds).unwrap_or_default();
+    // Read off the playbook in hand rather than through `super::project::refuses`, which
+    // would open the same file once per step: this is the very playbook the steps were
+    // generated from, so it is the one they are held to. A step that named no paths of its
+    // own inherits the main task's, and inherits its refusals with them — which is the
+    // point, since a refusal is about the path and not about who wrote it down.
+    let refused = pb.map(|p| p.project.refuses.clone()).unwrap_or_default();
     let defects: Vec<(&Task, Vec<wecode_core::Defect>)> = tasks
         .iter()
-        .map(|t| (t, admission::check_task(t, probe, &gate)))
+        .map(|t| {
+            let mut d = admission::check_task(t, probe, &gate);
+            d.extend(admission::check_refusals(t, &refused));
+            (t, d)
+        })
         .filter(|(_, d)| !d.is_empty())
         .collect();
 
