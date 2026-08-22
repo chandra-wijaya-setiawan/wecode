@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use support::Org;
-use support::agent::{a_task, with_agent};
+use support::agent::{a_task, a_task_in_src, with_agent};
 use support::playbook::{PLAYBOOK, with_playbook, with_playbook_body};
 
 // ------------------------------------------------------------------- run ------
@@ -512,6 +512,109 @@ fn a_charter_forbidden_launch_is_refused_before_anything_runs() {
     assert!(!r.ok(), "should refuse");
     r.assert_contains("charter forbids")
         .assert_contains("never_run");
+}
+
+// ----------------------------------------------------------------- claim ------
+
+/// The charter refusing the configured launch line: a dispatch that gets all the way past
+/// preparation and still never reaches an agent. Answers with the file as it was, for a
+/// test that wants to put it back.
+///
+/// `sh *` is one glob segment, so it only matches a launch line with no `/` in it — which
+/// is a constraint on the stand-in agent's script, not on this.
+fn forbid_the_harness(org: &Org) -> String {
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(
+        &conf,
+        text.replace("never_run = [", "never_run = [\"sh *\", "),
+    )
+    .unwrap();
+    text
+}
+
+#[test]
+fn a_dispatch_that_lost_the_race_stands_down_rather_than_running_it_twice() {
+    // A real second dispatch, sent while the first one's agent is up: the stand-in agent
+    // runs its own task again from inside its own worktree, which is the race the loop
+    // and a hand-typed `wecode run` can lose against each other. Two agents on one
+    // checkout overwrite each other's work — and the loser's `git reset --hard` takes the
+    // winner's away before they get that far.
+    let (org, _) = with_playbook("run-contended");
+    let dir = org.dir.display().to_string();
+    // Guarded on the redirect's own file, which the shell creates before the nested
+    // command starts: a check that did not refuse would otherwise dispatch for ever.
+    org.agent(&format!(
+        "[ -f {dir}/race.txt ] || {} --org {dir} run t > {dir}/race.txt 2>&1; \
+         echo done >> src/app.txt",
+        env!("CARGO_BIN_EXE_wecode")
+    ));
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+
+    org.run(&["run", "t"]).assert_ok("run").assert_contains("passed");
+
+    let raced = std::fs::read_to_string(org.dir.join("race.txt")).expect("the second dispatch ran");
+    assert!(raced.contains("already running"), "{raced}");
+    // And a way back, because nothing moves a `running` task on its own: a supervisor
+    // that died holding the claim would otherwise be unrecoverable.
+    assert!(raced.contains("wecode status t ready"), "{raced}");
+}
+
+#[test]
+fn taking_the_same_task_by_hand_again_is_not_a_race_it_lost() {
+    // The other half of the rule, and why the status alone cannot be it: `start` writes
+    // `running` and launches nothing, so the operator holds the task and starting again
+    // is how the tree is reset for a second look. Nothing else moves a `running` task,
+    // so refusing this would strand the work on a word.
+    let (org, _) = with_agent("run-restart", "true");
+    a_task_in_src(&org, "t", "src/**", "true");
+    org.run(&["start", "t"]).assert_ok("take it");
+    org.run(&["start", "t"])
+        .assert_ok("take it again")
+        .assert_contains("(reset)");
+}
+
+#[test]
+fn a_dispatch_refused_after_it_claimed_leaves_the_task_where_it_found_it() {
+    // The claim is written before the tree is cut, which is what makes it a claim rather
+    // than a note — so every refusal after it has to give the task back. Left standing,
+    // this was a task shown as `running` with nothing running: it holds a slot the loop
+    // counts, and the tick never authors `running`, so nothing takes it back.
+    //
+    // The script is slash-free so the charter's glob matches — see `forbid_the_harness`.
+    let (org, _) = with_agent("run-released", "cd src && echo done >> app.txt");
+    let restore = forbid_the_harness(&org);
+    a_task_in_src(&org, "t", "src/**", "grep -q done src/app.txt");
+
+    let r = org.run(&["run", "t"]);
+    assert!(!r.ok(), "the charter refuses the launch");
+    r.assert_contains("charter forbids");
+    org.run(&["show", "t"]).assert_contains("status     waiting");
+
+    // And it is still a dispatch, not a task somebody has to unstick first.
+    std::fs::write(org.path("company.toml"), restore).unwrap();
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("passed");
+}
+
+#[test]
+fn a_task_whose_groundwork_is_unfinished_is_given_back_too() {
+    // The shallow end of the same path, and the one an operator actually hits: this is
+    // refused inside preparation, before a tree is cut, and the claim still has to come
+    // off. `running` on a task whose predecessor has not finished would be the queue
+    // lying in both directions at once.
+    let (org, _) = with_agent("run-blocked", "true");
+    a_task_in_src(&org, "first", "src/app.txt", "true");
+    a_task_in_src(&org, "second", "src/other.txt", "true");
+    org.run(&["task", "add", "second", "--amend", "--after", "first"])
+        .assert_ok("chain them");
+
+    let r = org.run(&["run", "second"]);
+    assert!(!r.ok(), "its groundwork is not done");
+    r.assert_contains("first is not done");
+    org.run(&["show", "second"])
+        .assert_contains("status     waiting");
 }
 
 #[test]

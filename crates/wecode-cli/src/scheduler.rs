@@ -25,7 +25,8 @@
 
 use std::time::Duration;
 
-use wecode_core::{Plan, Task, TaskId, TaskStatus};
+use wecode_core::{ExecutionStatus, Plan, Task, TaskId, TaskStatus};
+use wecode_store::Execution;
 
 /// One status change a tick implies.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -113,6 +114,45 @@ pub(crate) fn dispatchable(plan: &Plan, slots: usize) -> Vec<&Task> {
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out.truncate(slots);
     out
+}
+
+/// Why a dispatch may not take this task, because another one already holds it.
+///
+/// What it stops is the loser of a race walking into the winner's tree. Preparing resets
+/// the checkout an agent is working in, and two agents on one checkout overwrite each
+/// other's work — so a dispatch arriving on a task somebody is already running has one
+/// safe move, which is to stand down.
+///
+/// Two facts, and it takes both. `Running` is what a dispatch writes to say the task is
+/// taken, but it is a cache, and the same word covers an operator who typed `start` an
+/// hour ago and went to lunch. The attempt row is the other half and the harder one: a
+/// row still `working` is a process wecode observed itself, in that worktree, now.
+///
+/// Both, because either alone refuses something legitimate. On the status alone an
+/// operator could not `start` their own task twice, and re-preparing is how the tree is
+/// reset for a second look. On the row alone a supervisor killed mid-run would hold the
+/// task for ever — the row is deliberately left open in that case, since it is the
+/// recovery information — and no status anyone could write would say otherwise.
+///
+/// Returned rather than raised, like [`crate::commands::exec::unsigned`]: a task
+/// somebody else is already doing is not a failure of the pass that skipped it.
+///
+/// The difference from [`dispatchable`] is the point. That decides what the *queue* may
+/// offer; this decides what a dispatch already aimed at a task may do with it. A `failed`
+/// task is retried by hand and a `waiting` one is taken by hand, so neither is contended
+/// — only a run in flight is.
+#[must_use]
+pub(crate) fn contended(id: &TaskId, held: TaskStatus, runs: &[Execution]) -> Option<String> {
+    let in_flight = runs
+        .iter()
+        .any(|r| r.ended.is_none() && r.status == ExecutionStatus::Working);
+    (held == TaskStatus::Running && in_flight).then(|| {
+        format!(
+            "{id} is already running — another dispatch has it\n  \
+             `wecode show {id}` for the attempt in flight, \
+             or `wecode status {id} ready` to hand it back"
+        )
+    })
 }
 
 /// How many slots are free, given what is already running.
@@ -310,6 +350,70 @@ mod tests {
         assert_eq!(free_slots(&p, 3), 1);
         // Never negative, however many were started by hand.
         assert_eq!(free_slots(&p, 1), 0);
+    }
+
+    /// One attempt row, as the store would hold it: `ended` is what tells an open run
+    /// from a finished one.
+    fn attempt(status: ExecutionStatus, ended: Option<u64>) -> Execution {
+        Execution {
+            id: 1,
+            task: "a".into(),
+            session: "s".into(),
+            attempt: 1,
+            status,
+            worktree: None,
+            pid: Some(42),
+            started: 0,
+            ended,
+            wall_secs: None,
+            spent_tokens: None,
+            replayed_tokens: None,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_second_dispatch_onto_a_run_in_flight_is_told_to_stand_down() {
+        let open = [attempt(ExecutionStatus::Working, None)];
+        let why =
+            contended(&TaskId::new("a"), TaskStatus::Running, &open).expect("a run is in flight");
+        assert!(why.contains("already running"), "{why}");
+        // And a way back, because the other half of this is a supervisor that died
+        // holding the claim: nothing else moves a `running` task on its own.
+        assert!(why.contains("wecode status a ready"), "{why}");
+    }
+
+    #[test]
+    fn taking_your_own_claim_again_is_not_a_race_you_lost() {
+        // `start` writes `running` and opens no attempt: the operator has it, and
+        // starting again is how the tree is reset for a second look. Refusing that
+        // would strand a task nothing else moves.
+        let id = TaskId::new("a");
+        assert_eq!(contended(&id, TaskStatus::Running, &[]), None);
+        // A finished attempt is not a claim either, whatever it finished as.
+        let done = [attempt(ExecutionStatus::Completed, Some(9))];
+        assert_eq!(contended(&id, TaskStatus::Running, &done), None);
+    }
+
+    #[test]
+    fn a_run_in_flight_over_a_status_that_moved_on_holds_nothing() {
+        // The status is the claim; the row only says a process was seen. Once something
+        // has written a verdict over it, this dispatch is not the one that lost a race —
+        // a retry of a failed task is exactly this shape.
+        let open = [attempt(ExecutionStatus::Working, None)];
+        for s in [
+            TaskStatus::Draft,
+            TaskStatus::Waiting,
+            TaskStatus::Ready,
+            TaskStatus::Verifying,
+            TaskStatus::NeedsApproval,
+            TaskStatus::NeedsInput,
+            TaskStatus::Failed,
+            TaskStatus::Done,
+            TaskStatus::Dropped,
+        ] {
+            assert_eq!(contended(&TaskId::new("a"), s, &open), None, "{s:?}");
+        }
     }
 
     #[test]
