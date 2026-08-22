@@ -10,7 +10,7 @@ use wecode_core::{Plan, Task, TaskId, TaskStatus, WORKER_DIR, admission};
 use wecode_gov::{Action, ActionKind, Broker, Session, glob};
 use wecode_org::{AgentTemplate, Company, Playbook, Workspace};
 
-use wecode_store::{Store, execution::Spend};
+use wecode_store::{Execution, Store, execution::Spend};
 
 use crate::args::Args;
 use crate::commands::ctx::*;
@@ -402,6 +402,9 @@ pub(crate) fn start(a: &Args) -> Res {
     // The envelope carries what earlier attempts did, so a retry can see its own
     // failure rather than starting blind.
     let runs = store.executions(&id)?;
+    // The same claim `run` takes, before the same preparation, because the two are one
+    // door: a tree reset under a running agent does not care which of them reset it.
+    let claim = Claim::take(&store, &task, &runs)?;
     let prepared = prepare(&ws, &store, &company, &plan, &task, &runs)?;
 
     // Starting is staffing: it changes who is expected to act.
@@ -414,7 +417,9 @@ pub(crate) fn start(a: &Args) -> Res {
         &Action::Staff,
         "starting a task",
     )?;
-    store.set_task_status(&id, TaskStatus::Running)?;
+    // The operator has it now, and nothing after this can fail in a way that means they
+    // do not.
+    claim.kept();
 
     // For a caller that speaks the protocol rather than reading prose. The state is
     // `submitted`: prepared, not yet spawned.
@@ -699,6 +704,57 @@ fn limits_for(template: &AgentTemplate, task: &Task) -> spawn::Limits {
     limits
 }
 
+/// One dispatch's hold on a task: `running`, written before anything is prepared and
+/// given back unless an agent actually ran.
+///
+/// *Before*, because that is what makes it a claim rather than a note. Preparing cuts the
+/// tree and resets the last attempt away, so two dispatches that both prepare leave the
+/// loser resetting the checkout the winner's agent is working in.
+///
+/// *Given back*, because a status written that early is written on every way out that
+/// reaches no agent — the admission gate, a missing signature, a prerequisite not done, a
+/// harness that will not start. Left standing, each of those was a task shown as
+/// `running` with nothing running: holding a slot [`scheduler::free_slots`] counts, and
+/// untouchable by the tick, which never authors `running`. `Drop` does it, so every `?`
+/// in between is covered by construction rather than by remembering.
+struct Claim<'a> {
+    store: &'a Store,
+    id: TaskId,
+    /// What the store held when the claim was taken, which is what goes back.
+    was: TaskStatus,
+    kept: bool,
+}
+
+impl<'a> Claim<'a> {
+    /// Takes the task, unless [`scheduler::contended`] says somebody else has it.
+    fn take(store: &'a Store, task: &Task, runs: &[Execution]) -> Result<Self, String> {
+        let (id, was) = (task.id.clone(), task.status);
+        if let Some(why) = scheduler::contended(&id, was, runs) {
+            return Err(why);
+        }
+        store.set_task_status(&id, TaskStatus::Running).map_err(|e| format!("{id}: {e}"))?;
+        Ok(Self { store, id, was, kept: false })
+    }
+
+    /// Keeps it: an agent is up, and the run owes the task a verdict from here.
+    fn kept(mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        // Only while it is still ours: anything else in that column is somebody's answer
+        // about this task, and putting the old status back over it would erase a fact this
+        // dispatch does not own. Quiet and best effort — an error is already on its way to
+        // the operator, and a second one about the database would bury the first.
+        let held = (self.store.load_plan().ok()).and_then(|p| p.task(&self.id).map(|t| t.status));
+        if !self.kept && held == Some(TaskStatus::Running) {
+            let _ = self.store.set_task_status(&self.id, self.was);
+        }
+    }
+}
+
 /// Runs a task: prepares it, spawns the agent that holds its post, then judges it.
 ///
 /// The agent is never given a session. The supervisor opens one and records on its
@@ -730,6 +786,8 @@ pub(crate) fn run_task(a: &Args) -> Res {
     // The envelope carries what earlier attempts did, so a retry can see its own
     // failure rather than starting blind.
     let runs = store.executions(&id)?;
+    // Before preparation, which is the whole of what makes it a claim — see [`Claim`].
+    let claim = Claim::take(&store, &task, &runs)?;
     let prepared = prepare(&ws, &store, &company, &plan, &task, &runs)?;
 
     let who = actor(a, &store, &company)?;
@@ -771,7 +829,6 @@ pub(crate) fn run_task(a: &Args) -> Res {
         .into());
     }
 
-    store.set_task_status(&id, TaskStatus::Running)?;
     // Opened before the process starts, so a crash leaves a row saying `working`
     // rather than no trace of the run at all.
     let exec = store.start_execution(&id, &who.session, prepared.cwd.to_str(), None)?;
@@ -787,6 +844,9 @@ pub(crate) fn run_task(a: &Args) -> Res {
         &prepared.cache,
         limits,
     )?;
+    // The agent ran, however it ended. From here the status is this run's to author, so
+    // the claim is not something to hand back.
+    claim.kept();
 
     // The exit is a fact we observed, not a claim the agent made. `Allow` even when
     // it exited badly: launching the agent was wecode's own permitted act, and the
