@@ -17,7 +17,7 @@ use super::subtask::{self, SubtaskTemplate};
 /// The fields a kind block has. Named here because the strict check is done by hand
 /// against this list — see [`kinds_of`].
 const KIND_FIELDS: &str =
-    "worktree, design_required, assign_to, accept, tokens, wall_secs, guidance, subtasks";
+    "worktree, design_required, assign_to, accept, tokens, wall_secs, guidance, subtasks, numbered";
 
 #[derive(Deserialize, Default, Debug)]
 pub(super) struct KindBlock {
@@ -39,6 +39,10 @@ pub(super) struct KindBlock {
     /// this list rather than in the blocks because a table has no order.
     #[serde(default)]
     subtasks: Vec<String>,
+    /// Whether an emitted task is named by its number in `subtasks` rather than by
+    /// the step's own name.
+    #[serde(default)]
+    numbered: bool,
     /// The `[feature.design]` sub-tables, plus anything else that did not match a
     /// field. `deny_unknown_fields` cannot be combined with `flatten`, so the check
     /// it used to give is done by name in [`kinds_of`]: a key here that `subtasks`
@@ -73,6 +77,17 @@ pub struct KindPlaybook {
     /// The decomposition `--expand` emits, in declared order. Empty means this
     /// project does not template work of this kind, and `--expand` has nothing to do.
     pub subtasks: Vec<SubtaskTemplate>,
+    /// Whether an emitted task is named `<main task>-1`, `-2` … in declared order
+    /// instead of by its step's name.
+    ///
+    /// The name is still what the file reads and what `after` points at; what it stops
+    /// being is the string an operator has to spell. An id is typed back — from a
+    /// phone, at the hour the notification arrived — and `retry-1` survives that
+    /// keyboard where `retry-instrument-the-cache` does not. Unlike the short number a
+    /// task also answers to, this one is minted by nothing: it is derivable from the
+    /// playbook, so it is the same string in the plan read at a desk and in the reply
+    /// sent from a train.
+    pub numbered: bool,
 }
 
 /// Every section the file holds, keyed by the kind it names.
@@ -114,6 +129,7 @@ pub(super) fn kinds_of(
                 wall_secs: block.wall_secs,
                 guidance: block.guidance.trim().to_string(),
                 subtasks,
+                numbered: block.numbered,
             },
         );
     }
