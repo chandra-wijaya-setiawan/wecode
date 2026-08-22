@@ -265,6 +265,75 @@ fn without_expand_a_templated_playbook_behaves_exactly_as_before() {
     assert!(!org.run(&["show", "retry-design"]).ok());
 }
 
+// ------------------------------------------------------------ numbered ids ------
+
+/// `TEMPLATED` with the kind naming its tasks by number. The steps are unchanged; what
+/// changes is the string an operator has to spell back.
+fn with_numbered_ids(name: &str) -> (Org, PathBuf) {
+    let (org, repo) = with_template(name);
+    org.playbook(
+        &repo,
+        &TEMPLATED.replace("[feature]\n", "[feature]\nnumbered  = true\n"),
+    );
+    (org, repo)
+}
+
+#[test]
+fn a_numbered_kind_names_its_tasks_by_their_place_in_the_template() {
+    let (org, _) = with_numbered_ids("exp-numbered");
+    let mut argv = EXPANDABLE.to_vec();
+    argv.push("--expand");
+    org.run(&argv)
+        .assert_ok("task add --expand")
+        .assert_contains("expanded retry into 2 subtasks")
+        .assert_contains("retry-1")
+        .assert_contains("retry-2")
+        // `after` names a sibling in the playbook, so in the plan it has to name the id
+        // that sibling was given — a dependency on `retry-design` would name a task
+        // this expansion never created.
+        .assert_contains("after retry-1")
+        .assert_lacks("retry-design");
+
+    // Ordinary tasks under the numbered ids, and `{{task}}` still the main task's id:
+    // the steps are numbered, the task above them is not renamed.
+    org.run(&["show", "retry-1"])
+        .assert_ok("show the first step")
+        .assert_contains("decide how retry should work")
+        .assert_contains("src/design/retry.md");
+    org.run(&["show", "retry-2"])
+        .assert_ok("show the second step")
+        .assert_contains("src/retry/**")
+        .assert_contains("retry-1");
+    assert!(
+        !org.run(&["show", "retry-design"]).ok(),
+        "the step's name is not an id here"
+    );
+
+    // And the id is a handle every command already takes, which is the whole of why a
+    // project would ask for a shorter one.
+    org.run(&["check", "retry-2"])
+        .assert_ok("check the second step")
+        .assert_contains("admitted");
+    org.run(&["tick"]).assert_ok("tick");
+    org.run(&["ready"])
+        .assert_ok("ready")
+        .assert_contains("retry-1")
+        .assert_lacks("retry-2");
+}
+
+#[test]
+fn a_kind_that_asks_for_nothing_keeps_the_ids_it_always_emitted() {
+    // Opt-in per kind, so a playbook written before the field existed emits what it
+    // did — the ids in it are already on boards, in branches and in the ledger.
+    let (org, _) = with_template("exp-unnumbered");
+    let mut argv = EXPANDABLE.to_vec();
+    argv.push("--expand");
+    org.run(&argv)
+        .assert_ok("task add --expand")
+        .assert_contains("retry-design")
+        .assert_lacks("retry-1");
+}
+
 // --------------------------------------------------------- inherited scope ------
 
 /// `TEMPLATED` with the build step's paths removed, so it names none at all. The

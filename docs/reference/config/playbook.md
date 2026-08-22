@@ -35,6 +35,7 @@ Prose, read by whoever decomposes a request into tasks. Say how work is split he
 what the seams are, and what a task of this kind must not do.
 """
 subtasks  = ["design", "build"]   # what `task add --expand` emits, in this order
+numbered  = true                  # name them <task>-1, <task>-2, not <task>-design
 
 [feature.design]                  # one block per name in `subtasks`
 kind   = "design"                 # defaults to the kind being expanded
@@ -183,6 +184,20 @@ so.
 `{{task}}` is the main task's id and `{{title}}` its title. They are the only two: a
 template that could reach further into the plan would be a small language, and this is a
 scaffold that runs once.
+
+`numbered = true` on the kind names the emitted tasks by their place in `subtasks` —
+`retry-1`, `retry-2` — instead of by the step's name. Nothing else moves: the step is
+still called `design` in the file, `after` still names it by that name, and a step with
+no `title` is still titled from it. The id is the one thing here an operator has to
+*type*, and a step name is prose — `retry-instrument-the-cache` has to be spelled back
+exactly, hyphens included, on whatever keyboard the notification reached. Unlike the
+[short number](../commands.md) a task also answers to, this one is minted by nothing and
+derivable from the playbook, so it is the same string in the plan read at a desk and in
+the reply sent from a train.
+
+Numbers are positions, so inserting a step in the middle of `subtasks` moves the ones
+after it. That only changes what the *next* expansion emits: ids are minted when a task
+is created, and the tasks already on the board keep theirs.
 
 `design_required` refuses a task of that kind at admission unless a `design` task
 stands before it — a predecessor up its dependency chain, or a subtask inside it, which

@@ -5,6 +5,11 @@
 //! *different*; everything it leaves unset falls through to the playbook for the step's
 //! own kind, exactly as a hand-written task of that kind would.
 //!
+//! That name is the emitted task's name too, unless the kind sets `numbered` — then the
+//! id carries the step's place in the list instead. The name is what a file is read
+//! with; an id is what an operator spells back, from wherever they happen to be when
+//! the notification finds them.
+//!
 //! Scope is the one thing that falls through somewhere else: to the main task being
 //! expanded, by [`Subtask::scope_under`]. The playbook has no scope to give — a kind
 //! block says nothing about paths — so a step that named none would otherwise be
@@ -52,7 +57,9 @@ struct SubtaskBlock {
 /// this step different, and nothing else.
 #[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub struct SubtaskTemplate {
-    /// The suffix: the emitted task is `<main task id>-<name>`.
+    /// The step's own name, which is the suffix too: the emitted task is
+    /// `<main task id>-<name>`, or `<main task id>-<its number>` where the kind asked
+    /// for numbers. Either way this is the name the file reads and `after` points at.
     pub name: String,
     /// Defaults to the kind being expanded — a template names it only when the step
     /// is a different sort of work, as a `design` step of a `feature` is.
@@ -209,23 +216,50 @@ fn fill(text: &str, task: &str, title: &str) -> String {
 }
 
 impl KindPlaybook {
+    /// The id suffix one step answers to: its number where the kind asked for numbers,
+    /// and its own name otherwise.
+    ///
+    /// Asked by name rather than by position, because `after` names a sibling and not a
+    /// place — resolving both through here is what makes a dependency arrive at the same
+    /// id the sibling itself is given. A name that is no step's cannot reach this: an
+    /// `after` is checked against the earlier siblings when the playbook is read, so the
+    /// fallback is only there to keep a name it could not place readable.
+    fn suffix(&self, name: &str) -> String {
+        if !self.numbered {
+            return name.to_string();
+        }
+        self.subtasks
+            .iter()
+            .position(|s| s.name == name)
+            .map_or_else(|| name.to_string(), |i| (i + 1).to_string())
+    }
+
     /// What `--expand` would emit for a main task, in declared order.
     ///
     /// Pure. It produces values and schedules nothing — the tasks it describes still
     /// face the admission gate, and may be edited or dropped before anything runs.
     /// `parent_kind` is the kind being expanded, used for a step that names none.
+    ///
+    /// The ids are the one thing `numbered` changes. Nothing else moves with it: a step
+    /// is still named in the file, still ordered by that name, and still titled by it
+    /// where it wrote no title — the number is what an operator types, not what a
+    /// reader is left with.
     #[must_use]
     pub fn expand(&self, parent_kind: TaskKind, task: &str, title: &str) -> Vec<Subtask> {
         self.subtasks
             .iter()
             .map(|s| Subtask {
-                id: format!("{task}-{}", s.name),
+                id: format!("{task}-{}", self.suffix(&s.name)),
                 kind: s.kind.unwrap_or(parent_kind),
                 title: s
                     .title
                     .as_ref()
                     .map_or_else(|| format!("{}: {title}", s.name), |t| fill(t, task, title)),
-                after: s.after.iter().map(|a| format!("{task}-{a}")).collect(),
+                after: s
+                    .after
+                    .iter()
+                    .map(|a| format!("{task}-{}", self.suffix(a)))
+                    .collect(),
                 write: s.write.iter().map(|g| fill(g, task, title)).collect(),
                 read: s.read.iter().map(|g| fill(g, task, title)).collect(),
                 accept: s.accept.iter().map(|c| fill(c, task, title)).collect(),
@@ -330,6 +364,57 @@ write  = ["README.md"]
         assert!(out[1].accept.is_empty());
         assert!(out[1].assign_to.is_none());
         assert_eq!(out[1].tokens, None);
+    }
+
+    /// `TEMPLATED` with the ids numbered: the same three steps, named by their place in
+    /// the list rather than by themselves.
+    fn numbered() -> String {
+        TEMPLATED.replace("[feature]\n", "[feature]\nnumbered  = true\n")
+    }
+
+    #[test]
+    fn a_numbered_kind_names_its_tasks_by_their_place_in_the_list() {
+        let p = Playbook::parse(&numbered()).unwrap();
+        let out = p.for_kind(TaskKind::Feature).unwrap().expand(
+            TaskKind::Feature,
+            "retry",
+            "retry a failed task once",
+        );
+        let ids: Vec<&str> = out.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["retry-1", "retry-2", "retry-3"]);
+        // `after` names a sibling rather than a place, so it has to arrive at the id
+        // that sibling was actually given — a dependency on `retry-design` here would
+        // name a task the expansion never creates.
+        assert_eq!(out[1].after, vec!["retry-1".to_string()]);
+        assert_eq!(out[2].after, vec!["retry-2".to_string()]);
+    }
+
+    #[test]
+    fn numbering_the_ids_changes_nothing_a_reader_is_left_with() {
+        // The number is what gets typed; the name is what gets read. So a step still
+        // titles itself by name where it wrote no title, and `{{task}}` is still the
+        // main task's id — numbering the steps does not rename the task above them.
+        let p = Playbook::parse(&numbered()).unwrap();
+        let out = p.for_kind(TaskKind::Feature).unwrap().expand(
+            TaskKind::Feature,
+            "retry",
+            "retry a failed task once",
+        );
+        assert_eq!(out[0].title, "decide how retry should work");
+        assert_eq!(out[0].write, vec!["docs/wecode/retry/design.md".to_string()]);
+        assert_eq!(out[1].title, "build: retry a failed task once");
+    }
+
+    #[test]
+    fn a_kind_that_asks_for_nothing_still_names_its_tasks_after_its_steps() {
+        // Opt-in: every playbook written before the field existed emits what it did.
+        let p = Playbook::parse(TEMPLATED).unwrap();
+        let k = p.for_kind(TaskKind::Feature).unwrap();
+        assert!(!k.numbered);
+        assert_eq!(
+            k.expand(TaskKind::Feature, "retry", "a title")[0].id,
+            "retry-design"
+        );
     }
 
     /// A template that leaves scope to the main task: `build` names none at all, and
