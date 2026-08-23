@@ -164,3 +164,18 @@ agent look free, which is the failure the empty column was avoiding in the first
 The same rule applies to unreachable code. A helper written for the next task is removed
 and re-added when that task arrives — twice now, deliberately, because "it will be used
 soon" is exactly the reasoning that leaves dead code behind.
+
+## What wecode is (restated 24 Aug 2026)
+
+It began as "run coding agents as staff" — an execution harness with governance. A
+week of dogfooding moved it up a pedestal, layer by layer, each added when its
+absence hurt: work-unit contracts (specs, ISO 29148 shaped), project purpose and
+refusals, versions a board can answer for, components on the way (ISO 42010/C4),
+UX/AX parity as a peer requirement. The identity that fits what it now does:
+
+**wecode is SDLC and project management for agentic software.**
+
+The division that holds it together: definition lives in the repo, versioned with the
+code (plan.md, specs/, architecture.md, playbook); accountability lives in the tool
+(gates, ledger, board, digest). Agents and humans hold one set of requirements,
+perceived through different surfaces, judged by artifacts either can verify.

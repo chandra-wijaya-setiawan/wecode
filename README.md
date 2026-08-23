@@ -1,6 +1,8 @@
 # wecode
 
-Run coding agents as staff.
+**SDLC and project management for agentic software.** Coding agents do the work;
+wecode is the lifecycle they work inside — requirements to versions, specs to
+signatures, one ledger both human and agent render.
 
 You talk to one orchestrator; it holds the plan, dispatches work to agents under
 enforced scopes and budgets, judges what came back from the diff rather than from the
