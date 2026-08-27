@@ -192,3 +192,55 @@ def test_the_diff_table_puts_riskier_changes_first() -> None:
     assert [r[1] for r in ordered] == ["del", "mod", "mod", "add", "add"]
     # Path order within a group, so a reviewer can still find a named file.
     assert [r[0] for r in ordered if r[1] == "add"] == ["b_added.py", "z_added.py"]
+
+
+def test_a_dropped_requirement_is_not_counted(store: Path) -> None:
+    """A requirement abandoned by a reslice is not a requirement.
+
+    Counting one makes the denominator wrong in the direction that flatters — 36 of 36 built
+    when 11 were superseded. `archived` alone does not catch it: a dropped task whose run left
+    a ledger entry cannot be removed at all.
+    """
+    conn = sqlite3.connect(store)
+    conn.execute(
+        "INSERT INTO tasks VALUES ('t53-old','ticket-53-bronze','feat','Superseded',"
+        "NULL,'dropped',NULL,0,0,0,NULL,NULL)"
+    )
+    conn.commit()
+    conn.close()
+    assert [r.id for r in load(store, "ticket-53-bronze").requirements] == ["t53-fr-01"]
+
+
+def test_sync_never_resurrects_a_dropped_requirement() -> None:
+    """Its criteria still pass — the tests it named are still green — so deriving status
+    from criteria alone would undo the decision that abandoned it.
+
+    A reslice dropped eleven requirements on #54 and the first sync put every one back.
+    """
+    from report_from_wecode import Requirement, derived_status
+
+    dropped = Requirement(
+        id="t54-fr-01",
+        title="Superseded by a reslice",
+        kind="feat",
+        status="dropped",
+        criteria=(_criterion(),),
+    )
+    assert derived_status(dropped) == "dropped"
+
+
+def test_an_archived_requirement_is_still_counted(store: Path) -> None:
+    """Archived means off the active board, which is what finishing work does to it.
+
+    Filtering on it emptied the report exactly as a ticket succeeded — #53 fell from 13
+    requirements to 1 and #54 from 25 to 4, keeping only what had not finished. A report of a
+    completed ticket would have described nothing at all.
+    """
+    conn = sqlite3.connect(store)
+    conn.execute(
+        "INSERT INTO tasks VALUES ('t53-fr-99','ticket-53-bronze','feat','Finished and filed',"
+        "NULL,'done',NULL,1,0,0,NULL,NULL)"
+    )
+    conn.commit()
+    conn.close()
+    assert "t53-fr-99" in [r.id for r in load(store, "ticket-53-bronze").requirements]

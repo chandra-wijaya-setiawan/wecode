@@ -206,7 +206,16 @@ def load(db: Path, project_id: str) -> Project:
         requirements = []
         tasks = conn.execute(
             "SELECT id, title, kind, status FROM tasks "
-            "WHERE project_id = ? AND archived = 0 ORDER BY id",
+            # Dropped tasks are excluded and archived ones are not, which are different
+            # questions. A dropped requirement was abandoned and is not a requirement;
+            # counting it makes the denominator wrong in the direction that flatters — 36 of
+            # 36 built, when 11 were superseded by a reslice.
+            #
+            # Archived means off the active board, which is what completing work does to it.
+            # Filtering on it emptied the report as the ticket succeeded: #53 went from 13
+            # requirements to 1 and #54 from 25 to 4, keeping only what had not finished yet.
+            # A report of a finished ticket would have described nothing.
+            "WHERE project_id = ? AND status != 'dropped' ORDER BY id",
             (project_id,),
         ).fetchall()
         for task_id, title, kind, status in tasks:
@@ -308,6 +317,7 @@ STATUS_DONE = "done"
 STATUS_VERIFYING = "verifying"
 STATUS_FAILED = "failed"
 STATUS_READY = "ready"
+STATUS_DROPPED = "dropped"
 
 
 def derived_status(requirement: Requirement) -> str:
@@ -316,6 +326,11 @@ def derived_status(requirement: Requirement) -> str:
     ``verifying`` is the state the two-tier table needs and a binary done/failed cannot
     express: built, and awaiting the evidence that it runs.
     """
+    # Never resurrect a dropped requirement. Its criteria still pass — the tests it named
+    # are still green — so deriving from criteria alone would undo the human decision that
+    # abandoned it. A reslice dropped eleven of these, and syncing put them all back.
+    if requirement.status == STATUS_DROPPED:
+        return STATUS_DROPPED
     offline, live = requirement.tier(live=False), requirement.tier(live=True)
     if any(c.ran and not c.passed for c in requirement.criteria):
         return STATUS_FAILED
