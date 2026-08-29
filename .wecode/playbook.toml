@@ -10,6 +10,13 @@
 [project]
 merge_to = "master"
 merge    = "approved"   # the charter protects master anyway
+# So does dispatch. Without this a task lands `ready` and the next tick spawns an agent
+# on it — which is right when the plan is the work, and wrong when the plan is a record
+# of a gap someone found. Registering the STE project's tracker gaps as tasks here left
+# four of them ready; on the STE side the same shape cost 71k tokens re-implementing a
+# file that was already finished. `record-not-commission` is the ticket to make this
+# unnecessary; until it lands, nothing starts unsigned.
+dispatch = "approved"
 language = "rust"
 # The integration branch. Task branches are cut from it.
 # Unset for now: this repo works on master directly, and naming a branch that does
@@ -52,6 +59,17 @@ wall_secs = 5400
 subtasks  = ["design", "build", "test"]
 
 guidance  = """
+Every feature is a work unit under the spec model this repo imposes on every
+other project (wt-53 shape, templates in specs/): the contract is
+specs/<number>-<task>/specification.md — ISO 29148 FR/NFR tables, ACs with trace
+ids, and the §4b UX/AX parity table, where the "user" is the terminal operator
+and the "agent" is a seat reaching the same action through the CLI or A2A — and
+the unit closes with report_as_finished.md, its numbers generated from
+git diff --numstat, never typed. docs/wecode/<task>/design.md stays the decision
+record the design step signs; the spec is what the build is held to. A feature
+whose write scope omits its specs/<number>-<task>/ directory is not admitted to
+this shape — declare it.
+
 One main task per behaviour that changes. Subtasks only when the work spans crates —
 each must be independently reviewable.
 
@@ -138,7 +156,7 @@ drop the design step when the title already says the decision.
 [feature.design]
 kind      = "design"
 title     = "decide how to {{title}}"
-write     = ["docs/wecode/{{task}}/design.md"]
+write     = ["docs/wecode/{{task}}/design.md", "specs/**"]
 # `test -f` was the whole gate, and `: > design.md` passed it — so a signature could be
 # given to an empty file and the ledger would record that someone had read it. The
 # script checks form only: that the document says what it is about, has parts, argues
