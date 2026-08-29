@@ -382,7 +382,14 @@ fn share_a_repo(plan: &Plan, a: &Task, b: &Task) -> bool {
 /// ordinary shape of a slice, and the direct-only version made the third and every
 /// later link impossible to admit.
 fn sequenced(plan: &Plan, a: &Task, b: &Task) -> bool {
-    waits_on(plan, a, &b.id) || waits_on(plan, b, &a.id)
+    // Ordering lifts through containment: a step inside `journal` cannot outlive
+    // its parent's place in the chain, so `lease --after journal` orders lease
+    // against journal's steps too. Without the lift, every expanded unit
+    // collided with its sequenced siblings (ledger, 30 Aug).
+    let (mut fa, mut fb) = (vec![a], vec![b]);
+    fa.extend(plan.ancestors(&a.id));
+    fb.extend(plan.ancestors(&b.id));
+    fa.iter().any(|x| fb.iter().any(|y| waits_on(plan, x, &y.id) || waits_on(plan, y, &x.id)))
 }
 
 /// Whether `t` waits on `target`, directly or through other tasks.
