@@ -49,6 +49,85 @@ impl Measure {
     }
 }
 
+/// What an acceptance command marked as needing live infrastructure starts with.
+///
+/// On the command line because there is nowhere else: a [`Measure::Command`] is a line
+/// and an expected status, in the plan and in the store both. Read case-insensitively for
+/// one reason — a marker that failed to match leaves the check in the *first* tier, where
+/// it runs against the real bucket on every verdict, unasked.
+const LIVE_MARK: &str = "live:";
+
+/// Which tier of acceptance a verdict is being asked for.
+///
+/// Here rather than beside the code that runs a check, because the tier is a property of
+/// the [`Measure::Command`] line this crate defines: the marker is part of that line's
+/// grammar. Who asks for the tier, and through which door, is the caller's — see
+/// [`Tier::asked_by`].
+///
+/// The request is per invocation and read from the environment — the same door
+/// `WECODE_CONFIG` and `WECODE_AGENT` come through — and that is the property worth
+/// having rather than a convenience. A tier written into the plan would be a standing
+/// instruction: every judgement the board loop made from then on would reach for real
+/// infrastructure, days after the person who wrote it stopped watching. In the
+/// environment of one command it cannot outlive the command.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Tier {
+    /// Everything a checkout can answer on its own, and nothing else. The default, and
+    /// what every unattended verdict is made of.
+    #[default]
+    Offline,
+    /// The offline tier and the live one together. Only ever by request.
+    Live,
+}
+
+impl Tier {
+    /// Whether a value the caller read is a request. Off unless something affirmative
+    /// is set: someone who exported the variable to turn the tier *off* said the more
+    /// deliberate of the two things, and reading the mere presence of the name as
+    /// consent would do the opposite of what they wrote.
+    #[must_use]
+    pub fn asked_by(v: Option<&str>) -> Self {
+        let Some(v) = v.map(str::trim) else {
+            return Self::Offline;
+        };
+        if ["", "0", "false", "no", "off"]
+            .iter()
+            .any(|off| v.eq_ignore_ascii_case(off))
+        {
+            Self::Offline
+        } else {
+            Self::Live
+        }
+    }
+
+    /// Whether a check of this kind runs under this tier.
+    #[must_use]
+    pub fn runs(self, live: bool) -> bool {
+        !live || self == Self::Live
+    }
+}
+
+/// Splits the tier marker off an acceptance command: whether it is live, and the line
+/// to actually run.
+///
+/// A marker with nothing behind it is not a marker. Read as a tier, `live:` alone would
+/// be a check that runs the empty string and exits 0 — a pass earned by asking nothing.
+/// Handed to `sh` unchanged it is a command not found, visibly broken where it was
+/// written.
+#[must_use]
+pub fn tier_of(cmd: &str) -> (bool, &str) {
+    let line = cmd.trim_start();
+    let Some(mark) = line.get(..LIVE_MARK.len()) else {
+        return (false, cmd);
+    };
+    let rest = line[LIVE_MARK.len()..].trim_start();
+    if mark.eq_ignore_ascii_case(LIVE_MARK) && !rest.is_empty() {
+        (true, rest)
+    } else {
+        (false, cmd)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cmp {
     Lt,
@@ -310,6 +389,31 @@ impl TaskStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_affirmative_value_asks_for_the_live_tier() {
+        // A variable exported to turn the tier off is the more deliberate of the two
+        // things a person can write, and reading the name's presence as consent would do
+        // the opposite of what they wrote.
+        assert_eq!(Tier::asked_by(None), Tier::Offline);
+        for off in ["", "  ", "0", "false", "FALSE", "no", "off"] {
+            assert_eq!(Tier::asked_by(Some(off)), Tier::Offline, "{off:?}");
+        }
+        for on in ["1", "yes", "true", "please"] {
+            assert_eq!(Tier::asked_by(Some(on)), Tier::Live, "{on:?}");
+        }
+    }
+
+    #[test]
+    fn a_marker_with_nothing_behind_it_is_not_a_marker() {
+        // `live:` alone read as a tier would be a check that runs the empty string and
+        // exits 0 — a pass earned by asking nothing. Left on the line it reaches `sh` as
+        // a command not found, visibly broken where the operator wrote it.
+        assert_eq!(tier_of("live:"), (false, "live:"));
+        assert_eq!(tier_of("live:   "), (false, "live:   "));
+        assert_eq!(tier_of("LIVE:  aws s3 ls"), (true, "aws s3 ls"));
+        assert_eq!(tier_of("cargo test"), (false, "cargo test"));
+    }
 
     #[test]
     fn every_project_status_round_trips_and_has_a_distinct_mark() {

@@ -10,10 +10,13 @@
 //! are checked separately and mean different things.
 //!
 //! This crate is pure: no I/O, no async. Everything is decidable by inspecting
-//! values, which is what makes the admission gate deterministic.
+//! values, which is what makes the admission gate deterministic. [`docs`] is the same
+//! rule applied to a repository's documentation: it parses text and joins path lists,
+//! and the caller is the one that opens a file.
 
 pub mod admission;
 pub mod common;
+pub mod docs;
 pub mod execution;
 pub mod id;
 pub mod plan;
@@ -22,7 +25,8 @@ pub mod short;
 pub mod task;
 
 pub use admission::{Admission, Defect, Waiver};
-pub use common::{Budget, Cmp, Measure, ProjectStatus, Scope, TaskStatus, WORKER_DIR};
+pub use common::{Budget, Cmp, Measure, ProjectStatus, Scope, TaskStatus, Tier, WORKER_DIR, tier_of};
+pub use docs::{Class, Doc, Stale};
 pub use execution::ExecutionStatus;
 pub use id::{ProjectId, TaskId};
 pub use short::Number;
