@@ -22,10 +22,16 @@ admission checks that would consume them. Same unit, later slices. Owner: the sa
 |---|---|
 | L2 container | `wecode` CLI — no new container |
 | L3 component | new `wecode-core::docs` (pure parse + join); callers in `wecode-cli::verify` and the admission path |
-| L4 | `parse_front_matter(&str) -> Doc`, `stale(changed: &[String], docs: &[Doc]) -> Vec<Stale>` |
+| L4 | `docs::parse(path, text) -> Doc`, `docs::stale(docs, changed, matches) -> Vec<Stale>` |
 
-Assumed placement, agreed by the design record: core parses and joins, core opens no
-files. Divergence to ratify if the build finds one — the file reading must stay in `cli`.
+Core parses and joins and opens no files. Three divergences, ratified by the build of the
+verify half:
+
+| As specified | As built | Why |
+|---|---|---|
+| `stale(changed, docs)` | `stale(docs, changed, matches)` | core is dependency-free, so the glob matcher arrives as a parameter — `wecode_gov::glob::any_matches`, no second dialect |
+| the stale list is assembled on `Verdict` | computed in `verify::changed`, read through `Verdict::stale()` | that call is the only moment the diff and the tree holding the pages are in one hand |
+| — | `Tier` and `tier_of` moved `verify.rs` → `wecode-core::common` | NFR-06-MNT-02: the room had to come from a split, and the `live:` marker is part of a `Measure::Command` line's grammar |
 
 ## 3. Requirement details
 
@@ -50,6 +56,11 @@ files. Divergence to ratify if the build finds one — the file reading must sta
 | NFR-06-MNT-02 | build | `verify.rs` and `admission.rs` are at the 1600-line `src` limit; the slice lands new modules and must leave `bash scripts/max-lines.sh` green |
 
 ## 4. Acceptance criteria
+
+State: AC-1 to AC-4, AC-6 and AC-7 are met by the verify half. **AC-5 is open** — FR-06-06
+is the admission half and lands with a sibling task. Until it does, a stale finding on a
+task whose write scope excludes the page is unrepairable inside the run; the mitigation for
+now is that coverage is one page (`docs/reference/front-matter.md`) and ratchets by hand.
 
 | AC | Criterion | Evidences | How it is proven |
 |---|---|---|---|
@@ -110,6 +121,8 @@ recorded and nothing more.
 | Opt-in by front-matter; absence governs nothing | coverage ratchets instead of a threshold | design record §"What a document declares" |
 | No waiver, no override flag | the subject line is the waiver, stated as truth | design record §"What moved with it does not mean" |
 | Parse and join in core; read files in cli | core opens no files — the `check_refusals` idiom | `wecode-core::admission` |
+| An unrecognised `class:` is watched, not exempt | the exemptions are what the gate's silence is made of; a typo must not buy one | `wecode_core::docs::Class::named` |
+| Front-matter documented on its own reference page, and that page governs the parser | the first `subject:` in the tree is the gate's own, so it is exercised by the commit that lands it | `docs/reference/front-matter.md` |
 
 ## 9. References
 

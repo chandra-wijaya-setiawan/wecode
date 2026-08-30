@@ -8,6 +8,8 @@
 //!   do its work. Acceptance cannot catch this and never could: the commands a task is
 //!   held to are the repository's own, and they passed on the tree before it started, so
 //!   a run that changed nothing came back green — see [`Changed::delivered_nothing`].
+//! - **Did the documentation move with it?** A page declaring a `subject:` that stayed out
+//!   of a diff touching one is refused beside a scope violation — [`wecode_core::docs`].
 //! - **Does it pass?** By running the acceptance commands here, not by being told.
 //!
 //! That ordering is the design's own rule — the diff always wins. An agent's
@@ -40,7 +42,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use wecode_core::{Measure, Scope, Task, TaskId, TaskStatus};
+use wecode_core::{Measure, Scope, Task, TaskId, TaskStatus, Tier, docs, tier_of};
 use wecode_gov::glob;
 
 use crate::git;
@@ -86,84 +88,9 @@ impl Check {
     }
 }
 
-/// What an acceptance command marked as needing live infrastructure starts with.
-///
-/// On the command line because there is nowhere else: a [`Measure::Command`] is a line
-/// and an expected status, in the plan and in the store both. Read case-insensitively for
-/// one reason — a marker that failed to match leaves the check in the *first* tier, where
-/// it runs against the real bucket on every verdict, unasked.
-const LIVE_MARK: &str = "live:";
-
-/// The variable that asks for the live tier, and the value `1` asks with.
+/// The variable that asks for the live tier, and the value `1` asks with. [`Tier`] and
+/// [`tier_of`] are in core, where the [`Measure::Command`] they read is defined.
 const LIVE_ENV: &str = "WECODE_LIVE";
-
-/// Which tier of acceptance a verdict is being asked for.
-///
-/// The request is per invocation and read from the environment — the same door
-/// `WECODE_CONFIG` and `WECODE_AGENT` come through — and that is the property worth
-/// having rather than a convenience. A tier written into the plan would be a standing
-/// instruction: every judgement the board loop made from then on would reach for real
-/// infrastructure, days after the person who wrote it stopped watching. In the
-/// environment of one command it cannot outlive the command.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum Tier {
-    /// Everything a checkout can answer on its own, and nothing else. The default, and
-    /// what every unattended verdict is made of.
-    #[default]
-    Offline,
-    /// The offline tier and the live one together. Only ever by request.
-    Live,
-}
-
-impl Tier {
-    /// What this invocation was asked for.
-    fn requested() -> Self {
-        Self::asked_by(std::env::var(LIVE_ENV).ok().as_deref())
-    }
-
-    /// Whether a value of [`LIVE_ENV`] is a request. Off unless something affirmative
-    /// is set: someone who exported the variable to turn the tier *off* said the more
-    /// deliberate of the two things, and reading the mere presence of the name as
-    /// consent would do the opposite of what they wrote.
-    fn asked_by(v: Option<&str>) -> Self {
-        let Some(v) = v.map(str::trim) else {
-            return Self::Offline;
-        };
-        if ["", "0", "false", "no", "off"]
-            .iter()
-            .any(|off| v.eq_ignore_ascii_case(off))
-        {
-            Self::Offline
-        } else {
-            Self::Live
-        }
-    }
-
-    /// Whether a check of this kind runs under this tier.
-    fn runs(self, live: bool) -> bool {
-        !live || self == Self::Live
-    }
-}
-
-/// Splits the tier marker off an acceptance command: whether it is live, and the line
-/// to actually run.
-///
-/// A marker with nothing behind it is not a marker. Read as a tier, `live:` alone would
-/// be a check that runs the empty string and exits 0 — a pass earned by asking nothing.
-/// Handed to `sh` unchanged it is a command not found, visibly broken where it was
-/// written.
-fn tier_of(cmd: &str) -> (bool, &str) {
-    let line = cmd.trim_start();
-    let Some(mark) = line.get(..LIVE_MARK.len()) else {
-        return (false, cmd);
-    };
-    let rest = line[LIVE_MARK.len()..].trim_start();
-    if mark.eq_ignore_ascii_case(LIVE_MARK) && !rest.is_empty() {
-        (true, rest)
-    } else {
-        (false, cmd)
-    }
-}
 
 /// What a task's work touched, and the tree it touched it in.
 ///
@@ -194,6 +121,10 @@ pub(crate) struct Changed {
     /// been consulted, so a verdict that skipped the scope half invents no finding out
     /// of the half that did run.
     owed: Cell<bool>,
+    /// Documents this diff touched the subject of and left where they were. Read beside
+    /// the diff rather than beside [`violations`] because the join needs both halves at
+    /// once: the paths to match, and the tree holding the pages that declared them.
+    stale: Vec<docs::Stale>,
 }
 
 impl Changed {
@@ -285,8 +216,18 @@ impl Verdict {
     /// asked*, and since that changes with the invocation, [`verdict`] says which was
     /// asked. Passing nothing is not among them: an empty check list is not a pass for
     /// anyone, and what follows on a task nobody dispatched is [`Outcome`]'s.
+    /// Documents this verdict's diff left behind — see [`wecode_core::docs`].
+    ///
+    /// A finding beside [`Verdict::violations`] and unlike one in what follows it: a bad
+    /// write stands in the tree to be held back, so it earns a [`git::refuse`] note; an
+    /// absence has nothing to sanction. It is recorded, and that is all a record needs.
+    pub(crate) fn stale(&self) -> &[docs::Stale] {
+        self.changed.as_ref().map_or(&[], |c| &c.stale[..])
+    }
+
     pub(crate) fn passed(&self) -> bool {
         self.violations.is_empty()
+            && self.stale().is_empty()
             && self.unjudgeable.is_empty()
             && !self.changed.as_ref().is_some_and(Changed::delivered_nothing)
             && !self.checks.is_empty()
@@ -390,12 +331,30 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Option<Changed>, git::G
     // A file a step delivered and this task then edited is this task's own work, and
     // saying so twice would report one path as both.
     delegated.retain(|p| !all.contains(p));
+    // This task's diff only: a step was judged against its own scope, page included, and
+    // charging a parent for its children's coupling is the same error as `delegated`.
+    let stale = docs::stale(&governing(dir), &all, &glob::any_matches);
     Ok(Some(Changed {
         dir: dir.to_path_buf(),
         paths: all,
         delegated,
         owed: Cell::new(false),
+        stale,
     }))
+}
+
+/// Every document in this tree that might govern something, parsed.
+///
+/// The file reading is here because core opens none: it parses text and joins two path
+/// lists, and a document is this repository's file. Tracked pages only — an untracked one
+/// is not yet part of the tree it would be speaking for.
+fn governing(dir: &Path) -> Vec<docs::Doc> {
+    git::tracked_files(dir)
+        .unwrap_or_default()
+        .iter()
+        .filter(|p| p.ends_with(".md"))
+        .filter_map(|p| Some(docs::parse(p, &std::fs::read_to_string(dir.join(p)).ok()?)))
+        .collect()
 }
 
 /// Whether the tree this verdict is standing in is the one this task owns.
@@ -497,13 +456,14 @@ fn commits_here(dir: &Path) -> bool {
 /// Unlike a spawned agent's, this environment is inherited: these commands are the
 /// operator's own and need the toolchain the operator has. The declared variables are
 /// laid over it, so a project's answer beats whatever the shell was carrying. The tier
-/// is whatever this invocation asked for — [`Tier::requested`].
+/// is whatever this invocation asked for — [`LIVE_ENV`].
 pub(crate) fn run_acceptance(
     dir: &Path,
     measures: &[Measure],
     env: &[(String, std::path::PathBuf)],
 ) -> Verdict {
-    run_tier(dir, measures, env, Tier::requested())
+    let asked = Tier::asked_by(std::env::var(LIVE_ENV).ok().as_deref());
+    run_tier(dir, measures, env, asked)
 }
 
 /// The same, with the tier named by the caller rather than read off the environment.
@@ -725,6 +685,14 @@ pub(crate) fn verdict(
                     s(n)
                 ));
             }
+            for st in v.stale() {
+                // Both halves: the page, and the change that asked for it — *edit the
+                // page* is not actionable without knowing which change implicated it.
+                out.push_str(&format!("  ✗ {} did not move with {}\n", st.doc, st.because));
+            }
+            if !v.stale().is_empty() {
+                out.push_str("\x20   edit it, or narrow its subject: — there is no waiver\n");
+            }
             let missing = v.unrunnable();
             let failed = v.checks.iter().filter(|c| !c.passed() && !c.missing()).count();
             if failed > 0 {
@@ -787,6 +755,7 @@ mod tests {
             paths: paths(list),
             delegated: Vec::new(),
             owed: Cell::new(false),
+            stale: Vec::new(),
         })
     }
 
@@ -811,7 +780,7 @@ mod tests {
     }
 
     /// Acceptance with no shared cache — what a project that declares none gets. The
-    /// tier is named rather than left to [`Tier::requested`], so a `WECODE_LIVE` in
+    /// tier is named rather than read off [`LIVE_ENV`], so a `WECODE_LIVE` in
     /// whatever shell runs the suite cannot decide what these tests assert.
     fn ran(dir: &Path, measures: &[Measure]) -> Verdict {
         run_tier(dir, measures, &[], Tier::Offline)
@@ -1494,10 +1463,8 @@ mod tests {
     fn a_marker_with_nothing_behind_it_is_not_a_marker() {
         // `live:` alone would otherwise be a check that runs the empty string, which exits
         // 0 — a pass earned by asking nothing. Handed to `sh` unchanged it comes back as
-        // 127, visibly broken where the operator wrote it.
-        assert_eq!(tier_of("live:"), (false, "live:"));
-        assert_eq!(tier_of("live:   "), (false, "live:   "));
-
+        // 127, visibly broken where the operator wrote it. What `tier_of` makes of the
+        // line is core's to assert; what a verdict makes of it is this.
         let v = ran(
             &std::env::temp_dir(),
             &[Measure::Command {
@@ -1508,20 +1475,6 @@ mod tests {
         assert!(!v.passed());
         assert!(v.deferred.is_empty(), "not deferred — it is malformed");
         assert_eq!(v.unrunnable().len(), 1);
-    }
-
-    #[test]
-    fn only_an_affirmative_value_asks_for_the_tier() {
-        // A variable exported to turn the tier off is the more deliberate of the two
-        // things a person can write, and reading the name's presence as consent would do
-        // the opposite of what they wrote.
-        assert_eq!(Tier::asked_by(None), Tier::Offline);
-        for off in ["", "  ", "0", "false", "FALSE", "no", "off"] {
-            assert_eq!(Tier::asked_by(Some(off)), Tier::Offline, "{off:?}");
-        }
-        for on in ["1", "yes", "true", "please"] {
-            assert_eq!(Tier::asked_by(Some(on)), Tier::Live, "{on:?}");
-        }
     }
 
     #[test]
@@ -1596,5 +1549,52 @@ mod tests {
         assert_eq!(out.matches("   live").count(), 1, "{out}");
         assert!(!out.contains("the offline tier only"), "{out}");
         assert!(!out.contains("not run"), "{out}");
+    }
+
+    // ------------------------------------------- documentation that stayed put ------
+
+    /// A tree carrying a committed page that declares what it governs. Committed
+    /// because an untracked page speaks for nothing — [`governing`] reads the index.
+    fn with_page(name: &str, body: &str) -> std::path::PathBuf {
+        let dir = worktree(name);
+        write(&dir, "docs/cache.md", body);
+        git_here(&dir, &["add", "-A"]);
+        git_here(&dir, &["commit", "-qm", "the page, before anybody moved it"]);
+        dir
+    }
+
+    const GOVERNS_SRC: &str = "---\nclass: hand-tended\nsubject: [src/**]\n---\n\nthe cache\n";
+
+    #[test]
+    fn a_diff_that_left_its_governing_document_behind_is_refused_and_says_which() {
+        // The whole point, off a real tree: the page named `src/**`, the work changed
+        // `src/cache.rs`, and nobody opened the page. The acceptance is green, which is
+        // the shape of the failure — a repository's own suite says nothing about a page.
+        let dir = with_page("stale-doc", GOVERNS_SRC);
+        write(&dir, "src/cache.rs", "fn evict() {}\n");
+        let task = Task::new("t1", "caching", "trim the cache").scoped(scope(&["src/**"]));
+        let v = judged(&[cmd("true")], read(&dir, "t1"), &task.scope);
+        let out = verdict(&task, &task.id, &dir, &v, TaskStatus::Failed);
+
+        assert_eq!(v.stale()[0].doc, "docs/cache.md");
+        assert!(v.violations.is_empty(), "nothing was written out of scope");
+        assert!(!v.passed(), "green acceptance over a page nobody opened");
+        assert!(out.contains("docs/cache.md did not move with src/cache.rs"), "{out}");
+        assert!(out.contains("there is no waiver"), "{out}");
+    }
+
+    #[test]
+    fn moving_the_document_with_it_is_all_that_is_asked() {
+        // The other half, and the whole modesty of the gate: a one-word edit satisfies
+        // it. Form is design-check.sh's business and substance is a signature's; what is
+        // left for a machine is the join. A page declaring nothing is the same silence,
+        // and `wecode_core::docs` asserts that half.
+        let dir = with_page("fresh-doc", GOVERNS_SRC);
+        write(&dir, "src/cache.rs", "fn evict() {}\n");
+        write(&dir, "docs/cache.md", &format!("{GOVERNS_SRC}\nand what it evicts.\n"));
+
+        let v = judged(&[cmd("true")], read(&dir, "t1"), &scope(&["src/**", "docs/**"]));
+        assert!(v.stale().is_empty(), "{:?}", v.stale());
+        assert!(v.passed(), "{v:?}");
     }
 }
