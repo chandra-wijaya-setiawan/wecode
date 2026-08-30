@@ -117,6 +117,18 @@ impl Org {
 
     /// Runs the binary against this workspace.
     pub(crate) fn run(&self, args: &[&str]) -> Run {
+        self.run_env(&[], args)
+    }
+
+    /// The same, with variables laid over the environment the binary is given.
+    ///
+    /// For the few things wecode reads at the door rather than out of the plan.
+    /// `WECODE_LIVE` is one and cannot be asked for any other way, deliberately: a tier
+    /// written into the plan would be a standing instruction, where a variable set on one
+    /// invocation cannot outlive it. A test that wants the second tier therefore has to
+    /// ask for it exactly as an operator does — and `set_var` is not that, since it would
+    /// also set it for every other test sharing the process.
+    pub(crate) fn run_env(&self, env: &[(&str, &str)], args: &[&str]) -> Run {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_wecode"));
         // `init` names its own target directory, so --org would be wrong there.
         if args.first() != Some(&"init") {
@@ -127,7 +139,12 @@ impl Org {
         // WECODE_CONFIG in particular: `use` writes a default there, and without
         // isolation a test run overwrites the real one.
         cmd.env_remove("WECODE_ORG");
+        // The acceptance tier for the same reason: a `WECODE_LIVE` exported in whatever
+        // shell runs the suite would otherwise send every verdict here at the real
+        // infrastructure a `live:` check names, on that person's own credentials.
+        cmd.env_remove("WECODE_LIVE");
         cmd.env("WECODE_CONFIG", self.dir.join("config"));
+        cmd.envs(env.iter().copied());
         decode(cmd.output().expect("binary runs"))
     }
 
