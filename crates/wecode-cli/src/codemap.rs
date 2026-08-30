@@ -271,7 +271,7 @@ fn sweep(dir: &Path, keep: usize) {
     if entries.len() <= keep {
         return;
     }
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.0));
     for (_, path) in entries.into_iter().skip(keep) {
         let _ = std::fs::remove_file(path);
     }
