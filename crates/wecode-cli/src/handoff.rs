@@ -194,6 +194,28 @@ fn repo_map_artifact(task: &Task, cwd: &Path) -> Option<a2a::Artifact> {
     )
 }
 
+/// What sits next to the files this task may write, as an artifact.
+///
+/// The layer below the repo map above it. That one says what the tree is; this says
+/// which files share names with the ones the scope points at — parsed, rather than
+/// guessed from directory adjacency. It is the same ranking `wecode map` prints, from
+/// the same function.
+///
+/// Seeded from the write scope, because the scope is where this task is *about* to be.
+/// A task that declared none gets the other question answered instead — the names the
+/// rest of the tree uses most — and [`crate::codemap`] says which it answered.
+///
+/// `None` when there is nothing to rank: no repository, no compiled grammar for
+/// anything in it, or a tree whose files share no names. Silence rather than an empty
+/// table, for the reason the repo map is silent about a tree it cannot read.
+fn codemap_artifact(task: &Task, cwd: &Path) -> Option<a2a::Artifact> {
+    let body = crate::codemap::envelope_section(cwd, &task.scope.write)?;
+    Some(
+        a2a::Artifact::new("codemap", "codemap", vec![a2a::Part::text(body)])
+            .described("files ranked by the names they share with this task's write scope"),
+    )
+}
+
 /// The text of a map artifact — the one part it has.
 ///
 /// Read back out of the artifact rather than kept beside it, so the prompt and the JSON
@@ -312,6 +334,7 @@ pub(crate) fn a2a_task(
     let context = predecessor_artifacts(task, plan, cwd, repo);
     let attempts = attempt_artifacts(task, runs, cwd);
     let shape = repo_map_artifact(task, cwd);
+    let near = codemap_artifact(task, cwd);
     let attempt = runs.iter().map(|r| r.attempt).max().unwrap_or(0) + 1;
 
     let context_text = if context.is_empty() {
@@ -341,6 +364,17 @@ pub(crate) fn a2a_task(
         format!("\n\nREPO MAP\n{map_text}")
     };
 
+    let near_text = near.as_ref().map(map_body).unwrap_or_default();
+
+    // Beneath the repo map and never above it. The tree is what the agent orients on;
+    // this is a shortlist within it, and a shortlist read before the thing it is a
+    // shortlist of is a set of paths with nothing behind them.
+    let orphaned_near = if template.contains("{{codemap}}") || near_text.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nNEAREST THE WRITE SCOPE\n{near_text}")
+    };
+
     let filled = template
         .replace("{{task_id}}", task.id.as_str())
         .replace("{{project_id}}", project.id.as_str())
@@ -349,7 +383,8 @@ pub(crate) fn a2a_task(
         .replace("{{acceptance}}", &acceptance_text)
         .replace("{{write_scope}}", &write_scope)
         .replace("{{context}}", &context_text)
-        .replace("{{repo_map}}", &map_text);
+        .replace("{{repo_map}}", &map_text)
+        .replace("{{codemap}}", &near_text);
 
     let prior = if attempts.is_empty() {
         String::new()
@@ -367,10 +402,11 @@ pub(crate) fn a2a_task(
         )
     } else {
         format!(
-            "{}{}{}{}\nWorking directory: {}\n",
+            "{}{}{}{}{}\nWorking directory: {}\n",
             filled.trim(),
             orphaned_context,
             orphaned_map,
+            orphaned_near,
             prior,
             cwd.display()
         )
@@ -398,9 +434,14 @@ pub(crate) fn a2a_task(
 
     let mut out = a2a::Task::new(execution, task.id.as_str(), a2a::TaskState::Submitted);
     out.history.push(message);
-    // The map first: it is the tree as it stands, and everything after it is something
-    // that already happened to that tree.
-    out.artifacts = shape.into_iter().chain(context).chain(attempts).collect();
+    // The map first, then what is near the scope inside it: both are the tree as it
+    // stands, and everything after them is something that already happened to it.
+    out.artifacts = shape
+        .into_iter()
+        .chain(near)
+        .chain(context)
+        .chain(attempts)
+        .collect();
     out
 }
 

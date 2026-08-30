@@ -151,6 +151,45 @@ pub(crate) fn tracked_files(repo: &Path) -> Result<Vec<String>, GitError> {
         .collect())
 }
 
+/// Every tracked file with the object id git holds its content under.
+///
+/// The id is the cache key the codemap is built on, and it is worth being exact about
+/// what it names: it is the hash of the content **in the index**, which is the content
+/// on disk for every file nobody has edited since. A hash names its own content, so an
+/// entry keyed on one can never be stale — it is collected, never invalidated. See
+/// [`dirty_files`] for the other half of that guarantee.
+///
+/// `-s` puts the mode, the id and the stage before a tab and the path; `-z` keeps a path
+/// containing a newline readable, as in [`tracked_files`].
+pub(crate) fn tracked_blobs(repo: &Path) -> Result<Vec<(String, String)>, GitError> {
+    let out = git(repo, &["ls-files", "-s", "-z", "--full-name"])?;
+    Ok(out
+        .split('\0')
+        .filter(|e| !e.is_empty())
+        .filter_map(|entry| {
+            let (meta, path) = entry.split_once('\t')?;
+            let oid = meta.split_whitespace().nth(1)?;
+            Some((oid.to_string(), path.to_string()))
+        })
+        .collect())
+}
+
+/// Tracked files whose content on disk is not what the index says it is.
+///
+/// The exception the content-hash key needs. A file edited and not staged has an index
+/// id that names the *old* bytes, so an entry stored under it would answer a later scan
+/// with tags from a file that no longer exists — the one way a content-addressed cache
+/// can lie. Those files are parsed every scan and cached under nothing, which is right:
+/// a tree being edited is exactly the tree whose map has to be current.
+pub(crate) fn dirty_files(repo: &Path) -> Result<Vec<String>, GitError> {
+    let out = git(repo, &["diff", "--name-only", "-z"])?;
+    Ok(out
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// Discards everything uncommitted in a worktree, so a retry starts clean.
 pub(crate) fn reset_hard(worktree: &Path) -> Result<(), GitError> {
     git(worktree, &["reset", "--hard"])?;

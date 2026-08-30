@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 wecode-core = { workspace = true }
 wecode-gov = { path = "../wecode-gov" }
+wecode-map = { path = "../wecode-map" }
 wecode-store = { path = "../wecode-store" }
 wecode-org = { path = "../wecode-org" }
 wecode-a2a = { workspace = true }
