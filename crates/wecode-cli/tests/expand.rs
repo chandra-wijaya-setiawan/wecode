@@ -322,6 +322,27 @@ fn a_numbered_kind_names_its_tasks_by_their_place_in_the_template() {
 }
 
 #[test]
+fn a_step_template_path_can_name_the_steps_number() {
+    let (org, repo) = with_numbered_ids("exp-numbered-path");
+    org.playbook(
+        &repo,
+        &TEMPLATED
+            .replace("[feature]\n", "[feature]\nnumbered  = true\n")
+            .replace(
+                "src/design/{{task}}.md",
+                "src/design/{{number}}-{{task}}.md",
+            ),
+    );
+    let mut argv = EXPANDABLE.to_vec();
+    argv.push("--expand");
+    org.run(&argv).assert_ok("task add --expand");
+    org.run(&["show", "retry-1"])
+        .assert_ok("show the first step")
+        .assert_contains("src/design/1-retry.md")
+        .assert_lacks("{{number}}");
+}
+
+#[test]
 fn a_kind_that_asks_for_nothing_keeps_the_ids_it_always_emitted() {
     // Opt-in per kind, so a playbook written before the field existed emits what it
     // did — the ids in it are already on boards, in branches and in the ledger.

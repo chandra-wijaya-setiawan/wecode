@@ -207,12 +207,15 @@ pub(super) fn templates_of(
     Ok(out)
 }
 
-/// The placeholders a template may use: the main task's id and its title.
+/// The placeholders a template may use: the main task's id and title, and the step's
+/// one-based place in the template.
 ///
-/// Deliberately two. A template that could reach further into the plan would be a
+/// Deliberately three. A template that could reach further into the plan would be a
 /// small language, and this is a scaffold that runs once.
-fn fill(text: &str, task: &str, title: &str) -> String {
-    text.replace("{{task}}", task).replace("{{title}}", title)
+fn fill(text: &str, task: &str, title: &str, number: usize) -> String {
+    text.replace("{{task}}", task)
+        .replace("{{title}}", title)
+        .replace("{{number}}", &number.to_string())
 }
 
 impl KindPlaybook {
@@ -248,21 +251,30 @@ impl KindPlaybook {
     pub fn expand(&self, parent_kind: TaskKind, task: &str, title: &str) -> Vec<Subtask> {
         self.subtasks
             .iter()
-            .map(|s| Subtask {
+            .enumerate()
+            .map(|(i, s)| Subtask {
                 id: format!("{task}-{}", self.suffix(&s.name)),
                 kind: s.kind.unwrap_or(parent_kind),
-                title: s
-                    .title
-                    .as_ref()
-                    .map_or_else(|| format!("{}: {title}", s.name), |t| fill(t, task, title)),
+                title: s.title.as_ref().map_or_else(
+                    || format!("{}: {title}", s.name),
+                    |t| fill(t, task, title, i + 1),
+                ),
                 after: s
                     .after
                     .iter()
                     .map(|a| format!("{task}-{}", self.suffix(a)))
                     .collect(),
-                write: s.write.iter().map(|g| fill(g, task, title)).collect(),
-                read: s.read.iter().map(|g| fill(g, task, title)).collect(),
-                accept: s.accept.iter().map(|c| fill(c, task, title)).collect(),
+                write: s
+                    .write
+                    .iter()
+                    .map(|g| fill(g, task, title, i + 1))
+                    .collect(),
+                read: s.read.iter().map(|g| fill(g, task, title, i + 1)).collect(),
+                accept: s
+                    .accept
+                    .iter()
+                    .map(|c| fill(c, task, title, i + 1))
+                    .collect(),
                 assign_to: s.assign_to.clone(),
                 tokens: s.tokens,
                 wall_secs: s.wall_secs,
@@ -403,6 +415,28 @@ write  = ["README.md"]
         assert_eq!(out[0].title, "decide how retry should work");
         assert_eq!(out[0].write, vec!["docs/wecode/retry/design.md".to_string()]);
         assert_eq!(out[1].title, "build: retry a failed task once");
+    }
+
+    #[test]
+    fn a_template_can_put_the_steps_number_in_a_path() {
+        let p = Playbook::parse(&TEMPLATED.replace(
+            "docs/wecode/{{task}}/design.md",
+            "docs/wecode/{{task}}/{{number}}-design.md",
+        ))
+        .unwrap();
+        let out = p.for_kind(TaskKind::Feature).unwrap().expand(
+            TaskKind::Feature,
+            "retry",
+            "retry a failed task once",
+        );
+        assert_eq!(
+            out[0].write,
+            vec!["docs/wecode/retry/1-design.md".to_string()]
+        );
+        assert_eq!(
+            out[0].accept,
+            vec!["test -f docs/wecode/retry/1-design.md".to_string()]
+        );
     }
 
     #[test]
