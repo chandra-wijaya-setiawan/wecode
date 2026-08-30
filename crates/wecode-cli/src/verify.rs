@@ -6,13 +6,8 @@
 //!   from all of it, including the attempts already committed on it.
 //! - **Did it do anything?** A task that declared a write scope and left no diff did not
 //!   do its work. Acceptance cannot catch this and never could: the commands a task is
-//!   held to are the repository's own, and they passed on the tree before it started.
-//!   An agent that ran out of budget, gave up, or reported success it had not earned
-//!   therefore came back green — a run that changed nothing was judged as one that
-//!   delivered, and passing is what merges. A main task with steps beneath it is the
-//!   one shape where an empty diff of its own is the plan working: its subtasks share
-//!   the tree it owns and commit on its branch, so the work it is owed is standing
-//!   there under their names rather than missing.
+//!   held to are the repository's own, and they passed on the tree before it started, so
+//!   a run that changed nothing came back green — see [`Changed::delivered_nothing`].
 //! - **Does it pass?** By running the acceptance commands here, not by being told.
 //!
 //! That ordering is the design's own rule — the diff always wins. An agent's
@@ -38,10 +33,8 @@
 //!
 //! Post-hoc rather than intercepted, because wecode cannot hook another process's
 //! writes. Confinement is the worktree; this is the check afterwards, which is why a
-//! write outside scope is *sanctioned* — recoverable — rather than prevented. Recovered
-//! and not merely recorded: the write has happened by the time anything looks, but
-//! nothing has *landed*, wecode decides what the attempt commits, and a refused path is
-//! left out of it.
+//! write outside scope is *sanctioned* — recoverable — rather than prevented, and
+//! [`violations`] is where the recovering happens.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -96,9 +89,9 @@ impl Check {
 /// What an acceptance command marked as needing live infrastructure starts with.
 ///
 /// On the command line because there is nowhere else: a [`Measure::Command`] is a line
-/// and an expected status, in the plan and in the store both. Read case-insensitively
-/// for one reason — a marker that failed to match leaves the check in the *first* tier,
-/// where it runs on every verdict, against the real bucket, unasked.
+/// and an expected status, in the plan and in the store both. Read case-insensitively for
+/// one reason — a marker that failed to match leaves the check in the *first* tier, where
+/// it runs against the real bucket on every verdict, unasked.
 const LIVE_MARK: &str = "live:";
 
 /// The variable that asks for the live tier, and the value `1` asks with.
@@ -108,10 +101,10 @@ const LIVE_ENV: &str = "WECODE_LIVE";
 ///
 /// The request is per invocation and read from the environment — the same door
 /// `WECODE_CONFIG` and `WECODE_AGENT` come through — and that is the property worth
-/// having rather than a convenience. A tier written into the plan, the task or the
-/// playbook would be a standing instruction: every judgement the board loop makes from
-/// then on would reach for real infrastructure, days after the person who wrote it
-/// stopped watching. In the environment of one command it cannot outlive the command.
+/// having rather than a convenience. A tier written into the plan would be a standing
+/// instruction: every judgement the board loop made from then on would reach for real
+/// infrastructure, days after the person who wrote it stopped watching. In the
+/// environment of one command it cannot outlive the command.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum Tier {
     /// Everything a checkout can answer on its own, and nothing else. The default, and
@@ -155,11 +148,10 @@ impl Tier {
 /// Splits the tier marker off an acceptance command: whether it is live, and the line
 /// to actually run.
 ///
-/// A marker with nothing behind it is not a marker. `live:` alone is an operator error,
-/// and handing it to `sh` unchanged returns it as a command that was not found —
-/// visibly broken where they wrote it. Read as a tier it would be a check that runs the
-/// empty string, which exits 0: a pass earned by asking nothing, which is the one
-/// outcome this module refuses everywhere else.
+/// A marker with nothing behind it is not a marker. Read as a tier, `live:` alone would
+/// be a check that runs the empty string and exits 0 — a pass earned by asking nothing.
+/// Handed to `sh` unchanged it is a command not found, visibly broken where it was
+/// written.
 fn tier_of(cmd: &str) -> (bool, &str) {
     let line = cmd.trim_start();
     let Some(mark) = line.get(..LIVE_MARK.len()) else {
@@ -178,8 +170,7 @@ fn tier_of(cmd: &str) -> (bool, &str) {
 /// The tree travels with the paths because the next question asked of them — which of
 /// them the scope refuses — is also the last moment anything holds both halves at once.
 /// A refusal that cannot name the tree it happened in can be recorded and nothing more;
-/// one that can is a refusal the commit afterwards is able to honour. Returning bare
-/// strings is what made the finding un-actable, and the finding was already true.
+/// one that can is a refusal the commit afterwards is able to honour.
 #[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub(crate) struct Changed {
     dir: PathBuf,
@@ -188,22 +179,20 @@ pub(crate) struct Changed {
     ///
     /// Kept apart from `paths` rather than folded into it, because these are not this
     /// task's writes to answer for in either direction. Not against its scope: a step
-    /// declares its own, and a design step writing `docs/**` beneath a parent scoped to
-    /// `crates/**` is the template doing exactly what it says — charging it here would
-    /// fail the parent for its children's licence. And not as its delivery either,
-    /// which is why the two lists are counted separately in the render. What they do
-    /// settle is the one question an empty diff cannot answer alone: whether the work
-    /// this task was owed is on the branch. It is, under their names.
+    /// declares its own, and charging a design step's `docs/**` to a parent scoped to
+    /// `crates/**` would fail it for its children's licence. And not as its delivery
+    /// either, which is why the render counts the two lists separately. What they settle
+    /// is the one question an empty diff cannot: whether the work this task was owed is
+    /// on the branch. It is, under their names.
     delegated: Vec<String>,
     /// Whether the scope this diff was judged against asked for any writes at all.
     ///
     /// Recorded by [`violations`], because that call is the only moment both halves are
     /// in one hand — the same reason `dir` travels here. A diff on its own cannot say
     /// whether being empty is a failure: for a spike, the one kind admitted without a
-    /// write scope, an empty diff is the declared outcome; for every other kind it is
-    /// the work not done. `false` until the scope has been consulted, so a diff nobody
-    /// checked a scope against makes no claim about what was owed — a verdict that
-    /// skipped the scope half must not invent a finding out of the half that did run.
+    /// write scope, an empty diff is the declared outcome. `false` until the scope has
+    /// been consulted, so a verdict that skipped the scope half invents no finding out
+    /// of the half that did run.
     owed: Cell<bool>,
 }
 
@@ -231,12 +220,10 @@ impl Changed {
     /// empty diff is a verdict about the work only once something is known to have been
     /// expected of it — and only once nothing else was answering for it.
     ///
-    /// A main task with steps is that second case, and it is not a loophole. It is what
-    /// decomposition *is*: one worktree is cut per main task and its subtasks commit
-    /// their work on its branch, each judged against the scope it declared as it
-    /// finished. Failing the parent for writing nothing of its own fails it for the
-    /// shape the playbook asked for, at the end, after every step has already passed
-    /// and the only thing left was to land them.
+    /// A main task with steps is that second case, and it is not a loophole but what
+    /// decomposition *is*: its subtasks commit on the branch it owns, each judged against
+    /// the scope it declared. Failing the parent for writing nothing of its own would
+    /// fail it for the shape the playbook asked for, after every step had passed.
     pub(crate) fn delivered_nothing(&self) -> bool {
         self.owed.get() && self.paths.is_empty() && self.delegated.is_empty()
     }
@@ -271,16 +258,15 @@ pub(crate) struct Verdict {
     pub(crate) unjudgeable: Vec<String>,
     /// Live checks this verdict did not run, as they would have been run.
     ///
-    /// Kept rather than dropped, which is the whole of why the tier is a list and not
-    /// an `if`. A check nobody asked for neither failed nor passed — it is a question
-    /// this verdict did not put, and leaving it out silently would make the offline
-    /// tier look like the whole of what the task was held to.
+    /// Kept rather than dropped, which is the whole of why the tier is a list and not an
+    /// `if`. A check nobody asked for neither failed nor passed, and leaving it out
+    /// silently would make the offline tier look like all the task was held to.
     pub(crate) deferred: Vec<String>,
 }
 
 impl Verdict {
-    /// Checks that could not run at all. An environment problem, reported apart from
-    /// the verdict so a missing toolchain never reads as failing work.
+    /// Checks that could not run at all. An environment problem, reported apart from the
+    /// verdict so a missing toolchain never reads as failing work.
     pub(crate) fn unrunnable(&self) -> Vec<&Check> {
         self.checks.iter().filter(|c| c.missing()).collect()
     }
@@ -289,19 +275,16 @@ impl Verdict {
     /// nothing at all.
     ///
     /// A task that declared a write scope and produced no diff fails here whatever its
-    /// acceptance says, and the acceptance saying so is the point: those commands are
-    /// the repository's own and were green before the run started, so a green board
-    /// beside an empty diff was the *expected* reading of a run that did nothing — the
-    /// quietest way for work to be marked delivered, and `passed` is what sends a branch
-    /// to `needs-approval` and from there to a merge.
+    /// acceptance says, and green acceptance beside an empty diff is exactly what a run
+    /// that did nothing looks like — the quietest way for work to be marked delivered,
+    /// and `passed` is what sends a branch to `needs-approval` and from there to a merge.
     ///
     /// A deferred live check is not counted against the work, because nothing asked it.
     /// The alternative reads well and is unusable: a task carrying one could then pass
-    /// only where the credentials for it are, and the tier would be a way of writing
-    /// acceptance that can only fail. A pass here is therefore *passed what was asked*,
-    /// and since that changes with the invocation, [`verdict`] says which was asked.
-    /// Passing nothing is not among them: an empty check list is not a pass for anyone,
-    /// and what follows from that on a task nobody dispatched is [`Outcome`]'s.
+    /// only where the credentials for it are. A pass here is therefore *passed what was
+    /// asked*, and since that changes with the invocation, [`verdict`] says which was
+    /// asked. Passing nothing is not among them: an empty check list is not a pass for
+    /// anyone, and what follows on a task nobody dispatched is [`Outcome`]'s.
     pub(crate) fn passed(&self) -> bool {
         self.violations.is_empty()
             && self.unjudgeable.is_empty()
@@ -357,11 +340,9 @@ fn is_worker_area(path: &str) -> bool {
 /// writes are *behind* `HEAD`, where `git diff HEAD` cannot see them. So an attempt that
 /// added nothing was judged against an empty diff — and an empty diff violates no scope.
 /// A first attempt rejected for writing outside its scope passed on the retry that
-/// changed nothing, with the out-of-scope file still standing on the branch, on its way
-/// to a merge. The retry did not overturn the finding; it stopped looking. Acceptance
-/// never had this problem: it runs against the worktree, which carries the committed
-/// work either way. Only the half that reads the diff could be emptied out, which is
-/// why the failure is quiet — a passing check beside a blank diff reads as a clean run.
+/// changed nothing, with the out-of-scope file still standing on the branch. The retry
+/// did not overturn the finding; it stopped looking. Acceptance never had this problem:
+/// it runs against the worktree, which carries the committed work either way.
 ///
 /// Attempts are picked out by subject rather than taken wholesale. A subtask shares its
 /// parent's branch and its siblings' attempts are in the same log, each already judged
@@ -369,9 +350,8 @@ fn is_worker_area(path: &str) -> bool {
 /// from, which is not this task's to answer for.
 ///
 /// The steps of a task that owns the tree are read too, into a second list — see
-/// [`Changed::delegated`] and [`a_step_here`]. Not this task's diff, and it never joins
-/// it; it is only the answer to whether a parent's own empty diff means the work is
-/// missing or means the work is theirs.
+/// [`Changed::delegated`] and [`a_step_here`]. Never joined to this task's diff; it only
+/// answers whether a parent's empty diff means the work is missing or means it is theirs.
 ///
 /// The window is [`git::attempts_on`]'s — the newest twenty commits wecode made here —
 /// the same history `wecode show` and the handoff already read, so widening it belongs
@@ -424,13 +404,11 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Option<Changed>, git::G
 /// subtasks share it rather than opening a second checkout. So the directory name
 /// answers, from inside a verdict, the question the plan would otherwise have to be
 /// opened for: *am I the top of this tree, or one of the steps in it?* Only the top is
-/// answered for by the attempts around it. A step's neighbours in the log are its
-/// siblings, and a sibling's work excuses nothing — that task owes its own diff.
+/// answered for by the attempts around it; a sibling's work excuses nothing.
 ///
-/// It follows that a step which is itself a parent is still judged on its own diff:
-/// from in here its children and its siblings are the same shape, and the relation
-/// telling them apart is in the plan. The tree's owner is the one this can settle
-/// without it, and the one that reaches a merge.
+/// It follows that a step which is itself a parent is still judged on its own diff: from
+/// in here its children and its siblings are the same shape, and the relation telling
+/// them apart is in the plan rather than in the tree.
 fn owns_the_tree(dir: &Path, id: &TaskId) -> bool {
     dir.file_name().and_then(|n| n.to_str()) == Some(id.as_str())
 }
@@ -441,14 +419,12 @@ fn owns_the_tree(dir: &Path, id: &TaskId) -> bool {
 /// A subtask has no branch of its own — that is the rule `merge` is built on — so a
 /// wecode attempt with no `wecode/<id>` standing behind it was committed here, by a step
 /// sharing this worktree. Asked of the branch and not of the id, because a step is named
-/// by whoever created it: `--expand` spells one `<parent>-<step>` and `task add --parent`
-/// takes any id at all, and a naming convention is not a relation.
+/// by whoever created it and a naming convention is not a relation.
 ///
-/// The branch is also what keeps the base out, which is the half that has to be right.
-/// A branch cut from a predecessor's, or from an integration branch carrying merges,
-/// brings that work's attempts into this log with exactly the shape of a step's — and
-/// every task that owned a tree has a `wecode/<id>` outliving it, kept through teardown
-/// and merge. That branch says the commits came from behind this task, not below it.
+/// The branch is also what keeps the base out, which is the half that has to be right. A
+/// branch cut from a predecessor's brings that work's attempts into this log with exactly
+/// the shape of a step's — and every task that owned a tree has a `wecode/<id>` outliving
+/// it, saying the commits came from behind this task rather than below it.
 fn a_step_here(dir: &Path, subject: &str) -> bool {
     match subject.split_once(": attempt") {
         Some((id, _)) => !git::branch_exists(dir, &crate::work::branch_for(&TaskId::new(id))),
@@ -462,27 +438,24 @@ fn a_step_here(dir: &Path, subject: &str) -> bool {
 /// change is a violation — not a free pass. A spike is the kind that legitimately
 /// has no scope, and a spike that edited files did something it did not declare.
 ///
-/// The mirror of that reading is recorded here rather than returned: a scope that
-/// *does* name paths is a task claiming it will change something, and a diff judged
-/// against one is owed a change. Not a violation — nothing was written where it was
-/// forbidden — so it does not belong in this list, which is the governance channel and
-/// files each entry against the task as a refused write. It belongs on the diff, where
-/// [`Verdict::passed`] reads it, and this is the one call that can put it there.
+/// The mirror of that reading is recorded here rather than returned: a scope that *does*
+/// name paths is a task claiming it will change something, and a diff judged against one
+/// is owed a change. Not a violation — nothing was written where it was forbidden — so it
+/// does not belong in this list, which is the governance channel. It belongs on the diff,
+/// where [`Verdict::passed`] reads it, and this is the one call that can put it there.
 ///
 /// Naming a refused write and stopping it from landing are one act, which is why they
 /// are one function. Sanctioned means *recoverable*, and until now nothing recovered:
 /// wecode commits every attempt, pass or fail, so the file the verdict had just refused
-/// went onto the branch in the same breath — and a later attempt can pass while it sits
-/// behind `HEAD` in a commit nobody re-reads. The record said no and the repository said
-/// yes. [`git::refuse`] is the note that settles it, left for the commit that follows
-/// this verdict; the writes stay in the tree, where the next verdict can see them and
+/// went onto the branch in the same breath, and a later attempt can pass while it sits
+/// behind `HEAD` in a commit nobody re-reads. [`git::refuse`] is the note that settles
+/// it, left for the commit that follows this verdict; the writes stay in the tree, where
 /// the retry's reset is what clears them.
 ///
 /// Only in a worktree wecode made — the same line `commit_attempt` draws. A task judged
 /// in the operator's own checkout has nothing held back, because wecode commits nothing
-/// there; and a note that cannot be written changes nothing about the verdict, so the
-/// failure is dropped. The refusal is already in the ledger, which is the half that
-/// must not be lost.
+/// there, and a note that cannot be written changes nothing about the verdict. The
+/// refusal is already in the ledger, which is the half that must not be lost.
 pub(crate) fn violations(changed: &Option<Changed>, scope: &Scope) -> Vec<String> {
     // A diff nobody read is a scope question nobody put, and the `Option` is what makes
     // that unarguable: there is no path list to charge against a scope, so no refusal
@@ -518,14 +491,13 @@ fn commits_here(dir: &Path) -> bool {
 /// --all-targets -- -D warnings` is not an argv this could split correctly.
 ///
 /// `env` is the project's shared build cache — see [`crate::cache`]. Acceptance is the
-/// second cold build a worktree pays for and usually the larger one: the agent may
-/// have run `cargo check`, this runs the suite. Setting it on the agent alone would
-/// have shared half a cache.
+/// second cold build a worktree pays for and usually the larger one, so setting it on
+/// the agent alone would have shared half a cache.
 ///
 /// Unlike a spawned agent's, this environment is inherited: these commands are the
 /// operator's own and need the toolchain the operator has. The declared variables are
-/// laid over it, so a project's answer for this repository beats whatever the shell was
-/// carrying. The tier is whatever this invocation asked for — [`Tier::requested`].
+/// laid over it, so a project's answer beats whatever the shell was carrying. The tier
+/// is whatever this invocation asked for — [`Tier::requested`].
 pub(crate) fn run_acceptance(
     dir: &Path,
     measures: &[Measure],
@@ -538,8 +510,8 @@ pub(crate) fn run_acceptance(
 ///
 /// Split out because a tier read from the ambient environment is one a test cannot set:
 /// `set_var` is unsafe, this workspace forbids unsafe outright, and a variable one test
-/// exports is one every other test in the process now runs under. The decision lives
-/// one function up, where a `--live` flag would set it too.
+/// exports is one every other test in the process runs under. The decision lives one
+/// function up, where a `--live` flag would set it too.
 pub(crate) fn run_tier(
     dir: &Path,
     measures: &[Measure],
@@ -580,17 +552,20 @@ pub(crate) fn run_tier(
     v
 }
 
+/// The plural `s`, for the counts this render prints five of.
+fn s(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
 /// What verification observed, and what it concluded.
 ///
-/// `owner` is the task whose worktree and branch this one worked in — itself, unless
-/// it is a subtask. A pass means different things to the two, and the difference is
-/// the one thing a reader cannot get from the status word alone: a main task that
-/// passed is waiting to be landed, a step of one has already put its commits where
-/// they land from.
+/// `owner` is the task whose worktree and branch this one worked in — itself, unless it
+/// is a subtask. A pass means different things to the two, and the status word carries
+/// neither: a main task that passed is waiting to be landed, a step of one has already
+/// put its commits where they land from.
 ///
-/// The tier is the second thing the status word cannot carry, and it is said here for
-/// the same reason: `passed` is now `passed what was asked`, and which of the two tiers
-/// was asked is a property of the invocation rather than of the task.
+/// The tier is the second thing the status word cannot carry: `passed` is now *passed
+/// what was asked*, and which tier was asked is a property of the invocation.
 #[must_use]
 pub(crate) fn verdict(
     task: &Task,
@@ -608,16 +583,11 @@ pub(crate) fn verdict(
     );
 
     if let Some(c) = &v.changed {
-        out.push_str(&format!(
-            "\ndiff — {} file{}\n",
-            c.len(),
-            if c.len() == 1 { "" } else { "s" }
-        ));
+        out.push_str(&format!("\ndiff — {} file{}\n", c.len(), s(c.len())));
         if c.is_empty() {
-            // Not neutral: a task that declared a write scope and changed nothing did
-            // not do its work, whatever its acceptance says. Unless its steps did the
-            // writing — the one reading of an empty diff that is not a finding, and the
-            // reader has to be told which of the two before they reach the verdict.
+            // Not neutral: a task that declared a write scope and changed nothing did not
+            // do its work — unless its steps did the writing, which is the one reading of
+            // an empty diff that is not a finding.
             out.push_str(if c.delegated().is_empty() {
                 "  nothing changed\n"
             } else {
@@ -637,20 +607,16 @@ pub(crate) fn verdict(
         if !steps.is_empty() {
             // Apart from the diff and marked apart from it: they are not this task's
             // writes, and this task's scope is not what they were held to.
-            out.push_str(&format!(
-                "\nits steps — {} file{} already on this branch\n",
-                steps.len(),
-                if steps.len() == 1 { "" } else { "s" }
-            ));
+            let n = steps.len();
+            out.push_str(&format!("\nits steps — {n} file{} already on this branch\n", s(n)));
             for path in steps {
                 out.push_str(&format!("  · {path}\n"));
             }
         }
     } else {
         // Never `0 files`: that beside a green check is the precise misreading
-        // [`Verdict::passed`] was built to prevent, and it would manufacture the
-        // finding out of nothing. The line says *this task has no diff of its own*
-        // rather than *wecode declined to look*.
+        // [`Verdict::passed`] was built to prevent, and would manufacture the finding out
+        // of nothing. This says *no diff is its own*, not *wecode declined to look*.
         out.push_str(
             "\ndiff — not judged\n  \
              nothing was dispatched for this task, so no diff is its own\n",
@@ -665,9 +631,8 @@ pub(crate) fn verdict(
                 if c.passed() { "✓" } else { "✗" },
                 truncate_cmd(&c.cmd, 44),
                 c.describe(),
-                // A green line that reached real infrastructure and a green line that
-                // read a file are worth different amounts, and only one of them is
-                // reproducible by whoever reads this next.
+                // A green line that reached real infrastructure and one that read a file
+                // are worth different amounts, and only one is reproducible by the reader.
                 if c.live { "   live" } else { "" }
             ));
         }
@@ -679,11 +644,8 @@ pub(crate) fn verdict(
     if !v.deferred.is_empty() {
         // Where the missing checks would have been, so nobody counts the acceptance
         // block above and concludes it was all of them.
-        out.push_str(&format!(
-            "\nlive — {} check{} not run\n",
-            v.deferred.len(),
-            if v.deferred.len() == 1 { "" } else { "s" }
-        ));
+        let n = v.deferred.len();
+        out.push_str(&format!("\nlive — {n} check{} not run\n", s(n)));
         for cmd in &v.deferred {
             out.push_str(&format!("  · {}\n", truncate_cmd(cmd, 44)));
         }
@@ -706,24 +668,22 @@ pub(crate) fn verdict(
                 "  ✓ its checks pass\n"
             });
             if !v.deferred.is_empty() {
-                // The tick above is about to be read as the whole verdict, because that
-                // is what it has always meant. It now means *what was asked*, and the
-                // reader cannot know which invocation this was.
+                // The tick above is about to be read as the whole verdict, which is what
+                // it has always meant. It now means *what was asked*.
                 let n = v.deferred.len();
+                let was = if n == 1 { "was" } else { "were" };
                 out.push_str(&format!(
-                    "    the offline tier only — {n} live check{} {} not asked for\n",
-                    if n == 1 { "" } else { "s" },
-                    if n == 1 { "was" } else { "were" }
+                    "    the offline tier only — {n} live check{} {was} not asked for\n",
+                    s(n)
                 ));
             }
-            // Three things a pass can mean, and the status word distinguishes only two
-            // of them. Said here because the next command differs in each case, and the
-            // wrong guess is expensive: `merge` on a step is refused, and waiting for a
-            // signature on one that will never be asked for is worse.
+            // Three things a pass can mean, and the status word distinguishes two. Said
+            // here because the next command differs in each case, and the wrong guess is
+            // expensive: `merge` on a step is refused, and waiting for a signature that
+            // will never be asked for is worse.
             match next {
-                // Ahead of the status, because a task nobody dispatched has no branch
-                // to land and no status this verdict may move: neither line below
-                // could be true of it, whatever it is sitting at.
+                // Ahead of the status, because a task nobody dispatched has no branch to
+                // land and no status this verdict may move.
                 _ if !task.is_dispatched() => out.push_str(
                     "    nothing here reports the work done — a signature does, \
                      and only a person has one\n",
@@ -741,38 +701,32 @@ pub(crate) fn verdict(
                 _ => {}
             }
         }
-        // Not a failure, and the asymmetry is the point: a dispatch was owed evidence,
-        // and a person's task never was. Its acceptance is optional and its diff is not
+        // Not a failure, and the asymmetry is the point: a dispatch was owed evidence and
+        // a person's task never was. Its acceptance is optional and its diff is not
         // wecode's to read, so a verdict on one can be empty of content with nothing
-        // wrong — the signature is what reports it, and that is the one piece of
-        // evidence here that was never an agent's word about itself.
+        // wrong — the signature is what reports it.
         Outcome::NothingAsked => out.push_str(
             "  · nothing asked — no check to run, and no diff of its own to read\n\
              \x20   a signature is what reports this one done\n",
         ),
         Outcome::Failed => {
             if idle {
-                // The green checks above are about to be read as a pass by whoever is
-                // scanning, so this says which way they point: they ran against a tree
-                // the task never touched, and would have passed before it started.
+                // The green checks above are about to be read as a pass, so this says
+                // which way they point: they ran against a tree the work never touched.
                 out.push_str(
                     "  ✗ nothing changed — this task declared a write scope and produced no diff\n\
                      \x20   the acceptance above ran against a tree the work never touched\n",
                 );
             }
-            if !v.violations.is_empty() {
+            let n = v.violations.len();
+            if n > 0 {
                 out.push_str(&format!(
-                    "  ✗ {} write{} outside scope — recorded against this task\n",
-                    v.violations.len(),
-                    if v.violations.len() == 1 { "" } else { "s" }
+                    "  ✗ {n} write{} outside scope — recorded against this task\n",
+                    s(n)
                 ));
             }
             let missing = v.unrunnable();
-            let failed = v
-                .checks
-                .iter()
-                .filter(|c| !c.passed() && !c.missing())
-                .count();
+            let failed = v.checks.iter().filter(|c| !c.passed() && !c.missing()).count();
             if failed > 0 {
                 out.push_str(&format!("  ✗ {failed} acceptance check(s) failed\n"));
             }
@@ -787,11 +741,9 @@ pub(crate) fn verdict(
                 ));
             }
             if v.checks.is_empty() && v.violations.is_empty() && !idle {
-                // A task whose acceptance is entirely live has the same empty check
-                // list as one with no acceptance at all, and they are not the same
-                // failure: the first was given something to be held to and nobody
-                // asked it. Sending that reader off to find a missing measure would be
-                // the wrong turn.
+                // A task whose acceptance is entirely live has the same empty check list
+                // as one with no acceptance at all, and they are not the same failure:
+                // the first was given something to be held to and nobody asked it.
                 out.push_str(if v.deferred.is_empty() {
                     "  ✗ nothing to judge by\n"
                 } else {
@@ -801,9 +753,9 @@ pub(crate) fn verdict(
             }
         }
     }
-    // The verdict reports; the caller transitions. `unchanged` is what says this one
-    // did not: a verdict safe to run before the work or after is the only kind worth
-    // pointing at a probe, and it is safe exactly because it moves nothing.
+    // The verdict reports; the caller transitions. `unchanged` is what says this one did
+    // not — and a verdict safe to run before the work or after is the only kind worth
+    // pointing at a probe.
     out.push_str(&format!(
         "  {}{}\n",
         next.as_str(),
@@ -815,7 +767,7 @@ pub(crate) fn verdict(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wecode_core::Cmp;
+    use wecode_core::{Cmp, task::Doer};
 
     fn scope(globs: &[&str]) -> Scope {
         Scope::write(globs)
@@ -849,9 +801,8 @@ mod tests {
     }
 
     /// A verdict assembled the way the `verify` command assembles one: acceptance, then
-    /// the diff, then the scope read against it. The order is the caller's and it is
-    /// part of the answer — the scope is what tells an empty diff whether being empty
-    /// is the declared outcome or the work not done.
+    /// the diff, then the scope read against it. The order is part of the answer — the
+    /// scope is what tells an empty diff whether it is the declared outcome.
     fn judged(measures: &[Measure], changed: Option<Changed>, scope: &Scope) -> Verdict {
         let mut v = ran(&std::env::temp_dir(), measures);
         v.changed = changed;
@@ -859,11 +810,9 @@ mod tests {
         v
     }
 
-    /// Acceptance with no shared cache — what a project that declares none gets.
-    ///
-    /// The tier is named rather than left to [`Tier::requested`], so a `WECODE_LIVE`
-    /// exported in whatever shell runs the suite cannot decide what these tests are
-    /// asserting about.
+    /// Acceptance with no shared cache — what a project that declares none gets. The
+    /// tier is named rather than left to [`Tier::requested`], so a `WECODE_LIVE` in
+    /// whatever shell runs the suite cannot decide what these tests assert.
     fn ran(dir: &Path, measures: &[Measure]) -> Verdict {
         run_tier(dir, measures, &[], Tier::Offline)
     }
@@ -880,9 +829,9 @@ mod tests {
         }
     }
 
-    /// A real repository, standing where a task's worktree would. git is a subprocess,
-    /// so faking it would test nothing — least of all the part that only shows up once
-    /// a commit is between the work and `HEAD`.
+    /// A real repository, standing where a task's worktree would. git is a subprocess, so
+    /// faking it would test nothing — least of all the part that only shows up once a
+    /// commit is between the work and `HEAD`.
     fn worktree(name: &str) -> std::path::PathBuf {
         let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
         let dir = Path::new(&base).join(format!("wecode-verify-{name}"));
@@ -891,8 +840,7 @@ mod tests {
     }
 
     /// The tree wecode cuts for a main task: a directory named after the task that owns
-    /// it, which is how `work::worktree_for` names one and how a verdict standing in it
-    /// knows whether the attempts around it are its steps' or the base's.
+    /// it, which is how `work::worktree_for` names one and how [`owns_the_tree`] answers.
     fn owned_worktree(name: &str, owner: &str) -> std::path::PathBuf {
         let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
         let org = Path::new(&base).join(format!("wecode-verify-{name}"));
@@ -956,9 +904,8 @@ mod tests {
     #[test]
     fn a_retry_that_added_nothing_is_still_judged_on_what_the_branch_carries() {
         // The whole point. Attempt 1 wrote outside its scope and was rejected for it;
-        // attempt 2 did nothing at all. Reading only the working tree, the second
-        // verdict saw an empty diff, found no violation in it, and passed work whose
-        // out-of-scope file was still sitting on the branch waiting to be merged.
+        // attempt 2 did nothing at all. Reading only the working tree, the second verdict
+        // passed work whose out-of-scope file was still sitting on the branch.
         let dir = worktree("retry-adds-nothing");
         attempt(
             &dir,
@@ -975,8 +922,8 @@ mod tests {
 
     #[test]
     fn the_work_a_retry_did_add_joins_the_work_it_inherited() {
-        // Both halves, once, in one list: the retry's own uncommitted writes and the
-        // attempt underneath them. A file touched by both is one path, not two.
+        // Both halves in one list: the retry's own uncommitted writes and the attempt
+        // underneath them, with a file touched by both counted once.
         let dir = worktree("retry-adds-more");
         attempt(
             &dir,
@@ -985,8 +932,7 @@ mod tests {
             &[("src/a.rs", "fn a() {}\n"), ("docs/note.md", "why\n")],
         );
         retry(&dir);
-        // One file the retry rewrote, one it added, and one it left exactly as the
-        // attempt underneath it wrote it.
+        // One file the retry rewrote, one it added, one it left as the attempt wrote it.
         write(&dir, "src/a.rs", "fn a() { todo!() }\n");
         write(&dir, "src/b.rs", "fn b() {}\n");
 
@@ -996,9 +942,9 @@ mod tests {
 
     #[test]
     fn a_siblings_attempts_on_a_shared_branch_are_not_this_tasks_to_answer_for() {
-        // A subtask works in its parent's tree, so the log carries its siblings'
-        // attempts. Each was judged against its own scope, and charging them here would
-        // fail every step after the first for work that was already accepted.
+        // A subtask works in its parent's tree, so the log carries its siblings' attempts.
+        // Each was judged against its own scope; charging them here would fail every step
+        // after the first for work that was already accepted.
         let dir = worktree("shared-branch");
         attempt(&dir, "step-one", 1, &[("docs/one.md", "one\n")]);
         attempt(&dir, "step-two", 1, &[("src/two.rs", "fn two() {}\n")]);
@@ -1011,9 +957,8 @@ mod tests {
 
     #[test]
     fn work_that_came_with_the_base_is_not_this_tasks_work() {
-        // A branch cut from a predecessor's carries that predecessor's commits. They
-        // are not in this diff, and a task is not asked to declare a scope covering the
-        // ground it was handed.
+        // A branch cut from a predecessor's carries that predecessor's commits, and a
+        // task is not asked to declare a scope covering the ground it was handed.
         let dir = worktree("base-history");
         let c = seen(&dir, "t1");
         assert!(c.is_empty(), "{c:?}");
@@ -1021,8 +966,8 @@ mod tests {
 
     #[test]
     fn a_first_attempt_is_read_exactly_as_before() {
-        // Judging happens before the commit, so on the first run there is nothing
-        // behind HEAD and this is the plain working-tree diff it has always been.
+        // Judging happens before the commit, so on the first run there is nothing behind
+        // HEAD and this is the plain working-tree diff it has always been.
         let dir = worktree("first-attempt");
         write(&dir, "src/a.rs", "fn a() {}\n");
         let plain = git::changed_files(&dir).unwrap();
@@ -1032,8 +977,8 @@ mod tests {
     #[test]
     fn only_a_tree_wecode_commits_in_is_held_back() {
         // Which trees those are, stated once. The worktrees wecode cuts live under the
-        // run root and nothing else does — a repository the operator keeps anywhere
-        // else is theirs, and wecode neither commits there nor withholds anything.
+        // run root and nothing else does; a repository the operator keeps elsewhere is
+        // theirs, and wecode neither commits there nor withholds anything.
         let ours = crate::work::run_root().join("an-org").join("t1");
         assert!(commits_here(&ours));
         assert!(!commits_here(&std::env::temp_dir().join("their-checkout")));
@@ -1042,10 +987,9 @@ mod tests {
 
     #[test]
     fn a_verdict_in_the_operators_own_checkout_holds_nothing_back() {
-        // The line `commit_attempt` draws, seen from this side. A task the playbook
-        // gave no worktree is judged where the operator is standing, and wecode commits
-        // nothing there — so there is nothing to hold back, and a note left in their
-        // repository would be one nothing ever reads.
+        // The line `commit_attempt` draws, seen from this side. A task the playbook gave
+        // no worktree is judged where the operator is standing, and wecode commits
+        // nothing there — so there is nothing to hold back.
         let dir = worktree("no-worktree");
         write(&dir, "src/a.rs", "fn a() {}\n");
         write(&dir, "Cargo.toml", "[package]\n");
@@ -1083,8 +1027,8 @@ mod tests {
 
     #[test]
     fn an_empty_scope_permits_nothing_rather_than_everything() {
-        // A spike declares no write scope. One that edited files did something it
-        // never said it would, so the fail-closed reading is the correct one.
+        // A spike declares no write scope, and one that edited files did something it
+        // never said it would: the fail-closed reading is the correct one.
         let v = violations(&touched(&["src/a.rs"]), &Scope::default());
         assert_eq!(v.len(), 1);
     }
@@ -1171,29 +1115,18 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_build_cache_is_set_on_the_acceptance_commands_too() {
-        // Acceptance is the second cold build a worktree pays for, and usually the
-        // larger one: the agent may have run `cargo check`, this runs the suite.
+    fn acceptance_runs_in_the_operators_environment_with_the_projects_cache_over_it() {
+        // Both halves of one environment. The cache is set here too because acceptance
+        // is the second cold build a worktree pays for and usually the larger one; and
+        // unlike a spawned agent's, the rest is inherited rather than built from an
+        // allowlist — a command without `PATH` could not find the toolchain it judges
+        // with.
         let v = run_tier(
             &std::env::temp_dir(),
-            &[cmd("test \"$CARGO_TARGET_DIR\" = /tmp/shared-target")],
-            &[(
-                "CARGO_TARGET_DIR".to_string(),
-                std::path::PathBuf::from("/tmp/shared-target"),
-            )],
-            Tier::Offline,
-        );
-        assert!(v.passed(), "{:?}", v.checks);
-    }
-
-    #[test]
-    fn acceptance_still_inherits_the_environment_it_needs_to_run_at_all() {
-        // Unlike a spawned agent's, this environment is not built from an allowlist:
-        // the commands are the operator's own, and one without `PATH` could not find
-        // the toolchain it is supposed to be judging with.
-        let v = run_tier(
-            &std::env::temp_dir(),
-            &[cmd("test -n \"$PATH\"")],
+            &[
+                cmd("test \"$CARGO_TARGET_DIR\" = /tmp/shared-target"),
+                cmd("test -n \"$PATH\""),
+            ],
             &[(
                 "CARGO_TARGET_DIR".to_string(),
                 std::path::PathBuf::from("/tmp/shared-target"),
@@ -1255,10 +1188,8 @@ mod tests {
     #[test]
     fn a_run_that_changed_nothing_does_not_pass_on_its_acceptance_alone() {
         // The whole point. Acceptance is the repository's own suite, so it was green
-        // before the agent started and is green after one that did nothing — an agent
-        // that ran out of budget, or gave up, or reported a success it never earned,
-        // came back with a clean board and an empty diff and was sent to the signature
-        // queue as delivered work.
+        // before the agent started and is green after one that did nothing: a clean
+        // board over an empty diff, sent to the signature queue as delivered work.
         let v = judged(&[cmd("true")], touched(&[]), &scope(&["src/**"]));
 
         assert!(v.checks.iter().all(Check::passed), "{:?}", v.checks);
@@ -1268,11 +1199,9 @@ mod tests {
 
     #[test]
     fn an_agent_that_touched_a_real_worktree_and_left_it_alone_is_caught_the_same_way() {
-        // The same finding read off git rather than off a fabricated diff, and in the
-        // order the `verify` command assembles it: acceptance first, then the diff,
-        // then the scope. The acceptance here is one that genuinely passes on an
-        // untouched tree — `test -f README.md` — because that is the shape of the real
-        // failure. A repository's own suite is green before its agents start.
+        // The same finding read off git rather than a fabricated diff. The acceptance
+        // here genuinely passes on an untouched tree, which is the shape of the real
+        // failure: a repository's own suite is green before its agents start.
         let dir = worktree("did-nothing");
         let mut v = ran(&dir, &[cmd("test -f README.md")]);
         v.changed = changed(&dir, &TaskId::new("t1")).unwrap();
@@ -1295,10 +1224,9 @@ mod tests {
 
     #[test]
     fn a_spike_that_declared_no_writes_is_not_failed_for_changing_nothing() {
-        // A spike is time-boxed investigation: it is the one kind admitted without a
-        // write scope, because what it owes is an answer rather than a diff. Reading
-        // every empty diff as a failure would make it the one kind that can never pass
-        // — any change is already a violation, so both outcomes would be red.
+        // A spike is the one kind admitted without a write scope, because what it owes is
+        // an answer rather than a diff. Reading every empty diff as a failure would make
+        // it the one kind that can never pass: any change is already a violation.
         let v = judged(&[cmd("true")], touched(&[]), &Scope::default());
         assert!(v.passed(), "{v:?}");
     }
@@ -1317,9 +1245,8 @@ mod tests {
     #[test]
     fn a_diff_no_scope_was_read_against_makes_no_claim_about_what_was_owed() {
         // `owed` is recorded by the scope check, so until that has run nothing knows a
-        // change was expected. Such a verdict has already skipped the scope half — the
-        // honest answer is silence here rather than a second finding invented out of a
-        // question nobody asked.
+        // change was expected. The honest answer is silence rather than a finding
+        // invented out of a question nobody asked.
         assert!(!touched(&[]).unwrap().delivered_nothing());
     }
 
@@ -1345,16 +1272,33 @@ mod tests {
         assert!(!out.contains("nothing to judge by"), "{out}");
     }
 
+    #[test]
+    fn a_verdict_on_work_nobody_dispatched_reads_no_diff_and_moves_nothing() {
+        // Every half at once. No diff is this task's own, so none is read and none is
+        // reported as `0 files`; nothing was asked, which here is not a failure; and the
+        // status goes back as it came, which is what makes a probe safe to run early.
+        let task = Task::new("t1", "fares", "mint the token").done_by(Doer::Person);
+        let dir = std::env::temp_dir();
+        let out = verdict(&task, &task.id, &dir, &ran(&dir, &[]), task.status);
+
+        assert!(out.contains("diff — not judged"), "{out}");
+        assert!(out.contains("· nothing asked"), "{out}");
+        assert!(out.contains("   unchanged"), "{out}");
+        assert!(!out.contains("0 files"), "{out}");
+
+        // A probe passing is the probes agreeing about the world, not the work done.
+        let out = verdict(&task, &task.id, &dir, &ran(&dir, &[cmd("true")]), task.status);
+        assert!(out.contains("✓ its checks pass"), "{out}");
+        assert!(out.contains("a signature does"), "{out}");
+    }
+
     // --------------------------------------------- work that belongs to steps ------
 
     #[test]
     fn a_parent_is_not_failed_for_work_that_belongs_to_its_steps() {
-        // The shape the playbook asks for, failed at the last moment for having it. A
-        // main task with steps owns the worktree and the branch; the steps commit their
-        // work there and each is judged as it finishes. The parent then writes nothing
-        // of its own — correctly, there is nothing left of its work to do — and the
-        // empty-diff rule read that as an agent that gave up. It failed after every
-        // step had passed, on the one task that can land them.
+        // The shape the playbook asks for, failed at the last moment for having it. The
+        // steps commit on the branch their parent owns, so the parent correctly writes
+        // nothing of its own — and the empty-diff rule read that as an agent giving up.
         let dir = owned_worktree("parent-steps", "t");
         attempt(&dir, "t-one", 1, &[("src/one.rs", "fn one() {}\n")]);
         attempt(&dir, "t-two", 1, &[("src/two.rs", "fn two() {}\n")]);
@@ -1375,10 +1319,9 @@ mod tests {
     #[test]
     fn a_step_writing_where_its_parent_may_not_is_not_the_parents_violation() {
         // Why the steps' work is held apart from the diff rather than folded into it. A
-        // step declares its own scope — a design step writes `docs/**` beneath a parent
-        // scoped to `src/**`, which is the template doing exactly what it says — so
-        // counting those paths as the parent's would fail it for its children's licence
-        // and record refused writes against a task that made none.
+        // step declares its own scope, so counting its paths as the parent's would fail
+        // the parent for its children's licence and record refused writes against a
+        // task that made none.
         let dir = owned_worktree("step-scope", "t");
         attempt(&dir, "t-design", 1, &[("docs/design/t.md", "the decision\n")]);
         retry(&dir);
@@ -1404,10 +1347,9 @@ mod tests {
     #[test]
     fn work_the_branch_was_cut_from_is_not_a_parents_steps() {
         // The case that decides how a step is recognised. A branch cut from a
-        // predecessor's — or from an integration branch carrying merges — brings that
-        // work's attempts into this log looking exactly like a step's. What separates
-        // them is that a task which owned a tree leaves a `wecode/<id>` behind it and a
-        // subtask never had one, so the base cannot excuse a task that did nothing.
+        // predecessor's brings that work's attempts into this log looking exactly like a
+        // step's, and what separates them is the `wecode/<id>` a task that owned a tree
+        // leaves behind: the base cannot excuse a task that did nothing.
         let dir = owned_worktree("base-attempts", "t");
         attempt(&dir, "pred", 1, &[("src/p.rs", "fn p() {}\n")]);
         branch_of(&dir, "pred");
@@ -1424,9 +1366,8 @@ mod tests {
     #[test]
     fn a_step_is_not_excused_by_what_its_siblings_delivered() {
         // Only the task the tree is named after is answered for by the attempts around
-        // it. A step's neighbours in the log are its siblings, already judged on their
-        // own scopes, and a task that owes a diff is not relieved of it by standing
-        // next to one.
+        // it. A step's neighbours are its siblings, already judged on their own scopes,
+        // and a task that owes a diff is not relieved of it by standing next to one.
         let dir = owned_worktree("sibling-empty", "t");
         attempt(&dir, "t-one", 1, &[("src/one.rs", "fn one() {}\n")]);
         retry(&dir);
@@ -1440,10 +1381,8 @@ mod tests {
 
     #[test]
     fn the_verdict_names_the_work_its_steps_left_on_the_branch() {
-        // The reader reaches the diff before the verdict, and "0 files / nothing
-        // changed" over a passing parent is the sentence they would have to reconcile
-        // on their own. What the branch carries is said where the missing diff would
-        // have been read.
+        // The reader reaches the diff before the verdict, and "0 files / nothing changed"
+        // over a passing parent is a sentence they would have to reconcile on their own.
         let dir = owned_worktree("parent-render", "t");
         attempt(&dir, "t-one", 1, &[("src/one.rs", "fn one() {}\n")]);
         retry(&dir);
@@ -1479,9 +1418,8 @@ mod tests {
     }
 
     /// An empty directory to run acceptance in. Side effects are how these tests tell
-    /// *did not run* from *ran and passed*: a command never started leaves no file
-    /// behind, where asserting on the verdict alone would pass just as well against a
-    /// tier that quietly ran everything and reported half of it.
+    /// *did not run* from *ran and passed*: asserting on the verdict alone would pass
+    /// just as well against a tier that quietly ran everything and reported half of it.
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("wecode-tier-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1491,10 +1429,9 @@ mod tests {
 
     #[test]
     fn a_live_check_is_not_started_at_all_unless_it_was_asked_for() {
-        // The whole point of the tier, and the only assertion that can carry it: not
-        // that the check was reported as skipped, but that nothing ran. A live check
-        // reaches real infrastructure with the credentials of whoever is judging, and
-        // every unattended verdict — a board tick's, a retry's — is one nobody asked.
+        // The whole point of the tier, and the only assertion that can carry it: not that
+        // the check was reported as skipped, but that nothing ran. A live check reaches
+        // real infrastructure with the credentials of whoever is judging.
         let dir = scratch("not-asked");
         let v = ran(&dir, &[cmd("true"), live("touch it-ran")]);
 
@@ -1531,10 +1468,9 @@ mod tests {
 
     #[test]
     fn the_marker_is_read_however_it_was_spelled() {
-        // Leniency in the direction that is cheap to be wrong in: a marker that failed
-        // to match leaves the check in the first tier, where it runs on every verdict,
-        // against the real thing. `Live:` is a typo; running it is not a consequence
-        // anyone signed up for.
+        // Leniency in the direction that is cheap to be wrong in: a marker that failed to
+        // match leaves the check in the first tier, where it runs against the real thing
+        // on every verdict. `Live:` is a typo, not consent.
         let dir = scratch("spelling");
         let v = ran(
             &dir,
@@ -1556,10 +1492,9 @@ mod tests {
 
     #[test]
     fn a_marker_with_nothing_behind_it_is_not_a_marker() {
-        // `live:` alone would otherwise be a check that runs the empty string, which
-        // exits 0 — a pass earned by asking nothing, in the one module that exists to
-        // refuse those. Handed to `sh` unchanged it comes back as 127, visibly broken
-        // where the operator wrote it.
+        // `live:` alone would otherwise be a check that runs the empty string, which exits
+        // 0 — a pass earned by asking nothing. Handed to `sh` unchanged it comes back as
+        // 127, visibly broken where the operator wrote it.
         assert_eq!(tier_of("live:"), (false, "live:"));
         assert_eq!(tier_of("live:   "), (false, "live:   "));
 
@@ -1578,8 +1513,8 @@ mod tests {
     #[test]
     fn only_an_affirmative_value_asks_for_the_tier() {
         // A variable exported to turn the tier off is the more deliberate of the two
-        // things a person can write, and reading the mere presence of the name as
-        // consent would do the opposite of what they wrote.
+        // things a person can write, and reading the name's presence as consent would do
+        // the opposite of what they wrote.
         assert_eq!(Tier::asked_by(None), Tier::Offline);
         for off in ["", "  ", "0", "false", "FALSE", "no", "off"] {
             assert_eq!(Tier::asked_by(Some(off)), Tier::Offline, "{off:?}");
@@ -1592,7 +1527,7 @@ mod tests {
     #[test]
     fn a_deferred_check_is_not_counted_against_the_work() {
         // The reading that fails closed is unusable: a task carrying a live check would
-        // then pass only where the credentials for it are. Acceptance that can only
+        // then pass only where the credentials for it are, and acceptance that can only
         // fail is acceptance nobody writes.
         let dir = scratch("not-against");
         let mut v = ran(&dir, &[cmd("true"), live("aws s3 ls s3://nope")]);
@@ -1630,10 +1565,8 @@ mod tests {
 
     #[test]
     fn the_verdict_says_which_tier_the_tick_was_earned_against() {
-        // `✓ passed` has meant one thing for as long as there was one tier, and now
-        // means *passed what was asked*. Which was asked is a property of the
-        // invocation rather than of the task, so the reader cannot recover it from
-        // anything else on the page.
+        // `✓ passed` now means *passed what was asked*, and which was asked is a property
+        // of the invocation — not recoverable from anything else on the page.
         let task = Task::new("t1", "cloud", "the bucket").scoped(scope(&["src/**"]));
         let dir = scratch("render-deferred");
         let mut v = ran(&dir, &[cmd("true"), live("bash scripts/smoke-cloud.sh")]);
