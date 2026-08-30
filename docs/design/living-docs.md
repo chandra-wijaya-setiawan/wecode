@@ -32,3 +32,26 @@ already have their cure in flight: the transition journal + lease reclaim
 
 The human rule that remains (the only one): a sentence with a number, a
 status, or the word "currently" does not belong in an evergreen page.
+
+## The decided question (owner, 30 Aug): artifacts are data structures
+
+Docs, specs and SDLC artifacts in a repo are TYPED RECORDS; markdown is their
+serialization, chosen because git supplies the transaction (commit), the
+concurrency control (merge), and the log (history). The division of substrate:
+machine-written concurrent facts → SQLite; authored knowledge → typed records
+in git; each side renders read-only projections of the other.
+
+What "typed" buys, per artifact — the schema wecode parses and the gate that
+consumes the fields (never grep, which comments have already fooled):
+
+| Artifact | Typed fields | Gate that consumes them |
+|---|---|---|
+| specification.md | FR/NFR ids, AC id → command, subject globs, unit number | admission: AC ids ⊆ acceptance cmds; subject ⊆ scope |
+| ADR | id, status, supersedes, date | admission of a superseding decision: target must exist; records render dated |
+| design.md | decides / costs / makes-harder / reverses | design-check upgraded from form to fields |
+| report_as_finished.md | numbers from git diff | generated — already pure data |
+| doc front-matter | subject: globs, class: generated/executable/record/evergreen | freshness join: subject changed after doc → refuse |
+
+`docs-first` (#006) builds this: a parser in core (the org crate's sibling —
+hand-authored records, machine-validated), verify consuming fields. Prose
+survives inside fields; structure decides.
