@@ -360,6 +360,7 @@ mod tests {
             task: "a".into(),
             session: "s".into(),
             attempt: 1,
+            attested_by: None,
             status,
             worktree: None,
             pid: Some(42),

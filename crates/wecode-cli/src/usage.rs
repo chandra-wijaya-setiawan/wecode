@@ -517,6 +517,7 @@ mod tests {
             session: "s-1".into(),
             attempt: n,
             status: wecode_core::ExecutionStatus::Completed,
+            attested_by: None,
             worktree: None,
             pid: None,
             started: 0,
