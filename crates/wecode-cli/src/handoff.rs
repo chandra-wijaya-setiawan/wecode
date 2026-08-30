@@ -212,6 +212,13 @@ fn map_body(a: &a2a::Artifact) -> String {
 ///
 /// Empty on a first attempt, which is the common case and should read as such rather
 /// than as a heading with nothing under it.
+///
+/// An attempt nobody dispatched belongs here too, and its artifact is empty on purpose:
+/// there is no commit under `<task>: attempt N` because there was no process to make
+/// one. What the next worker needs is the description, and [`crate::usage::account`]
+/// puts the attestor in it — *a person worked on this and here is what they say they
+/// did* is a different fact from *a run produced this diff*, and an agent reading a
+/// blank body under an unqualified `completed` would take it for the second.
 fn attempt_artifacts(
     task: &Task,
     runs: &[wecode_store::Execution],
@@ -238,7 +245,7 @@ fn attempt_artifacts(
                 format!("attempt {}", r.attempt),
                 vec![a2a::Part::text(body)],
             )
-            .described(format!("{} ({})", r.status.as_str(), r.detail))
+            .described(format!("{} ({})", r.status.as_str(), crate::usage::account(r)))
         })
         .collect()
 }

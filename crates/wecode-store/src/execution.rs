@@ -3,6 +3,12 @@
 //! A row is opened when the process starts and closed when it ends. If wecode dies in
 //! between, the row is left saying `working` with a pid — which is the recovery
 //! information wanted, not a bug to tidy away.
+//!
+//! …and one row that was never a process. Work wecode did not dispatch still costs
+//! money — a task handed out by `wecode start` and worked in somebody's own session, a
+//! console step done by hand — and until it can be written down here, the task it was
+//! for reads as free. [`Store::record_execution`] writes that attempt, and
+//! [`Execution::attested_by`] is what keeps it from being mistaken for a metered one.
 
 use rusqlite::params;
 use wecode_core::{ExecutionStatus, TaskId};
@@ -40,6 +46,33 @@ pub struct Execution {
     /// billed: the run line printed this figure and then threw it away, so a task
     /// that cost real money in replay left no trace of it anywhere.
     pub replayed_tokens: Option<u64>,
+    /// Who stated these figures, and `None` when wecode ran the process itself.
+    ///
+    /// The `None` is a claim, not a gap: this attempt was started here, timed here, and
+    /// its tokens read out of its own output. A name means none of that happened —
+    /// nobody was watching, and what the row holds is one person's account of what the
+    /// work cost. Both are worth keeping and neither may read as the other, which is
+    /// the whole of what this column does.
+    pub attested_by: Option<String>,
+    pub detail: String,
+}
+
+/// A cost stated after the fact, for work no dispatch metered.
+///
+/// One argument rather than four, for the reason [`Spend`] is one rather than two: the
+/// figures only mean anything with the attestor beside them. A `record_execution` that
+/// took the spend and left the name to a later call could write the row without one,
+/// and a row without one says wecode measured this.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Attested {
+    /// The person answerable for the figures — the human in the seat, or the seat.
+    pub by: String,
+    /// How long the work took, as stated. `None` where only the tokens are known,
+    /// which is the commoner half to be able to answer.
+    pub wall_secs: Option<u64>,
+    pub spend: Spend,
+    /// What the work was, in the attestor's words. The one line on this row that no
+    /// exit code wrote.
     pub detail: String,
 }
 
@@ -123,6 +156,62 @@ impl Store {
         Ok(())
     }
 
+    /// Files what work nobody dispatched cost, as its own attempt.
+    ///
+    /// Opened and closed in one write, because there was never a process to be between
+    /// the two: this row is a record of something that already happened, not a run to
+    /// be supervised. `worktree` and `pid` stay NULL for the same reason — there is
+    /// nothing here for a crash recovery to point at.
+    ///
+    /// **Its own attempt**, never an amendment to one. Adding a stated figure to a
+    /// metered row would leave a number that is half measured and half claimed, with no
+    /// way left to say which half; adding it to the task's total is what was wanted, and
+    /// a row of its own does that while keeping every other row exactly as honest as it
+    /// was. It follows that two people attesting the same work file two costs, and that
+    /// is the correct arithmetic: nothing here can tell it was the same work.
+    ///
+    /// `completed`, because that is what the row *has* to say among the eight states —
+    /// the work happened and it is over. It says nothing about whether the work was any
+    /// good: a cost record makes no claim about the result, and the task's own status
+    /// is where the verdict lives.
+    pub fn record_execution(
+        &self,
+        task: &TaskId,
+        session: &str,
+        what: &Attested,
+    ) -> Result<i64, StoreError> {
+        let attempt = self.next_attempt(task)?;
+        // The stated duration laid against the moment it was written down. Every reader
+        // of this table subtracts `started` from `ended` and expects `wall_secs`, so a
+        // row that put both stamps at now would answer *seven thousand seconds, in no
+        // time at all*. What is invented is when the work happened, which nothing here
+        // was ever in a position to observe; what is preserved is how long it took,
+        // which is the figure somebody actually stated.
+        let ended = now_secs();
+        let started = ended.saturating_sub(what.wall_secs.unwrap_or(0));
+        let c = self.conn();
+        c.execute(
+            "INSERT INTO task_executions
+                (task_id, session_id, attempt, status, started, ended, wall_secs,
+                 spent_tokens, replayed_tokens, attested_by, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                task.as_str(),
+                session,
+                attempt,
+                ExecutionStatus::Completed.as_str(),
+                crate::int::to_db(started),
+                crate::int::to_db(ended),
+                crate::int::opt_to_db(what.wall_secs),
+                crate::int::opt_to_db(what.spend.tokens),
+                crate::int::opt_to_db(what.spend.replayed),
+                what.by,
+                what.detail,
+            ],
+        )?;
+        Ok(c.last_insert_rowid())
+    }
+
     /// Which try the next run would be. Attempts are per task and start at 1.
     pub fn next_attempt(&self, task: &TaskId) -> Result<i64, StoreError> {
         let n: i64 = self.conn().query_row(
@@ -138,7 +227,8 @@ impl Store {
         let c = self.conn();
         let mut stmt = c.prepare(
             "SELECT id, task_id, session_id, attempt, status, worktree, pid,
-                    started, ended, wall_secs, spent_tokens, replayed_tokens, detail
+                    started, ended, wall_secs, spent_tokens, replayed_tokens,
+                    attested_by, detail
                FROM task_executions WHERE task_id = ?1 ORDER BY attempt",
         )?;
         let rows = stmt.query_map(params![task.as_str()], |r| {
@@ -155,7 +245,8 @@ impl Store {
                 r.get::<_, Option<i64>>(9)?,
                 r.get::<_, Option<i64>>(10)?,
                 r.get::<_, Option<i64>>(11)?,
-                r.get::<_, String>(12)?,
+                r.get::<_, Option<String>>(12)?,
+                r.get::<_, String>(13)?,
             ))
         })?;
 
@@ -174,6 +265,7 @@ impl Store {
                 wall,
                 spent,
                 replayed,
+                attested_by,
                 detail,
             ) = row?;
             out.push(Execution {
@@ -192,6 +284,7 @@ impl Store {
                 wall_secs: crate::int::opt_from_db(wall, "execution wall")?,
                 spent_tokens: crate::int::opt_from_db(spent, "execution spend")?,
                 replayed_tokens: crate::int::opt_from_db(replayed, "execution replay")?,
+                attested_by,
                 detail,
             });
         }
@@ -372,6 +465,137 @@ mod tests {
             s.executions(&TaskId::new("t")).unwrap()[1].spent_tokens,
             Some(0)
         );
+    }
+
+    #[test]
+    fn a_cost_nobody_measured_lands_as_its_own_attempt_and_names_who_said_so() {
+        // The gap this closes: a task handed out by `wecode start` and worked in
+        // somebody's own session spends real money and leaves no row, so the board
+        // reports it as free. What is written down is the figure and its author, and
+        // the two travel together — a number here with nobody's name on it would read
+        // as one wecode metered.
+        let s = store();
+        let metered = s
+            .start_execution(&TaskId::new("t"), "s-1", Some("/wt/t"), Some(7))
+            .unwrap();
+        s.finish_execution(
+            metered,
+            ExecutionStatus::Completed,
+            "exit 0",
+            Spend {
+                tokens: Some(1540),
+                replayed: Some(4000),
+            },
+        )
+        .unwrap();
+
+        s.record_execution(
+            &TaskId::new("t"),
+            "s-2",
+            &Attested {
+                by: "cws".into(),
+                wall_secs: Some(7200),
+                spend: Spend {
+                    tokens: Some(90_000),
+                    replayed: None,
+                },
+                detail: "worked it in my own session".into(),
+            },
+        )
+        .unwrap();
+
+        let runs = s.executions(&TaskId::new("t")).unwrap();
+        assert_eq!(runs.len(), 2, "a record of its own, not an amendment");
+        assert_eq!(runs[0].attested_by, None, "wecode ran that one");
+        assert_eq!(runs[0].spent_tokens, Some(1540), "and it is untouched");
+
+        let stated = &runs[1];
+        assert_eq!(stated.attempt, 2);
+        assert_eq!(stated.attested_by.as_deref(), Some("cws"));
+        assert_eq!(stated.spent_tokens, Some(90_000));
+        assert_eq!(stated.replayed_tokens, None, "nothing was said about it");
+        assert_eq!(stated.status, ExecutionStatus::Completed);
+        assert_eq!(stated.detail, "worked it in my own session");
+        assert_eq!(
+            (stated.worktree.as_deref(), stated.pid),
+            (None, None),
+            "there was no process here to point at"
+        );
+    }
+
+    #[test]
+    fn the_wall_a_cost_states_is_the_wall_the_row_reads_back() {
+        // Every reader of this table subtracts `started` from `ended` and expects the
+        // wall. Stamping both at now would file seven thousand seconds of work as
+        // having taken no time, which is the one figure an attestation actually knows.
+        let s = store();
+        s.record_execution(
+            &TaskId::new("t"),
+            "s",
+            &Attested {
+                by: "cws".into(),
+                wall_secs: Some(7200),
+                spend: Spend::default(),
+                detail: String::new(),
+            },
+        )
+        .unwrap();
+        let r = &s.executions(&TaskId::new("t")).unwrap()[0];
+        assert_eq!(r.wall_secs, Some(7200));
+        assert_eq!(r.ended.unwrap() - r.started, 7200);
+    }
+
+    #[test]
+    fn a_cost_that_states_only_tokens_leaves_the_wall_absent_rather_than_zero() {
+        // The `spent_tokens` rule, applied to the column beside it: *I know what it
+        // cost and not how long it took* is a real answer, and `0s` is a different one.
+        let s = store();
+        s.record_execution(
+            &TaskId::new("t"),
+            "s",
+            &Attested {
+                by: "cws".into(),
+                wall_secs: None,
+                spend: Spend {
+                    tokens: Some(90_000),
+                    replayed: None,
+                },
+                detail: String::new(),
+            },
+        )
+        .unwrap();
+        let r = &s.executions(&TaskId::new("t")).unwrap()[0];
+        assert_eq!(r.wall_secs, None);
+        assert!(r.ended.is_some(), "and it is not an unfinished run");
+    }
+
+    #[test]
+    fn a_cost_recorded_while_a_run_is_open_does_not_disturb_it() {
+        // The person attesting is usually not the supervisor, so the two can arrive in
+        // either order. The open row keeps its attempt and its `working`; the record
+        // takes the next number.
+        let s = store();
+        s.start_execution(&TaskId::new("t"), "s-1", None, Some(99))
+            .unwrap();
+        s.record_execution(
+            &TaskId::new("t"),
+            "s-2",
+            &Attested {
+                by: "cws".into(),
+                wall_secs: None,
+                spend: Spend {
+                    tokens: Some(10),
+                    replayed: None,
+                },
+                detail: String::new(),
+            },
+        )
+        .unwrap();
+
+        let stale = s.unfinished_executions().unwrap();
+        assert_eq!(stale.len(), 1, "only the run is unfinished");
+        assert_eq!(stale[0].attempt, 1);
+        assert_eq!(s.next_attempt(&TaskId::new("t")).unwrap(), 3);
     }
 
     #[test]

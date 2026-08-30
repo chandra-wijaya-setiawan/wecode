@@ -243,12 +243,20 @@ fn usage_in(usage: &Value) -> Option<Usage> {
 }
 
 /// Every run of a task, so a retry does not erase what happened last time.
+///
+/// The heading counts the attested rows as well as the attempts, and that is the whole
+/// of the warning: the figures below do not all come from the same place, and a reader
+/// adding them up is entitled to know before doing the arithmetic rather than after.
 #[must_use]
 pub(crate) fn executions(runs: &[wecode_store::Execution]) -> String {
     if runs.is_empty() {
         return String::new();
     }
-    let mut out = format!("\nruns ({})\n", runs.len());
+    let stated = runs.iter().filter(|r| r.attested_by.is_some()).count();
+    let mut out = match stated {
+        0 => format!("\nruns ({})\n", runs.len()),
+        n => format!("\nruns ({}, {n} stated rather than metered)\n", runs.len()),
+    };
     for r in runs {
         out.push_str(&format!(
             "  #{}  {:<10} {:<18} {:<20} {}\n",
@@ -264,10 +272,31 @@ pub(crate) fn executions(runs: &[wecode_store::Execution]) -> String {
                 },
             },
             cost(r),
-            r.detail
+            account(r)
         ));
     }
     out
+}
+
+/// What the attempt was, and — where wecode did not run it — who says so.
+///
+/// The name goes in front of the detail rather than after it. The figures are what a
+/// reader came for and they sit in the cell to the left, so the one thing that changes
+/// how they should be read has to arrive first; a long account of the work would push it
+/// past the width of anybody's terminal.
+///
+/// Silent on every metered row, which is the majority and needs no annotation: a run
+/// wecode opened, timed and read is what this table has always meant.
+#[must_use]
+pub(crate) fn account(r: &wecode_store::Execution) -> String {
+    let Some(by) = &r.attested_by else {
+        return r.detail.clone();
+    };
+    if r.detail.is_empty() {
+        format!("stated by {by}")
+    } else {
+        format!("stated by {by} — {}", r.detail)
+    }
 }
 
 /// What one attempt cost, in the two units it was reported in.
@@ -517,6 +546,7 @@ mod tests {
             session: "s-1".into(),
             attempt: n,
             status: wecode_core::ExecutionStatus::Completed,
+            attested_by: None,
             worktree: None,
             pid: None,
             started: 0,
@@ -553,5 +583,43 @@ mod tests {
         assert!(out.contains("90t "), "{out}");
         assert!(!out.contains("re-read"), "{out}");
         assert!(out.contains('—'), "an unmetered attempt still reads as such: {out}");
+    }
+
+    #[test]
+    fn a_cost_somebody_stated_never_reads_as_one_wecode_metered() {
+        // The whole point of the column, at the only place most people will meet it. A
+        // task worked in somebody's own session and a task run under supervision now
+        // both have rows here, and the figures on them mean different things: one was
+        // counted off an output stream, the other is a person's recollection. Told apart
+        // twice — in the heading, before the arithmetic, and again on the row itself.
+        let mut said = attempt(2, Some(90_000), None);
+        said.attested_by = Some("cws".into());
+        said.detail = "worked it in my own session".into();
+        let out = executions(&[attempt(1, Some(1540), Some(4000)), said]);
+
+        assert!(out.contains("runs (2, 1 stated rather than metered)"), "{out}");
+        assert!(out.contains("stated by cws — worked it in my own session"), "{out}");
+        // And the metered row is left exactly as it was: an annotation that leaked onto
+        // it would say wecode did not run something it ran.
+        assert!(out.contains("exit 0\n"), "{out}");
+    }
+
+    #[test]
+    fn a_run_wecode_watched_is_annotated_with_nothing_at_all() {
+        // The majority case, asserted so the marker cannot drift into it. A table where
+        // every row explains its provenance is a table where none of them do.
+        let out = executions(&[attempt(1, Some(90), None)]);
+        assert!(out.contains("runs (1)"), "{out}");
+        assert!(!out.contains("stated"), "{out}");
+    }
+
+    #[test]
+    fn a_stated_cost_with_nothing_said_about_it_still_names_who_said_it() {
+        // The name is the load-bearing half. A row that dropped it because the detail
+        // was empty would be a bare figure reading as a measured one.
+        let mut bare = attempt(1, Some(90_000), None);
+        bare.attested_by = Some("cws".into());
+        bare.detail = String::new();
+        assert_eq!(account(&bare), "stated by cws");
     }
 }

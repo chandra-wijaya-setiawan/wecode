@@ -24,6 +24,7 @@ mod work;
 use std::process::ExitCode;
 
 use args::Args;
+use commands::cost::*;
 use commands::ctx::*;
 use commands::exec::*;
 use commands::gov::*;
@@ -128,6 +129,11 @@ WORK
   wecode tick                          promote waiting tasks whose work is unblocked
   wecode loop [--once]                 tick, then dispatch what is ready, forever
   wecode run <task>                    spawn its agent, supervise it, then verify
+  wecode cost <task> \"<what was done>\"  attribute work wecode never dispatched
+        --tokens <n>  --wall <secs>  --replayed <n>    at least one of the first two
+        for a task worked in your own session, or a step done by hand in a console:
+        filed as an attempt of its own, in your name, stated rather than measured.
+        Every view marks it as stated; no metered row is touched
   wecode verify <task>                 judge it: diff against scope, then acceptance
   wecode merge <task>                  land it on the integration branch, and report
         the worktree comes down once nothing still works in it; the branch stays
@@ -202,6 +208,7 @@ fn run(a: &Args) -> Res {
         ("merge", _) => merge_task(a),
         ("rollback", _) => rollback_task(a),
         ("run", _) => run_task(a),
+        ("cost", _) => cost(a),
         ("tick", _) => tick(a),
         ("loop", _) | ("serve", _) => serve(a),
         ("worktree", "remove") | ("worktree", "rm") => worktree_remove(a),

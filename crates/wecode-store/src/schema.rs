@@ -20,8 +20,10 @@ use rusqlite::Connection;
 /// being read off the agent's output and printed, and nothing kept it. 10 adds
 /// `tasks.doer`, without which a manual task read as an agent's on the next tick.
 /// 11 adds `tasks.steps`: a person's task is dispatched by being described, and until
-/// this column existed there was nowhere for the description to live.
-pub const VERSION: i64 = 11;
+/// this column existed there was nowhere for the description to live. 12 adds
+/// `task_executions.attested_by`, so a cost can be filed against work wecode never
+/// dispatched without that figure reading as one wecode metered.
+pub const VERSION: i64 = 12;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -168,6 +170,16 @@ CREATE INDEX audit_by_outcome ON audit_log(outcome);
 -- against. Nullable on the same terms, and for a further reason: a run recorded
 -- before this column existed did not re-read nothing, it was never asked.
 --
+-- `attested_by` is who put the figures there when wecode did not. Every other row in
+-- this table is opened at spawn and closed at exit, so its wall was measured here and
+-- its tokens were read out of the run's own output. Work wecode did not dispatch —
+-- a person in their own session, a console step done by hand — has neither, and the
+-- only account of what it cost is one somebody states afterwards. Kept, because a task
+-- whose spend is invisible is a task that looks free; named, because the difference
+-- between a meter and an attestation is the first thing a reader of a cost needs.
+--
+-- NULL is therefore a claim rather than an absence: wecode watched this process.
+--
 -- No foreign key on session_id: the ledger and its executions outlive sessions.
 CREATE TABLE task_executions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +194,7 @@ CREATE TABLE task_executions (
     wall_secs       INTEGER,            -- measured by wecode
     spent_tokens    INTEGER,            -- reported by the agent; NULL if unmetered
     replayed_tokens INTEGER,            -- cache reads, reported; not budgeted
+    attested_by     TEXT,               -- who stated it; NULL if wecode ran it
     detail          TEXT NOT NULL DEFAULT '',
     UNIQUE (task_id, attempt)
 ) STRICT;
@@ -433,6 +446,16 @@ const UPGRADES: &[(i64, &str)] = &[
     // wrote instructions* into *the instructions are the title again*, which is the one
     // thing the column exists to tell apart.
     (10, "ALTER TABLE tasks ADD COLUMN steps TEXT"),
+    // Nothing backfills, and here NULL is the truth rather than a default standing in
+    // for one — the 9→10 rule rather than the 8→9 one. Every row already in the file
+    // was opened at spawn and closed at exit, which is exactly what an absent attestor
+    // says. Nullable all the same, because the column has to be able to say *nobody
+    // attested this*: `NOT NULL DEFAULT ''` would put an empty name on every run wecode
+    // watched and leave nothing to tell the two apart.
+    (
+        11,
+        "ALTER TABLE task_executions ADD COLUMN attested_by TEXT",
+    ),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -584,6 +607,40 @@ mod tests {
             .query_row("SELECT count(steps) FROM tasks", [], |r| r.get(0))
             .expect("tasks.steps exists after 10→11");
         assert_eq!(described, 0);
+        let attested: i64 = c
+            .query_row("SELECT count(attested_by) FROM task_executions", [], |r| {
+                r.get(0)
+            })
+            .expect("task_executions.attested_by exists after 11→12");
+        assert_eq!(attested, 0);
+    }
+
+    #[test]
+    fn the_runs_a_file_already_held_are_not_read_as_attested() {
+        // The upgrade a workspace in use takes to reach this build. Every attempt in it
+        // was a process wecode started and watched, and NULL is what says so — a
+        // backfilled name here would turn wecode's own meter into somebody's word for it.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("ALTER TABLE task_executions DROP COLUMN attested_by;")
+            .unwrap();
+        c.execute_batch(
+            "INSERT INTO projects (id, repo, objective, status)
+                  VALUES ('p', 'r', 'an objective sentence', 'active');
+             INSERT INTO tasks (id, project_id, kind, title, status)
+                  VALUES ('t', 'p', 'chore', 'do something specific', 'done');
+             INSERT INTO task_executions (task_id, session_id, attempt, status, started)
+                  VALUES ('t', 's', 1, 'completed', 0);",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 11i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let attested: Option<String> = c
+            .query_row("SELECT attested_by FROM task_executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(attested, None, "wecode ran it, so nobody attested it");
     }
 
     #[test]
@@ -601,7 +658,8 @@ mod tests {
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
-             ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
+             ALTER TABLE task_executions DROP COLUMN replayed_tokens;
+             ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
         .unwrap();
         c.pragma_update(None, "user_version", 5i64).unwrap();
@@ -628,7 +686,8 @@ mod tests {
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
-             ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
+             ALTER TABLE task_executions DROP COLUMN replayed_tokens;
+             ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
         .unwrap();
         c.execute_batch(
@@ -664,7 +723,8 @@ mod tests {
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
-             ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
+             ALTER TABLE task_executions DROP COLUMN replayed_tokens;
+             ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
         .unwrap();
         c.execute_batch(
@@ -710,7 +770,8 @@ mod tests {
             "ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
-             ALTER TABLE task_executions DROP COLUMN replayed_tokens;",
+             ALTER TABLE task_executions DROP COLUMN replayed_tokens;
+             ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
         .unwrap();
         c.execute_batch(
@@ -746,6 +807,7 @@ mod tests {
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
             "ALTER TABLE task_executions DROP COLUMN replayed_tokens;
+             ALTER TABLE task_executions DROP COLUMN attested_by;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;",
         )
@@ -787,7 +849,8 @@ mod tests {
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
             "ALTER TABLE tasks DROP COLUMN doer;
-             ALTER TABLE tasks DROP COLUMN steps;",
+             ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
         .unwrap();
         c.execute_batch(
@@ -822,8 +885,11 @@ mod tests {
         // than handing a phone a document nobody wrote.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("ALTER TABLE tasks DROP COLUMN steps")
-            .unwrap();
+        c.execute_batch(
+            "ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE task_executions DROP COLUMN attested_by;",
+        )
+        .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
              VALUES ('p','wecode','an objective','active');
@@ -890,6 +956,7 @@ mod tests {
         c.execute_batch(
             "ALTER TABLE task_executions DROP COLUMN spent_tokens;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;
+             ALTER TABLE task_executions DROP COLUMN attested_by;
              DROP TABLE worktrees;
              DROP TABLE inbox_cursor;
              DROP TABLE short_numbers;

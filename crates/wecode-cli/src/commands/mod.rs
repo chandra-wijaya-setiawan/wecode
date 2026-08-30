@@ -4,6 +4,7 @@
 //! the same file, so the admission gate reported a scope conflict between any two of
 //! them — the check was right about the shape of the code, and this is the fix.
 
+pub(crate) mod cost;
 pub(crate) mod ctx;
 pub(crate) mod exec;
 pub(crate) mod gov;

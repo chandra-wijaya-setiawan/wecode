@@ -384,7 +384,11 @@ fn place_words(parent: Option<&TaskId>, after: &[TaskId]) -> String {
 /// something that is not a number, and here the two must never read alike: `--tokens
 /// 200k` would otherwise leave the budget exactly as it was, under a message saying it
 /// had changed.
-fn amount(a: &Args, flag: &str) -> Result<Option<u64>, String> {
+///
+/// Shared with `wecode cost`, which reads figures of its own by the same rule. Two
+/// readers would be two rules: `--tokens 200k` has to be a refusal wherever it is typed,
+/// and the way that stops being true is one of them quietly answering `None`.
+pub(crate) fn amount(a: &Args, flag: &str) -> Result<Option<u64>, String> {
     if !a.has(flag) {
         return Ok(None);
     }

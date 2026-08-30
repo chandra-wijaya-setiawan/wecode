@@ -42,7 +42,7 @@ mod project;
 mod staff;
 mod task;
 
-pub(crate) use amend::{task_budget, task_scope};
+pub(crate) use amend::{amount, task_budget, task_scope};
 pub(crate) use filing::set_archived;
 pub(crate) use inspect::show;
 pub(crate) use project::project_add;
