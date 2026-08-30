@@ -103,6 +103,7 @@ recorded and nothing more.
 | The inverted gate for records (an edited ADR is the defect) | later slice |
 | Generating component docs from a codemap (mechanism 1) | `components` |
 | Backfilling `subject:` across `docs/**` | follow-on task per page — coverage ratchets, it is not bulk work |
+| The coverage sweep — how many pages declare a subject, how many have ever fired | later slice. `docs::governed` is the primitive and is built; *ever fired* is a ledger question this slice cannot reach, and `verify.rs` is at the ratchet with no room to print half of it |
 
 ## 7. Assumptions
 
