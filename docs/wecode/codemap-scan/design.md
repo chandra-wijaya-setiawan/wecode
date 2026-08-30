@@ -92,7 +92,7 @@ reading honestly for the first time: it binds the Rust in these crates and never
 what they link.
 
 Parsing lands in a new `wecode-map` crate depending on core alone — core is dependency-free
-by rule and a parser is a dependency. The cache is a store table keyed by content hash
+by rule and a parser is a dependency. The cache is a filesystem store under `~/.wecode/cache/<repo>/`, entries keyed by content hash (ADR-0001: derived data lives in a disposable cache — never the ledger db, whose surface is the audit record; never the workspace, which is hand-edited authority)
 (git's blob oid, which the index already carries for a clean file), and an entry is never
 invalidated because a hash names its own content; it is only collected. So the scan runs at
 dispatch, incrementally, rather than behind a command someone must remember — a map is
@@ -103,7 +103,7 @@ growing toward the 1600 in `.max-lines`.
 ## What it costs, and what it makes harder
 
 Order of a megabyte of compiled parser per grammar, a build that now compiles five more C
-libraries, a store table that grows with every blob ever seen, and milliseconds per file on
+libraries, a cache directory that grows with every blob ever seen (swept by keeping recent entries, deletable wholesale — ADR-0001), and milliseconds per file on
 a cold cache. Harder: cross-compiling to a target without those grammars, and — the real
 one — a map that is plausible and wrong. `docs/features.md` says the repo map "is a
 photograph, and it only knows four conventions", which is a limitation a reader can see;
