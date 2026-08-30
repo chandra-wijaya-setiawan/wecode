@@ -1,0 +1,21 @@
+[package]
+name = "wecode-map"
+description = "What a source file defines and what it names, and which files sit next to a scope."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# tree-sitter and its grammars, and nothing else. This crate opens no files — the
+# caller reads bytes and hands them in — which is what keeps the C dependency and the
+# I/O in separate crates, the same division `wecode_core::docs` already uses.
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+
+[lints]
+workspace = true

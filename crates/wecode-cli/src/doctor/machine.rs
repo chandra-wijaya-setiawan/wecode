@@ -66,8 +66,56 @@ pub(super) fn section(company: &Company, org: &Path) -> Section {
 fn drill(company: &Company, org: &Path) -> Vec<Check> {
     let mut checks = vec![git(), where_trees_land(org)];
     checks.extend(repositories(company));
+    checks.push(grammars(company));
     checks.extend(harnesses(company));
     checks
+}
+
+/// The heading for the languages the codemap can parse.
+const GRAMMARS: &str = "codemap grammars";
+
+/// Which declared languages the codemap has a grammar for.
+///
+/// Never `Broken`, and that is the design's own rule rather than leniency. The codemap
+/// ranks and never refuses: a project in a language wecode has no grammar for loses a
+/// ranking and keeps everything else, and every file in it still reaches the agent
+/// through the file layer. Failing the drill would put `wecode doctor && wecode loop`
+/// behind a grammar nobody's work depends on.
+///
+/// Read off each repository's own playbook rather than off the plan, because the drill
+/// does not open the store — see the module note. That also makes this the right place
+/// for it: `[project] language` is written in the repository it describes.
+fn grammars(company: &Company) -> Check {
+    let mut unmapped: Vec<String> = company
+        .repos
+        .iter()
+        .filter_map(|r| {
+            let declared = wecode_org::Playbook::at(&expand_home(&r.path))
+                .ok()
+                .flatten()?
+                .project
+                .language;
+            let named = declared.trim();
+            (!named.is_empty() && wecode_map::Language::named(named).is_none())
+                .then(|| format!("{} says `{named}`", r.name))
+        })
+        .collect();
+    unmapped.sort();
+
+    let have: Vec<&str> = wecode_map::Language::ALL
+        .iter()
+        .map(|l| l.as_str())
+        .collect();
+    let outcome = if unmapped.is_empty() {
+        Outcome::Sound(have.join(", "))
+    } else {
+        Outcome::Absent(format!(
+            "{} — no grammar, so those files stay at the file layer; wecode has {}",
+            unmapped.join(", "),
+            have.join(", ")
+        ))
+    };
+    Check::new(GRAMMARS, outcome)
 }
 
 /// Runs `git --version`.
@@ -437,6 +485,8 @@ mod tests {
                 GIT,
                 TREES,
                 "[[repos]]",
+                // After the repositories, because it is read out of their playbooks.
+                GRAMMARS,
                 "[agents.harness] command",
                 "[agents.harness] env_allowlist",
             ],

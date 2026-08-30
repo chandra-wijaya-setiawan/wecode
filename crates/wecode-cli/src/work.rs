@@ -51,6 +51,21 @@ pub(crate) fn run_root() -> PathBuf {
     }
 }
 
+/// Where derived data lives: `$WECODE_CONFIG/cache`, else `~/.wecode/cache`.
+///
+/// A third place, and a deliberate one. The workspace is hand-edited authority and the
+/// ledger is the audit record, so neither may hold something a machine regenerates —
+/// what goes here is disposable by construction: deleting the whole directory costs a
+/// re-scan and nothing else. Beside `run/` for the same reason `run/` is beside the
+/// workspace, and redirected by the same variable so a test never touches an operator's.
+#[must_use]
+pub(crate) fn cache_root() -> PathBuf {
+    match std::env::var("WECODE_CONFIG") {
+        Ok(dir) => expand_home(&dir).join("cache"),
+        Err(_) => expand_home("~/.wecode/cache"),
+    }
+}
+
 /// The task whose worktree this task works in: the root of its parent chain.
 ///
 /// Returns `None` only when the task is not in the plan.
