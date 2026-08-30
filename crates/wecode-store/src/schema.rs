@@ -807,6 +807,7 @@ mod tests {
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
             "ALTER TABLE task_executions DROP COLUMN replayed_tokens;
+             ALTER TABLE task_executions DROP COLUMN attested_by;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;",
         )
@@ -848,7 +849,8 @@ mod tests {
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
             "ALTER TABLE tasks DROP COLUMN doer;
-             ALTER TABLE tasks DROP COLUMN steps;",
+             ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
         .unwrap();
         c.execute_batch(
@@ -883,8 +885,11 @@ mod tests {
         // than handing a phone a document nobody wrote.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("ALTER TABLE tasks DROP COLUMN steps")
-            .unwrap();
+        c.execute_batch(
+            "ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE task_executions DROP COLUMN attested_by;",
+        )
+        .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
              VALUES ('p','wecode','an objective','active');
@@ -951,6 +956,7 @@ mod tests {
         c.execute_batch(
             "ALTER TABLE task_executions DROP COLUMN spent_tokens;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;
+             ALTER TABLE task_executions DROP COLUMN attested_by;
              DROP TABLE worktrees;
              DROP TABLE inbox_cursor;
              DROP TABLE short_numbers;

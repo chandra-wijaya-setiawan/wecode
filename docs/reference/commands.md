@@ -99,6 +99,11 @@ WORK
   wecode tick                          promote waiting tasks whose work is unblocked
   wecode loop [--once]                 tick, then dispatch what is ready, forever
   wecode run <task>                    spawn its agent, supervise it, then verify
+  wecode cost <task> "<what was done>"  attribute work wecode never dispatched
+        --tokens <n>  --wall <secs>  --replayed <n>    at least one of the first two
+        for a task worked in your own session, or a step done by hand in a console:
+        filed as an attempt of its own, in your name, stated rather than measured.
+        Every view marks it as stated; no metered row is touched
   wecode verify <task>                 judge it: diff against scope, then acceptance
   wecode merge <task>                  land it on the integration branch, and report
         the worktree comes down once nothing still works in it; the branch stays
@@ -486,6 +491,42 @@ of the two it is, and `wecode audit --task <id>` shows the sequence.
 `start` also reports the project's shared build cache — `cache CARGO_TARGET_DIR=...`,
 beside the worktree — because a hand-run task that built somewhere else would be the one
 build not sharing it. See [config/playbook.md](config/playbook.md#the-build-cache).
+
+**`wecode cost <task> "<what was done>"`** is what `start` was missing. A task handed out
+by `start` and finished in somebody's own session spends the same real money as one `run`
+supervised, and left no row anywhere — so the task read as free, and the project's total
+was short by every hour a person put into it. The same hole swallows a step no agent could
+have done at all: a console click, a key minted by hand.
+
+It writes **one more attempt**, never an amendment to an existing one. A stated figure
+added to a metered row would leave a number half measured and half claimed with nothing
+left to say which half; a row of its own reaches the task's total, which is what was
+wanted, and leaves every other row exactly as honest as it was. Two people attesting the
+same work therefore file two costs, and that is the correct arithmetic — nothing here can
+tell it was the same work.
+
+| | |
+|---|---|
+| `--tokens <n>` | what it cost, in the unit the budget is written in |
+| `--wall <secs>` | how long it took, as stated |
+| `--replayed <n>` | cache reads, if the figure is even known |
+
+At least one of `--tokens` and `--wall` is required, and so is the account of the work: a
+metered row gets its detail from an exit code, and this one has no such source. What is
+*not* a flag is who is attesting. That is the session's — a name a switch could carry is
+not an attribution, and the point of the record is that somebody is answerable.
+
+Stated is not measured, and every view says which. `wecode show` heads the block `runs (3,
+1 stated rather than metered)` and prefixes the row `stated by <name>`; the cockpit's task
+screen does the same from the same function. In the database it is
+`task_executions.attested_by`, where NULL is a claim rather than a gap — *wecode watched
+this process* — so no run recorded before the column existed is retitled by it.
+
+The record makes no claim about the result. No status moves and no acceptance runs: what
+the work cost and whether it was any good are different questions, and the task's own
+status is where the second one lives. Recording a cost needs `staff`, the authority that
+says who acts on a task — not `spend`, which is checked against a cap and would refuse a
+large honest figure after the money was already gone.
 
 **`wecode verify`** can be run on its own, and is the same code path `run` uses. It reads
 the *uncommitted* diff, so run it before committing by hand. The acceptance commands get

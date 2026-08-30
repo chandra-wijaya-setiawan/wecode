@@ -25,7 +25,7 @@ use wecode_store::{AuditLine, AuditQuery, Store};
 use crate::args::Args;
 use crate::board::{Ledger, Vitals, status_word};
 use crate::commands::ctx::*;
-use crate::{board, record, tui};
+use crate::{board, record, tui, usage};
 
 /// What a row points at. Two levels of work means a row is one or the other, and
 /// an id alone cannot say which — project and task ids live in separate spaces.
@@ -411,6 +411,10 @@ fn doing(
 /// — `9k` is a bargain or a breach depending on a number that would otherwise be on
 /// another screen. Red when the try went past it, which is the one reading here that is
 /// a judgement rather than a record.
+///
+/// An attempt nobody metered is named as one, in the heading and again on its own line —
+/// the same annotation `wecode show` prints, from the same function, because a figure
+/// that reads as measured on one screen and as stated on the other is worse than either.
 fn runs(store: &Store, t: &Task) -> Vec<Line<'static>> {
     let Ok(attempts) = store.executions(&t.id) else {
         return Vec::new();
@@ -418,7 +422,14 @@ fn runs(store: &Store, t: &Task) -> Vec<Line<'static>> {
     if attempts.is_empty() {
         return vec![Line::from("no runs yet".fg(Color::DarkGray))];
     }
-    let mut out = vec![Line::from(format!("runs ({})", attempts.len()).bold())];
+    let stated = attempts.iter().filter(|r| r.attested_by.is_some()).count();
+    let mut out = vec![Line::from(
+        match stated {
+            0 => format!("runs ({})", attempts.len()),
+            n => format!("runs ({}, {n} stated)", attempts.len()),
+        }
+        .bold(),
+    )];
     for r in &attempts {
         let spent = r.spent_tokens.unwrap_or_default();
         let over = t.budget.tokens.is_some_and(|b| spent > b);
@@ -443,7 +454,7 @@ fn runs(store: &Store, t: &Task) -> Vec<Line<'static>> {
                 },
             ),
             Span::styled(
-                format!("  {}", r.detail),
+                format!("  {}", usage::account(r)),
                 Style::new().fg(Color::DarkGray),
             ),
         ]));

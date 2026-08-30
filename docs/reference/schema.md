@@ -4,7 +4,7 @@ One file per workspace, `wecode.db`. Everything machine-written lives here; ever
 hand-edited lives in `company.toml` (see [config/company.md](config/company.md)), because a binary blob
 cannot be diffed, reviewed or opened in an editor.
 
-Currently **schema version 11**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
+Currently **schema version 12**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
 
 ## Shape
 
@@ -107,6 +107,14 @@ conversation, in an issue, in the envelope an agent is handed at dispatch. None 
 was ever in this column, and there is no value here that would be true of it. Writing the
 title in would turn *nobody wrote instructions* into *the instructions are the title
 again*, which is the exact distinction the column exists to make.
+
+The 11→12 step adds `task_executions.attested_by` and leaves it NULL, and here the rule
+comes out the other way round again: NULL is *the record*, not the gap. Every row already
+in the file was opened at spawn, timed here, and had its tokens read off the run's own
+output — which is exactly what an absent attestor says. It is nullable all the same,
+because the column has to be able to say *nobody attested this*; `NOT NULL DEFAULT ''`
+would hang an empty name on every run wecode watched and leave nothing to tell the two
+apart.
 
 ## Full DDL
 
@@ -258,6 +266,16 @@ CREATE INDEX audit_by_outcome ON audit_log(outcome);
 -- against. Nullable on the same terms, and for a further reason: a run recorded
 -- before this column existed did not re-read nothing, it was never asked.
 --
+-- `attested_by` is who put the figures there when wecode did not. Every other row in
+-- this table is opened at spawn and closed at exit, so its wall was measured here and
+-- its tokens were read out of the run's own output. Work wecode did not dispatch —
+-- a person in their own session, a console step done by hand — has neither, and the
+-- only account of what it cost is one somebody states afterwards. Kept, because a task
+-- whose spend is invisible is a task that looks free; named, because the difference
+-- between a meter and an attestation is the first thing a reader of a cost needs.
+--
+-- NULL is therefore a claim rather than an absence: wecode watched this process.
+--
 -- No foreign key on session_id: the ledger and its executions outlive sessions.
 CREATE TABLE task_executions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -272,6 +290,7 @@ CREATE TABLE task_executions (
     wall_secs       INTEGER,            -- measured by wecode
     spent_tokens    INTEGER,            -- reported by the agent; NULL if unmetered
     replayed_tokens INTEGER,            -- cache reads, reported; not budgeted
+    attested_by     TEXT,               -- who stated it; NULL if wecode ran it
     detail          TEXT NOT NULL DEFAULT '',
     UNIQUE (task_id, attempt)
 ) STRICT;
@@ -509,6 +528,22 @@ tokens can still say which one held the long conversation.
 Nothing rolls the replay up and nothing checks it against anything. It is recorded, not
 enforced — the ledger's `Action::Spend` row still carries only the budgeted count, since
 that is what the board compares.
+
+### A cost nobody metered
+
+`wecode cost` writes both halves as well, and for the same reason: a cost that reached the
+run table but not the ledger would leave the board still calling the task free, which is
+the complaint the command answers. What it adds is `task_executions.attested_by` on the
+attempt, so the two kinds of row can never be mistaken for one another.
+
+The ledger row cannot carry that distinction. `Action::Spend` is two numbers, `source` is
+one of three, and the closest is `harness` — not because an agent said it, but because of
+the two sources that are not the Broker's own decision, `supervisor` means *wecode
+measured this* and `harness` means *the figure came from outside wecode's instruments*.
+Which outsider it was is on the row already, in the post, the seat and the human in it.
+An unstated figure becomes `0` there, exactly as a `supervisor` spend row's does, and for
+the same reason: the column that can hold *unstated* holds it, and the total that cannot
+is short by what was never claimed rather than long by what was invented.
 
 Both are written however the run ended. A run killed on its wall limit spent what it
 spent, and a cost recorded only for clean exits would hide exactly the expensive
