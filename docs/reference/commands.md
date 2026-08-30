@@ -74,6 +74,11 @@ PLAN
   wecode playbook gaps                 what has been found and not folded in yet
   wecode brief                         who you are and how to work — read this first
   wecode tree [--all]                  projects and their task trees
+  wecode map [<project>] [--seed <glob>…]   what sits next to what, by name
+        parses the tracked source with tree-sitter and ranks the files nearest the
+        seeds — the same ranking a task's envelope carries, seeded from its write
+        scope. Names are matched between files, never resolved: read it to declare
+        a scope, not as an answer about what calls what
   wecode ready                         what is schedulable right now
   wecode show <id>                     one project or task in full
   wecode check <id>                    the admission verdict
