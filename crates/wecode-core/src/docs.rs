@@ -79,6 +79,10 @@ pub struct Stale {
     pub because: String,
 }
 
+/// The name the unit's acceptance pinned before this module chose its
+/// idiomatic spelling: `docs::Stale`. One truth, two names.
+pub type DocStale = Stale;
+
 /// The front-matter key naming what a document governs.
 const SUBJECT: &str = "subject";
 /// The front-matter key naming how the page is kept true — see [`Class`].
@@ -316,7 +320,3 @@ mod tests {
         assert_eq!(governed(&docs), 1);
     }
 }
-
-/// The name the unit's acceptance pinned before this module chose its
-/// idiomatic spelling: `docs::Stale`. One truth, two names.
-pub type DocStale = Stale;
