@@ -485,6 +485,8 @@ mod tests {
                 GIT,
                 TREES,
                 "[[repos]]",
+                // After the repositories, because it is read out of their playbooks.
+                GRAMMARS,
                 "[agents.harness] command",
                 "[agents.harness] env_allowlist",
             ],

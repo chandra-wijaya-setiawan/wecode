@@ -100,6 +100,16 @@ impl std::fmt::Debug for Scanned {
 /// or the index is empty. The envelope drops the section rather than printing a heading
 /// over an apology, exactly as the repo map above it does.
 pub(crate) fn scan(root: &Path) -> Option<Scanned> {
+    scan_into(root, &cache_dir(root))
+}
+
+/// The scan, against a named cache directory.
+///
+/// The seam exists so the incrementality can be proven: [`cache_dir`] is derived from an
+/// environment variable an operator owns, and a test that had to set one would be
+/// setting it for every other test in the process. Nothing outside this module chooses
+/// the directory.
+fn scan_into(root: &Path, dir: &Path) -> Option<Scanned> {
     let blobs = git::tracked_blobs(root).ok()?;
     if blobs.is_empty() {
         return None;
@@ -108,7 +118,6 @@ pub(crate) fn scan(root: &Path) -> Option<Scanned> {
     // so it is the one case a content key would answer wrongly. Those are parsed every
     // scan and stored under nothing.
     let dirty = git::dirty_files(root).unwrap_or_default();
-    let dir = cache_dir(root);
 
     let mut out = Scanned {
         index: Index::new(),
@@ -123,7 +132,7 @@ pub(crate) fn scan(root: &Path) -> Option<Scanned> {
         out.tally.mapped += 1;
         let key = (!dirty.contains(&rel)).then_some(oid.as_str());
 
-        if let Some(tags) = key.and_then(|k| recall(&dir, k)) {
+        if let Some(tags) = key.and_then(|k| recall(dir, k)) {
             out.tally.cached += 1;
             note(&mut out, rel, &tags);
             continue;
@@ -135,12 +144,12 @@ pub(crate) fn scan(root: &Path) -> Option<Scanned> {
         let tags = wecode_map::tags(lang, &bytes);
         out.tally.parsed += 1;
         if let Some(k) = key {
-            wrote += usize::from(keep(&dir, k, &tags));
+            wrote += usize::from(keep(dir, k, &tags));
         }
         note(&mut out, rel, &tags);
     }
     if wrote > 0 {
-        sweep(&dir, KEEP_ENTRIES);
+        sweep(dir, KEEP_ENTRIES);
     }
     Some(out)
 }
@@ -394,6 +403,8 @@ pub(crate) fn envelope_section(root: &Path, write: &[String]) -> Option<String> 
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     fn tag(mark: TagKind, name: &str, line: usize) -> Tag {
@@ -429,10 +440,12 @@ mod tests {
             tag(TagKind::Definition, "assemble", 12),
             tag(TagKind::Reference, "render", 40),
         ]);
-        let cut = &whole[..whole.len() - 4];
-        assert_eq!(decode(cut).len(), 1);
+        // Cut inside the second row's fields, which is what a torn write leaves.
+        let cut = &whole[..whole.len() - "40\trender\n".len()];
+        assert_eq!(decode(cut), vec![tag(TagKind::Definition, "assemble", 12)]);
         assert!(decode("").is_empty());
-        assert!(decode("nonsense\nx\ty\tz\n").len() <= 1);
+        // A line that is not a tag at all is dropped, not decoded into a name.
+        assert!(decode("nonsense\nx\ty\tz\n").is_empty());
     }
 
     #[test]
@@ -520,5 +533,128 @@ mod tests {
             .count();
         assert_eq!(left, 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------------------------------------------- scanning a tree ------
+
+    /// A scratch repository with source in it, and a cache directory of its own.
+    ///
+    /// Real git, because the cache key is git's own blob id and the dirty set is git's
+    /// own answer: a fake index would be a test of this module's opinion of git rather
+    /// than of git. Real source, because the toy fixture the end-to-end suite drives is
+    /// one text file and no grammar claims it.
+    fn planted(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("wecode-codemap-{name}"));
+        let cache = std::env::temp_dir().join(format!("wecode-codemap-{name}-cache"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(&root).expect("a scratch repository");
+
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            git_in(&root, &args);
+        }
+        put(&root, "src/seed.rs", "fn main() {\n    assemble();\n}\n");
+        put(&root, "src/near.rs", "pub fn assemble() -> u8 {\n    7\n}\n");
+        // Error-tolerant on purpose: a worktree mid-edit is exactly when somebody wants
+        // to know what is next to what, and exactly when nothing compiles.
+        put(&root, "src/torn.rs", "fn kept() {}\nfn broken( { ) nonsense\n");
+        // Parsed, and it names nothing. A fact about the file, not a failure.
+        put(&root, "src/quiet.rs", "// nothing but a sentence.\n");
+        // Most of a repository: no grammar claims it.
+        put(&root, "notes.md", "# notes\n");
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "-qm", "source"]);
+        (root, cache)
+    }
+
+    fn put(root: &Path, rel: &str, body: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+        std::fs::write(path, body).expect("a file");
+    }
+
+    fn git_in(root: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    #[test]
+    fn a_tree_is_read_into_names_and_what_it_could_not_read_is_counted() {
+        // FR-04-03. A file no grammar claims and a file that does not compile are both
+        // ordinary, and the difference between them is only visible if both are counted:
+        // a scan that dropped either would report a smaller repository than git has.
+        let (root, cache) = planted("counted");
+        let s = scan_into(&root, &cache).expect("a repository with an index");
+        assert_eq!(s.tally.mapped, 4, "{:?}", s.tally);
+        assert_eq!(s.tally.unmapped, 1, "{:?}", s.tally);
+        assert_eq!(s.tally.silent, 1, "{:?}", s.tally);
+        assert_eq!(s.tally.unreadable, 0, "{:?}", s.tally);
+        // Every file a grammar claimed is in the index, the silent one included.
+        assert_eq!(s.index.files(), 4);
+        let paths: Vec<&str> = s.index.paths().collect();
+        assert!(paths.contains(&"src/quiet.rs"), "{paths:?}");
+        // The half of the broken file that parsed is still a name.
+        assert!(s.index.names() >= 3, "{:?}", s.tally);
+    }
+
+    #[test]
+    fn a_second_scan_of_an_unchanged_tree_parses_nothing() {
+        // NFR-04-PER-01, and the whole reason the scan can run at dispatch rather than
+        // being a command somebody has to remember: a map is stale exactly when nobody
+        // re-ran it. The counter is the assertion — wall time would measure the machine.
+        let (root, cache) = planted("warm");
+        let cold = scan_into(&root, &cache).expect("a cold scan");
+        assert_eq!(cold.tally.parsed, 4, "{:?}", cold.tally);
+        assert_eq!(cold.tally.cached, 0, "{:?}", cold.tally);
+
+        let warm = scan_into(&root, &cache).expect("a warm scan");
+        assert_eq!(warm.tally.parsed, 0, "{:?}", warm.tally);
+        assert_eq!(warm.tally.cached, cold.tally.mapped, "{:?}", warm.tally);
+        // And answers the same, which is the half a counter alone does not prove.
+        assert_eq!(warm.index.names(), cold.index.names());
+        assert_eq!(warm.index.files(), cold.index.files());
+        assert_eq!(warm.tally.silent, cold.tally.silent);
+    }
+
+    #[test]
+    fn a_file_edited_since_the_index_is_parsed_rather_than_recalled() {
+        // The one case a content key would answer wrongly: git's id names the bytes the
+        // file *used* to hold, so an entry stored under it would describe a file that no
+        // longer exists. A tree being edited is the tree whose map has to be current.
+        let (root, cache) = planted("dirty");
+        let seeds = vec!["src/near.rs".to_string()];
+        let cold = scan_into(&root, &cache).expect("a cold scan");
+        let before = wecode_map::rank(&cold.index, &seeds, 10);
+        assert_eq!(before.rows[0].path, "src/seed.rs", "{:?}", before.rows);
+
+        put(&root, "src/near.rs", "pub fn assemble_renamed() {}\n");
+        let after = scan_into(&root, &cache).expect("a scan of the edited tree");
+        // Only the edited file is re-read; the other three still answer from the cache.
+        assert_eq!(after.tally.parsed, 1, "{:?}", after.tally);
+        assert_eq!(after.tally.cached, 3, "{:?}", after.tally);
+
+        // And the map is of the tree as it is now: nothing calls the renamed function,
+        // so the caller that was its neighbour a moment ago is no longer one.
+        let now = wecode_map::rank(&after.index, &seeds, 10);
+        assert!(now.seeded);
+        assert!(now.rows.is_empty(), "{:?}", now.rows);
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_repository_is_not_scanned() {
+        // The envelope drops the section rather than printing a heading over an apology.
+        let dir = std::env::temp_dir().join("wecode-codemap-notrepo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        assert!(scan_into(&dir, &dir.join("cache")).is_none());
     }
 }
