@@ -316,3 +316,7 @@ mod tests {
         assert_eq!(governed(&docs), 1);
     }
 }
+
+/// The name the unit's acceptance pinned before this module chose its
+/// idiomatic spelling: `docs::Stale`. One truth, two names.
+pub type DocStale = Stale;
