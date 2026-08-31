@@ -42,7 +42,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState,
 use ratatui::{DefaultTerminal, Frame};
 use wecode_core::{Plan, Project, ProjectId, TaskId};
 use wecode_org::Company;
-use wecode_store::{AuditLine, AuditQuery, Store, now_secs};
+use wecode_store::{AuditLine, AuditQuery, Execution, Store, now_secs};
 
 use crate::board::{self, Health, Vitals};
 use crate::commands::view::{self, Fold, RowItem, Subject, Tree, caption};
@@ -122,6 +122,9 @@ struct App {
     gates: board::DesignGates,
     plan: Plan,
     audit: Vec<AuditLine>,
+    /// Runs that have not ended yet. Kept beside the plan and ledger because all three
+    /// are one reading of the cockpit, refreshed on the same tick.
+    active_agents: Vec<Execution>,
     /// The screens the operator has open, HOME at the bottom and never empty. A stack
     /// because `esc` means *back*, not *up*: a task opened from a HOME group row belongs
     /// to a project they never visited, and walking them up the is-part-of chain would
@@ -167,6 +170,7 @@ impl App {
             gates: crate::commands::ctx::design_gates(&company, &plan),
             plan,
             audit: store.audit(&AuditQuery::default())?,
+            active_agents: store.unfinished_executions()?,
             known_repos: company.repos.iter().map(|r| r.name.clone()).collect(),
             store,
             company,
@@ -209,15 +213,18 @@ impl App {
         match (
             self.store.load_plan(),
             self.store.audit(&AuditQuery::default()),
+            self.store.unfinished_executions(),
         ) {
-            (Ok(p), Ok(a)) => {
+            (Ok(p), Ok(a), Ok(active)) => {
                 self.gates = crate::commands::ctx::design_gates(&self.company, &p);
                 self.plan = p;
                 self.audit = a;
+                self.active_agents = active;
                 self.rebuild();
             }
-            (Err(e), _) => self.status = format!("reload failed: {e}"),
-            (_, Err(e)) => self.status = format!("reload failed: {e}"),
+            (Err(e), _, _) => self.status = format!("reload failed: {e}"),
+            (_, Err(e), _) => self.status = format!("reload failed: {e}"),
+            (_, _, Err(e)) => self.status = format!("reload failed: {e}"),
         }
         self.last_reload = Instant::now();
     }
@@ -606,8 +613,18 @@ fn draw(f: &mut Frame, app: &mut App) {
     // that middle; the other two are a table, with the ledger under it while `t` holds.
     let screen = app.screen().clone();
     let tailing = app.tail && !matches!(screen, Screen::Task(_));
+    let active_height = if app.active_agents.is_empty() {
+        0
+    } else {
+        u16::try_from(app.active_agents.len())
+            .unwrap_or(u16::MAX)
+            .min(4)
+            // Top and bottom borders, plus the column heading.
+            .saturating_add(3)
+    };
     let areas = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(active_height),
         Constraint::Min(6),
         Constraint::Length(if tailing { TAIL } else { 0 }),
         Constraint::Length(1),
@@ -615,19 +632,67 @@ fn draw(f: &mut Frame, app: &mut App) {
     .split(f.area());
 
     header(f, areas[0], app);
+    if active_height > 0 {
+        active_agents(f, areas[1], app);
+    }
     if let Screen::Task(id) = &screen {
-        page(f, areas[1], app, id);
+        page(f, areas[2], app, id);
     } else {
-        table(f, areas[1], app);
+        table(f, areas[2], app);
         if tailing {
-            tail(f, areas[2], app);
+            tail(f, areas[3], app);
         }
     }
-    footer(f, areas[3], app);
+    footer(f, areas[4], app);
 
     if app.pane == Pane::Help {
         help(f, f.area());
     }
+}
+
+/// The work happening now, visible from every screen. An execution is the durable
+/// source here: task status alone says that work is in flight, but cannot say which
+/// agent, which attempt, or whether two agents are working at once.
+fn active_agents(f: &mut Frame, area: Rect, app: &App) {
+    let now = now_secs();
+    let rows = app.active_agents.iter().take(4).map(|run| {
+        let agent = app
+            .audit
+            .iter()
+            .rev()
+            .find(|line| line.session == run.session)
+            .map_or(run.session.as_str(), |line| line.agent.as_str());
+        let task = app
+            .plan
+            .task(&TaskId::new(&run.task))
+            .map_or(run.task.as_str(), |task| task.title.as_str());
+        Row::new(vec![
+            agent.to_string(),
+            format!("{} #{}", run.task, run.attempt),
+            task.to_string(),
+            run.status.as_str().to_string(),
+            board::ago(now.saturating_sub(run.started)),
+        ])
+    });
+    let widths = [
+        Constraint::Length(16),
+        Constraint::Length(20),
+        Constraint::Min(20),
+        Constraint::Length(14),
+        Constraint::Length(7),
+    ];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(["agent", "task / try", "objective", "state", "age"])
+                .style(Style::new().fg(Color::DarkGray)),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(Color::Cyan))
+                .title(" ACTIVE AGENTS "),
+        );
+    f.render_widget(table, area);
 }
 
 fn header(f: &mut Frame, area: Rect, app: &App) {
@@ -1368,6 +1433,38 @@ mod tests {
         assert_eq!(a.scroll, 0);
         a.key(KeyEvent::from(KeyCode::Char('k')));
         assert_eq!(a.scroll, 0, "and stops at the top");
+    }
+
+    #[test]
+    fn active_agents_stay_on_the_cockpit_until_their_run_ends() {
+        let mut a = app();
+        let id = TaskId::new("keys");
+        let run = a
+            .store
+            .start_execution(&id, "agent-7", None, Some(1234))
+            .unwrap();
+        a.reload();
+
+        let out = render(&mut a, 118, 30);
+        assert!(out.contains("ACTIVE AGENTS"), "{out}");
+        assert!(out.contains("agent-7"), "the session identifies the agent:\n{out}");
+        assert!(out.contains("keys #1"), "the task and attempt are visible:\n{out}");
+        assert!(out.contains("design the cache keys"), "its objective is visible:\n{out}");
+        assert!(out.contains("working"), "its live state is visible:\n{out}");
+
+        a.store
+            .finish_execution(
+                run,
+                wecode_core::ExecutionStatus::Completed,
+                "exit 0",
+                wecode_store::execution::Spend::default(),
+            )
+            .unwrap();
+        a.reload();
+        assert!(
+            !render(&mut a, 118, 30).contains("ACTIVE AGENTS"),
+            "finished work leaves the active panel"
+        );
     }
 
     #[test]
