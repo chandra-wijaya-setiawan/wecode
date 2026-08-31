@@ -54,6 +54,8 @@ pub(crate) fn kind_tag(kind: TaskKind) -> &'static str {
         TaskKind::Spike => "spike",
         TaskKind::Design => "dsgn",
         TaskKind::Docs => "docs",
+        TaskKind::Epic => "EPIC",
+        TaskKind::Story => "story",
     }
 }
 

@@ -30,9 +30,22 @@ pub enum TaskKind {
     /// is not finished when it passes. It is finished when someone signs it.
     Design,
     Docs,
+    /// Aggregating kinds (ADR-0004). They carry no write scope and no
+    /// acceptance of their own: an epic or a story is done when its children
+    /// are. Epic is SCOPE — one objective, decomposed; story is one
+    /// user-visible capability beneath it. A release is a label on work, never
+    /// a container of it.
+    Epic,
+    Story,
 }
 
 impl TaskKind {
+    /// Whether this kind only groups other work. Admission exempts these from
+    /// the scope and acceptance checks, and nothing dispatches them.
+    #[must_use]
+    pub fn aggregates(self) -> bool {
+        matches!(self, Self::Epic | Self::Story)
+    }
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -43,6 +56,8 @@ impl TaskKind {
             Self::Spike => "spike",
             Self::Design => "design",
             Self::Docs => "docs",
+            Self::Epic => "epic",
+            Self::Story => "story",
         }
     }
 
@@ -55,6 +70,8 @@ impl TaskKind {
             "spike" => Self::Spike,
             "design" => Self::Design,
             "docs" | "doc" => Self::Docs,
+            "epic" => Self::Epic,
+            "story" | "user-story" => Self::Story,
             _ => return None,
         })
     }
@@ -66,7 +83,7 @@ impl TaskKind {
     /// deliverable. A design task with no write scope has nothing to show for itself.
     #[must_use]
     pub fn requires_write_scope(self) -> bool {
-        !matches!(self, Self::Spike)
+        !matches!(self, Self::Spike) && !self.aggregates()
     }
 
     /// Whether passing verification finishes the work, or only makes it reviewable.

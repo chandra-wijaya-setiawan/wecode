@@ -260,6 +260,12 @@ pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defec
     let mut out = Vec::new();
     check_statement(&t.title, &mut out);
 
+    // A container (ADR-0004) holds no scope, acceptance or budget of its own —
+    // its children carry those, and asking twice would collide parent with child.
+    if t.kind.aggregates() {
+        return out;
+    }
+
     if t.is_dispatched() && t.acceptance.is_empty() {
         out.push(Defect::MeasureMissing);
     } else if t.is_dispatched() && !t.has_executable_acceptance() {

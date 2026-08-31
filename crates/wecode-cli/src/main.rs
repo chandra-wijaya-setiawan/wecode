@@ -74,7 +74,7 @@ PLAN
   wecode project list
 
   wecode task add <id> --project <p> \"<title>\"
-        --kind <feature|bug|refactor|chore|spike|design|docs>   default: feature
+        --kind <epic|story|feature|bug|refactor|chore|spike|design|docs>   default: feature
         --by <agent|person>      who does the work; default: agent. `manual` and
                                  `human` say person. Not yet recordable — the
                                  store has no column for it, so this is refused
