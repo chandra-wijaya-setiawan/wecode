@@ -3,7 +3,7 @@ class: record
 ---
 # ADR-0003: Grouping is a task kind, not a project
 
-Status: accepted (31 Aug 2026)
+Status: superseded by ADR-0004 (31 Aug 2026)
 
 ## Context
 ADR-0002 made the project a repo's standing container, so grouping needs a new
