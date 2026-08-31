@@ -74,6 +74,7 @@ enum Pane {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Screen {
     Home,
+    Agents,
     Project(ProjectId),
     Task(TaskId),
 }
@@ -82,7 +83,7 @@ impl Screen {
     /// The row this screen was opened from, so `esc` can land the cursor back on it.
     fn subject(&self) -> Option<Subject> {
         match self {
-            Self::Home => None,
+            Self::Home | Self::Agents => None,
             Self::Project(id) => Some(Subject::Project(id.clone())),
             Self::Task(id) => Some(Subject::Task(id.clone())),
         }
@@ -91,6 +92,7 @@ impl Screen {
     fn title(&self) -> String {
         match self {
             Self::Home => "HOME".to_string(),
+            Self::Agents => "ACTIVE AGENTS".to_string(),
             Self::Project(id) => format!("PROJECT {id}"),
             Self::Task(id) => format!("TASK {id}"),
         }
@@ -187,7 +189,8 @@ impl App {
             collapsed: HashSet::new(),
             query: String::new(),
             tail: false,
-            status: "j/k move · / filter · : go to · enter open · ? help · q quit".into(),
+            status: "j/k move · / filter · : go to · v agents · enter open · ? help · q quit"
+                .into(),
             quit: false,
         };
         app.rebuild();
@@ -237,6 +240,11 @@ impl App {
     /// unrolled, each stopped at whatever depth its author wrote out, which is how the
     /// portfolio came to end at root tasks.
     fn rebuild(&mut self) {
+        // ACTIVE AGENTS has no plan rows of its own. Keep the rows and selection of the
+        // screen underneath so leaving the view lands exactly where it was opened.
+        if matches!(self.screen(), Screen::Agents) {
+            return;
+        }
         let selected = self.selected().and_then(|r| r.subject.clone());
         let l = board::ledger_index(&self.audit);
         let tree = Tree {
@@ -274,6 +282,7 @@ impl App {
                     tree.push_project(&mut rows, p, &self.known_repos);
                 }
             }
+            Screen::Agents => unreachable!("handled above"),
             // TASK is a page of the view's own words rather than a table: what a leaf
             // task holds — its runs, its spend, its report — is not rows.
             Screen::Task(_) => {}
@@ -350,14 +359,14 @@ impl App {
         self.show_archived
             || match self.screen() {
                 Screen::Project(id) => self.plan.project(id).is_some_and(|p| p.archived),
-                Screen::Home | Screen::Task(_) => false,
+                Screen::Home | Screen::Agents | Screen::Task(_) => false,
             }
     }
 
     fn move_by(&mut self, delta: isize) {
         // A page of words has no selection to move, so the same keys move the page: `j`
         // is *next* on every screen, and what is next on a page is the line below.
-        if matches!(self.screen(), Screen::Task(_)) {
+        if matches!(self.screen(), Screen::Task(_) | Screen::Agents) {
             self.scroll = self
                 .scroll
                 .saturating_add_signed(if delta > 0 { 1 } else { -1 });
@@ -558,9 +567,16 @@ impl App {
                 self.reload();
                 self.status = "reloaded".into();
             }
-            KeyCode::Char('/') if !matches!(self.screen(), Screen::Task(_)) => self.ask(),
-            // TASK is a page with no rows to narrow, so the only search that means
-            // anything there is the one `:` asks anyway.
+            KeyCode::Char('v') if !matches!(self.screen(), Screen::Agents) => {
+                self.open(Screen::Agents);
+            }
+            KeyCode::Char('/')
+                if !matches!(self.screen(), Screen::Task(_) | Screen::Agents) =>
+            {
+                self.ask();
+            }
+            // TASK and ACTIVE AGENTS have no plan rows to narrow, so the only search
+            // that means anything there is the one `:` asks anyway.
             KeyCode::Char('/' | ':') => {
                 self.stack.push(Screen::Home);
                 self.ask();
@@ -612,8 +628,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     // and only the middle of it is the screen. TASK is one page and takes the whole of
     // that middle; the other two are a table, with the ledger under it while `t` holds.
     let screen = app.screen().clone();
-    let tailing = app.tail && !matches!(screen, Screen::Task(_));
-    let active_height = if app.active_agents.is_empty() {
+    let tailing = app.tail && !matches!(screen, Screen::Task(_) | Screen::Agents);
+    let active_height = if app.active_agents.is_empty() || matches!(screen, Screen::Agents) {
         0
     } else {
         u16::try_from(app.active_agents.len())
@@ -635,12 +651,14 @@ fn draw(f: &mut Frame, app: &mut App) {
     if active_height > 0 {
         active_agents(f, areas[1], app);
     }
-    if let Screen::Task(id) = &screen {
-        page(f, areas[2], app, id);
-    } else {
-        table(f, areas[2], app);
-        if tailing {
-            tail(f, areas[3], app);
+    match &screen {
+        Screen::Task(id) => page(f, areas[2], app, id),
+        Screen::Agents => agents_page(f, areas[2], app),
+        Screen::Home | Screen::Project(_) => {
+            table(f, areas[2], app);
+            if tailing {
+                tail(f, areas[3], app);
+            }
         }
     }
     footer(f, areas[4], app);
@@ -654,8 +672,25 @@ fn draw(f: &mut Frame, app: &mut App) {
 /// source here: task status alone says that work is in flight, but cannot say which
 /// agent, which attempt, or whether two agents are working at once.
 fn active_agents(f: &mut Frame, area: Rect, app: &App) {
+    agents_table(f, area, app, Some(4));
+}
+
+/// Every run still in flight, reached with `v` from any screen.
+fn agents_page(f: &mut Frame, area: Rect, app: &App) {
+    if app.active_agents.is_empty() {
+        f.render_widget(
+            Paragraph::new("no active agents")
+                .block(Block::default().borders(Borders::ALL).title(" ACTIVE AGENTS ")),
+            area,
+        );
+    } else {
+        agents_table(f, area, app, None);
+    }
+}
+
+fn agents_table(f: &mut Frame, area: Rect, app: &App, limit: Option<usize>) {
     let now = now_secs();
-    let rows = app.active_agents.iter().take(4).map(|run| {
+    let rows = app.active_agents.iter().take(limit.unwrap_or(usize::MAX)).map(|run| {
         let agent = app
             .audit
             .iter()
@@ -892,6 +927,7 @@ fn help(f: &mut Frame, area: Rect) {
         Line::from("g / G        first / last".to_string()),
         Line::from("/            narrow this screen to what answers".to_string()),
         Line::from(":            go to anything, from anywhere".to_string()),
+        Line::from("v            open active agents".to_string()),
         Line::from("t            show or hide the ledger as it is written".to_string()),
         Line::from("a            show or hide what is filed away".to_string()),
         Line::from("r            reload now".to_string()),
@@ -1465,6 +1501,21 @@ mod tests {
             !render(&mut a, 118, 30).contains("ACTIVE AGENTS"),
             "finished work leaves the active panel"
         );
+    }
+
+    #[test]
+    fn v_opens_active_agents_and_back_returns_to_the_same_place() {
+        let mut a = app();
+        select(&mut a, &leaf("keys"));
+        let selected = a.selected().and_then(|row| row.subject.clone());
+
+        a.key(KeyEvent::from(KeyCode::Char('v')));
+        assert_eq!(a.screen(), &Screen::Agents);
+        assert!(render(&mut a, 118, 24).contains("no active agents"));
+
+        a.key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(a.screen(), &Screen::Home);
+        assert_eq!(a.selected().and_then(|row| row.subject.clone()), selected);
     }
 
     #[test]
