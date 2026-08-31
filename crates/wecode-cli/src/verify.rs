@@ -202,6 +202,15 @@ impl Verdict {
         self.checks.iter().filter(|c| c.missing()).collect()
     }
 
+    /// Documents this verdict's diff left behind — see [`wecode_core::docs`].
+    ///
+    /// A finding beside [`Verdict::violations`] and unlike one in what follows it: a bad
+    /// write stands in the tree to be held back, so it earns a [`git::refuse`] note; an
+    /// absence has nothing to sanction. It is recorded, and that is all a record needs.
+    pub(crate) fn stale(&self) -> &[docs::Stale] {
+        self.changed.as_ref().map_or(&[], |c| &c.stale[..])
+    }
+
     /// Everything that had to hold, including the one an agent can satisfy by doing
     /// nothing at all.
     ///
@@ -216,15 +225,6 @@ impl Verdict {
     /// asked*, and since that changes with the invocation, [`verdict`] says which was
     /// asked. Passing nothing is not among them: an empty check list is not a pass for
     /// anyone, and what follows on a task nobody dispatched is [`Outcome`]'s.
-    /// Documents this verdict's diff left behind — see [`wecode_core::docs`].
-    ///
-    /// A finding beside [`Verdict::violations`] and unlike one in what follows it: a bad
-    /// write stands in the tree to be held back, so it earns a [`git::refuse`] note; an
-    /// absence has nothing to sanction. It is recorded, and that is all a record needs.
-    pub(crate) fn stale(&self) -> &[docs::Stale] {
-        self.changed.as_ref().map_or(&[], |c| &c.stale[..])
-    }
-
     pub(crate) fn passed(&self) -> bool {
         self.violations.is_empty()
             && self.stale().is_empty()
@@ -307,6 +307,7 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Option<Changed>, git::G
     let mut delegated = Vec::new();
     let mine = format!("{id}: attempt");
     let owns = owns_the_tree(dir, id);
+    let mut frozen = None;
     for (sha, subject) in git::attempts_on(dir)? {
         let ours = subject.starts_with(&mine);
         // Its own attempts are its own diff first, whatever else is true of the
@@ -321,6 +322,8 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Option<Changed>, git::G
         if theirs {
             delegated.extend(files);
         } else {
+            // Newest first, so the first of its own is where this run's diff stops.
+            frozen.get_or_insert(sha);
             all.extend(files);
         }
     }
@@ -333,7 +336,13 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Option<Changed>, git::G
     delegated.retain(|p| !all.contains(p));
     // This task's diff only: a step was judged against its own scope, page included, and
     // charging a parent for its children's coupling is the same error as `delegated`.
-    let stale = docs::stale(&governing(dir), &all, &glob::any_matches);
+    // Both halves at one revision — the run's own last attempt, or the tree it is still
+    // standing in when it has not committed one yet.
+    let stale = docs::stale(
+        &governing(dir, frozen.as_deref().unwrap_or("HEAD")),
+        &all,
+        &glob::any_matches,
+    );
     Ok(Some(Changed {
         dir: dir.to_path_buf(),
         paths: all,
@@ -343,17 +352,33 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Option<Changed>, git::G
     }))
 }
 
-/// Every document in this tree that might govern something, parsed.
+/// Every document that might govern something, as the run's diff left it — read at `at`
+/// rather than off the disk, which is the whole of this function's job.
 ///
-/// The file reading is here because core opens none: it parses text and joins two path
-/// lists, and a document is this repository's file. Tracked pages only — an untracked one
-/// is not yet part of the tree it would be speaking for.
-fn governing(dir: &Path) -> Vec<docs::Doc> {
-    git::tracked_files(dir)
+/// The changed half of the join is frozen: [`changed`] rebuilds it out of the run's own
+/// attempt commits, so it says the same thing an hour later or a week later. A document
+/// half read live off the branch does not. A `subject:` widened after the run refuses it
+/// for coupling it never created — the one thing the diff form was chosen to make
+/// impossible — and one narrowed after it quietly excuses one. Both halves come from a
+/// single revision, or the verdict is a fact about when somebody asked.
+///
+/// A page the run itself wrote needs no special case: it is in the diff, and a document
+/// in the diff is exempt whatever it declares.
+///
+/// The reading is here because core opens none — it parses text and joins two path lists,
+/// and a document is this repository's file. Through `git` directly rather than
+/// [`crate::git`]: a blob at a revision is this one call's need, and the tree it wants is
+/// not the tree on disk that every other reader there means.
+fn governing(dir: &Path, at: &str) -> Vec<docs::Doc> {
+    let read = |args: &[&str]| {
+        let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+        (out.status.success()).then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    read(&["ls-tree", "-r", "--name-only", at])
         .unwrap_or_default()
-        .iter()
+        .lines()
         .filter(|p| p.ends_with(".md"))
-        .filter_map(|p| Some(docs::parse(p, &std::fs::read_to_string(dir.join(p)).ok()?)))
+        .filter_map(|p| Some(docs::parse(p, &read(&["show", &format!("{at}:{p}")])?)))
         .collect()
 }
 
@@ -1551,50 +1576,8 @@ mod tests {
         assert!(!out.contains("not run"), "{out}");
     }
 
-    // ------------------------------------------- documentation that stayed put ------
-
-    /// A tree carrying a committed page that declares what it governs. Committed
-    /// because an untracked page speaks for nothing — [`governing`] reads the index.
-    fn with_page(name: &str, body: &str) -> std::path::PathBuf {
-        let dir = worktree(name);
-        write(&dir, "docs/cache.md", body);
-        git_here(&dir, &["add", "-A"]);
-        git_here(&dir, &["commit", "-qm", "the page, before anybody moved it"]);
-        dir
-    }
-
-    const GOVERNS_SRC: &str = "---\nclass: hand-tended\nsubject: [src/**]\n---\n\nthe cache\n";
-
-    #[test]
-    fn a_diff_that_left_its_governing_document_behind_is_refused_and_says_which() {
-        // The whole point, off a real tree: the page named `src/**`, the work changed
-        // `src/cache.rs`, and nobody opened the page. The acceptance is green, which is
-        // the shape of the failure — a repository's own suite says nothing about a page.
-        let dir = with_page("stale-doc", GOVERNS_SRC);
-        write(&dir, "src/cache.rs", "fn evict() {}\n");
-        let task = Task::new("t1", "caching", "trim the cache").scoped(scope(&["src/**"]));
-        let v = judged(&[cmd("true")], read(&dir, "t1"), &task.scope);
-        let out = verdict(&task, &task.id, &dir, &v, TaskStatus::Failed);
-
-        assert_eq!(v.stale()[0].doc, "docs/cache.md");
-        assert!(v.violations.is_empty(), "nothing was written out of scope");
-        assert!(!v.passed(), "green acceptance over a page nobody opened");
-        assert!(out.contains("docs/cache.md did not move with src/cache.rs"), "{out}");
-        assert!(out.contains("there is no waiver"), "{out}");
-    }
-
-    #[test]
-    fn moving_the_document_with_it_is_all_that_is_asked() {
-        // The other half, and the whole modesty of the gate: a one-word edit satisfies
-        // it. Form is design-check.sh's business and substance is a signature's; what is
-        // left for a machine is the join. A page declaring nothing is the same silence,
-        // and `wecode_core::docs` asserts that half.
-        let dir = with_page("fresh-doc", GOVERNS_SRC);
-        write(&dir, "src/cache.rs", "fn evict() {}\n");
-        write(&dir, "docs/cache.md", &format!("{GOVERNS_SRC}\nand what it evicts.\n"));
-
-        let v = judged(&[cmd("true")], read(&dir, "t1"), &scope(&["src/**", "docs/**"]));
-        assert!(v.stale().is_empty(), "{:?}", v.stale());
-        assert!(v.passed(), "{v:?}");
-    }
+    // The doc gate's own tests are in `tests/cli.rs`. They moved there when [`governing`]
+    // started reading a revision rather than the disk: what the gate now claims is that
+    // the verdict does not move when the tree does, and only the whole command run twice
+    // over one real branch can say whether that holds.
 }
