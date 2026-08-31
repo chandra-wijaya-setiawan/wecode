@@ -40,6 +40,8 @@ Provisional and slice-local.
 | FR-07-08 | export | Each record type exports to markdown at a declared path |
 | FR-07-09 | export | The export is one-way: the store is written, the file is generated |
 | FR-07-10 | report | The requirement-status table is generated from the links, not from task ids |
+| FR-07-11 | template | The markdown a record exports to is produced from a **template**, not from formatting hardcoded in the exporter |
+| FR-07-12 | template | Templates resolve project-first: the project's own template if it declares one, else the workspace default, else the one shipped with wecode |
 
 **Non-functional**
 
@@ -84,7 +86,28 @@ model does not need the store to understand branches.
 The record holds the current text. Exporting and committing makes the commit the version, which
 is what a hand-maintained baseline-history table is doing today.
 
-### 5.4 What the supersede edge buys
+### 5.4 Where a template lives, and why not in the consuming repository
+
+A template is the shape of an exported document, so it belongs with the exporter, not with the
+thing exported. Today every consuming repository carries its own copy — STETSS has four under
+`specs/_TEMPLATE-*.md` and this repository has its own — and six worktrees of one repository each
+carried a copy of the playbook, which diverged silently until someone diffed them.
+
+Three levels, most specific winning:
+
+| Level | Path | For |
+|---|---|---|
+| project | declared by the project record | A project whose documents genuinely differ |
+| workspace | `~/.wecode/workspaces/<org>/templates/` | The house style across an org's projects |
+| built-in | shipped with the binary | What a new workspace starts from |
+
+The consuming repository holds **no** template, because it holds no authority over the shape of
+a generated file. What it holds is the export, and the round-trip gate keeps that honest.
+
+This is the same argument as the records themselves, one level up: a template copied into six
+places is six copies with no check between them.
+
+### 5.5 What the supersede edge buys
 
 Today a supersede is a hand-edited `Status:` line, so nothing prevents ADR 0012 claiming 0013
 superseded it while 0013 never mentions 0012. As an edge the chain cannot contradict itself, and
@@ -106,6 +129,7 @@ superseded it while 0013 never mentions 0012. As an edge the chain cannot contra
 | A2 | Last-write-wins is acceptable for a team of three | Needs the record lock §6 defers. The failure is silent: one person's edit disappears |
 | A3 | Existing `requirements.md` files can be parsed into records | Migration becomes manual; the tables are regular enough that this looks safe |
 | A4 | Requirement ids stay unique within a story | They are today (`FR-54-nn`); a project-wide baseline would need re-scoping |
+| A5 | Three levels of template resolution are enough | A fourth — per story — would mean two stories in one project exporting different shapes, which is a divergence rather than a need |
 
 ## 8. Decisions
 
@@ -116,6 +140,7 @@ superseded it while 0013 never mentions 0012. As an edge the chain cannot contra
 | ADR owned by the repo, not a story | A decision spans stories; filing it under one is arbitrary | §5.2 |
 | One-way export with a round-trip gate | Two writers on one artifact is the defect STETSS #76 is built around; do not build it in here | NFR-07-CI-01 |
 | Baseline is a column | Raising a baseline is a deliberate act. Without the field, a requirement would just change | FR-07-01 |
+| Templates resolve project → workspace → built-in | Projects differ; a single global template forces the wrong shape on one of them, and a per-repository copy is the divergence this whole spec exists to remove | §5.4 |
 
 ## 9. References
 
