@@ -65,6 +65,8 @@ const TAIL: u16 = 7;
 enum Pane {
     Board,
     Help,
+    /// Waiting for the screen name after the `v` (view) prefix.
+    View,
     /// The query line has the keys: every character narrows what is on screen.
     Query,
 }
@@ -189,7 +191,7 @@ impl App {
             collapsed: HashSet::new(),
             query: String::new(),
             tail: false,
-            status: "j/k move · / filter · : go to · v agents · enter open · ? help · q quit"
+            status: "j/k move · / filter · : go to · v view · enter open · ? help · q quit"
                 .into(),
             quit: false,
         };
@@ -530,6 +532,19 @@ impl App {
             self.pane = Pane::Board;
             return;
         }
+        if self.pane == Pane::View {
+            self.pane = Pane::Board;
+            match k.code {
+                KeyCode::Char('a') if !matches!(self.screen(), Screen::Agents) => {
+                    self.open(Screen::Agents);
+                }
+                KeyCode::Char('h') if !matches!(self.screen(), Screen::Home) => {
+                    self.open(Screen::Home);
+                }
+                _ => self.status = "view: a agents · h home".into(),
+            }
+            return;
+        }
         if self.pane == Pane::Query {
             self.typing(k);
             return;
@@ -567,8 +582,9 @@ impl App {
                 self.reload();
                 self.status = "reloaded".into();
             }
-            KeyCode::Char('v') if !matches!(self.screen(), Screen::Agents) => {
-                self.open(Screen::Agents);
+            KeyCode::Char('v') => {
+                self.pane = Pane::View;
+                self.status = "view: a agents · h home".into();
             }
             KeyCode::Char('/')
                 if !matches!(self.screen(), Screen::Task(_) | Screen::Agents) =>
@@ -927,7 +943,8 @@ fn help(f: &mut Frame, area: Rect) {
         Line::from("g / G        first / last".to_string()),
         Line::from("/            narrow this screen to what answers".to_string()),
         Line::from(":            go to anything, from anywhere".to_string()),
-        Line::from("v            open active agents".to_string()),
+        Line::from("v a          open active agents".to_string()),
+        Line::from("v h          open home".to_string()),
         Line::from("t            show or hide the ledger as it is written".to_string()),
         Line::from("a            show or hide what is filed away".to_string()),
         Line::from("r            reload now".to_string()),
@@ -1504,18 +1521,34 @@ mod tests {
     }
 
     #[test]
-    fn v_opens_active_agents_and_back_returns_to_the_same_place() {
+    fn v_a_opens_active_agents_and_back_returns_to_the_same_place() {
         let mut a = app();
         select(&mut a, &leaf("keys"));
         let selected = a.selected().and_then(|row| row.subject.clone());
 
         a.key(KeyEvent::from(KeyCode::Char('v')));
+        assert_eq!(a.screen(), &Screen::Home);
+        a.key(KeyEvent::from(KeyCode::Char('a')));
         assert_eq!(a.screen(), &Screen::Agents);
         assert!(render(&mut a, 118, 24).contains("no active agents"));
 
         a.key(KeyEvent::from(KeyCode::Esc));
         assert_eq!(a.screen(), &Screen::Home);
         assert_eq!(a.selected().and_then(|row| row.subject.clone()), selected);
+    }
+
+    #[test]
+    fn v_h_opens_home_and_back_returns_to_the_same_place() {
+        let mut a = app();
+        a.open(onto("layer"));
+
+        a.key(KeyEvent::from(KeyCode::Char('v')));
+        assert_eq!(a.screen(), &onto("layer"));
+        a.key(KeyEvent::from(KeyCode::Char('h')));
+        assert_eq!(a.screen(), &Screen::Home);
+
+        a.key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(a.screen(), &onto("layer"));
     }
 
     #[test]
