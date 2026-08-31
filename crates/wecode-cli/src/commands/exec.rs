@@ -600,15 +600,14 @@ pub(crate) fn serve(a: &Args) -> Res {
             print!("{}", notify::on_digest(&company, ws.root(), &blocked, &gated));
         }
 
-        if !blocked.is_empty() {
-            // Printed every pass, and announced on none of them: each of these was
-            // announced as it stopped, by whatever wrote the status. This is the
-            // standing condition, and a notification per tick is a notifier nobody
-            // leaves switched on.
-            for t in blocked.iter().take(3) {
-                println!("  ⏸ {} needs you — {}", t.id, t.status.as_str());
-            }
-        } else {
+        // Reporting is NOT an alternative to dispatching: one stuck task used to
+        // starve the queue. Nothing runs unsigned anyway — the playbook and the
+        // charter decide that, not this branch.
+        for t in blocked.iter().take(3) {
+            println!("  ⏸ {} needs you — {}", t.id, t.status.as_str());
+        }
+
+        {
             // Named every pass, like the tasks that need an answer: the queue standing
             // still because nobody has signed is the operator's business, and a silent
             // idle loop looks like a loop with nothing to do.

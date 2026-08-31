@@ -1,34 +1,5 @@
 //! The cockpit: **one application whose screens call each other**. HOME is the whole
 //! portfolio under the four attention groups; `enter` opens PROJECT, that project's task
-//! tree to the leaves; `enter` again opens TASK, one task in full — what it waits on,
-//! what it is doing, what each attempt cost, the report it landed, its incidents. The
-//! chain is drawn out in `docs/reference/commands.md`.
-//!
-//! `enter` opens what the cursor is on and `esc` goes back to the row it was opened
-//! from. No screen is reachable only by quitting and starting again with a different
-//! command, and no screen is a flag: that is the whole of the difference between this
-//! and three views that happen to share a renderer. Everything else — the fold set, the
-//! archived toggle, the query, the selection — survives the move, because a screen is a
-//! place in one application rather than a program of its own.
-//!
-//! Same four columns wherever there is a table — what · status · spend · needs-you.
-//! Health is computed from ground truth (see [`crate::board`]), never reported by an
-//! agent; it is the colour of the needs-you cell rather than a column, every cause of
-//! amber or red already writing an entry there.
-//!
-//! HOME **opens on the same four attention groups the snapshot leads with**, drawn from
-//! [`board::attention_groups`] where `wecode board` gets its own — so a cockpit left
-//! open on a desk and a snapshot read on a phone cannot disagree about what needs
-//! somebody. The tree under them is the whole one, subtasks and their subtasks
-//! included, and a row with work beneath it folds shut: what is not on screen is what
-//! the operator put away, never what the view decided to omit.
-//!
-//! Reloads from the store on a tick, so it tracks state as it changes.
-//!
-//! An **instrument** rather than a display: `/` narrows the screen to what answers a
-//! question, `:` asks it of the whole workspace and opens what it finds, and `t` puts the
-//! ledger as it is written under the table — reaching one row out of a plan too long to
-//! read, or watching what an agent is doing without leaving where you are.
 
 use std::collections::HashSet;
 use std::io;
@@ -267,10 +238,6 @@ impl App {
                 };
                 // The four questions, then the shape of the plan — the order the
                 // snapshot prints them in, and for the same reason. Skipped when there
-                // is nothing at all, so an empty workspace still falls through to the
-                // line saying how to start one rather than to four headings over none.
-                // Skipped under a query too: the groups are the same leaves read a
-                // second way, so a narrowed HOME would answer with one task twice.
                 if !projects.is_empty() && self.query.is_empty() {
                     tree.push_attention(&mut rows, &projects);
                     rows.push(caption("PORTFOLIO"));
@@ -598,8 +565,6 @@ impl App {
                 self.ask();
             }
             // The ledger as it is written, under the table, and away again with the same
-            // key: what an agent is doing is worth rows the tree wants, but only while
-            // somebody is watching it happen.
             KeyCode::Char('t') => self.tail = !self.tail,
             KeyCode::Char('?') => self.pane = Pane::Help,
             _ => {}
@@ -641,8 +606,6 @@ fn needs_span(v: &Vitals) -> Span<'static> {
 
 fn draw(f: &mut Frame, app: &mut App) {
     // The same header and footer on every screen, because the frame is the application
-    // and only the middle of it is the screen. TASK is one page and takes the whole of
-    // that middle; the other two are a table, with the ledger under it while `t` holds.
     let screen = app.screen().clone();
     let tailing = app.tail && !matches!(screen, Screen::Task(_) | Screen::Agents);
     let active_height = if app.active_agents.is_empty() || matches!(screen, Screen::Agents) {
@@ -687,64 +650,8 @@ fn draw(f: &mut Frame, app: &mut App) {
 /// The work happening now, visible from every screen. An execution is the durable
 /// source here: task status alone says that work is in flight, but cannot say which
 /// agent, which attempt, or whether two agents are working at once.
-fn active_agents(f: &mut Frame, area: Rect, app: &App) {
-    agents_table(f, area, app, Some(4));
-}
-
-/// Every run still in flight, reached with `v` from any screen.
-fn agents_page(f: &mut Frame, area: Rect, app: &App) {
-    if app.active_agents.is_empty() {
-        f.render_widget(
-            Paragraph::new("no active agents")
-                .block(Block::default().borders(Borders::ALL).title(" ACTIVE AGENTS ")),
-            area,
-        );
-    } else {
-        agents_table(f, area, app, None);
-    }
-}
-
-fn agents_table(f: &mut Frame, area: Rect, app: &App, limit: Option<usize>) {
-    let now = now_secs();
-    let rows = app.active_agents.iter().take(limit.unwrap_or(usize::MAX)).map(|run| {
-        let agent = app
-            .audit
-            .iter()
-            .rev()
-            .find(|line| line.session == run.session)
-            .map_or(run.session.as_str(), |line| line.agent.as_str());
-        let task = app
-            .plan
-            .task(&TaskId::new(&run.task))
-            .map_or(run.task.as_str(), |task| task.title.as_str());
-        Row::new(vec![
-            agent.to_string(),
-            format!("{} #{}", run.task, run.attempt),
-            task.to_string(),
-            run.status.as_str().to_string(),
-            board::ago(now.saturating_sub(run.started)),
-        ])
-    });
-    let widths = [
-        Constraint::Length(16),
-        Constraint::Length(20),
-        Constraint::Min(20),
-        Constraint::Length(14),
-        Constraint::Length(7),
-    ];
-    let table = Table::new(rows, widths)
-        .header(
-            Row::new(["agent", "task / try", "objective", "state", "age"])
-                .style(Style::new().fg(Color::DarkGray)),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::new().fg(Color::Cyan))
-                .title(" ACTIVE AGENTS "),
-        );
-    f.render_widget(table, area);
-}
+mod agents;
+use agents::{active_agents, agents_page};
 
 fn header(f: &mut Frame, area: Rect, app: &App) {
     let line = Line::from(vec![
@@ -801,9 +708,6 @@ fn table(f: &mut Frame, area: Rect, app: &mut App) {
             let spend = r.vitals.as_ref().map_or_else(String::new, spend_text);
             let needs = r.vitals.as_ref().map_or_else(|| Span::raw(""), needs_span);
             // A project names itself in bold cyan; a task is plain and connected by a
-            // tree glyph, so the two levels are told apart without reading. The title is
-            // deliberately not here — at this width it truncated to noise, and the pane
-            // below carries it in full.
             let what = if r.subject.is_none() {
                 // Grey: a heading is a place on the screen, not a thing to act on.
                 Line::from(r.label.clone().fg(Color::DarkGray))
@@ -845,8 +749,6 @@ fn table(f: &mut Frame, area: Rect, app: &mut App) {
 
     if app.rows.is_empty() {
         // An empty screen has two causes, one of them the operator's own doing: saying
-        // how to start a workspace to somebody who has just mistyped a filter is what
-        // makes a narrowing look like a crash.
         f.render_widget(
             Paragraph::new(if app.query.is_empty() {
                 "no projects yet — wecode project add <id> --repo <name> \"<objective>\"".into()
@@ -994,10 +896,6 @@ fn event_loop(
 
         // One draw per burst of keys, not one key per draw. A held `j` repeats around
         // thirty times a second and a full-frame draw is slower than that, so reading a
-        // single event per pass let the queue grow without bound: the cursor kept moving
-        // for as long after the key came up as the operator had held it down. Once the
-        // blocking poll says there is something, everything already waiting is applied
-        // first and the frame drawn once, over the state all of it left behind.
         if event::poll(POLL)? {
             loop {
                 match event::read()? {
@@ -1270,12 +1168,6 @@ mod tests {
     fn the_frame_says_whose_workspace_this_is_and_draws_the_tree_whole() {
         // The four columns, the two dropped for only ever repeating them, and the words
         // around the table — which screen, whose company, which row is the project and
-        // what code it works on. Then the tree all the way down: it stopped at root
-        // tasks, and the work actually being done is usually a leaf.
-        //
-        // `salt` sorts after `keys` on purpose: the store loads non-root tasks in id
-        // order, so a grandchild whose id sorts before its parent's cannot be read back.
-        // That is a gap in `wecode-store`, recorded in features.md.
         let mut a = app();
         a.store
             .save_task(&task("salt", "pick the salt", "crates/cache/salt.rs").under("keys"))

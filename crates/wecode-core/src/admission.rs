@@ -1,13 +1,4 @@
 //! The admission gate: is this well enough formed to be worked on?
-//!
-//! Every check is decided by inspecting values and the plan. Nothing calls a model.
-//! That is the point — a gate that sometimes says yes for reasons nobody can
-//! reproduce is not a gate.
-//!
-//! Two layers, and the second is not the first with a flag on it. A [`Defect`] is a
-//! reason work cannot start; a [`Divergence`] is a workable declaration that is not
-//! what the project's own guidance would have written — see [`advise`] for why that
-//! had to be a separate verdict rather than a defect that declines to block.
 
 use crate::common::Measure;
 use crate::id::{ProjectId, TaskId};
@@ -124,9 +115,6 @@ impl Defect {
                  Narrow one, or make this depend on it."
             ),
             // The same defect, said so it survives the reader not having the other
-            // project on screen — an id alone reads as a task missing from their own
-            // board. Both repairs still hold across the boundary: a dependency may
-            // name any task in the plan, whatever project it belongs to.
             Self::ScopeOverlaps {
                 with,
                 glob,
