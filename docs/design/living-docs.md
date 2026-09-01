@@ -55,3 +55,25 @@ consumes the fields (never grep, which comments have already fooled):
 `docs-first` (#006) builds this: a parser in core (the org crate's sibling —
 hand-authored records, machine-validated), verify consuming fields. Prose
 survives inside fields; structure decides.
+
+## Templates make structure enforceable (owner, 1 Sep)
+A document's shape can only be enforced where it is declared, so both
+story-level documents are templates, resolved project → workspace → built-in
+(the order spec templates already use):
+
+  ~/.wecode/workspaces/<org>/templates/story-design.md   canonical shape
+  ~/.wecode/workspaces/<org>/templates/story-report.md
+  <repo>/.wecode/templates/*.md                          overrides only
+
+Grounding, read rather than recalled: ISO/IEC/IEEE 15289:2019 §10.15 Design
+description, §10.3 Acceptance report, §10.74 Verification report;
+DI-IPSC-81435A (SDD) §3–6 for the design's section list; DI-IPSC-81440A
+(Software Test Report) §3–5 for the report's, including its rule that an
+assessment states each remaining deficiency WITH its impact; NASA NPR 7150.2D
+[SWE-034] (acceptance criteria are defined and documented) and [SWE-194] (every
+requirement met or DISPOSITIONED before delivery) — the close gate, mandated
+elsewhere long before we wanted it.
+
+Every section is marked [gen] or authored. The report is generated entirely
+except three prose sections, because the restated requirement text is precisely
+what rotted in the wt-53 slice.
