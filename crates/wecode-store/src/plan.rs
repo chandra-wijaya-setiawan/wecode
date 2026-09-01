@@ -119,6 +119,7 @@ impl Store {
         // Tasks arrive parent-before-child and prerequisite-before-dependent, so
         // `Plan`'s own checks can run on insert. Ordering by parent then id gets
         // parents first; dependencies are attached afterwards for the same reason.
+        let mut deferred_parents: Vec<(TaskId, TaskId)> = Vec::new();
         let mut stmt = self.conn().prepare(
             "SELECT id, project_id, kind, doer, title, parent_id, status, assignee,
                     budget_tokens, budget_wall, archived
@@ -186,7 +187,23 @@ impl Store {
             t.archived = archived != 0;
             t.acceptance = self.measures(&MeasureTable::Task, &id)?;
             t.scope = self.scope(&id)?;
+            // Parents last, for the same reason dependencies are: a child may
+            // sort before its parent (`req-rows` before `requirements-table`),
+            // and inserting it first aborted the whole load — every read of the
+            // plan failed until the row was repaired by hand (1 Sep 2026).
+            let parent = t.parent.take();
             plan.add_task(t).map_err(structural)?;
+            if let Some(p) = parent {
+                deferred_parents.push((TaskId::new(id.clone()), p));
+            }
+        }
+
+        for (child, parent) in deferred_parents {
+            let mut t = plan.task(&child).cloned().ok_or_else(|| {
+                structural(wecode_core::PlanError::NoSuchTask(child.clone()))
+            })?;
+            t.parent = Some(parent);
+            plan.update_task(t).map_err(structural)?;
         }
 
         // Dependencies last: both endpoints must already be present.
