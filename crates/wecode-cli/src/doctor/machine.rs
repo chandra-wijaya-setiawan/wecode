@@ -541,6 +541,7 @@ mod tests {
         let check = repository(&Repo {
             name: "app".to_string(),
             path: dir.to_string_lossy().into_owned(),
+            installs: None,
         });
         assert!(!check.outcome.is_broken(), "{check:?}");
         assert!(check.outcome.note().contains("wecode-doctor-repo"), "{check:?}");
@@ -554,6 +555,7 @@ mod tests {
         let check = repository(&Repo {
             name: "app".to_string(),
             path: "~/projects/definitely-not-a-repo-9f3a".to_string(),
+            installs: None,
         });
         assert!(check.outcome.is_broken(), "{check:?}");
         assert!(check.outcome.note().contains("is not there"), "{check:?}");
@@ -567,6 +569,7 @@ mod tests {
         let check = repository(&Repo {
             name: "app".to_string(),
             path: dir.to_string_lossy().into_owned(),
+            installs: None,
         });
         assert!(check.outcome.is_broken(), "{check:?}");
         assert!(
@@ -586,6 +589,7 @@ mod tests {
         let check = repository(&Repo {
             name: "app".to_string(),
             path: file.to_string_lossy().into_owned(),
+            installs: None,
         });
         assert!(check.outcome.is_broken(), "{check:?}");
         assert!(check.outcome.note().contains("is not there"), "{check:?}");

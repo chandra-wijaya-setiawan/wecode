@@ -8,6 +8,7 @@ mod commands;
 mod doctor;
 mod git;
 mod handoff;
+mod install;
 mod ledger;
 mod map;
 mod notify;
@@ -144,7 +145,12 @@ WORK
   wecode merge <task>                  land it on the integration branch, and report
         the worktree comes down once nothing still works in it; the branch stays
         the report is committed to docs/wecode/<task>/report.md, on the target
+        a repo with `installs` set also gets its executable built from the merge
+        commit and moved to that path — reported, and unable to fail the merge
   wecode rollback <task>               revert that merge; the report says when to
+  wecode install [--repo <name>]       build the integration branch and install what
+        it produces, at the `installs` path in company.toml. The same step a merge
+        runs: for the first install, and for retrying one a merge declined
   wecode worktree                      list them, grouped by repository
   wecode worktree remove <task|path>   take one down (--force if dirty)
         a path reaches the trees no task can: an orphan's, and the merge scratch
@@ -214,6 +220,7 @@ fn run(a: &Args) -> Res {
         ("verify", _) => verify_task(a),
         ("merge", _) => merge_task(a),
         ("rollback", _) => rollback_task(a),
+        ("install", _) => install_now(a),
         ("run", _) => run_task(a),
         ("cost", _) => cost(a),
         ("tick", _) => tick(a),
