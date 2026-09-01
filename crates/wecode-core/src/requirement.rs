@@ -8,31 +8,37 @@ use crate::{Defect, Plan, Task, TaskId, TaskKind};
 /// A task against the obligations its project has stated (ADR-0005).
 ///
 /// A gate beside [`check_task`] on [`check_refusals`]'s terms, and for the same reason:
-/// what it needs is not in the plan. Requirements are ledger rows, and core reads no
-/// database any more than it reads a file — so the handles are handed in, by the one
-/// command group that has them, wherever a requirement is named or read back.
+/// half of what it needs is not in the plan. The task says what it serves — that is
+/// [`Task::requirement`], a field like any other — and `known` is every handle that
+/// answers for it, a story's own or a task's whole project's. Those are ledger rows, and
+/// core reads no database any more than it reads a file, so they are handed in by the
+/// one command group that has them.
 ///
-/// `named` is the handle this declaration cites, if any; `known` is every handle that
-/// answers for this task — a story's own, a task's whole project's. A story is asked
-/// the other question, what it *owes*, because a story is where an obligation is
-/// stated and one that states none is a container whose completion nothing can settle.
+/// Asked of the task rather than of a handle passed alongside it, so a caller checking a
+/// declaration before it is written checks the same object that will be saved. A handle
+/// beside the task is a second place for the answer to live, and the two disagree at the
+/// first caller that forgets to pass it.
+///
+/// A story is asked the other question, what it *owes*, because a story is where an
+/// obligation is stated and one that states none is a container whose completion nothing
+/// can settle.
 #[must_use]
-pub fn check_requirement(t: &Task, named: Option<&str>, known: &[String]) -> Vec<Defect> {
+pub fn check_requirement(t: &Task, known: &[String]) -> Vec<Defect> {
     let mut out = Vec::new();
     // The exemption every gate beside this one makes: an obligation stated after the
     // work finished cannot make the finished work retroactively defective.
     if t.status.is_closed() {
         return out;
     }
-    if let Some(id) = named
+    if let Some(id) = &t.requirement
         && !known.iter().any(|k| k == id)
     {
         out.push(Defect::RequirementUnknown {
-            named: id.to_string(),
+            named: id.clone(),
             known: known.to_vec(),
         });
     }
-    if t.kind == TaskKind::Story && known.is_empty() && named.is_none() {
+    if t.kind == TaskKind::Story && known.is_empty() && t.requirement.is_none() {
         out.push(Defect::StoryOwesNothing);
     }
     out

@@ -177,6 +177,17 @@ pub struct Task {
     pub parent: Option<TaskId>,
     /// Scheduling: tasks that must finish first. Not a hierarchy.
     pub depends_on: Vec<TaskId>,
+    /// The obligation this task is an attempt at (ADR-0005), where it names one.
+    ///
+    /// A third thing a task points at, and neither of the two above: those are relations
+    /// between tasks, and this reaches out of the plan at a contract a story wrote. A
+    /// handle — `<story>/FR-1` — rather than a typed id, because a requirement is folded
+    /// out of the ledger by the store, and core reads no database.
+    ///
+    /// One handle, not a list. A task is an attempt at one obligation, and a task that
+    /// would name two is two tasks. The plural lives at the other end: many attempts may
+    /// answer to one requirement, which is what makes an obligation's history readable.
+    pub requirement: Option<String>,
     /// How we know it is done.
     pub acceptance: Vec<Measure>,
     pub scope: Scope,
@@ -211,6 +222,7 @@ impl Task {
             doer: Doer::Agent,
             parent: None,
             depends_on: Vec::new(),
+            requirement: None,
             acceptance: Vec::new(),
             scope: Scope::default(),
             budget: Budget::default(),
@@ -244,6 +256,14 @@ impl Task {
         if !self.depends_on.contains(&id) {
             self.depends_on.push(id);
         }
+        self
+    }
+
+    /// Names the obligation this is an attempt at. A second call replaces the first:
+    /// the task serves one requirement, and which one is a fact about it now.
+    #[must_use]
+    pub fn serving(mut self, requirement: impl Into<String>) -> Self {
+        self.requirement = Some(requirement.into());
         self
     }
 
@@ -434,6 +454,20 @@ mod tests {
     }
 
     #[test]
+    fn what_a_task_serves_is_one_handle_and_the_latest_one() {
+        // Unlike `after`, which accumulates: a prerequisite list is the shape of the
+        // schedule, where an obligation is what this task is an attempt at — singular,
+        // and re-declaring it moves the task rather than adding to it. What it *was*
+        // an attempt at is in the ledger, which is the half a column cannot keep.
+        let t = Task::new("t", "p", "x").serving("story/FR-1");
+        assert_eq!(t.requirement.as_deref(), Some("story/FR-1"));
+        assert_eq!(
+            t.serving("story/FR-2").requirement.as_deref(),
+            Some("story/FR-2")
+        );
+    }
+
+    #[test]
     fn repeating_a_dependency_does_not_duplicate_it() {
         let t = Task::new("t", "p", "x").after("a").after("a").after("b");
         assert_eq!(t.depends_on.len(), 2);
@@ -453,6 +487,7 @@ mod tests {
         assert_eq!(t.status, TaskStatus::Draft);
         assert!(t.parent.is_none());
         assert!(t.depends_on.is_empty());
+        assert!(t.requirement.is_none(), "it answers to nothing yet");
         assert!(t.assignee.is_none());
         assert!(!t.has_executable_acceptance());
         assert!(t.is_visible(), "nothing is filed away to begin with");

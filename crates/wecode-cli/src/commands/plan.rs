@@ -454,13 +454,17 @@ fn requirement_asked(a: &Args) -> Result<Option<Stated>, Box<dyn std::error::Err
     }
 
     // The task as it will be, so the check reads the same before the row exists as
-    // after it: a fresh declaration is a draft, which is what `Task::new` gives.
+    // after it: a fresh declaration is a draft, which is what `Task::new` gives, and an
+    // amendment is the task already in the plan carrying the handle it is about to
+    // claim. Set on the probe rather than passed beside it, so what is checked is the
+    // object that gets written.
     let probe = match existing {
         Some(t) => t.clone(),
         None => Task::new(typed, project.clone(), "").of_kind(kind),
-    };
+    }
+    .serving(said);
     let known = handles(&store, &project)?;
-    if let Some(d) = requirement::check_requirement(&probe, Some(said), &known).first() {
+    if let Some(d) = requirement::check_requirement(&probe, &known).first() {
         return Err(d.question().into());
     }
     Ok(Some(Stated::Served {
@@ -516,6 +520,12 @@ impl Stated {
             }
             Self::Served { project, id } => {
                 store.serve_requirement(by, project, &t.id, id)?;
+                // The column after the row, on `set_task_steps`'s rule and for its
+                // reason: the task has to exist before anything on it can be written.
+                // Both halves, because they are different facts — the ledger keeps that
+                // this task claimed the handle just now, the column keeps that it is
+                // what the task answers to until somebody says otherwise.
+                store.set_task_requirement(&t.id, id)?;
                 Ok(format!(
                     "  serves    {id} — open again until this task is done\n"
                 ))
@@ -555,7 +565,12 @@ fn requirements_on(a: &Args, typed: &str, project_first: bool) -> Res {
         let mine: Vec<&Requirement> = all.iter().filter(|r| r.story == t.id).collect();
         return Ok(owed(t, &mine, &plan));
     }
-    let served: Vec<&Requirement> = all.iter().filter(|r| r.served_by.contains(&t.id)).collect();
+    // Asked of the task rather than searched for among the requirements: the task's own
+    // row says what it serves, and there is at most one.
+    let served: Vec<&Requirement> = all
+        .iter()
+        .filter(|r| t.requirement.as_deref() == Some(r.id.as_str()))
+        .collect();
     Ok(listed("serves — the obligations this task answers to", &served, |_| {
         String::new()
     }))
@@ -567,7 +582,7 @@ fn owed(t: &Task, mine: &[&Requirement], plan: &Plan) -> String {
     if mine.is_empty() {
         // The one thing a story with no obligations gets told, and it is a question:
         // nothing here can settle whether such a story is finished.
-        return requirement::check_requirement(t, None, &names)
+        return requirement::check_requirement(t, &names)
             .first()
             .map_or_else(String::new, |d| format!("\n  ⚠ {}\n", d.question()));
     }

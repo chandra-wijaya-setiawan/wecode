@@ -22,8 +22,10 @@ use rusqlite::Connection;
 /// 11 adds `tasks.steps`: a person's task is dispatched by being described, and until
 /// this column existed there was nowhere for the description to live. 12 adds
 /// `task_executions.attested_by`, so a cost can be filed against work wecode never
-/// dispatched without that figure reading as one wecode metered.
-pub const VERSION: i64 = 12;
+/// dispatched without that figure reading as one wecode metered. 13 adds
+/// `tasks.requirement_id` — the obligation a task is an attempt at (ADR-0005), which
+/// until now could only be recovered by scanning the ledger.
+pub const VERSION: i64 = 13;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -63,6 +65,22 @@ CREATE TABLE tasks (
     steps         TEXT,
     -- hierarchy: is part of. At most one parent, hence a column.
     parent_id     TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    -- The obligation this task is an attempt at: `<story>/FR-1` (ADR-0005). A column
+    -- because a task serves one, and the many is at the other end — a requirement
+    -- gathers every task pointing at it, which is the join the plan could not do.
+    --
+    -- No foreign key, and none is possible: a requirement is not a table. Its wording
+    -- is a `require` row in the ledger, because three of the five fields ADR-0005 asks
+    -- for are already what a ledger row is. So this is checked in code on write, and
+    -- for a further reason than the three columns above it: the check is the whole
+    -- refusal. A handle nothing stated is a typo in the command, and a task saved
+    -- pointing at nothing is a row somebody has to find and unpick.
+    --
+    -- NULL is a task that answers to nothing in particular, which most are. The ledger
+    -- keeps the other half — that this task claimed this handle, when, and by whom —
+    -- and the two are different facts rather than two copies of one: the column is what
+    -- it serves now, the rows are what it has ever been an attempt at.
+    requirement_id TEXT,
     status        TEXT NOT NULL,
     -- Filed away by the operator, with everything that is part of it. Display only,
     -- and here that is the whole of it: unlike `projects.archived`, nothing in the
@@ -357,6 +375,28 @@ INSERT INTO short_numbers (kind, id) SELECT 'project', id FROM projects ORDER BY
 INSERT INTO short_numbers (kind, id) SELECT 'task', id FROM tasks ORDER BY id;
 ";
 
+/// The `tasks.requirement_id` column, as an upgrade — and the second step in this list
+/// that **backfills**, on `ADD_SHORT_NUMBERS`'s rule rather than in spite of it.
+///
+/// The rule the four silent steps follow is *do not write a fact nobody observed*. Here
+/// the fact was observed and written down: every task that ever claimed an obligation
+/// said so in a `serve` row, which is where this link lived before the column existed.
+/// Copying it forward invents nothing. Leaving it out would be the destructive choice —
+/// the fold that answers "which tasks serve this?" now reads the column, so an empty one
+/// would quietly report that no task in the workspace answers to anything.
+///
+/// The newest row wins, because that is what the column means. A task moved from `FR-1`
+/// to `FR-2` serves `FR-2`, and the ledger keeps that it once served the other.
+const ADD_REQUIREMENT_LINK: &str = "
+ALTER TABLE tasks ADD COLUMN requirement_id TEXT;
+
+UPDATE tasks SET requirement_id = (
+    SELECT target FROM audit_log
+     WHERE action = 'serve' AND audit_log.task_id = tasks.id
+     ORDER BY seq DESC LIMIT 1
+);
+";
+
 /// What `migrate` should do about a file at `current`.
 ///
 /// Split out as a pure function so every case is testable without depending on what
@@ -456,6 +496,7 @@ const UPGRADES: &[(i64, &str)] = &[
         11,
         "ALTER TABLE task_executions ADD COLUMN attested_by TEXT",
     ),
+    (12, ADD_REQUIREMENT_LINK),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -549,7 +590,14 @@ mod tests {
                  id TEXT PRIMARY KEY, repo TEXT NOT NULL, objective TEXT NOT NULL,
                  status TEXT NOT NULL, budget_tokens INTEGER, budget_wall INTEGER
              ) STRICT;
-             CREATE TABLE tasks (id TEXT PRIMARY KEY) STRICT;",
+             CREATE TABLE tasks (id TEXT PRIMARY KEY) STRICT;
+             -- 12→13 reads the ledger to recover what each task was serving, so the
+             -- stand-in needs it for the same reason it needs `tasks`: a step proved
+             -- against a shape version 1 never had is not proved.
+             CREATE TABLE audit_log (
+                 seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT,
+                 action TEXT NOT NULL, target TEXT NOT NULL
+             ) STRICT;",
         )
         .unwrap();
         c.pragma_update(None, "user_version", 1i64).unwrap();
@@ -613,6 +661,10 @@ mod tests {
             })
             .expect("task_executions.attested_by exists after 11→12");
         assert_eq!(attested, 0);
+        let serving: i64 = c
+            .query_row("SELECT count(requirement_id) FROM tasks", [], |r| r.get(0))
+            .expect("tasks.requirement_id exists after 12→13");
+        assert_eq!(serving, 0, "there was nothing in the ledger to recover");
     }
 
     #[test]
@@ -622,8 +674,11 @@ mod tests {
         // backfilled name here would turn wecode's own meter into somebody's word for it.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("ALTER TABLE task_executions DROP COLUMN attested_by;")
-            .unwrap();
+        c.execute_batch(
+            "ALTER TABLE task_executions DROP COLUMN attested_by;
+             ALTER TABLE tasks DROP COLUMN requirement_id;",
+        )
+        .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
                   VALUES ('p', 'r', 'an objective sentence', 'active');
@@ -658,6 +713,7 @@ mod tests {
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE tasks DROP COLUMN requirement_id;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;
              ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
@@ -686,6 +742,7 @@ mod tests {
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE tasks DROP COLUMN requirement_id;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;
              ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
@@ -723,6 +780,7 @@ mod tests {
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE tasks DROP COLUMN requirement_id;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;
              ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
@@ -770,6 +828,7 @@ mod tests {
             "ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE tasks DROP COLUMN requirement_id;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;
              ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
@@ -809,7 +868,8 @@ mod tests {
             "ALTER TABLE task_executions DROP COLUMN replayed_tokens;
              ALTER TABLE task_executions DROP COLUMN attested_by;
              ALTER TABLE tasks DROP COLUMN doer;
-             ALTER TABLE tasks DROP COLUMN steps;",
+             ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE tasks DROP COLUMN requirement_id;",
         )
         .unwrap();
         c.execute_batch(
@@ -850,6 +910,7 @@ mod tests {
         c.execute_batch(
             "ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE tasks DROP COLUMN requirement_id;
              ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
         .unwrap();
@@ -887,6 +948,7 @@ mod tests {
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
             "ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE tasks DROP COLUMN requirement_id;
              ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
         .unwrap();
@@ -908,6 +970,60 @@ mod tests {
             .expect("tasks.steps exists");
         assert_eq!(title, "mint the fares token", "the plan survived");
         assert_eq!(steps, None, "the title is not passed off as instructions");
+    }
+
+    #[test]
+    fn a_database_that_predates_the_link_recovers_it_from_the_rows_that_stated_it() {
+        // The one place this list backfills for a second time, and the opposite call to
+        // 4→5: there the fact was never observed, here it was written down every time.
+        // A `serve` row is where this link lived before the column existed, so leaving
+        // the column empty would not be caution — it would report that a workspace full
+        // of attempts answers to nothing.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("ALTER TABLE tasks DROP COLUMN requirement_id;")
+            .unwrap();
+        c.execute_batch(
+            "INSERT INTO projects (id, repo, objective, status)
+             VALUES ('p','wecode','an objective','active');
+             INSERT INTO tasks (id, project_id, kind, title, status)
+             VALUES ('story','p','story','answer a reply','draft'),
+                    ('parse','p','feature','parse a reply','done'),
+                    ('idle','p','chore','tidy up','draft');
+             INSERT INTO audit_log
+                 (at, session_id, post, agent, task_id, source, action, target,
+                  outcome, detail)
+             VALUES (0,'s','lead','a','story','supervisor','require','story/FR-1',
+                     'allow','a reply signs a task'),
+                    (0,'s','lead','a','parse','supervisor','serve','story/FR-1',
+                     'allow',''),
+                    (0,'s','lead','a','parse','supervisor','serve','story/FR-2',
+                     'allow','');",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 12i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let mut stmt = c
+            .prepare("SELECT id, requirement_id FROM tasks ORDER BY id")
+            .unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("idle".to_string(), None),
+                // The newest claim, because that is what the column means. That it once
+                // served FR-1 stays in the ledger, which is the half a column cannot keep.
+                ("parse".to_string(), Some("story/FR-2".to_string())),
+                // A story states obligations; it does not serve one.
+                ("story".to_string(), None),
+            ]
+        );
     }
 
     #[test]
@@ -962,7 +1078,8 @@ mod tests {
              DROP TABLE short_numbers;
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
-             ALTER TABLE tasks DROP COLUMN steps;",
+             ALTER TABLE tasks DROP COLUMN steps;
+             ALTER TABLE tasks DROP COLUMN requirement_id;",
         )
         .unwrap();
         c.execute_batch(
@@ -993,10 +1110,15 @@ mod tests {
                  id TEXT PRIMARY KEY, repo TEXT NOT NULL, objective TEXT NOT NULL,
                  status TEXT NOT NULL, budget_tokens INTEGER, budget_wall INTEGER
              ) STRICT;
-             -- Version 1 had tasks, and 6→7 reads them to number what is already there.
-             -- A stand-in file this test invents still has to have the tables the real
-             -- one had, or it proves the migration against a shape that never existed.
+             -- Version 1 had tasks, and 6→7 reads them to number what is already there;
+             -- it had the ledger, and 12→13 reads that. A stand-in file this test invents
+             -- still has to have the tables the real one had, or it proves the migration
+             -- against a shape that never existed.
              CREATE TABLE tasks (id TEXT PRIMARY KEY) STRICT;
+             CREATE TABLE audit_log (
+                 seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT,
+                 action TEXT NOT NULL, target TEXT NOT NULL
+             ) STRICT;
              INSERT INTO projects (id, repo, objective, status)
              VALUES ('old', 'wecode', 'an objective', 'active');",
         )

@@ -122,7 +122,7 @@ impl Store {
         let mut deferred_parents: Vec<(TaskId, TaskId)> = Vec::new();
         let mut stmt = self.conn().prepare(
             "SELECT id, project_id, kind, doer, title, parent_id, status, assignee,
-                    budget_tokens, budget_wall, archived
+                    budget_tokens, budget_wall, archived, requirement_id
              FROM tasks ORDER BY (parent_id IS NOT NULL), id",
         )?;
         type Row = (
@@ -137,6 +137,7 @@ impl Store {
             Option<i64>,
             Option<i64>,
             i64,
+            Option<String>,
         );
         let rows: Vec<Row> = stmt
             .query_map([], |r| {
@@ -152,12 +153,25 @@ impl Store {
                     r.get(8)?,
                     r.get(9)?,
                     r.get(10)?,
+                    r.get(11)?,
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
 
-        for (id, project, kind, doer, title, parent, status, assignee, tokens, wall, archived) in
-            rows
+        for (
+            id,
+            project,
+            kind,
+            doer,
+            title,
+            parent,
+            status,
+            assignee,
+            tokens,
+            wall,
+            archived,
+            requirement,
+        ) in rows
         {
             let mut t = Task::new(TaskId::new(&id), ProjectId::new(&project), title);
             t.number = task_numbers.get(&id).copied();
@@ -185,6 +199,11 @@ impl Store {
                 wall_secs: crate::int::opt_from_db(wall, "budget wall")?,
             };
             t.archived = archived != 0;
+            // Unparsed, unlike the kind and the doer above: a handle is a string all the
+            // way down, and there is no set of them this build could check it against
+            // without loading the ledger for every task in the plan. What refuses an
+            // unknown handle is the gate at `task add`, before the row exists.
+            t.requirement = requirement;
             t.acceptance = self.measures(&MeasureTable::Task, &id)?;
             t.scope = self.scope(&id)?;
             // Parents last, for the same reason dependencies are: a child may
@@ -349,12 +368,12 @@ impl Store {
         let c = self.conn();
         c.execute(
             "INSERT INTO tasks (id, project_id, kind, doer, title, parent_id, status, assignee,
-                                budget_tokens, budget_wall, archived)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                                budget_tokens, budget_wall, archived, requirement_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 project_id = ?2, kind = ?3, doer = ?4, title = ?5, parent_id = ?6,
                 status = ?7, assignee = ?8, budget_tokens = ?9, budget_wall = ?10,
-                archived = ?11",
+                archived = ?11, requirement_id = ?12",
             params![
                 t.id.as_str(),
                 t.project.as_str(),
@@ -367,6 +386,7 @@ impl Store {
                 crate::int::opt_to_db(t.budget.tokens),
                 crate::int::opt_to_db(t.budget.wall_secs),
                 i64::from(t.archived),
+                t.requirement,
             ],
         )?;
         self.replace_measures(&MeasureTable::Task, t.id.as_str(), &t.acceptance)?;
@@ -556,6 +576,48 @@ impl Store {
         self.conn().execute(
             "UPDATE tasks SET steps = ?2 WHERE id = ?1",
             params![id.as_str(), (!steps.trim().is_empty()).then_some(steps)],
+        )?;
+        Ok(())
+    }
+
+    /// The obligation one task is an attempt at, and `None` when it names none.
+    ///
+    /// The read half of [`Self::set_task_requirement`], on [`Self::task_steps`]'s terms:
+    /// a caller holding one task id and asking one question about it should not have to
+    /// rebuild the plan to hear the answer. Everything that wants this beside a whole
+    /// plan already has it — [`Task::requirement`] is loaded with the rest of the row.
+    ///
+    /// `None` is also what a task that does not exist reads as, again as `task_steps` is.
+    pub fn requirement_of(&self, id: &TaskId) -> Result<Option<String>, StoreError> {
+        let found: Option<Option<String>> = self
+            .conn()
+            .query_row(
+                "SELECT requirement_id FROM tasks WHERE id = ?1",
+                [id.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(found.flatten())
+    }
+
+    /// Records that this task is an attempt at that obligation. Blank erases it.
+    ///
+    /// One column rather than a whole [`Self::save_task`], on [`Self::set_task_budget`]'s
+    /// rule: a task claims an obligation at the moment it is created, and a save would
+    /// carry the caller's whole idea of the task back into the database beside it —
+    /// including acceptance, which is frozen once a task has been dispatched.
+    ///
+    /// The handle is not checked here, and that is where the check belongs rather than a
+    /// gap in it. A handle nothing stated is a typo in a command, so it is refused at the
+    /// gate, before the task exists; by the time anything reaches this, the alternative
+    /// to writing the column would be a saved task and a silent refusal to link it.
+    pub fn set_task_requirement(&self, id: &TaskId, requirement: &str) -> Result<(), StoreError> {
+        self.conn().execute(
+            "UPDATE tasks SET requirement_id = ?2 WHERE id = ?1",
+            params![
+                id.as_str(),
+                (!requirement.trim().is_empty()).then_some(requirement)
+            ],
         )?;
         Ok(())
     }
@@ -1322,6 +1384,53 @@ mod tests {
             None,
             "a reused id does not inherit the last occupant's instructions"
         );
+    }
+
+    #[test]
+    fn what_a_task_serves_survives_a_restart_and_the_narrow_writes() {
+        // The point of the column. Before it, the only record was a ledger row, so
+        // answering "what is this task for?" meant scanning the log — and the answer had
+        // to survive every promotion, reshape and archive on the way, because the read
+        // that wants it happens days after the claim.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("sprint")).unwrap();
+        let t = Task::new("parse", "caching", "parse a reply").serving("sprint/FR-1");
+        s.save_task(&t).unwrap();
+
+        s.set_task_status(&"parse".into(), TaskStatus::Ready).unwrap();
+        s.set_task_shape(&"parse".into(), Some(&"sprint".into()), &[])
+            .unwrap();
+        s.set_task_archived(&"parse".into(), true).unwrap();
+
+        assert_eq!(
+            s.requirement_of(&"parse".into()).unwrap().as_deref(),
+            Some("sprint/FR-1")
+        );
+        let back = s.load_plan().unwrap().task(&"parse".into()).unwrap().clone();
+        assert_eq!(back.requirement.as_deref(), Some("sprint/FR-1"));
+    }
+
+    #[test]
+    fn a_task_answering_to_nothing_says_so_and_can_be_pointed_elsewhere() {
+        // Three absences reading one way, as `task_steps` has: a task that claims
+        // nothing, an id that is not in the plan, and a claim written blank over.
+        let s = store();
+        s.save_project(&project()).unwrap();
+        s.save_task(&task("layer")).unwrap();
+        assert_eq!(s.requirement_of(&"layer".into()).unwrap(), None);
+        assert_eq!(s.requirement_of(&"no-such-task".into()).unwrap(), None);
+
+        s.set_task_requirement(&"layer".into(), "story/FR-1").unwrap();
+        // Moved rather than added to. A task serves one obligation, and the ledger is
+        // where what it used to serve stays on the record.
+        s.set_task_requirement(&"layer".into(), "story/FR-2").unwrap();
+        assert_eq!(
+            s.requirement_of(&"layer".into()).unwrap().as_deref(),
+            Some("story/FR-2")
+        );
+        s.set_task_requirement(&"layer".into(), "  ").unwrap();
+        assert_eq!(s.requirement_of(&"layer".into()).unwrap(), None);
     }
 
     #[test]
