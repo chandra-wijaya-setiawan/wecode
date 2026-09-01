@@ -542,7 +542,17 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         Step::Upgrade(from) => {
             for (version, sql) in UPGRADES {
                 if *version >= from {
-                    conn.execute_batch(sql)?;
+                    // An upgrade must be idempotent: a database may already carry a
+                    // column this step adds — the test fixtures build the current
+                    // schema and then declare an older version, and a real file can
+                    // be half-upgraded by an interrupted run. A duplicate column is
+                    // the step having already happened, not a failure.
+                    match conn.execute_batch(sql) {
+                        Ok(()) => {}
+                        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg)))
+                            if msg.starts_with("duplicate column name") => {}
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             conn.pragma_update(None, "user_version", VERSION)?;
