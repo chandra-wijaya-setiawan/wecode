@@ -193,6 +193,35 @@ what a declaration leaves blank, and fills acceptance and budget *whole* — so 
 kind's wall limit with it, neither of which said anything until now. See
 [playbooks](../guides/playbooks.md) for what is reported and where it stays silent.
 
+**`wecode task add --requirement`** states what a story owes, or names the obligation a
+task is an attempt at. The task's own kind decides which, so a wording that happens to
+look like a handle is still a wording:
+
+| on | `--requirement` means | what happens |
+|---|---|---|
+| `--kind story` | the wording of one obligation | a handle is minted: `<story>/FR-1`, or `NFR-1` with `--nfr` |
+| any other kind | a handle a story already stated | the task is recorded as an attempt at it |
+
+A handle nothing stated is refused before the task is written, because a saved task
+pointing at nothing is a row somebody has to find and unpick. A story already in the
+plan takes more with `wecode task add <story> --amend --requirement "<…>"`.
+
+Requirements are **rows in the audit ledger**, not columns on a task (ADR-0005): one
+`require` row states the contract, one `serve` row per attempt at it. That is what makes
+the history of an obligation readable — many tasks may answer to one requirement, and
+rework, a bug against it and a changed design are all supposed to show. `wecode audit
+--task <story>` prints them with everything else decided about that story.
+
+Their state is **derived, never stored**: a requirement is `met` while something has
+answered it and nothing open still claims it, so creating a task against a closed
+requirement reopens it by arithmetic rather than by remembering to. `wecode check <id>`
+prints what a story owes with each one's state, and what a task serves.
+
+Two limits worth knowing. `--requirement` and `--nfr` are not in `wecode help` above,
+because the usage text lives in `main.rs` and this change was scoped out of it — the
+fenced block is verbatim `wecode help` and a test enforces that. And `dropped`, the
+third state ADR-0005 names, is not reachable: nothing can drop a requirement yet.
+
 **`wecode task budget <id>`** changes what a task may spend without recreating it. The
 way out before it was `wecode task rm` followed by `task add` again, and that stops
 working at the moment it is wanted: a task that has run is history and refuses to be

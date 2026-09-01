@@ -1285,3 +1285,95 @@ fn who_does_the_work_is_recorded() {
               "--tokens", "1000"])
         .assert_ok("an agent's task").assert_contains("saved task mint-auto");
 }
+
+// ---------------------------------------------------------- requirements -------
+
+/// A project with a story under it, ready to be given obligations.
+fn a_story(name: &str) -> Org {
+    let org = Org::new(name, "solo");
+    org.seed();
+    org.run(&["task", "add", "reply-story", "answer a task from a chat reply",
+              "--project", "caching", "--kind", "story"])
+        .assert_ok("add story");
+    org
+}
+
+#[test]
+fn a_story_states_what_it_owes_and_the_store_keeps_it() {
+    let org = a_story("req-stated");
+    // The handle is minted, never typed: two people asked to name FR-1 name it twice.
+    org.run(&["task", "add", "reply-story", "--amend", "--requirement",
+              "a reply naming a task by number signs it"])
+        .assert_ok("state one")
+        .assert_contains("reply-story/FR-1");
+    org.run(&["task", "add", "reply-story", "--amend", "--nfr", "--requirement",
+              "a reply is answered inside two seconds"])
+        .assert_ok("state another")
+        .assert_contains("reply-story/NFR-1");
+
+    // Read back off the ledger rather than out of the command that wrote it.
+    org.run(&["check", "reply-story"])
+        .assert_ok("check the story")
+        .assert_contains("what this story owes")
+        .assert_contains("reply-story/FR-1")
+        .assert_contains("a reply naming a task by number signs it")
+        .assert_contains("reply-story/NFR-1");
+
+    // And it is a row in the ledger, with the keys that correlate it.
+    org.run(&["audit", "--task", "reply-story"])
+        .assert_ok("audit")
+        .assert_contains("require")
+        .assert_contains("reply-story/FR-1");
+}
+
+#[test]
+fn a_story_owing_nothing_is_asked_what_it_owes() {
+    // Not a refusal: a story is created before anybody has written its obligations
+    // down, and refusing it would only teach people to type a placeholder.
+    let org = a_story("req-empty");
+    org.run(&["check", "reply-story"])
+        .assert_ok("check")
+        .assert_contains("What must be true for this story to be done?");
+}
+
+#[test]
+fn a_task_serves_an_obligation_and_holds_it_open_until_it_is_done() {
+    let org = a_story("req-served");
+    org.run(&["task", "add", "reply-story", "--amend", "--requirement",
+              "a reply naming a task by number signs it"])
+        .assert_ok("state one");
+    org.run(&["task", "add", "reply-parse", "parse a chat reply into a task id",
+              "--project", "caching", "--parent", "reply-story",
+              "--accept-cmd", "cargo test", "--write", "src/reply/**",
+              "--tokens", "5000", "--requirement", "reply-story/FR-1"])
+        .assert_ok("serve it")
+        .assert_contains("serves    reply-story/FR-1");
+
+    // Open while an attempt is unfinished — the reset rule, derived rather than stored.
+    org.run(&["check", "reply-story"]).assert_contains("open")
+        .assert_contains("1 attempt: reply-parse");
+    org.run(&["status", "reply-parse", "done"]).assert_ok("finish it");
+    org.run(&["check", "reply-story"]).assert_contains("met");
+
+    // The task's own side of the join: what it answers to.
+    org.run(&["check", "reply-parse"])
+        .assert_contains("the obligations this task answers to")
+        .assert_contains("reply-story/FR-1");
+}
+
+#[test]
+fn a_handle_no_story_stated_is_refused_before_the_task_is_written() {
+    let org = a_story("req-unknown");
+    org.run(&["task", "add", "reply-story", "--amend", "--requirement",
+              "a reply naming a task by number signs it"])
+        .assert_ok("state one");
+    let r = org.run(&["task", "add", "typo", "do the thing", "--project", "caching",
+                      "--accept-cmd", "cargo test", "--write", "docs/**",
+                      "--tokens", "100", "--requirement", "reply-story/FR-9"]);
+    assert!(!r.ok(), "a stale handle is refused");
+    r.assert_contains("reply-story/FR-9").assert_contains("reply-story/FR-1");
+    // Nothing was written: a task pointing at an obligation nobody stated is a row
+    // the operator would otherwise have to find and unpick.
+    org.run(&["tree"]).assert_lacks("typo");
+}
+
