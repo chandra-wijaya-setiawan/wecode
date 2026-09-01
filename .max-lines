@@ -15,5 +15,5 @@
 # an oversight: a half whose tallest file has not moved under the next hundred has no
 # room to give, however much was split beneath it.
 
-src=1700
+src=1600
 tests=1400
