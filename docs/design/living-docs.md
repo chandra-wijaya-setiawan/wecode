@@ -77,3 +77,13 @@ elsewhere long before we wanted it.
 Every section is marked [gen] or authored. The report is generated entirely
 except three prose sections, because the restated requirement text is precisely
 what rotted in the wt-53 slice.
+
+### What the citations above do and do not claim
+Verified verbatim: the clause TITLES and numbering of 15289:2019 (fourth
+edition, 2019-07) and the full section lists of DI-IPSC-81435A and -81440A,
+read from the official scans. NOT read: the body content of 15289 clauses
+7.2–7.8 and 10.x — those pages are paywalled, so our templates follow the
+DoD DIDs' section lists (which we could read) and 15289 for WHICH documents
+exist, not for their bullet-level contents. Also: 12207:2017 is superseded by
+IEEE/ISO/IEC 12207-2026; nothing here depends on its clause numbering, but a
+future citation should name the current edition.
