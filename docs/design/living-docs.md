@@ -107,3 +107,18 @@ the design by id — never restated there. Alternatives-considered is a `should`
 in 42010 §5.8.1 and optional in IEEE 1016 §4.8; we keep it on measured grounds
 (reviewers' first need is what instigated a change) rather than claiming a
 mandate we do not have.
+
+### What the evidence does NOT support
+No controlled study shows that WRITING a design document before coding improves
+any outcome. The strongest measured result in the field is about READING design
+documentation while changing code: Dzidek et al. (IEEE TSE 2008) found +54%
+functional correctness (p=0.03) with professionals on a real system — and no
+time saving. Several numbers repeated in this area trace to nothing, including
+the 10x/100x cost-of-change curve, which Menzies et al. falsified across 171
+projects and 47,376 defect logs.
+
+So: keep design documents short (1–3 pages), write one only where 42010 §5.8.2's
+criteria bite, and optimise them for the reader who arrives later — which is
+where the only real evidence points. The generated report is the opposite case:
+it costs nothing to produce, so its length is bounded only by what the ledger
+knows.
