@@ -110,6 +110,11 @@ pub(crate) fn keep(
 ///
 /// The summary leads with what undoes it. Auto-merging is only defensible because it
 /// is reversible, so the way back is the first thing worth knowing, not a footnote.
+// Eight parameters is one past clippy's threshold, and the honest fix is a
+// struct of the merge's facts rather than a shorter signature that hides one.
+// Deferred: this function is a renderer, its parameters are its inputs, and the
+// aftermath (swept, installed) arrived here because a merge now does more.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub(crate) fn merged(
     task: &Task,
