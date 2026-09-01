@@ -206,16 +206,25 @@ A handle nothing stated is refused before the task is written, because a saved t
 pointing at nothing is a row somebody has to find and unpick. A story already in the
 plan takes more with `wecode task add <story> --amend --requirement "<…>"`.
 
-Requirements are **rows in the audit ledger**, not columns on a task (ADR-0005): one
-`require` row states the contract, one `serve` row per attempt at it. That is what makes
-the history of an obligation readable — many tasks may answer to one requirement, and
-rework, a bug against it and a changed design are all supposed to show. `wecode audit
---task <story>` prints them with everything else decided about that story.
+A requirement is stored in two halves, and the split is state against event (ADR-0005):
 
-Their state is **derived, never stored**: a requirement is `met` while something has
-answered it and nothing open still claims it, so creating a task against a closed
-requirement reopens it by arithmetic rather than by remembering to. `wecode check <id>`
-prints what a story owes with each one's state, and what a task serves.
+| half | where | what it says |
+|---|---|---|
+| the contract | a `require` row in the ledger | this story owes this, stated by this person, then |
+| the claim | a `serve` row in the ledger | this task took a run at that handle, then |
+| what a task serves | `tasks.requirement_id` | what this task answers to **now** |
+
+Not two copies of one fact. The column holds one handle and moves when the task is
+re-aimed; the rows never change, which is what makes the history of an obligation
+readable — rework, a bug against it and a changed design are all supposed to show.
+`wecode audit --task <id>` prints them with everything else decided about that task.
+
+Which tasks answer to a requirement is read off the **column**, so a task pointed at
+another obligation stops holding the first one open. Their state is then **derived,
+never stored**: a requirement is `met` while something has answered it and nothing open
+still claims it, so creating a task against a closed requirement reopens it by
+arithmetic rather than by remembering to. `wecode check <id>` prints what a story owes
+with each one's state, and what a task serves.
 
 Two limits worth knowing. `--requirement` and `--nfr` are not in `wecode help` above,
 because the usage text lives in `main.rs` and this change was scoped out of it — the

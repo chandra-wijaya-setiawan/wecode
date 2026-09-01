@@ -4,7 +4,7 @@ One file per workspace, `wecode.db`. Everything machine-written lives here; ever
 hand-edited lives in `company.toml` (see [config/company.md](config/company.md)), because a binary blob
 cannot be diffed, reviewed or opened in an editor.
 
-Currently **schema version 12**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
+Currently **schema version 13**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
 
 ## Shape
 
@@ -116,6 +116,14 @@ because the column has to be able to say *nobody attested this*; `NOT NULL DEFAU
 would hang an empty name on every run wecode watched and leave nothing to tell the two
 apart.
 
+**The 12→13 step is the second exception, and for 6→7's reason rather than against it.**
+It adds `tasks.requirement_id` and then fills it from the `serve` rows already in the
+ledger, newest per task. Nothing is invented: that is where this link lived before the
+column existed, and every task that ever claimed an obligation said so in a row. Leaving
+it empty would be the destructive choice, not the cautious one — the fold that answers
+*which tasks serve this?* now reads the column, so a blank one would report that a
+workspace full of attempts answers to nothing.
+
 ## Full DDL
 
 The schema as it actually is, extracted from `crates/wecode-store/src/schema.rs`:
@@ -159,6 +167,20 @@ CREATE TABLE tasks (
     steps         TEXT,
     -- hierarchy: is part of. At most one parent, hence a column.
     parent_id     TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    -- The obligation this task is an attempt at: `<story>/FR-1` (ADR-0005). A column
+    -- because a task serves one, and the many is at the other end — a requirement
+    -- gathers every task pointing at it, which is the join the plan could not do.
+    --
+    -- No foreign key, and none is possible: a requirement is not a table. Its wording
+    -- is a `require` row in the ledger. So this is checked in code on write, and for a
+    -- further reason than the three columns above it: the check is the whole refusal.
+    -- A handle nothing stated is a typo in the command, and a task saved pointing at
+    -- nothing is a row somebody has to find and unpick.
+    --
+    -- NULL is a task that answers to nothing in particular, which most are. The ledger
+    -- keeps the other half — that this task claimed this handle, when, and on whose
+    -- say-so — and the two are different facts rather than two copies of one.
+    requirement_id TEXT,
     status        TEXT NOT NULL,
     -- Filed away by the operator, with everything that is part of it. Display only,
     -- and here that is the whole of it: unlike `projects.archived`, nothing in the

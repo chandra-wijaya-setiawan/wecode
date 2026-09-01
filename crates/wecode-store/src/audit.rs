@@ -7,12 +7,19 @@
 //! Requirements are here for a reason worth stating, because the obvious place for
 //! them is a table of their own. ADR-0005 asks for `requirements(id, story_id, type,
 //! description, status)`, and three of those five fields are the ledger already: an
-//! obligation is *stated* by somebody at a moment, and every task that takes a run at
-//! it states so too. Only `status` wants a column, and it is the one field ADR-0005
-//! also says must never be trusted on its own — "a requirement is only done while
-//! nothing open references it" is a fact about the tasks, so it is derived from them
-//! ([`wecode_core::admission::requirement_is_met`]) rather than written back. What is
-//! left is rows, and rows with the correlation keys this table already carries.
+//! obligation is *stated* by somebody at a moment, and that is exactly a row here.
+//! `status` is the one field ADR-0005 also says must never be trusted on its own —
+//! "a requirement is only done while nothing open references it" is a fact about the
+//! tasks, so it is derived from them ([`wecode_core::requirement::requirement_is_met`])
+//! rather than written back.
+//!
+//! The other half of ADR-0005's shape, `task.requirement_id`, *is* a column, and the
+//! split is between state and event. Which obligation a task serves is a fact about the
+//! task now, so it lives on the task's row and moves when the task does. That it claimed
+//! that handle, when, and on whose say-so is a thing that happened, so it is a `serve`
+//! row here and never changes. Neither is a copy of the other, and the fold below reads
+//! the column: an attempt that has since been pointed elsewhere is not still a claim on
+//! what it used to serve.
 
 use std::collections::BTreeMap;
 
@@ -90,13 +97,13 @@ impl ReqKind {
     }
 }
 
-/// One obligation a story carries, folded out of the rows that stated it and the
-/// rows that named it.
+/// One obligation a story carries, folded out of the rows that stated it and the tasks
+/// that point at it.
 ///
 /// The wording is the contract; `served_by` is the attempts at it. Many tasks may
-/// answer to one requirement — rework, a bug against it, a changed design — and that
-/// is the point of keeping the attempts rather than a pointer: the history of an
-/// obligation is what a story cannot otherwise show.
+/// answer to one requirement — rework, a bug against it, a changed design — and that is
+/// the point of gathering them here rather than hanging one pointer off the story: the
+/// history of an obligation is what a story cannot otherwise show.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Requirement {
     /// `<story>/FR-1`. Minted per story and per kind.
@@ -108,7 +115,11 @@ pub struct Requirement {
     pub at: u64,
     /// The person who stated it, or the post when the row named no person.
     pub by: String,
-    /// Every task that named it, oldest first.
+    /// Every task that serves it, in the order the tasks were created.
+    ///
+    /// The tasks pointing here *now*, not every task that ever claimed it. An attempt
+    /// since aimed at another obligation is no longer a claim on this one, and would
+    /// otherwise hold it open for ever.
     pub served_by: Vec<TaskId>,
 }
 
@@ -323,11 +334,14 @@ impl Store {
         })
     }
 
-    /// Records that a task is an attempt at a requirement.
+    /// Records that a task claimed a requirement, at a moment and on somebody's say-so.
     ///
-    /// Its own row rather than a column on the task, because it is an event with a
-    /// time on it: this is what resets the obligation to open, and a column would
-    /// remember only the last thing to have claimed it.
+    /// A row *beside* [`Store::set_task_requirement`] rather than instead of it. The
+    /// column is the state — what this task serves — and this is the event, which the
+    /// column cannot hold: a column remembers only the latest claim, and what an
+    /// obligation has been through is the thing a story cannot otherwise show. Writing
+    /// only the row was the earlier shape, and it made every reader of "what does this
+    /// task serve?" scan the ledger to find out.
     pub fn serve_requirement(
         &self,
         by: By<'_>,
@@ -377,19 +391,23 @@ impl Store {
 
     /// Every requirement, oldest first — of one project, of one story, or of all of it.
     ///
-    /// Folded on read rather than kept as a table, and the fold is the whole of the
-    /// model: a later `require` row for the same handle restates the contract, and
-    /// every `serve` row adds an attempt at it. A `serve` naming a handle nothing ever
-    /// stated is dropped here; the gate refuses those before they can be written, and
-    /// inventing a requirement out of a reference to one would hide that it had.
+    /// Folded on read rather than kept as a table, out of the two halves ADR-0005 splits
+    /// this into. The ledger states the contract: a later `require` row for the same
+    /// handle restates it, and the attempts already made against the old wording stay,
+    /// which is what makes the change visible. The `tasks` table says who is answering
+    /// it, because that is a fact about a task and moves when the task does.
+    ///
+    /// A task pointing at a handle nothing ever stated is dropped here. The gate refuses
+    /// those before the row can be written, and inventing a requirement out of a
+    /// reference to one would hide that it had.
     pub fn requirements(
         &self,
         project: Option<&ProjectId>,
         story: Option<&TaskId>,
     ) -> Result<Vec<Requirement>, StoreError> {
         let mut stmt = self.conn().prepare(
-            "SELECT at, post, human, project_id, task_id, action, target, detail
-             FROM audit_log WHERE action IN ('require','serve') ORDER BY seq",
+            "SELECT at, post, human, project_id, task_id, target, detail
+             FROM audit_log WHERE action = 'require' ORDER BY seq",
         )?;
         // Keyed by handle, and the order they were stated in is kept separately: the
         // handles sort `FR-1, FR-10, FR-2`, which is not an order anybody wrote.
@@ -405,34 +423,32 @@ impl Store {
                     r.get::<_, Option<String>>(4)?.unwrap_or_default(),
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
-                    r.get::<_, String>(7)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        for (at, post, human, in_project, on_task, action, target, detail) in rows {
+        for (at, post, human, in_project, on_task, target, detail) in rows {
             let by = if human.is_empty() { post } else { human };
-            if action == "require" {
-                let r = found.entry(target.clone()).or_insert_with(|| {
-                    order.push(target.clone());
-                    Requirement {
-                        id: target.clone(),
-                        story: TaskId::new(&on_task),
-                        project: ProjectId::new(&in_project),
-                        wording: String::new(),
-                        at,
-                        by: String::new(),
-                        served_by: Vec::new(),
-                    }
-                });
-                // The newest statement is the contract; the attempts already made
-                // against the old one stay, which is what makes the change visible.
-                (r.wording, r.at, r.by) = (detail, at, by);
-            } else if let Some(r) = found.get_mut(&target) {
-                let task = TaskId::new(&on_task);
-                if !r.served_by.contains(&task) {
-                    r.served_by.push(task);
+            let r = found.entry(target.clone()).or_insert_with(|| {
+                order.push(target.clone());
+                Requirement {
+                    id: target.clone(),
+                    story: TaskId::new(&on_task),
+                    project: ProjectId::new(&in_project),
+                    wording: String::new(),
+                    at,
+                    by: String::new(),
+                    served_by: Vec::new(),
                 }
+            });
+            // The newest statement is the contract; the attempts already made
+            // against the old one stay, which is what makes the change visible.
+            (r.wording, r.at, r.by) = (detail, at, by);
+        }
+
+        for (handle, task) in self.serving_tasks()? {
+            if let Some(r) = found.get_mut(&handle) {
+                r.served_by.push(task);
             }
         }
         Ok(order
@@ -441,6 +457,27 @@ impl Store {
             .filter(|r| project.is_none_or(|p| r.project == *p))
             .filter(|r| story.is_none_or(|s| r.story == *s))
             .collect())
+    }
+
+    /// `(handle, task)` for every task that names an obligation, oldest task first.
+    ///
+    /// Ordered by short number, which is the order the tasks were created: numbers are
+    /// minted once and never reissued, so this is stable across a restart and across a
+    /// file restored on another machine. The alternative orderings are both wrong for a
+    /// reader — by id sorts `FR-10` between `FR-1` and `FR-2` all over again, and by
+    /// nothing at all is whatever SQLite feels like.
+    fn serving_tasks(&self) -> Result<Vec<(String, TaskId)>, StoreError> {
+        let mut stmt = self.conn().prepare(
+            "SELECT t.requirement_id, t.id FROM tasks t
+             LEFT JOIN short_numbers s ON s.kind = 'task' AND s.id = t.id
+             WHERE t.requirement_id IS NOT NULL ORDER BY s.n",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, TaskId::new(r.get::<_, String>(1)?)))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Tokens spent, by project. The kind of aggregate a flat log could not do.
@@ -469,6 +506,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wecode_core::{Project, Task};
     use wecode_gov::{Broker, Charter, Effective, Grant, Invariant, Session};
 
     fn store() -> Store {
@@ -613,6 +651,77 @@ mod tests {
             })
             .unwrap();
         assert!(elsewhere.is_empty());
+    }
+
+    #[test]
+    fn an_obligation_gathers_the_tasks_that_point_at_it_now() {
+        // The fold reads two halves, and this is why they are split. The ledger holds the
+        // contract and every claim ever made against it; the tasks hold which obligation
+        // each is answering today. Read the claims instead and a task re-aimed at another
+        // requirement goes on holding the first one open for ever.
+        let s = store();
+        s.save_project(&Project::new("caching", "add response caching", "wecode"))
+            .unwrap();
+        for id in ["story", "parse", "retry"] {
+            s.save_task(&Task::new(id, "caching", format!("do {id}")))
+                .unwrap();
+        }
+        let by = By {
+            session: "s-1",
+            post: "lead",
+            agent: "claude-code",
+            human: "Chandra",
+        };
+        let (project, story) = (ProjectId::new("caching"), TaskId::new("story"));
+        let state = |wording| {
+            s.declare_requirement(by, &project, &story, ReqKind::Functional, wording)
+                .unwrap()
+                .id
+        };
+        assert_eq!(state("a reply naming a task signs it"), "story/FR-1");
+        assert_eq!(state("a reply naming nothing is ignored"), "story/FR-2");
+
+        let claim = |task: &str, handle: &str| {
+            s.serve_requirement(by, &project, &TaskId::new(task), handle)
+                .unwrap();
+            s.set_task_requirement(&TaskId::new(task), handle).unwrap();
+        };
+        claim("parse", "story/FR-1");
+        claim("retry", "story/FR-1");
+        let found = s.requirements(Some(&project), None).unwrap();
+        assert_eq!(
+            found[0].served_by,
+            vec![TaskId::new("parse"), TaskId::new("retry")],
+            "in the order the tasks were created"
+        );
+        assert!(found[1].served_by.is_empty());
+
+        claim("retry", "story/FR-2");
+        let found = s.requirements(Some(&project), None).unwrap();
+        assert_eq!(found[0].served_by, vec![TaskId::new("parse")]);
+        assert_eq!(found[1].served_by, vec![TaskId::new("retry")]);
+        // And nothing was rewritten to say so: both claims are still on the record.
+        let rows = s
+            .audit(&AuditQuery {
+                task: Some("retry".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].target, "story/FR-1");
+    }
+
+    #[test]
+    fn a_task_pointing_at_a_handle_nobody_stated_invents_no_requirement() {
+        // Only reachable by writing the column behind the gate's back, which is exactly
+        // when it matters: a fold that conjured a requirement out of a reference to one
+        // would hide that the workspace holds a task aimed at nothing.
+        let s = store();
+        s.save_project(&Project::new("caching", "add response caching", "wecode"))
+            .unwrap();
+        s.save_task(&Task::new("parse", "caching", "parse a reply").serving("ghost/FR-1"))
+            .unwrap();
+        assert!(s.requirements(None, None).unwrap().is_empty());
     }
 
     #[test]
