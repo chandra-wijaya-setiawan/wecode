@@ -19,6 +19,19 @@ use super::{Company, OrgError, agent::Intelligence};
 pub struct Repo {
     pub name: String,
     pub path: String,
+    /// Where to put the executable this repository produces, once a merge lands on its
+    /// integration branch. Absent means nothing is installed, silently.
+    ///
+    /// Naming a destination *is* the opt-in; a boolean beside it would be a second place
+    /// for the same answer to live. It sits here rather than in the repository's own
+    /// playbook because a playbook is committed **inside** the repo being merged, so a
+    /// field there would let any repository grant itself the right to write to the
+    /// operator's machine by committing one line to itself. `company.toml` is
+    /// hand-edited, outside every repo, by the person whose home directory this is — the
+    /// only file that can carry an authority to write outside a repository, because it
+    /// is the only one an agent cannot reach.
+    #[serde(default)]
+    pub installs: Option<String>,
 }
 
 /// A seat in the org chart.
@@ -183,6 +196,26 @@ mod tests {
         assert_eq!(c.repo_names(), vec!["wecode".to_string()]);
         assert_eq!(c.repo("wecode").unwrap().path, "~/projects/wecode");
         assert!(c.repo("ghost").is_none());
+        // Nothing is installed until a destination says where, and that is what makes
+        // the absent field an answer rather than an omission.
+        assert!(c.repo("wecode").unwrap().installs.is_none());
+    }
+
+    #[test]
+    fn a_repo_may_name_where_its_executable_is_installed() {
+        // The opt-in for installing after a merge, and it lives here rather than in the
+        // repository's own playbook: a playbook is committed inside the repo being
+        // merged, so a field there would let a repository grant itself the right to
+        // write to the operator's machine.
+        let text = format!(
+            "{MINIMAL}\n[[repos]]\nname = \"wecode\"\npath = \"~/projects/wecode\"\n\
+             installs = \"~/.local/bin/wecode\"\n"
+        );
+        let c = Company::parse(&text).unwrap();
+        assert_eq!(
+            c.repo("wecode").unwrap().installs.as_deref(),
+            Some("~/.local/bin/wecode")
+        );
     }
 
     #[test]

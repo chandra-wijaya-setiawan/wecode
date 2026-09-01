@@ -515,7 +515,16 @@ pub(crate) fn commit_file(
 }
 
 /// A directory with `target` checked out, and whether it belongs to the operator.
-fn tree_for(repo: &Path, scratch: &Path, target: &str) -> Result<(PathBuf, bool), GitError> {
+///
+/// Reachable outside this module because a fourth thing now needs the integration branch
+/// on disk — [`crate::install`] compiles it. One function so the dirty-tree refusal and
+/// the borrow-or-scratch decision cannot be two decisions: a second implementation would
+/// be free to build the merge result in a tree the merge itself would have refused.
+pub(crate) fn tree_for(
+    repo: &Path,
+    scratch: &Path,
+    target: &str,
+) -> Result<(PathBuf, bool), GitError> {
     if let Some(theirs) = checked_out_at(repo, target) {
         if is_dirty(&theirs) {
             return Err(GitError::Failed {

@@ -8,7 +8,7 @@ use wecode_store::{AuditQuery, Store};
 use crate::args::Args;
 use crate::commands::ctx::*;
 use crate::render;
-use crate::{git, ledger, notify, record, teardown, telegram, work};
+use crate::{git, install, ledger, notify, record, teardown, telegram, work};
 
 pub(crate) fn parse_action(a: &Args) -> Result<Action, String> {
     let verb = a.cmd(2);
@@ -398,6 +398,20 @@ pub(crate) fn merge_task(a: &Args) -> Res {
     let plan = store.load_plan()?;
     let swept = teardown::after_landing(&store, &plan, &repo, &work::org_name(ws.root()), &owner)?;
 
+    // The first thing that ever compiles the merge result, and — if this repo named a
+    // destination — the moment the operator's `wecode` stops being whatever their
+    // checkout was on. Unable to fail the merge, which has already landed: everything it
+    // refuses is a line in the report. See [`crate::install`].
+    let installed = install::after_landing(
+        &repo,
+        &scratch,
+        &target,
+        company
+            .repo(&project.repo)
+            .and_then(|r| r.installs.as_deref()),
+        &merged.sha,
+    );
+
     // The report is built first and committed second, because the file *is* the report:
     // rendering a second version for the repository would give the same merge two
     // accounts that could disagree. What the terminal shows is the committed text plus
@@ -410,6 +424,7 @@ pub(crate) fn merge_task(a: &Args) -> Res {
         &merged,
         needs_signature,
         &swept,
+        &installed,
     );
     let kept = record::keep(
         &repo,

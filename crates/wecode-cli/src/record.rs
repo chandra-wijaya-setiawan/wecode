@@ -45,6 +45,7 @@ use std::path::Path;
 use wecode_core::{Plan, Task, TaskId};
 
 use crate::git;
+use crate::install::{Installed, install_line};
 use crate::render;
 use crate::teardown::{Swept, teardown_line};
 
@@ -118,6 +119,7 @@ pub(crate) fn merged(
     m: &git::Merged,
     signed: bool,
     swept: &Swept,
+    installed: &Installed,
 ) -> String {
     let short = |sha: &str| sha.chars().take(9).collect::<String>();
 
@@ -129,6 +131,11 @@ pub(crate) fn merged(
     ));
     out.push_str(&unblocks(task, plan));
     out.push_str(&teardown_line(swept));
+    // Beside the worktree line, because they are the two facts a merge creates about the
+    // machine it ran on rather than about the branch. No ledger row: this file is
+    // committed, generated, and already the document that says what a merge did, so a
+    // second record of the same event would be a second thing to keep in agreement.
+    out.push_str(&install_line(installed));
     out.push_str(&format!(
         "  undo       wecode rollback {}   (was {})\n",
         task.id,
@@ -427,6 +434,7 @@ mod tests {
             },
             true,
             &Swept::Nothing,
+            &Installed::Unasked,
         );
         for shared in [
             "  4 files, +252 −13\n",

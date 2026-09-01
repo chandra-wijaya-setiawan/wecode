@@ -3,11 +3,11 @@
 
 use wecode_core::TaskKind;
 use wecode_gov::{Action, WorkKind};
-use wecode_org::{Company, Workspace, gap, playbook, workspace};
+use wecode_org::{Company, Repo, Workspace, gap, playbook, workspace};
 
 use crate::args::Args;
 use crate::commands::ctx::*;
-use crate::{render, work};
+use crate::{git, install, render, work};
 
 pub(crate) fn init(a: &Args) -> Res {
     let dir = require(a.cmd(1), "org name or directory")?;
@@ -352,4 +352,129 @@ pub(crate) fn whoami(a: &Args) -> Res {
         .unwrap_or(s);
     let post = find_post(&company, &s.post)?;
     Ok(render::org::whoami(&company, s, &post, company.grant_of(&post)))
+}
+
+// ----------------------------------------------------------------- install ------
+// Putting the executable a repository produces where the operator can reach it, on
+// demand. The mechanism is [`crate::install`]; what lives here is only *which repo* and
+// *which branch*, which are questions about the company and the plan.
+
+/// Installs what a repository produces, from its integration branch.
+///
+/// The other caller of [`install::after_landing`] — the automatic one is the merge. This
+/// is the escape hatch after a merge declined, and the only way the *first* install can
+/// happen at all: bootstrapping reach out of a merge you must already be at a terminal to
+/// run is circular.
+///
+/// Nothing here is put past the Broker, and that is an authority answer rather than an
+/// omission. The destination comes from `company.toml`, which is outside every repository
+/// and outside every write scope; the bytes come from the integration branch, which is
+/// where a signed merge put them. No argument to this command widens either.
+pub(crate) fn install_now(a: &Args) -> Res {
+    let (ws, store, company) = open_full(a)?;
+    let repo = which_repo(&company, a.get("repo"))?;
+    let path = workspace::expand_home(&repo.path);
+    let target = integration_branch(&company, &store.load_plan()?, &repo.name)?;
+    // The branch tip, which is what a merge would have installed. Resolved before the
+    // build, so a branch git does not know is one sentence rather than a cargo failure.
+    let sha = git::commit_at(&path, &target).ok_or_else(|| {
+        format!(
+            "`{target}` is not a branch in {} — nothing to install from",
+            path.display()
+        )
+    })?;
+
+    let done = install::after_landing(
+        &path,
+        &work::merge_scratch(&work::org_name(ws.root())),
+        &target,
+        repo.installs.as_deref(),
+        &sha,
+    );
+    // Non-zero when nothing was installed, unlike the merge path: this one was typed, so
+    // an operator scripting it is owed an exit code rather than a line to read.
+    match install::refusal(&done) {
+        Some(why) => Err(why.into()),
+        None => Ok(install::install_line(&done)),
+    }
+}
+
+/// The repo whose executable is being installed: the one carrying `installs`.
+///
+/// Not inferred from `current_exe()`. That would break precisely when the feature works —
+/// an installed wecode's own path is under no repository at all — and detection that fails
+/// on its own success is not detection.
+fn which_repo<'a>(company: &'a Company, named: Option<&str>) -> Result<&'a Repo, String> {
+    if let Some(name) = named {
+        let repo = company.repo(name).ok_or_else(|| {
+            format!(
+                "no repo `{name}` in [[repos]] — have: {}",
+                company.repo_names().join(", ")
+            )
+        })?;
+        // Named explicitly and still declined, because the destination *is* the opt-in:
+        // installing somewhere this file does not say would be wecode choosing a path in
+        // the operator's home.
+        if repo.installs.is_none() {
+            return Err(format!(
+                "repo `{name}` names no destination — nothing says where to install it\n  \
+                 add one to its [[repos]] block: installs = \"~/.local/bin/{name}\""
+            ));
+        }
+        return Ok(repo);
+    }
+    let carrying: Vec<&Repo> = company
+        .repos
+        .iter()
+        .filter(|r| r.installs.is_some())
+        .collect();
+    match carrying.as_slice() {
+        [one] => Ok(one),
+        [] => Err("no [[repos]] block names an `installs` destination in company.toml\n  \
+                   add one to the repo whose executable this is, and nothing else changes"
+            .to_string()),
+        many => Err(format!(
+            "several repos install an executable — name one with --repo: {}",
+            many.iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// The branch a repository's code lives on, read off the playbooks of the projects that
+/// work in it.
+///
+/// The same `merge_to` a merge lands on, because installing from anything else would put
+/// code on the operator's `PATH` that no merge ever landed. Two projects in one repo that
+/// disagree about it are refused rather than reconciled: picking either would make which
+/// binary the operator has depend on which project happened to sort first.
+fn integration_branch(
+    company: &Company,
+    plan: &wecode_core::Plan,
+    repo: &str,
+) -> Result<String, String> {
+    // Archived projects included. Archiving hides a project from the cockpit; it does not
+    // move the repository's code onto a different branch.
+    let mut branches: Vec<String> = plan
+        .all_projects()
+        .filter(|p| p.repo == repo)
+        .filter_map(|p| playbook_of(company, p).ok().flatten())
+        .filter_map(|pb| pb.project.merge_to.clone())
+        .collect();
+    branches.sort();
+    branches.dedup();
+    match branches.len() {
+        1 => Ok(branches.swap_remove(0)),
+        0 => Err(format!(
+            "no project on repo `{repo}` declares `merge_to` — nothing says which branch\n  \
+             its code is on. Set it in that project's playbook"
+        )),
+        _ => Err(format!(
+            "projects on repo `{repo}` disagree about the integration branch: {}\n  \
+             one repository's code is on one branch — settle it in their playbooks",
+            branches.join(", ")
+        )),
+    }
 }
