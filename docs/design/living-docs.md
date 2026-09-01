@@ -87,3 +87,23 @@ DoD DIDs' section lists (which we could read) and 15289 for WHICH documents
 exist, not for their bullet-level contents. Also: 12207:2017 is superseded by
 IEEE/ISO/IEC 12207-2026; nothing here depends on its clause numbering, but a
 future citation should name the current edition.
+
+### The standards permit records instead of documents
+The load-bearing citations for a generated report, read verbatim:
+29148 §7 — "The information items do not require physical documentation, so long
+as required content is easily available and logically organized"; 29119-3:2021
+§4.1.1 — electronic records conform, and "the use of the nomenclature used in
+Clauses 5, 6, 7 and 8 is not mandatory"; IEEE 1012-2016 §11.1 — "the format and
+grouping of the V&V reports may be user defined". Generating the close-out
+report is the option the standards wrote in, not a corner cut.
+
+Two conventions copied because they make omission auditable: a tailored-out
+section keeps its heading and says so (DI-IPSC-81440A), and an inapplicable
+topic states the reason (IEEE 1012-2016 §11.3.2).
+
+One boundary worth repeating: goals, acceptance criteria and design constraints
+are REQUIREMENTS content (29148:2018 §9.6.10/§9.6.16/§9.6.19), referenced from
+the design by id — never restated there. Alternatives-considered is a `should`
+in 42010 §5.8.1 and optional in IEEE 1016 §4.8; we keep it on measured grounds
+(reviewers' first need is what instigated a change) rather than claiming a
+mandate we do not have.
