@@ -3,8 +3,21 @@
 //! `seq` is assigned by the database, so the sequence is monotonic across every
 //! process that ever writes. A per-process counter got that wrong once, and every
 //! record claimed to be number one.
+//!
+//! Requirements are here for a reason worth stating, because the obvious place for
+//! them is a table of their own. ADR-0005 asks for `requirements(id, story_id, type,
+//! description, status)`, and three of those five fields are the ledger already: an
+//! obligation is *stated* by somebody at a moment, and every task that takes a run at
+//! it states so too. Only `status` wants a column, and it is the one field ADR-0005
+//! also says must never be trusted on its own — "a requirement is only done while
+//! nothing open references it" is a fact about the tasks, so it is derived from them
+//! ([`wecode_core::admission::requirement_is_met`]) rather than written back. What is
+//! left is rows, and rows with the correlation keys this table already carries.
+
+use std::collections::BTreeMap;
 
 use rusqlite::params;
+use wecode_core::{ProjectId, TaskId};
 use wecode_gov::{Action, ControlMode, Decision, Record, Source};
 
 use crate::{Store, StoreError, now_secs};
@@ -55,6 +68,76 @@ impl AuditLine {
     }
 }
 
+/// Functional or not — what the system must do, against how well it must do it.
+///
+/// Carried in the handle rather than in a column, so `checkout/NFR-1` says which it is
+/// everywhere it is named: in the ledger, in a task's brief, in a merge report. A
+/// column would say it in the one place that reads the column and leave the id, which
+/// is what travels, meaning nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReqKind {
+    Functional,
+    NonFunctional,
+}
+
+impl ReqKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Functional => "FR",
+            Self::NonFunctional => "NFR",
+        }
+    }
+}
+
+/// One obligation a story carries, folded out of the rows that stated it and the
+/// rows that named it.
+///
+/// The wording is the contract; `served_by` is the attempts at it. Many tasks may
+/// answer to one requirement — rework, a bug against it, a changed design — and that
+/// is the point of keeping the attempts rather than a pointer: the history of an
+/// obligation is what a story cannot otherwise show.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Requirement {
+    /// `<story>/FR-1`. Minted per story and per kind.
+    pub id: String,
+    pub story: TaskId,
+    pub project: ProjectId,
+    pub wording: String,
+    /// When it was last stated.
+    pub at: u64,
+    /// The person who stated it, or the post when the row named no person.
+    pub by: String,
+    /// Every task that named it, oldest first.
+    pub served_by: Vec<TaskId>,
+}
+
+impl Requirement {
+    #[must_use]
+    pub fn kind(&self) -> ReqKind {
+        if self.id.contains("/NFR-") {
+            ReqKind::NonFunctional
+        } else {
+            ReqKind::Functional
+        }
+    }
+}
+
+/// Who is writing a row no Broker decided.
+///
+/// Everything the Broker authorises arrives as a [`Record`], which carries its own
+/// attribution. A requirement is *stated* rather than authorised — the authorisation
+/// is the `define` recorded beside it — and the row still has to say who said so,
+/// because a ledger with an anonymous row in it is not a ledger.
+#[derive(Clone, Copy, Debug)]
+pub struct By<'a> {
+    pub session: &'a str,
+    pub post: &'a str,
+    pub agent: &'a str,
+    /// The person in the seat; empty for an autonomous agent, as in [`AuditLine`].
+    pub human: &'a str,
+}
+
 /// How the ledger is queried. Each variant is one predicate, combined by the
 /// caller — which is what a relational store buys over scanning a log.
 #[derive(Clone, Default, Debug)]
@@ -86,6 +169,17 @@ fn action_parts(a: &Action) -> (&'static str, String) {
         Action::Define { kind } => ("define", kind.as_str().to_string()),
         Action::Introspect { level } => ("introspect", format!("{level:?}")),
         Action::Staff => ("staff", String::new()),
+    }
+}
+
+/// Who a stated row is attributed to. The person where there is one: a requirement is
+/// somebody's undertaking, and the post they happened to be sitting in is not who has
+/// to answer for the wording.
+fn person_or_post(by: By<'_>) -> String {
+    if by.human.is_empty() {
+        by.post.to_string()
+    } else {
+        by.human.to_string()
     }
 }
 
@@ -198,6 +292,155 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// States a requirement of a story, and returns the handle it now answers to.
+    ///
+    /// The number is minted per story and per kind out of what the ledger already
+    /// holds, so `checkout/FR-2` is that story's second functional obligation whatever
+    /// else has been written since. Minted rather than typed, because an id an
+    /// operator chooses is an id two people choose differently.
+    pub fn declare_requirement(
+        &self,
+        by: By<'_>,
+        project: &ProjectId,
+        story: &TaskId,
+        kind: ReqKind,
+        wording: &str,
+    ) -> Result<Requirement, StoreError> {
+        let mine = self.requirements(None, Some(story))?;
+        let n = mine.iter().filter(|r| r.kind() == kind).count() + 1;
+        let id = format!("{story}/{}-{n}", kind.as_str());
+        let at = self.append_stated(by, project, story, "require", &id, wording)?;
+        Ok(Requirement {
+            id,
+            story: story.clone(),
+            project: project.clone(),
+            wording: wording.to_string(),
+            at,
+            by: person_or_post(by),
+            served_by: Vec::new(),
+        })
+    }
+
+    /// Records that a task is an attempt at a requirement.
+    ///
+    /// Its own row rather than a column on the task, because it is an event with a
+    /// time on it: this is what resets the obligation to open, and a column would
+    /// remember only the last thing to have claimed it.
+    pub fn serve_requirement(
+        &self,
+        by: By<'_>,
+        project: &ProjectId,
+        task: &TaskId,
+        requirement: &str,
+    ) -> Result<(), StoreError> {
+        self.append_stated(by, project, task, "serve", requirement, "")?;
+        Ok(())
+    }
+
+    /// One ledger row that states a fact rather than reporting a verdict.
+    ///
+    /// `supervisor`, not `broker`: nothing was decided here. The Broker's own row for
+    /// the `define` that authorised the declaration sits beside this one, and a reader
+    /// filtering the ledger for what was *judged* must not pick this up as a judgement.
+    fn append_stated(
+        &self,
+        by: By<'_>,
+        project: &ProjectId,
+        task: &TaskId,
+        action: &str,
+        target: &str,
+        detail: &str,
+    ) -> Result<u64, StoreError> {
+        let at = now_secs();
+        self.conn().execute(
+            "INSERT INTO audit_log
+               (at, session_id, post, agent, human, project_id, task_id,
+                source, action, target, outcome, mode, detail)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,'supervisor',?8,?9,'allow',NULL,?10)",
+            params![
+                crate::int::to_db(at),
+                by.session,
+                by.post,
+                by.agent,
+                by.human,
+                project.as_str(),
+                task.as_str(),
+                action,
+                target,
+                detail,
+            ],
+        )?;
+        Ok(at)
+    }
+
+    /// Every requirement, oldest first — of one project, of one story, or of all of it.
+    ///
+    /// Folded on read rather than kept as a table, and the fold is the whole of the
+    /// model: a later `require` row for the same handle restates the contract, and
+    /// every `serve` row adds an attempt at it. A `serve` naming a handle nothing ever
+    /// stated is dropped here; the gate refuses those before they can be written, and
+    /// inventing a requirement out of a reference to one would hide that it had.
+    pub fn requirements(
+        &self,
+        project: Option<&ProjectId>,
+        story: Option<&TaskId>,
+    ) -> Result<Vec<Requirement>, StoreError> {
+        let mut stmt = self.conn().prepare(
+            "SELECT at, post, human, project_id, task_id, action, target, detail
+             FROM audit_log WHERE action IN ('require','serve') ORDER BY seq",
+        )?;
+        // Keyed by handle, and the order they were stated in is kept separately: the
+        // handles sort `FR-1, FR-10, FR-2`, which is not an order anybody wrote.
+        let mut found: BTreeMap<String, Requirement> = BTreeMap::new();
+        let mut order: Vec<String> = Vec::new();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    crate::int::from_row(r.get(0)?, 0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        for (at, post, human, in_project, on_task, action, target, detail) in rows {
+            let by = if human.is_empty() { post } else { human };
+            if action == "require" {
+                let r = found.entry(target.clone()).or_insert_with(|| {
+                    order.push(target.clone());
+                    Requirement {
+                        id: target.clone(),
+                        story: TaskId::new(&on_task),
+                        project: ProjectId::new(&in_project),
+                        wording: String::new(),
+                        at,
+                        by: String::new(),
+                        served_by: Vec::new(),
+                    }
+                });
+                // The newest statement is the contract; the attempts already made
+                // against the old one stay, which is what makes the change visible.
+                (r.wording, r.at, r.by) = (detail, at, by);
+            } else if let Some(r) = found.get_mut(&target) {
+                let task = TaskId::new(&on_task);
+                if !r.served_by.contains(&task) {
+                    r.served_by.push(task);
+                }
+            }
+        }
+        Ok(order
+            .into_iter()
+            .filter_map(|id| found.remove(&id))
+            .filter(|r| project.is_none_or(|p| r.project == *p))
+            .filter(|r| story.is_none_or(|s| r.story == *s))
+            .collect())
     }
 
     /// Tokens spent, by project. The kind of aggregate a flat log could not do.

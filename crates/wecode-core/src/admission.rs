@@ -68,6 +68,18 @@ pub enum Defect {
     DesignMissing,
     /// A project with no tasks cannot progress.
     ProjectHasNoTasks,
+    /// A story that states no obligation. Its children are then attempts at nothing
+    /// written down, and "is this story done?" has no answer but somebody's opinion.
+    StoryOwesNothing,
+    /// A task naming a requirement no story ever stated.
+    ///
+    /// `known` is what the project does hold, on the same terms as [`Self::RepoUnknown`]:
+    /// a handle is minted rather than typed, so the usual way to get here is a stale one
+    /// off an older story, and the list is what makes that visible.
+    RequirementUnknown {
+        named: String,
+        known: Vec<String>,
+    },
     /// A dependency that will never be satisfied.
     DependencyMissing {
         on: TaskId,
@@ -138,6 +150,17 @@ impl Defect {
             Self::ProjectHasNoTasks => {
                 "This project has no tasks. Break it down before starting it.".into()
             }
+            Self::StoryOwesNothing => "What must be true for this story to be done? \
+                 State it: `wecode task add <story> --amend --requirement \"<one obligation>\"`."
+                .into(),
+            Self::RequirementUnknown { named, known } if known.is_empty() => format!(
+                "No story in this project has stated {named:?}. A story states one with \
+                 --requirement, and the handle it answers to is minted there."
+            ),
+            Self::RequirementUnknown { named, known } => format!(
+                "No story in this project has stated {named:?}. It holds: {}.",
+                known.join(", ")
+            ),
             Self::DependencyMissing { on } => format!("This waits on `{on}`, which does not exist."),
         }
     }
@@ -301,17 +324,6 @@ pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defec
     }
 
     // The competition is for a working tree, and a working tree belongs to a
-    // repository rather than to a project. Two projects on one repo is the ordinary
-    // shape of a codebase that is being worked on from more than one angle, and
-    // scanning only `tasks_of(&t.project)` let each of them admit a task claiming the
-    // same files: nothing said no until two worktrees came back with the same lines
-    // changed, by which point both had been paid for.
-    //
-    // Three further things stop concurrency: a dependency in either direction
-    // sequences them — across projects too, since a dependency may name any task in
-    // the plan — a parent/child relation means one contains the other rather than
-    // competing with it, and a different repository means they never touch the same
-    // file however alike their globs read.
     for other in plan.tasks() {
         if other.id == t.id
             || other.status.is_closed()
@@ -554,6 +566,8 @@ pub fn check_refusals(t: &Task, refuses: &[Refusal]) -> Vec<Defect> {
     out
 }
 
+
+
 // -------------------------------------------------------------- advice ------
 
 /// What a project's playbook would have put on a task of one kind, reduced to the
@@ -689,12 +703,6 @@ pub fn advise(t: &Task, plan: &Plan, expected: &Expected) -> Vec<Divergence> {
     }
 
     // A budget nobody stated is `BudgetMissing`, and the gate is asking about it.
-    // Past that the two figures are read separately, because they are overridden
-    // together: naming one takes the playbook's default off both.
-    //
-    // Under, not merely different. Room bought above the default costs nothing when
-    // it turns out to be unnecessary; below it the run stops part-done with the spend
-    // already made, which is the expensive direction to discover by accident.
     if t.budget.is_set() {
         for (measure, declared, default) in [
             ("tokens", t.budget.tokens, expected.tokens),
@@ -711,11 +719,6 @@ pub fn advise(t: &Task, plan: &Plan, expected: &Expected) -> Vec<Divergence> {
     }
 
     // And what the project said about itself, which no playbook knows: a task is part
-    // of a project and its figures come out of the same pot, so one that alone asks
-    // for more than the project was given has outgrown the thing it belongs to. Read
-    // from the plan rather than from `expected`, because it is not the playbook's
-    // opinion. Silent when either figure is absent — an unstated budget is
-    // `BudgetMissing`, which the gate is already asking about on both.
     if let Some(p) = plan.project(&t.project) {
         for (measure, declared, ceiling) in [
             ("tokens", t.budget.tokens, p.budget.tokens),
@@ -947,9 +950,6 @@ mod tests {
     #[test]
     fn an_unordered_unrelated_task_still_collides() {
         // The control on both exemptions above, which were the same test written
-        // twice: neither ordering nor nesting may become a blanket pass. With no path
-        // between two tasks and no parent relation either, the same two scopes are a
-        // genuine conflict.
         let mut plan = seeded();
         plan.add_task(good_task()).unwrap();
 

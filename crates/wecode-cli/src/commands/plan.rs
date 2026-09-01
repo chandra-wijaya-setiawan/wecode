@@ -34,6 +34,13 @@
 //! they could still change their mind about — `task add` and `check`. Both are wrapped
 //! here rather than answered inside their own modules, because a second verdict that
 //! two modules format two ways is two features.
+//!
+//! …and `--requirement`, which is `--onto` again in a different plane. Every other
+//! field of a task is a column on its row; an obligation is a *ledger* row that
+//! outlives the attempts at it (ADR-0005), so it is answered either side of the
+//! command on exactly the rule `--onto` is: the handle is checked before the task is
+//! written, and stated after. What a story owes and what a task serves are then read
+//! back beside the playbook's opinion, for the same two commands and the same reason.
 
 mod amend;
 mod filing;
@@ -52,8 +59,11 @@ pub(crate) use task::task_rm;
 use std::path::PathBuf;
 
 use wecode_core::admission::{self, Divergence};
-use wecode_core::{Budget, Cmp, Measure, Scope, Task, TaskId};
+use wecode_core::requirement;
+use wecode_core::{Budget, Cmp, Measure, Plan, Scope, Task, TaskId, TaskKind};
 use wecode_gov::{Action, WorkKind};
+use wecode_store::audit::{By, ReqKind, Requirement};
+use wecode_store::{Store, StoreError};
 
 use crate::args::Args;
 use crate::commands::ctx::{
@@ -107,11 +117,14 @@ pub(crate) fn budget_from(a: &Args) -> Option<Budget> {
 pub(crate) fn task_add(a: &Args) -> Res {
     // Checked before the declaration is written and cut after it: see [`Cut`].
     let cut = onto_asked(a)?;
+    // Likewise, and for the reason spelled out on [`Stated`].
+    let stated = requirement_asked(a)?;
     // `--onto` can be the whole of an amendment, and then it has to run without one.
     // `task_amend` requires one of its own flags and refuses a command naming none, so
     // it only runs when it has something to do — the same split `--steps` makes, one
-    // module over, for the same reason.
-    let alone = cut.is_some()
+    // module over, for the same reason. `--requirement` is the same case: stating an
+    // obligation on a story already in the plan changes no field of its row.
+    let alone = (cut.is_some() || stated.is_some())
         && a.has("amend")
         && !["parent", "top", "after", "no-after", "steps"]
             .iter()
@@ -121,11 +134,18 @@ pub(crate) fn task_add(a: &Args) -> Res {
     } else {
         task::task_add(a)?
     };
+    let had_cut = cut.is_some();
     if let Some(cut) = cut {
         out.push_str(&cut.apply(a, alone)?);
     }
+    if let Some(stated) = stated {
+        // Not twice for one command: the cut above already recorded the `define` when
+        // it ran on the path where nothing else would have.
+        out.push_str(&stated.apply(a, alone && !had_cut)?);
+    }
     // The id names the task being declared, so it is read as a task and nothing else.
     out.push_str(&advice_on(a, a.cmd(2), false)?);
+    out.push_str(&requirements_on(a, a.cmd(2), false)?);
     Ok(out)
 }
 
@@ -137,6 +157,7 @@ pub(crate) fn task_add(a: &Args) -> Res {
 pub(crate) fn check(a: &Args) -> Res {
     let mut out = inspect::check(a)?;
     out.push_str(&advice_on(a, a.cmd(1), true)?);
+    out.push_str(&requirements_on(a, a.cmd(1), true)?);
     Ok(out)
 }
 
@@ -360,6 +381,231 @@ impl Cut {
         }
         Ok(out)
     }
+}
+
+// ------------------------------------------------- the stated obligation ------
+
+/// What `--requirement` names, once the plan has been asked about it.
+///
+/// Two things, because a requirement has two ends and the task's own kind says which
+/// end this is. A **story** states one: the wording is the contract, and the handle it
+/// answers to is minted rather than typed. Anything else *serves* one: the task is an
+/// attempt at an obligation somebody already wrote down, and naming it is what puts
+/// that obligation back on the board until this task is done (ADR-0005).
+///
+/// The kind decides it rather than the shape of the string, so a wording that happens
+/// to look like a handle is still a wording, and a handle typed on a story is still a
+/// story restating what it owes.
+#[derive(Debug)]
+enum Stated {
+    Declared {
+        project: wecode_core::ProjectId,
+        kind: ReqKind,
+        wording: String,
+    },
+    Served {
+        project: wecode_core::ProjectId,
+        id: String,
+    },
+}
+
+/// `--requirement <wording|handle>`, resolved and checked, before anything is written.
+///
+/// The refusal here is [`Defect::RequirementUnknown`] asked as a question rather than
+/// filed as a defect, and that is deliberate: a handle nothing ever stated is a typo in
+/// the command, not a gap in the plan. Answering it with a saved task pointing at
+/// nothing would leave the operator a row to find and unpick.
+fn requirement_asked(a: &Args) -> Result<Option<Stated>, Box<dyn std::error::Error>> {
+    if !a.has("requirement") {
+        return Ok(None);
+    }
+    let said = require(
+        a.get("requirement").unwrap_or(""),
+        "--requirement \"<wording>\" on a story, or <handle> on a task",
+    )?;
+    let (store, _) = open(a)?;
+    let plan = store.load_plan()?;
+    let typed = require(a.cmd(2), "task id")?;
+    // An amendment names work that exists, on `onto_asked`'s rule and for its reason.
+    let existing = if a.has("amend") {
+        Some(the_task(&plan, typed)?)
+    } else {
+        plan.task_ref(typed)
+    };
+    let kind = match existing {
+        Some(t) => t.kind,
+        None => a.get("kind").and_then(TaskKind::parse).unwrap_or_default(),
+    };
+    let project = match existing {
+        Some(t) => t.project.clone(),
+        None => which_project(a, &plan)?.id,
+    };
+
+    if kind == TaskKind::Story {
+        return Ok(Some(Stated::Declared {
+            project,
+            kind: if a.has("nfr") {
+                ReqKind::NonFunctional
+            } else {
+                ReqKind::Functional
+            },
+            wording: said.to_string(),
+        }));
+    }
+
+    // The task as it will be, so the check reads the same before the row exists as
+    // after it: a fresh declaration is a draft, which is what `Task::new` gives.
+    let probe = match existing {
+        Some(t) => t.clone(),
+        None => Task::new(typed, project.clone(), "").of_kind(kind),
+    };
+    let known = handles(&store, &project)?;
+    if let Some(d) = requirement::check_requirement(&probe, Some(said), &known).first() {
+        return Err(d.question().into());
+    }
+    Ok(Some(Stated::Served {
+        project,
+        id: said.to_string(),
+    }))
+}
+
+impl Stated {
+    /// Writes the ledger row, now that the task it belongs to is in the plan.
+    ///
+    /// `authorise` on [`Cut::apply`]'s terms and for its reason: stating an obligation
+    /// on a story already in the plan can be the whole of an amendment, and on that
+    /// path nothing else has recorded a `define`.
+    fn apply(&self, a: &Args, authorise: bool) -> Res {
+        let (store, company) = open(a)?;
+        let plan = store.load_plan()?;
+        // Read back out of the plan, which is what makes a refused declaration state
+        // nothing: an obligation nobody can name is worse than one nobody wrote.
+        let Some(t) = plan.task_ref(a.cmd(2)) else {
+            return Ok(String::new());
+        };
+        let who = actor(a, &store, &company)?;
+        if authorise {
+            require_allowed(
+                &store,
+                &company,
+                &who,
+                (Some(t.project.to_string()), Some(t.id.to_string())),
+                &Action::Define {
+                    kind: WorkKind::Task,
+                },
+                "stating what a story owes",
+            )?;
+        }
+        let by = By {
+            session: &who.session,
+            post: &who.post,
+            agent: &who.agent,
+            human: who.human.as_deref().unwrap_or_default(),
+        };
+        match self {
+            Self::Declared {
+                project,
+                kind,
+                wording,
+            } => {
+                let r = store.declare_requirement(by, project, &t.id, *kind, wording)?;
+                Ok(format!(
+                    "  requires  {} — {}\n",
+                    r.id, r.wording
+                ))
+            }
+            Self::Served { project, id } => {
+                store.serve_requirement(by, project, &t.id, id)?;
+                Ok(format!(
+                    "  serves    {id} — open again until this task is done\n"
+                ))
+            }
+        }
+    }
+}
+
+/// Every requirement handle a project holds.
+fn handles(store: &Store, project: &wecode_core::ProjectId) -> Result<Vec<String>, StoreError> {
+    Ok(store
+        .requirements(Some(project), None)?
+        .into_iter()
+        .map(|r| r.id)
+        .collect())
+}
+
+/// What a story owes, or what a task is an attempt at.
+///
+/// Read out of the ledger rather than passed down from the command, on `advice_on`'s
+/// rule: `--requirement` states one obligation and a story usually carries several, so
+/// printing back only what was just typed would be the least useful of the two.
+fn requirements_on(a: &Args, typed: &str, project_first: bool) -> Res {
+    if typed.is_empty() {
+        return Ok(String::new());
+    }
+    let (store, _) = open(a)?;
+    let plan = store.load_plan()?;
+    if project_first && plan.project_ref(typed).is_some() {
+        return Ok(String::new());
+    }
+    let Some(t) = plan.task_ref(typed) else {
+        return Ok(String::new());
+    };
+    let all = store.requirements(Some(&t.project), None)?;
+    if t.kind == TaskKind::Story {
+        let mine: Vec<&Requirement> = all.iter().filter(|r| r.story == t.id).collect();
+        return Ok(owed(t, &mine, &plan));
+    }
+    let served: Vec<&Requirement> = all.iter().filter(|r| r.served_by.contains(&t.id)).collect();
+    Ok(listed("serves — the obligations this task answers to", &served, |_| {
+        String::new()
+    }))
+}
+
+/// The obligations of one story, each with whether anything still owes it.
+fn owed(t: &Task, mine: &[&Requirement], plan: &Plan) -> String {
+    let names: Vec<String> = mine.iter().map(|r| r.id.clone()).collect();
+    if mine.is_empty() {
+        // The one thing a story with no obligations gets told, and it is a question:
+        // nothing here can settle whether such a story is finished.
+        return requirement::check_requirement(t, None, &names)
+            .first()
+            .map_or_else(String::new, |d| format!("\n  ⚠ {}\n", d.question()));
+    }
+    listed("requirements — what this story owes", mine, |r| {
+        let met = requirement::requirement_is_met(&r.served_by, plan);
+        format!("{:<5}  ", if met { "met" } else { "open" })
+    })
+}
+
+/// One block, formatted so a handle lines up under a handle.
+fn listed(heading: &str, rows: &[&Requirement], state: impl Fn(&Requirement) -> String) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n  {heading}\n\n");
+    let wide = rows.iter().map(|r| r.id.len()).max().unwrap_or(0);
+    for r in rows {
+        out.push_str(&format!(
+            "  ·  {:<wide$}  {}{}\n",
+            r.id,
+            state(r),
+            r.wording
+        ));
+        if !r.served_by.is_empty() {
+            out.push_str(&format!(
+                "     {:<wide$}  {} attempt{}: {}\n",
+                "",
+                r.served_by.len(),
+                if r.served_by.len() == 1 { "" } else { "s" },
+                r.served_by
+                    .iter()
+                    .map(TaskId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    out
 }
 
 pub(crate) fn scope_from(a: &Args) -> Option<Scope> {
