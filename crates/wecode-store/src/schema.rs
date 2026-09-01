@@ -24,8 +24,11 @@ use rusqlite::Connection;
 /// `task_executions.attested_by`, so a cost can be filed against work wecode never
 /// dispatched without that figure reading as one wecode metered. 13 adds
 /// `tasks.requirement_id` — the obligation a task is an attempt at (ADR-0005), which
-/// until now could only be recovered by scanning the ledger.
-pub const VERSION: i64 = 13;
+/// until now could only be recovered by scanning the ledger. 14 adds
+/// `task_executions.beat`: an open row claims a supervisor is watching a process right
+/// now, and until this column there was nothing in the file that could tell that claim
+/// from one left behind by a `kill -9`.
+pub const VERSION: i64 = 14;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -198,6 +201,16 @@ CREATE INDEX audit_by_outcome ON audit_log(outcome);
 --
 -- NULL is therefore a claim rather than an absence: wecode watched this process.
 --
+-- `beat` is the second the supervisor of an open row last reported itself alive. An open
+-- row is a claim that some wecode process is watching a child *right now*, and every exit
+-- that runs code closes it — so what is left open is either a real run or a machine that
+-- stopped. Nothing in the file could tell those apart, and a pid cannot: after a reboot it
+-- names somebody else's process. A beat is narrower and true, which is why it is the
+-- column and the pid is not: a named supervisor was still executing at a stated second.
+--
+-- NULL on an *open* row means the row predates this column or was written by a wecode that
+-- does not beat, and is read as `started`. On a closed row it is history.
+--
 -- No foreign key on session_id: the ledger and its executions outlive sessions.
 CREATE TABLE task_executions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,6 +221,7 @@ CREATE TABLE task_executions (
     worktree        TEXT,
     pid             INTEGER,
     started         INTEGER NOT NULL,
+    beat            INTEGER,            -- last heard from; NULL on a row nobody beat
     ended           INTEGER,
     wall_secs       INTEGER,            -- measured by wecode
     spent_tokens    INTEGER,            -- reported by the agent; NULL if unmetered
@@ -497,6 +511,13 @@ const UPGRADES: &[(i64, &str)] = &[
         "ALTER TABLE task_executions ADD COLUMN attested_by TEXT",
     ),
     (12, ADD_REQUIREMENT_LINK),
+    // Nothing backfills, and here the absence is what has to be readable rather than
+    // merely honest. Every open row already in the file was left open by a wecode that
+    // never beat, so there is no second at which any of them was last heard from — and
+    // stamping one now would say a supervisor reported itself alive at the moment of the
+    // upgrade, which is the one claim the sweep acts on. Read as `started` instead, where
+    // it says exactly what is known: nobody has been heard from since this began.
+    (13, "ALTER TABLE task_executions ADD COLUMN beat INTEGER"),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
