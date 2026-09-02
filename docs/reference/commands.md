@@ -604,6 +604,32 @@ bottom of `provenance` says where it went — or, if the commit failed, that it 
 anywhere; the merge stands either way, since by then there is nothing to undo. `rollback`
 does not delete it.
 
+**`wecode install`** and the install step a merge runs are one function. A merge that
+lands then builds that repository's own executable from the merge commit and renames it
+over the path its `[[repos]]` block names in `company.toml`:
+
+```toml
+[[repos]]
+name     = "wecode"
+path     = "~/projects/wecode"
+installs = "~/.local/bin/wecode"   # absent → nothing installed, and nothing said
+```
+
+Naming the destination is the whole opt-in, and only `company.toml` may name it: a
+playbook is committed inside the repository being merged, so a field there would let any
+repo acquire the right to write to your machine by committing a line to itself. The build
+is debug, in the repository's own `target/`, so the usual install is a link rather than a
+compile — and it is the first thing that ever compiles the merge result, since acceptance
+ran pre-merge on the branch.
+
+Nothing it refuses can fail the merge. A destination directory that does not exist, a
+symlink or a directory in the way, or a merge result that does not compile is a line in
+the report naming the reason, and the destination still holds the binary it held. Retry
+with `wecode install`, never by merging again — git counts the branch merged, so a second
+merge lands nothing. `wecode install [--repo <name>]` is also the only way the *first*
+install can happen, and unlike the merge path it exits non-zero when nothing was
+installed.
+
 **`wecode worktree remove`** takes either a task id or a path. A path is how the two middle
 rows are reached: neither has a task to look up in the plan, which is precisely what makes
 them an orphan and a scratch. The two are told apart by shape — a task id is a kebab-case

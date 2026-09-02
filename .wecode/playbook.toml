@@ -18,9 +18,12 @@ merge    = "approved"   # the charter protects master anyway
 # unnecessary; until it lands, nothing starts unsigned.
 dispatch = "approved"
 language = "rust"
-# The integration branch. Task branches are cut from it.
-# Unset for now: this repo works on master directly, and naming a branch that does
-# not exist would fail at `wecode start`.
+# `master` is the integration branch: task branches are cut from it, and it is what a
+# merge builds. Nothing here says where the executable that build produces installs,
+# and nothing here can — `[project]` denies unknown fields, so a repository has no way
+# to name a path on the operator's machine by committing a line to itself. That answer
+# lives on `[[repos]] installs` in company.toml, which is hand-edited and outside every
+# write scope. See docs/wecode/cli-self-install-on-merge/design.md.
 
 # Decisions already taken live in docs/wecode/<task>/design.md. Read the one matching
 # your task id before writing anything, and check docs/wecode/ for a design that names
@@ -86,10 +89,12 @@ order, because core cannot depend on anything above it.
 Tests go to `impl` along with the code: this repo keeps them beside the source, so the
 tester post's tests/** scope cannot reach them. See the bug playbook.
 
-Put the test file in the write scope. Unit tests sit inside the module being changed,
-so they are covered already — but anything touching the CLI almost always edits
-crates/wecode-cli/tests/cli.rs too, and leaving it out fails the scope check after the
-work is done. Three tasks in a row have been caught by this.
+Put the test file in the write scope, and name the right one: the end-to-end suite is
+one file per area under crates/wecode-cli/tests/, not the single cli.rs it used to be.
+Unit tests sit inside the module being changed, so they are covered already — but
+anything touching the CLI almost always edits the area's file too, and leaving it out
+fails the scope check after the work is done. Three tasks in a row have been caught by
+this, and a fourth put its tests in a file its own acceptance did not read.
 
 Acceptance is an executable command, never a description. `Judged` is illegal on a
 task and the gate will refuse it.
@@ -207,8 +212,8 @@ to depend on its own child, and there is no way to add a dependency after a task
 exists anyway. Declare `--after` when you create the task.
 
 Both go to `impl`, not `test`. In this repo tests live beside the code — 25 src files
-carry inline `#[cfg(test)] mod tests`, and the integration suite is at
-crates/wecode-cli/tests/cli.rs. The tester post's scope is tests/** and spec/**, so it
+carry inline `#[cfg(test)] mod tests`, and the integration suite is one file per area
+under crates/wecode-cli/tests/. The tester post's scope is tests/** and spec/**, so it
 can write none of them; check with `wecode guard test write <path>`.
 
 That means the usual guarantee — a tester that cannot weaken the code to make a test
