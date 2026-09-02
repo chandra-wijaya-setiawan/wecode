@@ -871,12 +871,16 @@ fn help(f: &mut Frame, area: Rect) {
     );
 }
 
+/// A panic must not leave the terminal raw, nor take its own message down with it.
+mod crash;
+
 /// Runs the cockpit until the operator quits, opening on `opening` or on HOME.
 pub(crate) fn run(
     store: Store,
     company: Company,
     opening: Option<Screen>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    std::panic::set_hook(crash::hook(store.path(), std::panic::take_hook()));
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, store, company, opening);
     ratatui::restore();
