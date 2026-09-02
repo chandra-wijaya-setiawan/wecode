@@ -44,6 +44,30 @@ impl Default for AttentionBlock {
     }
 }
 
+/// `[budgets]`: whether a spend figure is a ceiling or a reading.
+///
+/// Off by default, deliberately. A budget killed mid-run destroys the work already
+/// paid for — the tree keeps a half-written change nobody can accept — while the
+/// overrun it prevents was going to land on the board in red either way. Monitoring
+/// is free; enforcement has a body count. An operator who wants the hard stop turns
+/// it on knowing that.
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BudgetsBlock {
+    #[serde(default)]
+    enforce: bool,
+}
+
+/// Whether a task's token budget stops a run or only measures it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Budgets {
+    pub enforce: bool,
+}
+
+pub(super) fn budgets_of(b: &BudgetsBlock) -> Budgets {
+    Budgets { enforce: b.enforce }
+}
+
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InvariantBlock {

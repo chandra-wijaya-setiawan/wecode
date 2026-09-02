@@ -32,7 +32,7 @@ mod role;
 
 pub use agent::{AgentTemplate, Intelligence};
 pub use chart::{Post, Repo, User};
-pub use limits::Attention;
+pub use limits::{Attention, Budgets};
 pub use reach::{Notify, Telegram};
 
 use std::collections::BTreeMap;
@@ -190,6 +190,8 @@ struct Wire {
     #[serde(default)]
     attention: limits::AttentionBlock,
     #[serde(default)]
+    budgets: limits::BudgetsBlock,
+    #[serde(default)]
     invariants: limits::InvariantBlock,
     #[serde(default)]
     session: limits::SessionBlock,
@@ -273,6 +275,7 @@ pub struct Company {
     pub profile: String,
     pub vision: String,
     pub attention: Attention,
+    pub budgets: Budgets,
     pub notify: Notify,
     pub telegram: Telegram,
     pub charter: Charter,
@@ -312,6 +315,7 @@ impl Company {
             profile: w.company.profile,
             vision: w.company.vision,
             attention: limits::attention_of(&w.attention),
+            budgets: limits::budgets_of(&w.budgets),
             notify: reach::notify_of(&w.notify)?,
             telegram: reach::telegram_of(&w.telegram)?,
             charter: limits::charter_of(&w.invariants),

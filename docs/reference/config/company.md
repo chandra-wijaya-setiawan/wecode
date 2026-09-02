@@ -183,3 +183,14 @@ Omitting all of it is the supported case and is exactly today's behaviour: no `m
 or no `intelligence`, means wecode names no model and the harness runs whatever it would
 have run. `wecode company show` prints the resolved name beside the level, and `wecode
 run` prints it beside what the run cost.
+
+## `[budgets]`
+
+| key | default | meaning |
+|---|---|---|
+| `enforce` | `false` | whether a task's token budget stops a run or only measures it |
+
+Off, a run that spends past its budget is never killed: the overrun lands on the
+board in red and the ledger keeps the true figure, but the work in the tree
+survives. On, the supervisor stops the run shortly after the budget is crossed.
+Wall clocks are not behind this flag — time is the operator's; tokens are money.

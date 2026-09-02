@@ -43,7 +43,8 @@ pub mod toolchain;
 pub mod workspace;
 
 pub use company::{
-    AgentTemplate, Attention, Company, Intelligence, Notify, OrgError, Post, Repo, Telegram,
+    AgentTemplate, Attention, Budgets, Company, Intelligence, Notify, OrgError, Post, Repo,
+    Telegram,
     Templates, User,
 };
 pub use gap::{Gap, GapError};

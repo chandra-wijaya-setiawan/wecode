@@ -1,7 +1,4 @@
 //! Commands that make work happen: prepare it, run it, judge it, schedule it.
-//!
-//! The boundary against [`crate::commands::plan`] is deliberate — one module decides
-//! what should be true, the other finds out what is.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -153,11 +150,6 @@ pub(crate) fn prepare(
         .into());
     }
     // Nothing here has anything to prepare for a manual task: no worktree, no branch,
-    // no envelope, and above all no agent. Refused at the one door `run` and `start`
-    // both come through rather than in each of them — the scheduler already keeps this
-    // work out of the queue, and this is what holds when something reaches past it. It
-    // is the whole point of the kind: a step that touches a real console, or a token
-    // only its owner can mint, must never arrive at something that would try.
     if task.is_done_by_a_person() {
         return Err(format!(
             "{id} is done by a person — nothing is dispatched to it and no tree is cut\n  \
@@ -209,9 +201,6 @@ pub(crate) fn prepare(
 
     let mut notes = String::new();
     // The project's own checkout, kept apart from `cwd` rather than shadowed by it: a
-    // task with a worktree works somewhere else, and the handoff still has to be able to
-    // read what a predecessor left here — a design asks for no worktree, so this is
-    // where its document was written.
     let repo = repo_path(company, project)?;
     let mut cwd = repo.clone();
 
@@ -222,15 +211,6 @@ pub(crate) fn prepare(
             return Err(format!("{} is not a git repository", repo.display()).into());
         }
         // Where this branch starts. A predecessor's branch when it has one still standing
-        // apart, so a dependent task *has* the work it comes after rather than merely
-        // being told about it — otherwise every chain touching the same files conflicts
-        // at merge, and the task would be building on a base that is missing its
-        // groundwork.
-        //
-        // Falling back to the playbook's integration branch, then to wherever the repo
-        // is standing. Guessing a name like "dev" would fail on repos without one. The
-        // integration branch is the *first* answer rather than the last for a predecessor
-        // that has already landed there — [`predecessor_branch`] says why.
         let integration = pb.as_ref().and_then(|p| p.project.merge_to.clone());
         let from_predecessor = predecessor_branch(&repo, plan, task, integration.as_deref());
         let base = match from_predecessor.or(integration) {
@@ -694,12 +674,18 @@ pub(crate) fn forbidden_by_charter(company: &Company, line: &str) -> Option<Stri
 /// Idle stays the template's. A budget says how long the work may take, not how long the
 /// harness may go quiet in the middle of it — different questions, and only the agent's
 /// own output stream can answer the second one.
-fn limits_for(template: &AgentTemplate, task: &Task) -> spawn::Limits {
+///
+/// `[budgets] enforce` decides whether the token half is a ceiling or a reading, and it
+/// is off unless the company turned it on. A kill mid-run destroys the work already paid
+/// for — the heartbeat build died at 25 lines this way, its schema column merged and its
+/// feature absent — while the overrun it prevents lands on the board in red either way.
+/// The wall clock is not behind the flag: time is the operator's, tokens are money.
+fn limits_for(template: &AgentTemplate, task: &Task, enforce_tokens: bool) -> spawn::Limits {
     let mut limits = spawn::Limits::from(template);
     if let Some(declared) = task.budget.wall_secs.map(Duration::from_secs) {
         limits.wall = Some(limits.wall.map_or(declared, |cap| cap.min(declared)));
     }
-    limits.tokens = task.budget.tokens;
+    limits.tokens = if enforce_tokens { task.budget.tokens } else { None };
     limits
 }
 
@@ -833,7 +819,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
     let exec = store.start_execution(&id, &who.session, prepared.cwd.to_str(), None)?;
     // The harness's clock, tightened by the wall this task declared and `wecode show`
     // has been printing all along.
-    let limits = limits_for(&template, &task);
+    let limits = limits_for(&template, &task, company.budgets.enforce);
     let outcome = spawn::run(
         &template,
         &prepared.envelope,
@@ -1545,7 +1531,7 @@ mod tests {
     fn a_task_is_held_to_the_wall_it_declared() {
         // The whole defect: this number was printed by `wecode show` and enforced by
         // nothing, so a task budgeted at a minute ran to the harness's half hour.
-        let l = limits_for(&harness(Some(1800), Some(300)), &budgeted(Some(60)));
+        let l = limits_for(&harness(Some(1800), Some(300)), &budgeted(Some(60)), false);
         assert_eq!(l.wall, Some(Duration::from_secs(60)));
         // And only the wall: a budget has nothing to say about silence.
         assert_eq!(l.idle, Some(Duration::from_secs(300)));
@@ -1555,15 +1541,15 @@ mod tests {
     fn a_task_cannot_declare_its_way_past_the_harnesss_wall() {
         // The tighter of the two, in both directions. The template's wall is the stop
         // under every run this harness makes, and a budget is not a way to lift it.
-        let l = limits_for(&harness(Some(600), None), &budgeted(Some(5400)));
+        let l = limits_for(&harness(Some(600), None), &budgeted(Some(5400)), false);
         assert_eq!(l.wall, Some(Duration::from_secs(600)));
     }
 
     #[test]
     fn a_task_is_held_to_the_tokens_it_was_budgeted() {
-        // The other half of the same defect: the figure the admission gate demanded and
-        // the board coloured rows against never reached the run it was written for.
-        let l = limits_for(&harness(Some(1800), Some(300)), &budgeted(Some(60)));
+        // The figure reaches the run only under [budgets] enforce: measured always,
+        // a kill switch only where the company said so.
+        let l = limits_for(&harness(Some(1800), Some(300)), &budgeted(Some(60)), true);
         assert_eq!(l.tokens, Some(1000));
     }
 
@@ -1576,23 +1562,33 @@ mod tests {
                 tokens: None,
                 wall_secs: Some(60),
             });
-        assert_eq!(limits_for(&harness(Some(1800), Some(300)), &t).tokens, None);
+        assert_eq!(limits_for(&harness(Some(1800), Some(300)), &t, true).tokens, None);
+    }
+
+    #[test]
+    fn a_token_budget_stops_a_run_only_where_the_company_said_so() {
+        // Off is the default and off means measured, not enforced: the figure still
+        // reaches the ledger through the meter, but no run is killed over it.
+        let l = limits_for(&harness(Some(1800), Some(300)), &budgeted(Some(60)), false);
+        assert_eq!(l.tokens, None);
+        let l = limits_for(&harness(Some(1800), Some(300)), &budgeted(Some(60)), true);
+        assert_eq!(l.tokens, Some(1000));
     }
 
     #[test]
     fn either_wall_alone_is_the_whole_answer() {
         // A harness with no clock is held to the task's...
-        let l = limits_for(&harness(None, Some(300)), &budgeted(Some(90)));
+        let l = limits_for(&harness(None, Some(300)), &budgeted(Some(90)), false);
         assert_eq!(l.wall, Some(Duration::from_secs(90)));
 
         // ...and a task budgeted in tokens alone is held to the harness's, which is
         // what every task got before this and is still right when there is nothing
         // tighter to apply.
-        let l = limits_for(&harness(Some(1800), Some(300)), &budgeted(None));
+        let l = limits_for(&harness(Some(1800), Some(300)), &budgeted(None), false);
         assert_eq!(l.wall, Some(Duration::from_secs(1800)));
 
         // Neither declares one: nothing to enforce, and no invented limit either.
-        let l = limits_for(&harness(None, None), &budgeted(None));
+        let l = limits_for(&harness(None, None), &budgeted(None), false);
         assert_eq!(l.wall, None);
     }
 }
