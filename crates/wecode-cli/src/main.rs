@@ -3,6 +3,7 @@
 mod args;
 mod board;
 mod cache;
+mod claim;
 mod codemap;
 mod commands;
 mod doctor;
@@ -135,6 +136,9 @@ WORK
                                        --json emits the A2A task instead of prose
   wecode tick                          promote waiting tasks whose work is unblocked
   wecode loop [--once]                 tick, then dispatch what is ready, forever
+        also closes a run whose supervisor has stopped reporting for 5 minutes,
+        confirmed a minute later: the task goes to failed for a person to retry;
+        nothing is killed, no worktree is removed, nothing is re-dispatched
   wecode run <task>                    spawn its agent, supervise it, then verify
   wecode cost <task> \"<what was done>\"  attribute work wecode never dispatched
         --tokens <n>  --wall <secs>  --replayed <n>    at least one of the first two

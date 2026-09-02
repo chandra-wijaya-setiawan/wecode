@@ -57,6 +57,26 @@ pub struct Execution {
     pub detail: String,
 }
 
+/// One open row, as the loop's sweep reads it: which run, whose it is, and when its
+/// supervisor was last heard from.
+///
+/// Narrower than [`Execution`] on purpose. The sweep's whole question is *is anybody
+/// still watching this*, which the beat answers; the rest is what closing the row
+/// needs — the task to hand back, the attempt to check it is still the latest, and
+/// the worktree to leave standing on the record.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OpenRun {
+    pub exec: i64,
+    pub task: String,
+    pub attempt: i64,
+    pub started: u64,
+    /// The second the supervisor last said it was still executing. `None` is a row
+    /// opened by a wecode that does not beat, and reads as `started`: the row's claim
+    /// is dated from the last evidence anyone actually holds.
+    pub beat: Option<u64>,
+    pub worktree: Option<String>,
+}
+
 /// A cost stated after the fact, for work no dispatch metered.
 ///
 /// One argument rather than four, for the reason [`Spend`] is one rather than two: the
@@ -103,10 +123,12 @@ impl Store {
     ) -> Result<i64, StoreError> {
         let attempt = self.next_attempt(task)?;
         let c = self.conn();
+        // `beat` opens equal to `started`, so an open row is never without one: the
+        // insert itself is the supervisor's first report of being here.
         c.execute(
             "INSERT INTO task_executions
-                (task_id, session_id, attempt, status, worktree, pid, started)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (task_id, session_id, attempt, status, worktree, pid, started, beat)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
             params![
                 task.as_str(),
                 session,
@@ -152,6 +174,111 @@ impl Store {
                 crate::int::opt_to_db(spend.replayed),
                 detail
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Stamps a run's row: its supervisor was still executing at this second.
+    ///
+    /// Only while the row is open. A closed row's beat is history, and a late stamp
+    /// from a thread that outlived its run must not rewrite it. Waits briefly on a
+    /// locked database rather than erroring: the caller is a background thread whose
+    /// single failure is absorbed anyway, and waiting is how it avoids missing a beat
+    /// to a longer write happening beside it.
+    pub fn beat(&self, id: i64) -> Result<(), StoreError> {
+        self.conn().busy_timeout(std::time::Duration::from_secs(5))?;
+        self.conn().execute(
+            "UPDATE task_executions SET beat = ?2 WHERE id = ?1 AND ended IS NULL",
+            params![id, crate::int::to_db(now_secs())],
+        )?;
+        Ok(())
+    }
+
+    /// The rows still claiming a supervisor: open and `working`, with their beats.
+    ///
+    /// What the loop's sweep reads. A row [`Store::record_execution`] filed never
+    /// appears — it is closed at insert, and there was never a process behind it to
+    /// have stopped watching.
+    pub fn open_runs(&self) -> Result<Vec<OpenRun>, StoreError> {
+        let c = self.conn();
+        let mut stmt = c.prepare(
+            "SELECT id, task_id, attempt, started, beat, worktree
+               FROM task_executions
+              WHERE ended IS NULL AND status = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![ExecutionStatus::Working.as_str()], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (exec, task, attempt, started, beat, worktree) = row?;
+            out.push(OpenRun {
+                exec,
+                task,
+                attempt,
+                started: crate::int::from_db(started, "execution start")?,
+                beat: crate::int::opt_from_db(beat, "execution beat")?,
+                worktree,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Closes a row at a stated instant rather than at now.
+    ///
+    /// For the verdict written over an *absence*: the sweep closing a run whose
+    /// supervisor went silent ends it at the last beat, because the silence after it
+    /// was not watched work and `wall_secs` has to keep meaning what it means on every
+    /// other row. The spend columns are left as they stand — NULL, on the rule they
+    /// already carry: nothing read a count out of that run, and 0 would claim it ran
+    /// for free.
+    pub fn close_execution_at(
+        &self,
+        id: i64,
+        status: ExecutionStatus,
+        detail: &str,
+        ended: u64,
+    ) -> Result<(), StoreError> {
+        let started: i64 = self.conn().query_row(
+            "SELECT started FROM task_executions WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )?;
+        let started = crate::int::from_db(started, "execution start")?;
+        self.conn().execute(
+            "UPDATE task_executions
+                SET status = ?2, ended = ?3, wall_secs = ?4, detail = ?5
+              WHERE id = ?1",
+            params![
+                id,
+                status.as_str(),
+                crate::int::to_db(ended),
+                crate::int::to_db(ended.saturating_sub(started)),
+                detail
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Backdates a run, for tests that need staleness without sleeping — what
+    /// [`Store::backdate_session`] is to sessions.
+    #[doc(hidden)]
+    pub fn backdate_run(
+        &self,
+        id: i64,
+        started: u64,
+        beat: Option<u64>,
+    ) -> Result<(), StoreError> {
+        self.conn().execute(
+            "UPDATE task_executions SET started = ?2, beat = ?3 WHERE id = ?1",
+            params![id, crate::int::to_db(started), crate::int::opt_to_db(beat)],
         )?;
         Ok(())
     }
@@ -659,6 +786,120 @@ mod tests {
         )
         .unwrap();
         assert!(s.unfinished_executions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_open_row_is_never_without_a_beat() {
+        // The insert is the supervisor's first report of being here: a row whose beat
+        // was NULL for its first thirty seconds would read as pre-beat history and be
+        // dated from `started` anyway, so the column says that outright.
+        let s = store();
+        let id = s
+            .start_execution(&TaskId::new("t"), "s", Some("/wt/t"), None)
+            .unwrap();
+        let runs = s.open_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].exec, id);
+        assert_eq!(runs[0].beat, Some(runs[0].started));
+        assert_eq!(runs[0].task, "t");
+        assert_eq!(runs[0].worktree.as_deref(), Some("/wt/t"));
+    }
+
+    #[test]
+    fn a_beat_stamps_an_open_row_and_never_a_closed_one() {
+        let s = store();
+        let id = s
+            .start_execution(&TaskId::new("t"), "s", None, None)
+            .unwrap();
+        s.backdate_run(id, 100, Some(100)).unwrap();
+        s.beat(id).unwrap();
+        let stamped = s.open_runs().unwrap()[0].beat.unwrap();
+        assert!(stamped > 100, "beaten past the backdated stamp");
+
+        // Closed, the row is history: a late stamp from a thread that outlived its
+        // run changes nothing and reports nothing.
+        s.finish_execution(id, ExecutionStatus::Completed, "exit 0", Spend::default())
+            .unwrap();
+        s.beat(id).unwrap();
+        let kept: Option<i64> = s
+            .conn()
+            .query_row(
+                "SELECT beat FROM task_executions WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, Some(i64::try_from(stamped).unwrap()));
+    }
+
+    #[test]
+    fn a_run_closed_at_its_last_beat_records_no_silence_as_work() {
+        // `ended` is the last beat, not the moment of the sweep — otherwise the row
+        // files as elapsed work a silence nobody was watching, and `wall_secs` stops
+        // meaning what it means on every other row.
+        let s = store();
+        let id = s
+            .start_execution(&TaskId::new("t"), "s", Some("/wt/t"), None)
+            .unwrap();
+        s.backdate_run(id, 100, Some(160)).unwrap();
+        s.close_execution_at(id, ExecutionStatus::Canceled, "supervisor silent", 160)
+            .unwrap();
+
+        let run = &s.executions(&TaskId::new("t")).unwrap()[0];
+        assert_eq!(run.status, ExecutionStatus::Canceled);
+        assert_eq!(run.ended, Some(160));
+        assert_eq!(run.wall_secs, Some(60));
+        assert_eq!(run.detail, "supervisor silent");
+        assert_eq!(run.spent_tokens, None, "nothing read a count out of it");
+        assert_eq!(run.replayed_tokens, None);
+        assert!(s.open_runs().unwrap().is_empty(), "no longer anyone's claim");
+    }
+
+    #[test]
+    fn a_supervisor_returning_after_the_sweep_outranks_it() {
+        // The sweep acted on an absence of evidence; a supervisor that finishes has
+        // some, so its verdict overwrites the provisional one — both the status and
+        // the figures.
+        let s = store();
+        let id = s
+            .start_execution(&TaskId::new("t"), "s", None, None)
+            .unwrap();
+        s.close_execution_at(id, ExecutionStatus::Canceled, "supervisor silent", 160)
+            .unwrap();
+        s.finish_execution(
+            id,
+            ExecutionStatus::Completed,
+            "exit 0",
+            Spend {
+                tokens: Some(90),
+                replayed: None,
+            },
+        )
+        .unwrap();
+
+        let run = &s.executions(&TaskId::new("t")).unwrap()[0];
+        assert_eq!(run.status, ExecutionStatus::Completed);
+        assert_eq!(run.detail, "exit 0");
+        assert_eq!(run.spent_tokens, Some(90));
+    }
+
+    #[test]
+    fn a_cost_stated_after_the_fact_is_never_an_open_run() {
+        // Closed at insert: there was never a process behind it, so there is nobody
+        // whose silence a sweep could be reading.
+        let s = store();
+        s.record_execution(
+            &TaskId::new("t"),
+            "s",
+            &Attested {
+                by: "cws".into(),
+                wall_secs: Some(60),
+                spend: Spend::default(),
+                detail: String::new(),
+            },
+        )
+        .unwrap();
+        assert!(s.open_runs().unwrap().is_empty());
     }
 
     #[test]

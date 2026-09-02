@@ -7,10 +7,11 @@ use wecode_core::{Plan, Task, TaskId, TaskStatus, WORKER_DIR, admission};
 use wecode_gov::{Action, ActionKind, Broker, Session, glob};
 use wecode_org::{AgentTemplate, Company, Playbook, Workspace};
 
-use wecode_store::{Execution, Store, execution::Spend};
+use wecode_store::{Store, execution::Spend};
 
 use crate::args::Args;
 use crate::commands::ctx::*;
+use crate::claim::{self, Claim};
 use crate::{
     cache, git, handoff, ledger, notify, render, scheduler, spawn, teardown, telegram, verify, work,
 };
@@ -506,6 +507,9 @@ pub(crate) fn serve(a: &Args) -> Res {
     // held here for the same reason: a rhythm has no edge in the database either.
     let mut announced = notify::Announced::default();
     let mut digest = notify::Rhythm::of(&company);
+    // The sweep's memory, in the process rather than the database — which is also why
+    // only the loop sweeps: a one-shot pass was not there for the silence it would judge.
+    let mut suspects = scheduler::Suspects::new(claim::CONFIRM);
 
     println!(
         "  watching {} · {limit} at a time ({} open items, {cores} cores)\n  ctrl-c to stop\n",
@@ -513,6 +517,15 @@ pub(crate) fn serve(a: &Args) -> Res {
     );
 
     loop {
+        // The sweep before promotion, so the queue is honest before anything is taken
+        // from it: a run whose supervisor is gone holds a slot until its row closes.
+        // Reported and stepped over on error, like the reply channel below — the loop
+        // keeps working unattended.
+        match claim::sweep(a, &ws, &store, &company, &mut suspects) {
+            Ok(swept) => print!("{swept}"),
+            Err(e) => println!("  ⚠ sweep: {e}"),
+        }
+
         let plan = store.load_plan()?;
 
         // Promotion first, and recorded, so the queue is honest before anything is
@@ -689,57 +702,6 @@ fn limits_for(template: &AgentTemplate, task: &Task, enforce_tokens: bool) -> sp
     limits
 }
 
-/// One dispatch's hold on a task: `running`, written before anything is prepared and
-/// given back unless an agent actually ran.
-///
-/// *Before*, because that is what makes it a claim rather than a note. Preparing cuts the
-/// tree and resets the last attempt away, so two dispatches that both prepare leave the
-/// loser resetting the checkout the winner's agent is working in.
-///
-/// *Given back*, because a status written that early is written on every way out that
-/// reaches no agent — the admission gate, a missing signature, a prerequisite not done, a
-/// harness that will not start. Left standing, each of those was a task shown as
-/// `running` with nothing running: holding a slot [`scheduler::free_slots`] counts, and
-/// untouchable by the tick, which never authors `running`. `Drop` does it, so every `?`
-/// in between is covered by construction rather than by remembering.
-struct Claim<'a> {
-    store: &'a Store,
-    id: TaskId,
-    /// What the store held when the claim was taken, which is what goes back.
-    was: TaskStatus,
-    kept: bool,
-}
-
-impl<'a> Claim<'a> {
-    /// Takes the task, unless [`scheduler::contended`] says somebody else has it.
-    fn take(store: &'a Store, task: &Task, runs: &[Execution]) -> Result<Self, String> {
-        let (id, was) = (task.id.clone(), task.status);
-        if let Some(why) = scheduler::contended(&id, was, runs) {
-            return Err(why);
-        }
-        store.set_task_status(&id, TaskStatus::Running).map_err(|e| format!("{id}: {e}"))?;
-        Ok(Self { store, id, was, kept: false })
-    }
-
-    /// Keeps it: an agent is up, and the run owes the task a verdict from here.
-    fn kept(mut self) {
-        self.kept = true;
-    }
-}
-
-impl Drop for Claim<'_> {
-    fn drop(&mut self) {
-        // Only while it is still ours: anything else in that column is somebody's answer
-        // about this task, and putting the old status back over it would erase a fact this
-        // dispatch does not own. Quiet and best effort — an error is already on its way to
-        // the operator, and a second one about the database would bury the first.
-        let held = (self.store.load_plan().ok()).and_then(|p| p.task(&self.id).map(|t| t.status));
-        if !self.kept && held == Some(TaskStatus::Running) {
-            let _ = self.store.set_task_status(&self.id, self.was);
-        }
-    }
-}
-
 /// Runs a task: prepares it, spawns the agent that holds its post, then judges it.
 ///
 /// The agent is never given a session. The supervisor opens one and records on its
@@ -817,6 +779,10 @@ pub(crate) fn run_task(a: &Args) -> Res {
     // Opened before the process starts, so a crash leaves a row saying `working`
     // rather than no trace of the run at all.
     let exec = store.start_execution(&id, &who.session, prepared.cwd.to_str(), None)?;
+    // The row now claims a live watcher, and the beat keeps that claim true for
+    // exactly as long as this process is here to make it — see [`claim::Beat`]. Held
+    // to the end of the run, verdict included: the row is open until then.
+    let _beat = claim::Beat::start(&store, exec);
     // The harness's clock, tightened by the wall this task declared and `wecode show`
     // has been printing all along.
     let limits = limits_for(&template, &task, company.budgets.enforce);

@@ -23,10 +23,12 @@
 //! the doing is theirs, and a promotion that reached only the database is a task
 //! assigned to somebody who was never asked.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use wecode_core::{ExecutionStatus, Plan, Task, TaskId, TaskStatus};
 use wecode_store::Execution;
+use wecode_store::execution::OpenRun;
 
 /// One status change a tick implies.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -180,6 +182,67 @@ pub(crate) fn awaiting_a_human(plan: &Plan) -> Vec<&Task> {
 
 /// How long to sleep between passes.
 pub(crate) const INTERVAL: Duration = Duration::from_secs(5);
+
+/// The open runs whose supervisor has stopped saying so: no beat for `silence`.
+///
+/// Pure and returned rather than applied, exactly as [`transitions`] is: the decision
+/// is testable without a database, and the caller records each close before making it.
+/// A `NULL` beat on an open row reads as `started` — the row predates the beat, and
+/// the claim is dated from the last evidence anyone actually holds.
+///
+/// Ages are computed saturating, so a beat that reads future-dated — a wall clock
+/// stepped backwards under the beating thread — reads *fresh*, and a backwards step
+/// delays the sweep rather than making it wrong.
+pub(crate) fn stale(runs: &[OpenRun], now: u64, silence: Duration) -> Vec<&OpenRun> {
+    runs.iter()
+        .filter(|r| now.saturating_sub(r.beat.unwrap_or(r.started)) >= silence.as_secs())
+        .collect()
+}
+
+/// The sweep's memory between passes: which runs read stale, and when each was first
+/// seen to.
+///
+/// Held in the loop's process rather than in the database, beside `Announced` and
+/// `Rhythm` and for their reason: an edge with nothing in the database to be the edge
+/// of belongs to the process that watches for it. It is also what makes the sweep safe
+/// on a laptop — suspend freezes the beating thread while the wall clock runs on, so a
+/// machine resuming after eight hours holds live runs whose beats read eight hours
+/// old. One reading may not close anything; a run still stale a whole window later is
+/// one whose resumed supervisor had every chance to speak.
+///
+/// It follows that only `wecode loop` sweeps. A one-shot `wecode tick` has one pass
+/// and was not there to hear the silence, so it may not judge it — and this memory
+/// dies with the process, so it cannot.
+pub(crate) struct Suspects {
+    window: Duration,
+    seen: HashMap<i64, Instant>,
+}
+
+impl Suspects {
+    pub(crate) fn new(window: Duration) -> Self {
+        Self {
+            window,
+            seen: HashMap::new(),
+        }
+    }
+
+    /// Which of `stale` have now read stale for the whole window, this pass running at
+    /// `now`. A run that stopped reading stale — beaten again, or closed by a
+    /// returning supervisor — is forgotten entirely, so a later suspicion of the same
+    /// run starts the window over.
+    pub(crate) fn confirm(&mut self, stale: &[i64], now: Instant) -> Vec<i64> {
+        self.seen.retain(|id, _| stale.contains(id));
+        let mut due: Vec<i64> = stale
+            .iter()
+            .filter(|&&id| {
+                now.duration_since(*self.seen.entry(id).or_insert(now)) >= self.window
+            })
+            .copied()
+            .collect();
+        due.sort_unstable();
+        due
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -519,6 +582,83 @@ mod tests {
         assert!(transitions(&p).is_empty(), "settled on the person");
         let waiting: Vec<&str> = awaiting_a_human(&p).iter().map(|t| t.id.as_str()).collect();
         assert_eq!(waiting, vec!["a"]);
+    }
+
+    /// One open row as the sweep reads it, with only the clocks varying.
+    fn open_run(exec: i64, started: u64, beat: Option<u64>) -> OpenRun {
+        OpenRun {
+            exec,
+            task: "a".into(),
+            attempt: 1,
+            started,
+            beat,
+            worktree: None,
+        }
+    }
+
+    /// Ten missed beats, as the design fixed it.
+    const SILENCE: Duration = Duration::from_secs(300);
+
+    #[test]
+    fn a_run_is_stale_only_after_the_whole_silence() {
+        // 299 seconds of quiet is an agent thinking, not a dead supervisor: the
+        // in-run limits already cover a child gone quiet under a watcher that is fine.
+        let runs = [open_run(1, 0, Some(700)), open_run(2, 0, Some(701))];
+        let found: Vec<i64> = stale(&runs, 1000, SILENCE).iter().map(|r| r.exec).collect();
+        assert_eq!(found, vec![1]);
+    }
+
+    #[test]
+    fn a_row_nobody_ever_beat_is_dated_from_its_start() {
+        // NULL beat is a row from before the beat existed, or a wecode that does not
+        // write one. The last evidence anyone holds is the insert itself.
+        let runs = [open_run(1, 100, None)];
+        assert_eq!(stale(&runs, 400, SILENCE).len(), 1);
+        assert!(stale(&runs, 399, SILENCE).is_empty());
+    }
+
+    #[test]
+    fn a_future_dated_beat_reads_fresh_rather_than_wrapping() {
+        // A wall clock stepped backwards must delay the sweep, never trigger it.
+        let runs = [open_run(1, 0, Some(5000))];
+        assert!(stale(&runs, 1000, SILENCE).is_empty());
+    }
+
+    #[test]
+    fn suspicion_is_confirmed_a_whole_window_later_and_never_on_one_reading() {
+        let mut s = Suspects::new(Duration::from_secs(60));
+        let t = Instant::now();
+        assert!(s.confirm(&[7], t).is_empty(), "a first sighting only remembers");
+        assert!(s.confirm(&[7], t + Duration::from_secs(59)).is_empty());
+        assert_eq!(s.confirm(&[7], t + Duration::from_secs(60)), vec![7]);
+    }
+
+    #[test]
+    fn a_run_that_beats_between_readings_is_forgotten() {
+        // The case the confirmation exists for: suspend freezes the beating thread
+        // while the wall clock runs on, so a resumed machine's live runs all read
+        // stale once. The resumed supervisor beats again before the window is out,
+        // and the suspicion has to die with that rather than wait to pounce.
+        let mut s = Suspects::new(Duration::from_secs(60));
+        let t = Instant::now();
+        s.confirm(&[7], t);
+        assert!(s.confirm(&[], t + Duration::from_secs(30)).is_empty());
+        assert!(
+            s.confirm(&[7], t + Duration::from_secs(120)).is_empty(),
+            "a fresh suspicion starts the window over"
+        );
+    }
+
+    #[test]
+    fn a_missed_pass_delays_a_sweep_rather_than_losing_or_doubling_one() {
+        // The property that makes running this on a timer safe, restated for the
+        // sweep: confirmation is recomputed from the first sighting every time.
+        let mut s = Suspects::new(Duration::from_secs(60));
+        let t = Instant::now();
+        s.confirm(&[7], t);
+        let late = t + Duration::from_secs(600);
+        assert_eq!(s.confirm(&[7], late), vec![7]);
+        assert_eq!(s.confirm(&[7], late), vec![7], "still due until acted on");
     }
 
     #[test]
