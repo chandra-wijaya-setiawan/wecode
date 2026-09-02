@@ -61,7 +61,7 @@ TBD — the change is confined to the task store, the admission gate and `wecode
 
 ## 5. Evidence
 
-**Five dispatched runs, one cause, 316,377 tokens.** Every rejection carries the same
+**Seven dispatched runs, one cause, 439,676 tokens — and still climbing.** Every rejection carries the same
 signature — `uv run pytest app/lakehouse -q — exit 4, wanted 0`. Exit 4 is pytest's *usage*
 error: it could not collect, which means the path was not there. Four of the five also read
 `.wecode/playbook.toml` outside scope, and one read
@@ -71,8 +71,15 @@ error: it could not collect, which means the path was not there. Four of the fiv
 |---|--:|--:|---|
 | `s54-strip-bom` | 1 | 36,093 | pytest exit 4, plus two out-of-scope reads |
 | `s54-academic-term-sources` | 1 | 53,683 | pytest exit 4, ruff exit 1 |
-| `g76-checkpoint-capture` | 1 | 46,272 | pytest exit 4 |
-| `g86-semantic-config` | 2 | 180,329 | pytest exit 4, twice |
+| `g76-checkpoint-capture` | 2 | 86,460 | pytest exit 4, twice |
+| `g86-semantic-config` | 3 | 263,440 | pytest exit 4, three times |
+
+**`wecode loop` makes this compound.** A task set back to `ready` is re-dispatched, fails
+identically, and costs again. Two tasks were reset after their first rejection and both failed
+a second time within the hour for the same reason — 123,299 further tokens. So the defect is
+not only expensive per dispatch, it is expensive per *retry*, and a retry is the natural
+response to a failure whose message does not name the tree it happened in. FR-12-05 is what
+would break that cycle.
 
 No run reached the work. Every one of these tasks was then done by hand or is still open, so
 the whole 316,377 tokens bought nothing — which is what FR-12-02 and FR-12-03 are for: a
