@@ -336,6 +336,9 @@ fn second_repo(org: &Org, name: &str) {
 }
 
 /// A second project, so its tasks meet the seeded ones across a project boundary.
+///
+/// Forced: one repo carries one live project at a time, and these tests are about
+/// what happens between the tasks of two an operator insisted on anyway.
 fn second_project(org: &Org, id: &str, repo: &str) {
     org.run(&[
         "project",
@@ -350,6 +353,7 @@ fn second_project(org: &Org, id: &str, repo: &str) {
         "200000",
         "--wall",
         "1800",
+        "--force",
     ])
     .assert_ok("add second project");
 }
@@ -472,6 +476,30 @@ fn widening_a_scope_onto_another_projects_files_is_refused() {
         .assert_contains("overlaps")
         .assert_contains("caching")
         .assert_contains("not changed");
+}
+
+#[test]
+fn a_repo_carries_one_live_project_at_a_time() {
+    // The project-level gate the tests above step over with --force: a repository is
+    // one integration branch and one playbook, and a second live project on it is a
+    // second owner for both. Archiving parks the holder, and the refusal names it
+    // because the repair is done to it.
+    let org = Org::new("one-per-repo", "solo");
+    org.seed();
+    let add = &["project", "add", "exports", "cut the export payload in half",
+                "--repo", "app", "--measure-cmd", "cargo test",
+                "--tokens", "1000", "--wall", "60"];
+    org.run(add)
+        .assert_ok("a refusal is a verdict, not an error")
+        .assert_contains("not admitted")
+        .assert_contains("caching")
+        .assert_contains("not saved");
+
+    org.run(&["archive", "caching"]).assert_ok("archive");
+    org.run(add)
+        .assert_ok("the archived holder freed its repo")
+        .assert_contains("admitted")
+        .assert_contains("saved");
 }
 
 // -------------------------------------------------------------- design ---------

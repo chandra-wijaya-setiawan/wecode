@@ -33,6 +33,16 @@ pub enum Defect {
         repo: String,
         known: Vec<String>,
     },
+    /// A second live project on a repo that already carries one.
+    ///
+    /// A repository is one working tree, one integration branch and one playbook, and
+    /// two live projects on it are two owners for each of those. Archiving parks the
+    /// holder — [`check_task`] already reads a parked project as no competition — so
+    /// the same line that frees a repo's files frees the repo itself.
+    RepoAlreadyHasProject {
+        repo: String,
+        held_by: ProjectId,
+    },
     MeasureMissing,
     MeasureNotExecutable,
     ScopeMissing,
@@ -106,6 +116,10 @@ impl Defect {
             Self::RepoUnknown { repo, known } => {
                 format!("Repo {repo:?} is not registered. Known: {}.", known.join(", "))
             }
+            Self::RepoAlreadyHasProject { repo, held_by } => format!(
+                "Repo {repo:?} already carries the live project `{held_by}`. One repo, \
+                 one live project: add tasks to `{held_by}`, or archive it first."
+            ),
             Self::MeasureMissing => {
                 "How will we know this is done? Give a command, or a metric with a target.".into()
             }
@@ -240,6 +254,21 @@ pub fn check_project(p: &Project, plan: &Plan, known_repos: &[String]) -> Vec<De
         out.push(Defect::RepoUnknown {
             repo: p.repo.clone(),
             known: known_repos.to_vec(),
+        });
+    }
+
+    // One live project per repo. `plan.projects()` yields only unarchived ones, so an
+    // archived holder frees its repo the way `parked` below frees its files — and an
+    // archived candidate claims nothing, for the same reason. A blank repo is
+    // `RepoMissing`, just reported; pairing two blanks would report it again as
+    // something else.
+    if !p.archived
+        && !p.repo.trim().is_empty()
+        && let Some(other) = plan.projects().find(|o| o.id != p.id && o.repo == p.repo)
+    {
+        out.push(Defect::RepoAlreadyHasProject {
+            repo: p.repo.clone(),
+            held_by: other.id.clone(),
         });
     }
 
@@ -1133,6 +1162,62 @@ mod tests {
             overlap(&check_task(&rival("exports"), &plan, &[])).is_none(),
             "{:?}",
             check_task(&rival("exports"), &plan, &[])
+        );
+    }
+
+    #[test]
+    fn a_second_live_project_on_a_repo_that_already_has_one_is_refused() {
+        // The project-level twin of the overlap gate: two live projects on one repo
+        // are two owners for one integration branch, and until now nothing said no
+        // before their tasks started colliding file by file.
+        let d = check_project(&neighbour(), &seeded(), &repos());
+        let held = Defect::RepoAlreadyHasProject {
+            repo: "wecode".into(),
+            held_by: "caching".into(),
+        };
+        assert!(d.contains(&held), "{d:?}");
+        // The question names the holder, because the repair is done to it.
+        assert!(held.question().contains("`caching`"), "{}", held.question());
+    }
+
+    #[test]
+    fn archiving_the_holder_frees_its_repo_for_the_next_project() {
+        // Archiving parks a project, and parking already means "competes for
+        // nothing" at the task level. The repo itself follows the same line.
+        let mut plan = seeded();
+        let mut parked = plan.project(&"caching".into()).unwrap().clone();
+        parked.archived = true;
+        plan.update_project(parked).unwrap();
+        let repo_held = |d: &[Defect]| {
+            d.iter().any(|x| matches!(x, Defect::RepoAlreadyHasProject { .. }))
+        };
+        assert!(!repo_held(&check_project(&neighbour(), &plan, &repos())));
+
+        // ...and the archived holder, re-checked where it stands, claims nothing
+        // either: the board re-checks stored projects, and a parked one faulting the
+        // live one's repo would fault the wrong project.
+        let mut live = Plan::new();
+        live.add_project(neighbour()).unwrap();
+        let held = plan.project(&"caching".into()).unwrap().clone();
+        assert!(!repo_held(&check_project(&held, &live, &repos())));
+    }
+
+    #[test]
+    fn a_project_holds_its_own_repo_without_reading_as_its_own_rival() {
+        // `check` and the board re-run this on projects already in the plan, so the
+        // holder must not collide with itself; and a different repo is a different
+        // working tree, held by nobody here.
+        let mut plan = seeded();
+        plan.add_task(good_task()).unwrap();
+        let stored = plan.project(&"caching".into()).unwrap().clone();
+        assert!(check_project(&stored, &plan, &repos()).is_empty());
+
+        let mut far = neighbour();
+        far.repo = "wemail".into();
+        assert!(
+            !check_project(&far, &plan, &[])
+                .iter()
+                .any(|x| matches!(x, Defect::RepoAlreadyHasProject { .. }))
         );
     }
 
