@@ -4,7 +4,7 @@ One file per workspace, `wecode.db`. Everything machine-written lives here; ever
 hand-edited lives in `company.toml` (see [config/company.md](config/company.md)), because a binary blob
 cannot be diffed, reviewed or opened in an editor.
 
-Currently **schema version 13**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
+Currently **schema version 14**. Tables: `projects`, `tasks`, `task_depends_on`, `task_scopes`, `project_measures`, `task_acceptance`, `sessions`, `audit_log`, `task_executions`, `worktrees`, `inbox_cursor`, `short_numbers`.
 
 ## Shape
 
@@ -123,6 +123,13 @@ column existed, and every task that ever claimed an obligation said so in a row.
 it empty would be the destructive choice, not the cautious one — the fold that answers
 *which tasks serve this?* now reads the column, so a blank one would report that a
 workspace full of attempts answers to nothing.
+
+The 13→14 step adds `task_executions.beat` and leaves it NULL — 8→9's rule once more.
+The column is the second a supervisor last reported itself alive, written every thirty
+seconds while a run is watched; no row already in the file was ever beaten, so there is
+no second at which any of them was last heard from, and a reader treats NULL on an open
+row as `started` — the last evidence anyone actually holds. On a closed row it is
+history.
 
 ## Full DDL
 
@@ -308,6 +315,7 @@ CREATE TABLE task_executions (
     worktree        TEXT,
     pid             INTEGER,
     started         INTEGER NOT NULL,
+    beat            INTEGER,            -- last heard from; NULL on a row nobody beat
     ended           INTEGER,
     wall_secs       INTEGER,            -- measured by wecode
     spent_tokens    INTEGER,            -- reported by the agent; NULL if unmetered
