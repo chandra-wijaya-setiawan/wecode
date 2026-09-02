@@ -19,6 +19,13 @@ offers, what we adopt, and what we deliberately refuse.
 | **Readiness ≠ liveness** | Kubernetes probes | Three questions wear one word today: is the agent alive, is the task dispatchable, is this run still starting. Splitting them is what makes `waiting` mean one thing. |
 | **Scheduler owns the verdict** | Airflow zombie reaping | A worker never declares itself dead. The sweep that finds an expired lease writes the status. |
 
+Built, narrower than Temporal's on purpose: the supervisor beats
+`task_executions.beat` every 30 seconds (`claim::Beat`) and carries no progress —
+the beat proves the *watcher* was alive, and the diff stays the only account of the
+work. The pure staleness decision is `scheduler::stale`; only `wecode loop` acts on
+it, after a confirming second reading, per
+`docs/wecode/heartbeat-cleans-stalled-agents/design.md`.
+
 ## Kept, because ours is stronger here
 - **Identity as a proof, not an estimate:** `boot_id + pid + process start time`
   (rel-transition-journal's design). Chubby and Kubernetes need TTL leases
