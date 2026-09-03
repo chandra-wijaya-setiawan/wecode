@@ -1,162 +1,200 @@
-# What makes a story done, and what refuses it
+# A story is complete by arithmetic, and closed by a person
 
-Notes for `story-completeness-gate-design`. ADR-0006 §3 promised `wecode close <story>` —
-a gate that "refuses while any requirement under the story is `open`" — and nothing was
-built. What is decided here is the predicate, the one door it stands at, and why it
-refuses where the same shape of check on a project only leaves a note.
+Decided: completeness is a **derived predicate** — three clauses, computed in
+`wecode-core::requirement` and never stored — enforced at exactly one door.
+`wecode close <story>` refuses while any clause fails, records the closure when none
+does, and emits the story's report as its receipt. `wecode status <story> done` starts
+refusing for aggregating kinds and names `close` instead. ADR-0006 §3 promised this gate
+and nothing was built.
 
 ## What settles a story today
 
-Nothing does. Four pieces exist and none of them meet.
+Nothing does. Four pieces exist and none of them meet:
 
 | piece | where | what it does |
 |---|---|---|
-| "an epic or a story is done when its children are" | `crates/wecode-core/src/task.rs:32` | a doc comment; no code reads it |
-| `requirement_is_met` | `crates/wecode-core/src/requirement.rs:59` | derives the answer per obligation, correctly — and is called only by the `owed()` renderer |
-| leaf progress | `crates/wecode-cli/src/board.rs:368` | a percentage on the board, from leaf statuses, never written back |
-| `Defect::StoryOwesNothing` | `crates/wecode-core/src/admission.rs:83` | the one enforced story rule, and it stands at the front door |
+| "an epic or a story is done when its children are" | `wecode-core/src/task.rs:34` | a doc comment; no code reads it |
+| `requirement_is_met` | `wecode-core/src/requirement.rs:59` | derives the answer per obligation, correctly — called only by the `owed()` renderer |
+| leaf progress | `wecode-cli/src/board.rs:367` | a percentage on the board, never written back |
+| `Defect::StoryOwesNothing` | `wecode-core/src/admission.rs:83` | refused nowhere |
 
-A story's status is a column like any other, and `wecode status <story> done` writes it
-(`plan/staff.rs:108`) with nothing checked but the `Staff` capability. The transition that
-closes every other kind cannot reach a story: aggregating kinds are never dispatched and
-never merged, so `merge`'s `set_task_status(&id, Done)` — downstream of acceptance, a
-scope-checked diff and a signature — has no path to one. A story becomes done because
-somebody typed that it was.
+That last row is the one to check, because it is the fact the rest of this rests on.
+`check_requirement` has two callers and neither is a gate: `plan.rs:467`, on the branch a
+story never takes — `requirement_asked` returns `Declared` at `plan.rs:443`, before the
+check — and `plan.rs:585`, the `owed()` renderer, which prints it as a `⚠` question.
+`check_task`, the admission gate proper, returns early for aggregating kinds
+(`admission.rs:305`). So a story that states no obligation is admitted, staffed and
+worked, and the only surface that mentions it is one somebody chose to run.
 
-So a story can sit at `done` with three obligations nothing ever answered and a failed
-child beneath it, and every surface will report it green. That is worse than a gap:
-`StoryOwesNothing` already forces every story to state what it owes, so the ledger holds
-the material to settle the question and no gate asks it.
+Above that, `wecode status <story> done` writes the column with nothing checked but the
+`Staff` capability (`plan/staff.rs:98`–`107`). The transition that closes every other
+kind cannot reach a container: `merge`'s `set_task_status(&id, Done)` sits downstream of
+acceptance, a scope-checked diff and a signature, and nothing dispatches or merges an
+aggregating kind. A story is done because somebody typed that it was — over three
+unanswered obligations and a failed child, if that is how it stands.
 
-## Complete is three clauses, derived
-
-A story is complete when all three hold. They are computed from the plan and the ledger
-at the moment they are asked, never stored — the reason is written on `requirement_is_met`
-already and it is the same reason: a column recording completeness is a copy of what the
-tasks say, and the two part company at the first task somebody moves by hand.
+## Complete is three clauses
 
 | clause | fails when | the repair |
 |---|---|---|
-| **owes something** | the story stated no obligation | state one — `--amend --requirement` |
-| **every obligation answered** | nothing done answers it, or an open task still claims it | write the task, finish it, or drop the obligation |
-| **nothing open beneath it** | a task under the story is neither `done` nor `dropped` | finish it, drop it, or re-parent it |
+| **there is something to be complete about** | a story states no obligation; an epic has no child | state one — `--amend --requirement`; or decompose it |
+| **every obligation is answered** | its state is anything but met | write the task, finish it, run the criteria, or drop the obligation |
+| **nothing open beneath it** | a descendant is neither `done` nor `dropped` | finish it, drop it, or re-parent it |
 
-The second clause splits `requirement_is_met`'s single `false` into its two halves,
-because the repairs are different work: *unanswered* wants a task written, *still claimed*
-wants a task finished. A shortfall an operator cannot act on from its own wording is a
-shortfall they have to go and reconstruct.
+Clause 1 generalises rather than being asked of stories only. An epic with nothing under
+it passing green is the vacuous pass that the empty-diff and empty-check rules elsewhere
+in this tree exist to refuse, with a whole objective's name on it — and ADR-0005 puts
+obligations on the story, so an epic can never answer clause 1 on its own account.
 
-The third clause exists because not every task under a story serves a requirement — a
-docs task, a cleanup, a spike — and the obligations alone would let the story close over
-work still in flight. `is_closed()` is `Done | Dropped`, so a **failed** child blocks the
-close, which is right: retries are exhausted and a person owes a decision either way.
+Clause 3 exists because not every task under a story serves a requirement — a docs task,
+a cleanup, a spike — and the obligations alone would let a story close over work still in
+flight. `is_closed()` is `Done | Dropped`, so a **failed** child blocks the close, which
+is right: retries are exhausted and a person owes a decision either way.
 
-The predicate belongs in `wecode-core::requirement`, beside the two functions it is made
-of, and takes what core can name: the story, the plan, and `&[Owed { id, served_by }]` —
-the ledger rows folded down to the two fields the answer needs, handed in by the command
-that has a store. That is `check_requirement`'s existing seam and it holds for the same
-reason: core reads no database.
+The canon calls clause 2 the conditions of satisfaction (Cohn, *User Stories Applied*,
+2004, ch. 6) and asks a team to check them by hand at a review. Scrum's Definition of
+Done is the same checklist one level up, held per team rather than per story. wecode's
+difference is 12207's: each condition is already a record, so the checklist is a query
+and a gate can hold it.
 
-An epic needs no second rule. Obligations belong to stories (ADR-0005), so an epic's own
-obligation list is always empty and its completeness is its stories' — the first clause is
-therefore asked of stories only, and the other two generalise unchanged.
+## The gate does not derive an obligation's state
+
+```rust
+pub struct Owed { pub handle: String, pub state: ReqState, pub served_by: Vec<TaskId> }
+pub fn shortfalls(t: &Task, plan: &Plan, owed: &[Owed]) -> Vec<Shortfall>
+```
+
+`ReqState` is folded by whoever reads the ledger and handed in — `check_requirement`'s
+existing seam, for its reason: core reads no database. Today the caller gets it from
+`requirement_is_met`; that this gate never calls it itself is what makes one seam serve
+three decisions in flight:
+
+| that design | what it changes | what this gate does about it |
+|---|---|---|
+| acceptance criteria as rows | adds `unproven` between open and met | refuses it, with *run the criteria* as the repair |
+| typed delivery links | changes which attempts count as an answer | nothing |
+| requirement kinds | classifies the wording | nothing |
+
+A `Shortfall` per failing clause, not one boolean: *unanswered* wants a task written and
+*still claimed* wants a task finished, and a refusal an operator cannot act on from its
+own wording is one they have to go and reconstruct.
 
 ## One door, and it is `close`
 
-`wecode close <story>` is the checked transition and the only way a story reaches `done`.
-`wecode status <story> done` starts refusing for aggregating kinds and names `close`
-instead. Two doors to one transition is two answers to one question, and the unchecked one
-would win every time somebody was in a hurry.
+`wecode close <story|epic>` is the checked transition and the only way an aggregating kind
+reaches `done`. Two doors to one transition is two answers to one question, and the
+unchecked one wins every time somebody is in a hurry. No test in the tree moves a story or
+an epic through `status`, so the refusal costs nothing to add.
 
-`status <story> dropped` stays legal and unchecked. The gate refuses a claim of success,
-never an admission of failure: abandoning a story is a judgement an operator is entitled
-to make, and it is the honest thing to type when the work is not going to happen.
-
-Authority does not change — `Action::Staff`, as for moving any task. No new signature: the
-merges underneath were each signed under the project's own policy, and asking for a second
-one here would be a signature standing in for evidence that already exists.
+`status <container> dropped` stays legal and unchecked. The gate refuses a claim of
+success, never an admission of failure. Authority is `Action::Staff`, as for moving any
+task; no new signature, since the merges underneath were each signed under the project's
+own policy and a second one here would stand in for evidence that already exists.
 
 `wecode check <story>` prints the same shortfalls without transitioning, the way it
-re-runs the admission verdict without the save. The gate is something to consult, not only
-to be refused by, and an operator asking "what is left on this story?" should not have to
-attempt the close to find out.
+re-runs the admission verdict without the save. An operator asking what is left should not
+have to attempt the close to find out.
 
-## Why a refusal here, when a project only gets a note
+## The escape the refusal depends on
 
-Closing a project with open tasks prints a line and proceeds (`plan/staff.rs:69`):
-"closing with work outstanding is a judgement the operator is entitled to make." The
-asymmetry is deliberate and rests on one fact — a requirement has a first-class way to say
-*we decided not to serve this*, and an open task under a project has none. Refusing where
-the operator has nothing to type is a gate standing in front of work that is not allowed
-to fix what fails it. Refusing where they can type one sentence is a gate asking them to
-say which of the two things they mean.
+Refusing where the operator has nothing to type is a gate standing in front of work that
+is not allowed to fix what fails it. Clause 2's escape is ADR-0005's third state, and
+nothing reaches it — `docs/reference/commands.md:240` says so, and two other designs in
+this wave have already taken a dependency on the same hole.
 
-That escape does not exist yet. `dropped` is named in ADR-0005 and nothing reaches it —
-`requirement-kinds-design` took a dependency on the same hole. So it ships in this change:
-`wecode requirement drop <handle> --why "<reason>"` appends a `drop` row beside `require`
-and `serve`, and the fold in `Store::requirements` reads the newest row for a handle as
-the current state, which makes a later `require` the restatement gesture for free.
-The refusal is only legitimate with the escape it names, so the two land together or
-neither does.
+So it lands first, in this story, and the gate lands behind it:
+`wecode task add <story> --amend --drop <handle> --why "<reason>"` — a third `Stated`
+variant (`plan.rs:400`) writing a `drop` row beside `require` and `serve`, and the fold in
+`Store::requirements` (`audit.rs:615`) reading the newest row per handle as the current
+state. A later `require` restating the handle then reopens it for free. Not a
+`wecode requirement` command group: there is no such group, and an obligation is stated on
+the amend path today.
 
-There is no `close --force`. A waiver at admission says *work on it anyway*; a forced
-close would say *call it done anyway*, which is what `dropped` already says with a reason
-attached and an author on it. The difference is that `--force` would put an unrecorded
-claim into a generated report.
+## Complete is not closed
 
-## Why not roll up on the last merge
+`docs/wecode/planning-lifecycle-stages-design/design.md` folds a container's planning
+stage out of the same records and derives a top rung it calls `closed`, refusing `done` on
+a container outright. One rung has to move, and this is the amendment: the derived reading
+is **complete**, and **closed** is complete plus the column this command writes.
 
-The tempting alternative: `merge` closes the last child, recomputes the story, and sets it
-done with nobody typing anything. It fails on the clause it would have to trust most —
-the plan cannot tell *no more work* from *no work written yet*. A story with two tasks
-where the second has not been declared would close the moment the first landed, and the
-vacuous pass is the exact failure the empty-diff and empty-check rules elsewhere in this
-tree exist to refuse. Only a person knows the decomposition is finished. The transition
-therefore stays explicit and the gate checks it, which is also what keeps the report a
-receipt for a deliberate act rather than a side effect of a merge aimed at something else.
+What `close` adds is not in the records — *no more work is coming*. That is the same fact
+an automatic rollup on the last merge cannot have, and it is a decision, so it is stored.
+The two designs then share one function: the ladder's rung is `shortfalls()` returning
+empty, and the gate is `shortfalls()` returning anything.
+
+Closure is therefore not final, and the reading is the half that can fall. File a bug
+against a closed story and the obligation reopens by ADR-0005's arithmetic while the
+column still says `done`. Decided: the column is not rewritten and nothing is refused —
+it surfaces as a `Divergence`, the advisory tier this repo already has for a call an
+operator is entitled to make, naming the obligation and when the story was closed. `close`
+may be run again, and a second report at the same path is a later commit.
+
+## The receipt
+
+ADR-0006 §2 makes the story's report generated, never authored, and this is the command
+that emits it: the join of obligations × the tasks that served them × their runs ×
+acceptance results, on `record.rs`'s renderer and shape. Committed by
+`git::commit_file(repo, scratch, target, …)` — `record::keep`'s own path (`record.rs:93`),
+because the story's worktree comes down when its last task lands. It goes to
+`docs/wecode/<story>/report.md`, beside the design, and cites each child's
+`docs/wecode/<task>/report.md` by path rather than restating it.
+
+Emitted only on a close that passed, so the document's existence is the proof: a report
+cannot be produced for an incomplete story, and there is nothing else that produces one.
 
 ## What it was decided against
 
 | instead | why it loses |
 |---|---|
-| a `Divergence` note on `status <story> done` | advice is for calls an operator is entitled to make; a story reported done over an unanswered obligation is not a call, it is the thing the requirement rows were added to prevent |
-| a `complete` column on the story, written when the last child lands | a copy of what the tasks say, out of step at the first hand-moved task — `requirement_is_met`'s own argument |
-| a new `Defect` on the admission gate | admission asks whether work may *start*; this asks whether it may *stop*, and folding them would refuse dispatch on an unfinished story, which is every story |
-| rolling up automatically on the last merge | cannot distinguish an empty child list from a decomposition nobody finished |
-| adding a fresh design digest as a fourth clause | the digest proves what was signed and the doc-freshness gate already refuses a diff that moves it; a second reader of one fact is the drift this repo keeps refusing |
-| `close --force` | an unrecorded claim in a generated report, where `dropped --why` is a recorded one |
+| a `Divergence` on `status <story> done` | advice is for calls an operator is entitled to make; a story reported done over an unanswered obligation is the thing the requirement rows were added to prevent |
+| a `complete` column, written when the last child lands | a copy of what the tasks say, out of step at the first hand-moved task — `requirement_is_met`'s own argument |
+| a new `Defect` on the admission gate | admission asks whether work may *start*; this asks whether it may *stop*, and folding them would refuse dispatch on every unfinished story |
+| rolling up automatically on the last merge | the plan cannot tell *no more work* from *no work written yet*, so a story whose second task is undeclared closes when the first lands |
+| deriving `ReqState` inside the gate | a second reader of a rule three designs in flight are each changing |
+| a fresh design digest as a fourth clause | the doc-freshness gate already refuses a diff that moves it |
+| `close --force` | an unrecorded claim in a generated report, where `--drop --why` is a recorded one |
 
-## The receipt
+## What this costs
 
-ADR-0006 §2 makes `report_as_finished.md` generated, never authored, and this is the
-command that emits it — the join of requirements × the tasks that served them × their runs
-× acceptance results, on the merge record's existing renderer and shape. Emitted only on a
-close that passed, so the document's existence is the proof: a report cannot be produced
-for an incomplete story, and there is nothing else to produce it. The story's design
-document is cited by path and digest rather than restated.
+**Clause 1 turns a printed question into a refusal.** Every story in an existing
+workspace that owes nothing can be worked but not closed, and the first week of this reads
+as the tool being wrong about work somebody knows is finished. The repair is one sentence
+typed, which is the point of the clause.
+
+**Nothing runs the criteria.** Until acceptance criteria are records, clause 2 is a claim
+about attempts, not about the obligation — the gate is exactly as strong as
+`requirement_is_met`, which is stronger than a typed column and weaker than the word
+*complete* suggests.
+
+**Two commands are the wrong shape for a shell.** `close` exits non-zero on a shortfall,
+so a script that closes an epic's stories in a loop stops at the first incomplete one with
+no summary of the rest. `check` is the answer and the refusal says so.
 
 ## The room it has to land in
 
-| file | lines | cap | note |
+| file | lines | cap | what goes there |
 |---|---|---|---|
-| `crates/wecode-core/src/requirement.rs` | 70 | 1700 | `Owed`, `Shortfall`, the predicate |
+| `crates/wecode-core/src/requirement.rs` | 70 | 1700 | `Owed`, `Shortfall`, `shortfalls` |
 | `crates/wecode-store/src/audit.rs` | 1140 | 1700 | the `drop` row and the fold |
+| `crates/wecode-cli/src/commands/plan.rs` | 694 | 1700 | the third `Stated` variant |
+| `crates/wecode-cli/src/commands/plan/close.rs` | new | 1700 | the gate, the report, the commit |
 | `crates/wecode-cli/src/commands/plan/staff.rs` | 209 | 1700 | the redirect |
-| `crates/wecode-cli/src/main.rs` | 257 | 1700 | `("close", _)` — and `wecode-cli` has no lib target, so a command not wired here is dead code under `-D warnings` |
-| `crates/wecode-cli/tests/requirements.rs` | 124 | 1500 | where the existing requirement tests are |
+| `crates/wecode-cli/src/main.rs` | 257 | 1700 | `("close", _)` and `USAGE` |
+| `crates/wecode-cli/tests/requirements.rs` | 124 | 1500 | where the requirement tests are |
+| `docs/reference/commands.md` | 719 | — | `tests/workspace.rs:626` asserts its fenced block *is* `wecode help` |
 
-`close` itself is a new module under `commands/plan/`, not another 200 lines in
-`plan.rs` (694) — the directory was split for this. Acceptance reads the whole worktree,
-so the build task's write scope has to cover `main.rs` or the command it adds cannot
-compile.
+`close` is a new module under `commands/plan/`, not another 200 lines in `plan.rs` — the
+directory was split for this. Two scope traps, both named in `.wecode/playbook.toml`: the
+build task must declare `docs/**`, or the commands.md line it is forced to move fails the
+scope check after the work is done; and `wecode-cli` has no lib target, so a `close`
+module not wired into `main.rs` is dead code under `-D warnings`.
 
 ## What would show this was decided wrong
 
-Operators typing `wecode status <story> dropped` to get past a close they could not
-satisfy. That would mean the third clause is too strict — that stories routinely carry
-side work nobody intends to finish — and the answer would be to scope the clause to tasks
-that serve an obligation and let the rest be listed rather than blocking.
+Operators typing `status <story> dropped` to get past a close they could not satisfy.
+Clause 3 would then be too strict — stories routinely carry side work nobody intends to
+finish — and the answer is to scope it to tasks that serve an obligation and list the rest.
 
-Or: nobody ever runs `close`. Stories would then be a planning device that no one settles,
-the report would go unwritten, and the honest reading is that completeness wanted to be
-a question the board asks continuously rather than a gate one command holds.
+Or: nobody ever runs `close`. Stories would be a planning device no one settles, the
+report would go unwritten, and the honest reading is that completeness wanted to be a
+question the board asks continuously rather than a gate one command holds.
