@@ -49,8 +49,8 @@ pub use company::{
 };
 pub use gap::{Gap, GapError};
 pub use playbook::{
-    CacheDir, DispatchPolicy, KindPlaybook, MergePolicy, Playbook, PlaybookError, Subtask,
-    SubtaskTemplate, Written,
+    CacheDir, Component, DispatchPolicy, KindPlaybook, MergePolicy, Playbook, PlaybookError,
+    Subtask, SubtaskTemplate, Written,
 };
 pub use template::Template;
 pub use toolchain::Toolchain;

@@ -20,6 +20,7 @@
 //! |---|---|
 //! | `project` | `[project]` — what holds for every kind here |
 //! | `cache` | `[project.build_cache]` — the directories worktrees share |
+//! | `component` | `[project.components]` — the names a scope may use for paths |
 //! | `kind` | `[feature]`, `[bug]`, … — what this project says about one kind of work |
 //! | `subtask` | `[feature.design]`, … — how that kind breaks down |
 //! | `starter` | the file `playbook init` writes, which is the only one that writes |
@@ -36,12 +37,14 @@
 //! two machines with different homes.
 
 mod cache;
+mod component;
 mod kind;
 mod project;
 mod starter;
 mod subtask;
 
 pub use cache::CacheDir;
+pub use component::Component;
 pub use kind::KindPlaybook;
 pub use project::{DispatchPolicy, MergePolicy, ProjectSettings};
 pub use starter::{Written, init, starter};
@@ -106,6 +109,17 @@ pub enum PlaybookError {
         var: String,
         why: String,
     },
+    /// A `[project.components]` entry that could not be resolved to paths.
+    BadComponent {
+        name: String,
+        why: String,
+    },
+    /// A scope naming a component the project does not declare.
+    ComponentUnknown {
+        at: String,
+        named: String,
+        known: String,
+    },
     /// An `accept` line whose program this machine does not have.
     CommandNotFound {
         at: String,
@@ -146,6 +160,24 @@ impl fmt::Display for PlaybookError {
                 }
             ),
             Self::BadCache { var, why } => write!(f, "[project.build_cache] {var}: {why}"),
+            Self::BadComponent { name, why } => {
+                write!(f, "[project.components] {name}: {why}")
+            }
+            // With the declared names where there are any, and saying so where there are
+            // none: using the syntax before writing the table is the likelier mistake,
+            // and a list of nothing would read as a misspelling.
+            Self::ComponentUnknown { at, named, known } if known.is_empty() => write!(
+                f,
+                "{at}: `{}{named}` names a component, and this project declares no \
+                 components — write [project.components], or name the paths",
+                Component::SIGIL
+            ),
+            Self::ComponentUnknown { at, named, known } => write!(
+                f,
+                "{at}: `{}{named}` is not a component this project declares — it has: \
+                 {known}",
+                Component::SIGIL
+            ),
             Self::CommandNotFound { at, cmd, program } => write!(
                 f,
                 "{at} accept: `{program}` is not on this machine — `{cmd}` would only \
@@ -230,12 +262,14 @@ pub struct Playbook {
 }
 
 impl Playbook {
+    /// `[project]` is read first because the kinds below it are read against one of
+    /// its tables: a scope in a subtask template may name a component, and the names
+    /// it may use are declared there.
     pub fn parse(text: &str) -> Result<Self, PlaybookError> {
         let w: Wire = toml::from_str(text)?;
-        Ok(Self {
-            project: project::settings_of(&w.project)?,
-            kinds: kind::kinds_of(w.kinds)?,
-        })
+        let project = project::settings_of(&w.project)?;
+        let kinds = kind::kinds_of(w.kinds, &project.components)?;
+        Ok(Self { project, kinds })
     }
 
     /// Reads the playbook from a repository. A repo without one is `Ok(None)`, not an

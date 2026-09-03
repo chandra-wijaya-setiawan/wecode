@@ -16,6 +16,11 @@
 //! refused for having no scope at all, and the only repair would be to restate the main
 //! task's paths in every step of the template.
 //!
+//! It is also the one thing here that may be stated by name: `write = ["@store"]` is
+//! the paths `[project.components]` gives that component, resolved as this file is read
+//! (see [`super::component`]). What a step carries is always paths, so nothing further
+//! down has to know the word.
+//!
 //! Expansion is pure. It produces values and schedules nothing: the tasks it describes
 //! still face the admission gate, and may be edited or dropped before anything runs.
 
@@ -25,6 +30,7 @@ use serde::Deserialize;
 use wecode_core::{Scope, TaskKind};
 
 use super::PlaybookError;
+use super::component::{self, Component};
 use super::kind::KindPlaybook;
 
 #[derive(Deserialize, Default, Debug)]
@@ -150,6 +156,7 @@ pub(super) fn templates_of(
     key: &str,
     declared: &[String],
     steps: &BTreeMap<String, toml::Value>,
+    comps: &[Component],
 ) -> Result<Vec<SubtaskTemplate>, PlaybookError> {
     let at = format!("[{key}]");
     let mut out = Vec::with_capacity(declared.len());
@@ -196,8 +203,10 @@ pub(super) fn templates_of(
             kind,
             title: s.title,
             after: s.after,
-            write: s.write,
-            read: s.read,
+            // The one field pair read against something outside its own block: either
+            // side may name a component, and what is stored is the paths it stands for.
+            write: component::resolve(&format!("[{key}.{name}] write"), &s.write, comps)?,
+            read: component::resolve(&format!("[{key}.{name}] read"), &s.read, comps)?,
             accept: s.accept,
             assign_to: s.assign_to,
             tokens: s.tokens,

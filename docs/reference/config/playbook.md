@@ -23,6 +23,10 @@ CARGO_TARGET_DIR = "~/.cache/wecode/app/target"
 "vendor/**" = "vendored code is updated by its own tool, never by hand"
 "crates/*/src/generated/**" = "regenerate it: `cargo run -p codegen`"
 
+[project.components]              # the parts this repo is built out of, by name
+store = ["crates/wecode-store/**"]
+gate  = ["crates/wecode-core/src/admission.rs"]
+
 [feature]
 worktree  = true
 design_required = true            # refuse a feature with no design task behind it
@@ -45,7 +49,7 @@ accept = ["test -f docs/wecode/{{task}}/design.md"]
 
 [feature.build]
 after  = ["design"]               # an earlier sibling's name, not a task id
-write  = ["src/**"]
+write  = ["@store"]               # a component, or globs — see below
 ```
 
 One section per task kind. A kind with no section gets no defaults and no worktree. Only
@@ -129,6 +133,39 @@ that permitted it is itself the bug. This is one repository's, checked against a
 declaration, and answered by editing the declaration. A project may be stricter than the
 charter and never laxer — the same rule `merge` and `dispatch` keep — so refusing a path
 the charter already forbids changes nothing except when somebody reads the verdict.
+
+## Components: a scope that names a part instead of a path
+
+Everything wecode governs is addressed by path glob, and a glob says where work may go
+without saying what it *is*. `[project.components]` is the table that gives the paths
+their meaning back: each key is the name of a part of this repository, each value the
+paths that part owns.
+
+```toml
+[project.components]
+store = ["crates/wecode-store/**", "migrations/**"]
+gate  = ["crates/wecode-core/src/admission.rs"]
+```
+
+A **scope in this file may then name one**, on either side: `write = ["@store"]` in a
+subtask block is the store's paths. The `@` is the whole syntax — a path cannot begin
+with one — and the name is resolved *as the playbook is read*, so what a step carries,
+and what reaches assignment, the envelope, verification and the admission gate, is
+always paths. Nothing downstream learns the word.
+
+| | |
+|---|---|
+| where | `write` and `read` in a subtask block. A task's own `--write` still takes globs |
+| resolution | one level: a component names paths, never another component |
+| order | the scope's, each name replaced in place by its component's paths in table order |
+| repeats | collapse — naming `@store` beside a path the store already owns states it once |
+| a name nobody declared | refuses the playbook wherever it is loaded, naming the line and the components that do exist |
+| a component with no paths | refused. A step whose `write` resolved to nothing does not fail — it inherits the main task's scope, which is the widest answer reached by the narrowest-looking line |
+| `[project.refuses]` | states paths, not names. It is checked against what a scope resolved to, and quotes the path back |
+
+Nothing requires a component, and a path no component claims is ordinary: not every
+directory is part of the architecture. Renaming what a part *is* stays one edit in one
+table, however many steps name it.
 
 ## The build cache
 

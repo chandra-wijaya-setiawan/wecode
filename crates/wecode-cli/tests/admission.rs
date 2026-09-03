@@ -111,6 +111,104 @@ fn a_scope_widened_into_what_the_project_refuses_is_not_changed_either() {
         .assert_contains("✓ admitted");
 }
 
+// ----------------------------------------------------------- components ------
+
+/// A project that has said what its parts are, and a `feature` whose steps are scoped
+/// by name rather than by glob. The paths stay under `src/` so the solo template's
+/// engineer can reach them: an expansion nobody could be assigned would prove the wrong
+/// thing.
+const COMPONENTS: &str = r#"
+[project.components]
+cache = ["src/cache/**", "src/store/cache.rs"]
+probe = ["src/probe/**"]
+
+[feature]
+worktree  = true
+assign_to = "impl"
+accept    = ["true"]
+tokens    = 1000
+wall_secs = 60
+subtasks  = ["build", "instrument"]
+
+[feature.build]
+write = ["@cache"]
+
+[feature.instrument]
+after = ["build"]
+write = ["@probe"]
+read  = ["@cache"]
+"#;
+
+/// The main task an expansion hangs off. `scope` is its own, which every step here
+/// overrides with a component of its own — so a refusal that lands is the step's.
+fn a_feature(org: &Org, id: &str, scope: &str) -> support::Run {
+    org.run(&[
+        "task", "add", id, "add response caching", "--project", "caching", "--kind", "feature",
+        "--write", scope, "--tokens", "1000", "--wall", "60", "--expand",
+    ])
+}
+
+#[test]
+fn a_step_scoped_by_component_is_admitted_on_the_paths_that_component_owns() {
+    // Why this is worth a test through the binary: the name is resolved while the
+    // playbook is read, so what reaches the plan — and assignment, and the envelope,
+    // and verification — is paths. A scope stored as `@cache` would clear this gate and
+    // then be a task no post could be given and no diff could be judged against.
+    let (org, _) = with_playbook_body("admission-component-scope", COMPONENTS);
+    a_feature(&org, "caching-1", "src/**")
+        .assert_ok("a template whose steps name components")
+        .assert_contains("expanded caching-1 into 2 subtasks");
+
+    org.run(&["show", "caching-1-build"])
+        .assert_ok("show the step")
+        // Every path the component owns, in the order the table gives them.
+        .assert_contains("src/cache/**")
+        .assert_contains("src/store/cache.rs")
+        // And nothing carrying the name onward: one table was followed, once.
+        .assert_lacks("@cache");
+
+    // Both sides of a scope, because both are scopes.
+    org.run(&["show", "caching-1-instrument"])
+        .assert_ok("show the step that reads one component and writes another")
+        .assert_contains("src/probe/**")
+        .assert_contains("src/cache/**");
+}
+
+/// A reason for a path a component owns, distinct from [`WHY`] so the verdict below
+/// cannot pass on the wrong project's sentence.
+const GENERATED: &str = "the probe is generated: `cargo run -p codegen`";
+
+#[test]
+fn a_component_whose_paths_the_project_refuses_is_refused_by_its_paths() {
+    // The two settings meeting: `refuses` states paths, a scope states a name, and the
+    // verdict has to be about the files — they are what the reader has to narrow. The
+    // main task keeps clear of the refusal so the one that lands is the step's.
+    let body = format!("{COMPONENTS}\n[project.refuses]\n\"src/probe/**\" = \"{GENERATED}\"\n");
+    let (org, _) = with_playbook_body("admission-component-refused", &body);
+    a_feature(&org, "caching-2", "src/cache/**")
+        .assert_ok("the verdict is printed rather than raised")
+        .assert_contains("not expanded")
+        // The path, not the name: it is the line the playbook said no about.
+        .assert_contains("\"src/probe/**\"")
+        .assert_contains(GENERATED);
+}
+
+#[test]
+fn a_scope_naming_a_component_no_one_declared_refuses_the_playbook_where_it_is_read() {
+    // A typo in a scope is a typo in one file, and this is the whole reason the names
+    // are resolved as the playbook is read: `@cahce` left to stand as a glob would match
+    // no file, and a task that can write nothing is discovered at verification, once its
+    // budget is spent. Refused here it costs one edit, and the message names both the
+    // line to fix and what the project does declare.
+    let typo = COMPONENTS.replace("[\"@cache\"]", "[\"@cahce\"]");
+    let (org, _) = with_playbook_body("admission-component-unknown", &typo);
+    let r = a_feature(&org, "caching-3", "src/cache/**");
+    assert!(!r.ok(), "a playbook that cannot be read admits nothing");
+    r.assert_contains("cahce")
+        .assert_contains("[feature.build] write")
+        .assert_contains("@cache");
+}
+
 #[test]
 fn a_task_inside_what_its_project_was_given_is_said_nothing_about() {
     // The control. A note on every task would be a note nobody reads, and the ceiling
