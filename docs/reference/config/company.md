@@ -31,7 +31,8 @@ answer = "curl -sS -m 20 -d callback_query_id=\"$WECODE_TELEGRAM_CALLBACK\" -d t
 timeout = "30s"                   # the same line should edit the message it answers,
                                   # so a decided button stops offering; see telegram.md
 
-[invariants]                      # outrank every grant below
+[invariants]                      # outrank every grant below; one of them is not here
+                                  # and cannot be — this file is on its list, see below
 never_touch = [".github/**", "infra/**", "**/*.pem", "**/.env"]
 never_run = ["git push --force*", "rm -rf /*"]
 approval_to_merge = ["main", "master", "release/**"]
@@ -308,6 +309,51 @@ the call that consults it belongs beside `scheduler::contended` in
 `crates/wecode-cli/src/claim.rs`, which was outside the scope of the task that built this.
 Until that one line lands, setting the key changes what `wecode show` reports and does not
 yet stop a dispatch.
+
+## The invariant you cannot write
+
+Every charter forbids writes to the files that configure agents, whatever this file says.
+There is no key for it, no default to change and no way to narrow it — the first path on
+the list is this file, so a rule spelled here would be a rule an agent could unspell.
+
+| forbidden, wherever in the tree it sits | what it decides |
+|---|---|
+| `**/company.toml` | the roles, the grants, the posts, and these invariants |
+| `**/.wecode/playbook.toml` | the scope and acceptance commands a task is dispatched under |
+| `**/.claude/settings.json`, `**/.claude/settings.local.json` | the harness's own permissions and hooks |
+| `**/.claude/agents/**` | what a subagent is and what it may reach |
+| `**/.mcp.json` | the tool servers an agent may call |
+
+The line is **authority, not guidance**. `CLAUDE.md`, a skill, a spec and a README stay
+ordinary work: an agent that rewrites its briefing has told itself something, where an
+agent that rewrites `company.toml` has granted itself something.
+
+It is an invariant like the ones above it in every other respect. `wecode company show`
+prints it as its own `never touch` line beside what you wrote, every seat's briefing
+carries it, and a breach is an alarm rather than a note. A task that genuinely has to
+repair one of these files takes the ordinary route out — a holder signs an exception
+bounded to that task, and the signature is on the ledger. No seat signs one for itself.
+
+```console
+$ wecode guard impl write .claude/settings.json
+impl (claude-code)  write .claude/settings.json
+
+  ✗ denied — invariant violated: never_touch .claude/settings.json
+     regimented: blocked before it happens.
+
+  ⚡ ALARM — charter invariant. Dispatch freezes until acknowledged.
+```
+
+The same answer comes back for a role you have widened to `write = ["**"]`: the invariant
+is judged before the grant, so there is no seat to be promoted into.
+
+Three costs, all accepted:
+
+| | |
+|---|---|
+| a fixture `playbook.toml` under `tests/` is guarded too | the glob matches the filename, not the intent; a signed exception is the answer, and the alternative is a guard that reasons about which copy is real |
+| you edit these files in an editor, not through wecode | already true — `[[repos]] installs` is the authority to write outside every repository, and it is only safe to put here because this is the file no agent reaches |
+| a task may still *declare* one of them in its write scope | `never_touch` is checked per write, not at admission; the task is admitted and the write is refused when it is attempted, which is where the alarm comes from |
 
 ## `[[invariants.auto_merge]]` — saying yes once
 

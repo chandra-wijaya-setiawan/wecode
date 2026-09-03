@@ -5,6 +5,11 @@
 //! `[invariants]` bounds every agent's, and outranks every grant that would exceed it;
 //! `[session]` bounds how long an interactive one may sit idle.
 //!
+//! One invariant here is not written here, or anywhere: the charter always forbids
+//! writes to the files that configure agents, `company.toml` first among them. See
+//! [`wecode_gov::CONFIGURES_AGENTS`] for why that one is compiled in — a rule an agent
+//! can edit is a rule it does not have.
+//!
 //! One key here is not a ceiling: `[[invariants.auto_merge]]` is where the operator says
 //! yes in advance, by condition, to merges `approval_to_merge` would otherwise stop on
 //! them one at a time. It is written beside the invariant it answers because that is the
@@ -14,7 +19,7 @@
 use std::time::Duration;
 
 use serde::Deserialize;
-use wecode_gov::{Charter, Invariant, StandingOrder};
+use wecode_gov::{Charter, Invariant, StandingOrder, agent_config};
 
 use super::agent::Intelligence;
 use super::{OrgError, parse_duration};
@@ -193,8 +198,16 @@ pub(super) fn session_ttl(b: &SessionBlock) -> Result<Duration, OrgError> {
 /// merges already land, so it grants nothing; it is left in place because deleting the
 /// `approval_to_merge` entry is how a protection is withdrawn, and an order that survives
 /// the withdrawal is what makes putting it back a one-line change.
+///
+/// [`agent_config`] goes in first and comes from nothing in the block. It is the one
+/// invariant no company writes and none can drop: an operator adds to what is protected
+/// here, never subtracts from it, because the file this function is parsing is itself on
+/// that list. It is a separate entry rather than folded into `never_touch` so the two
+/// stay legible apart — `wecode company show` prints what the operator chose beside what
+/// wecode guarantees, and merging them would make the guarantee look like a default
+/// somebody could rewrite.
 pub(super) fn charter_of(b: &InvariantBlock) -> Charter {
-    let mut out = Vec::new();
+    let mut out = vec![agent_config()];
     if !b.never_touch.is_empty() {
         out.push(Invariant::NeverTouch(b.never_touch.clone()));
     }
@@ -282,6 +295,30 @@ mod tests {
                 .contains(&Invariant::NeverTouch(vec!["**/*.pem".to_string()]))
         );
         assert!(c.charter.invariants.contains(&Invariant::MaxTokens(500)));
+    }
+
+    #[test]
+    fn the_charter_guards_the_files_that_configure_agents() {
+        // The company that writes no `[invariants]` at all still has this one, because
+        // the block it would be written in is the block being guarded.
+        let c = Company::parse(MINIMAL).unwrap();
+        assert!(c.charter.invariants.contains(&wecode_gov::agent_config()));
+    }
+
+    #[test]
+    fn nothing_an_operator_writes_can_drop_the_agent_config_guard() {
+        // The attack it exists for, written as configuration: a charter that names an
+        // empty `never_touch` and hands out a root grant. The operator's list is
+        // honoured — it is empty — and the guard is a separate invariant beside it.
+        let text = format!("{MINIMAL}\n[invariants]\nnever_touch = []\n");
+        let c = Company::parse(&text).unwrap();
+        assert!(c.charter.invariants.contains(&wecode_gov::agent_config()));
+        assert!(
+            !c.charter
+                .invariants
+                .contains(&Invariant::NeverTouch(Vec::new())),
+            "an empty list is not an invariant of nothing"
+        );
     }
 
     /// The block as an operator writes it: a protection, and the merges already answered.
