@@ -39,7 +39,7 @@ max_tokens = 1000000
 max_intelligence = 7.5            # no seat may be staffed above this level; see below
 
 [[repos]]                         # declared by path; they live elsewhere
-name = "app"
+name = "app"                      # unique across the file; see below
 path = "~/projects/app"
 
 [roles.engineer]                  # a role is enforced capabilities, or it is nothing
@@ -164,6 +164,21 @@ conversation; a cap written in the one scale and checked in the other is over on
 first turn and says nothing thereafter. `wecode run` prints the replayed figure beside
 the spend, because cache reads are billed — at a tenth of the rate — and a number left
 out of a budget should not also be left off the screen.
+
+## Names that must resolve to one thing
+
+Two identifiers in this file are looked up by something that has nothing else to go on,
+so a second block claiming one is refused at load rather than resolved by order.
+
+| | why one |
+|---|---|
+| `[[repos]] name` | a project owns one repository, by name — a duplicate makes the second `path` configured and unreachable, and the work lands in whichever was typed first |
+| `[[users]] telegram` | a reply carries an account and no name, so a shared one is a signature attributable to two people; see [telegram.md](telegram.md) |
+
+Neither refusal is about tidiness: order decides both, silently, and the wrong answer is
+indistinguishable from the right one afterwards. The reverse pairings are legal — two
+names over one `path` is a monorepo or a renamed checkout, and a person with no
+`telegram` simply cannot answer from a chat.
 
 ## Run it before you depend on it
 
