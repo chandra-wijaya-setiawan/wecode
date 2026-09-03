@@ -27,8 +27,10 @@ use rusqlite::Connection;
 /// until now could only be recovered by scanning the ledger. 14 adds
 /// `task_executions.beat`: an open row claims a supervisor is watching a process right
 /// now, and until this column there was nothing in the file that could tell that claim
-/// from one left behind by a `kill -9`.
-pub const VERSION: i64 = 14;
+/// from one left behind by a `kill -9`. 15 adds `drivers`, on the same rule one level
+/// up: nothing said a dispatcher existed at all, so an idle loop and an absent one were
+/// the same database.
+pub const VERSION: i64 = 15;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -297,6 +299,32 @@ CREATE TABLE short_numbers (
     id   TEXT NOT NULL,
     UNIQUE (kind, id)
 ) STRICT;
+
+-- One row per `wecode loop` process: the dispatcher saying it exists.
+--
+-- `task_executions.beat` says a *run* is being watched. This says a driver is there to
+-- start runs at all, which is the claim that matters exactly when there are none — a
+-- workspace with a full queue and nothing moving is either dispatching slowly or not
+-- dispatching, and until this table those were the same file.
+--
+-- `beat` is `NOT NULL`, unlike the executions' column: no row here can predate it, so
+-- there is no history to leave unsaid. It opens equal to `started`, because starting is
+-- the first pass.
+--
+-- `closed` is the clean exit. A driver is live when `closed IS NULL` and its beat is
+-- recent; the two together are what a `kill -9` cannot fake, and are why no pid is
+-- kept — after a reboot `kill(pid, 0)` answers about somebody else's process.
+--
+-- `host` is whose machine it was, for a workspace two operators drive. Nothing joins on
+-- it: it is read out beside a stale beat, where *which* laptop went to sleep is the
+-- next thing asked.
+CREATE TABLE drivers (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    host    TEXT NOT NULL,
+    started INTEGER NOT NULL,
+    beat    INTEGER NOT NULL,   -- last pass; equal to `started` on a driver's first
+    closed  INTEGER             -- NULL while it is running
+) STRICT;
 ";
 
 /// The `task_executions` table, as an upgrade for a database that predates it.
@@ -411,6 +439,26 @@ UPDATE tasks SET requirement_id = (
 );
 ";
 
+/// The `drivers` table, as an upgrade for a database that predates it.
+///
+/// Frozen at the shape version 15 installs, like the three table steps above it, and
+/// nothing backfills — which here is load-bearing rather than merely honest. A row
+/// invented during the upgrade would carry a beat, and a beat is read as *a dispatcher
+/// was alive at this second*. It would say a loop is running on the machine that opened
+/// the file, which is the one thing this table exists to be able to deny.
+///
+/// So a workspace upgrading has no driver until one starts, and a board opened before
+/// that says so.
+const ADD_DRIVERS: &str = "
+CREATE TABLE drivers (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    host    TEXT NOT NULL,
+    started INTEGER NOT NULL,
+    beat    INTEGER NOT NULL,
+    closed  INTEGER
+) STRICT;
+";
+
 /// What `migrate` should do about a file at `current`.
 ///
 /// Split out as a pure function so every case is testable without depending on what
@@ -518,6 +566,7 @@ const UPGRADES: &[(i64, &str)] = &[
     // upgrade, which is the one claim the sweep acts on. Read as `started` instead, where
     // it says exactly what is known: nobody has been heard from since this began.
     (13, "ALTER TABLE task_executions ADD COLUMN beat INTEGER"),
+    (14, ADD_DRIVERS),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -696,6 +745,41 @@ mod tests {
             .query_row("SELECT count(requirement_id) FROM tasks", [], |r| r.get(0))
             .expect("tasks.requirement_id exists after 12→13");
         assert_eq!(serving, 0, "there was nothing in the ledger to recover");
+        let driving: i64 = c
+            .query_row("SELECT count(*) FROM drivers", [], |r| r.get(0))
+            .expect("drivers exists after 14→15");
+        assert_eq!(driving, 0, "upgrading a file does not start a loop");
+    }
+
+    #[test]
+    fn a_database_that_predates_the_drivers_gains_it_with_nothing_driving() {
+        // The upgrade a workspace in use takes to reach this build, and the one place a
+        // backfill would be worse than useless: a row here says a dispatcher was alive
+        // at a stated second, so inventing one would have the board report that `wecode
+        // loop` is running because the file was opened. Empty is the truth — nothing
+        // was driving this workspace until something says so.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("DROP TABLE drivers;").unwrap();
+        c.execute_batch(
+            "INSERT INTO projects (id, repo, objective, status)
+             VALUES ('p','wecode','an objective','active');
+             INSERT INTO tasks (id, project_id, kind, title, status)
+             VALUES ('warm','p','feature','warm the cache','ready');",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 14i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let driving: i64 = c
+            .query_row("SELECT count(*) FROM drivers", [], |r| r.get(0))
+            .expect("the drivers table exists");
+        assert_eq!(driving, 0, "no loop is claimed to be dispatching");
+        let title: String = c
+            .query_row("SELECT title FROM tasks WHERE id = 'warm'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(title, "warm the cache", "the plan survived");
     }
 
     #[test]
@@ -706,7 +790,8 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
-            "ALTER TABLE task_executions DROP COLUMN attested_by;
+            "DROP TABLE drivers;
+             ALTER TABLE task_executions DROP COLUMN attested_by;
              ALTER TABLE tasks DROP COLUMN requirement_id;",
         )
         .unwrap();
@@ -739,7 +824,8 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
-            "DROP TABLE inbox_cursor;
+            "DROP TABLE drivers;
+             DROP TABLE inbox_cursor;
              DROP TABLE short_numbers;
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
@@ -767,7 +853,8 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
-            "DROP TABLE worktrees;
+            "DROP TABLE drivers;
+             DROP TABLE worktrees;
              DROP TABLE inbox_cursor;
              DROP TABLE short_numbers;
              ALTER TABLE tasks DROP COLUMN archived;
@@ -807,7 +894,8 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
-            "DROP TABLE short_numbers;
+            "DROP TABLE drivers;
+             DROP TABLE short_numbers;
              ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
@@ -856,7 +944,8 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
-            "ALTER TABLE tasks DROP COLUMN archived;
+            "DROP TABLE drivers;
+             ALTER TABLE tasks DROP COLUMN archived;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
              ALTER TABLE tasks DROP COLUMN requirement_id;
@@ -896,7 +985,8 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
-            "ALTER TABLE task_executions DROP COLUMN replayed_tokens;
+            "DROP TABLE drivers;
+             ALTER TABLE task_executions DROP COLUMN replayed_tokens;
              ALTER TABLE task_executions DROP COLUMN attested_by;
              ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
@@ -939,7 +1029,8 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
-            "ALTER TABLE tasks DROP COLUMN doer;
+            "DROP TABLE drivers;
+             ALTER TABLE tasks DROP COLUMN doer;
              ALTER TABLE tasks DROP COLUMN steps;
              ALTER TABLE tasks DROP COLUMN requirement_id;
              ALTER TABLE task_executions DROP COLUMN attested_by;",
@@ -978,7 +1069,8 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
-            "ALTER TABLE tasks DROP COLUMN steps;
+            "DROP TABLE drivers;
+             ALTER TABLE tasks DROP COLUMN steps;
              ALTER TABLE tasks DROP COLUMN requirement_id;
              ALTER TABLE task_executions DROP COLUMN attested_by;",
         )
@@ -1012,8 +1104,11 @@ mod tests {
         // of attempts answers to nothing.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        c.execute_batch("ALTER TABLE tasks DROP COLUMN requirement_id;")
-            .unwrap();
+        c.execute_batch(
+            "DROP TABLE drivers;
+             ALTER TABLE tasks DROP COLUMN requirement_id;",
+        )
+        .unwrap();
         c.execute_batch(
             "INSERT INTO projects (id, repo, objective, status)
              VALUES ('p','wecode','an objective','active');
@@ -1101,7 +1196,8 @@ mod tests {
         // Back to the shape version 3 really had: no spend column, no worktrees, no
         // inbox cursor, no numbers, nothing filed away.
         c.execute_batch(
-            "ALTER TABLE task_executions DROP COLUMN spent_tokens;
+            "DROP TABLE drivers;
+             ALTER TABLE task_executions DROP COLUMN spent_tokens;
              ALTER TABLE task_executions DROP COLUMN replayed_tokens;
              ALTER TABLE task_executions DROP COLUMN attested_by;
              DROP TABLE worktrees;

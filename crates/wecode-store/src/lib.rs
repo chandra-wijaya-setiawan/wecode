@@ -5,6 +5,7 @@
 //! projects, tasks, sessions, and the audit ledger.
 
 pub mod audit;
+pub mod driver;
 pub mod execution;
 pub mod inbox;
 mod int;
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 pub use audit::{AuditLine, AuditQuery};
+pub use driver::Driver;
 pub use execution::Execution;
 pub use session::SessionInfo;
 pub use short::Level;

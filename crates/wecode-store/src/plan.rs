@@ -187,14 +187,14 @@ impl Store {
             plan.add_project(p).map_err(structural)?;
         }
 
-        // Tasks arrive parent-before-child and prerequisite-before-dependent, so
-        // `Plan`'s own checks can run on insert. Ordering by parent then id gets
-        // parents first; dependencies are attached afterwards for the same reason.
+        // Row order carries nothing. `Plan` checks both relations on insert, and both
+        // are attached after every task is in — an id order that puts each parent
+        // first does not exist once a hierarchy is more than one level deep.
         let mut deferred_parents: Vec<(TaskId, TaskId)> = Vec::new();
         let mut stmt = self.conn().prepare(
             "SELECT id, project_id, kind, doer, title, parent_id, status, assignee,
                     budget_tokens, budget_wall, archived, requirement_id
-             FROM tasks ORDER BY (parent_id IS NOT NULL), id",
+             FROM tasks ORDER BY id",
         )?;
         type Row = (
             String,
@@ -277,10 +277,10 @@ impl Store {
             t.requirement = requirement;
             t.acceptance = self.measures(&MeasureTable::Task, &id)?;
             t.scope = self.scope(&id)?;
-            // Parents last, for the same reason dependencies are: a child may
-            // sort before its parent (`req-rows` before `requirements-table`),
-            // and inserting it first aborted the whole load — every read of the
-            // plan failed until the row was repaired by hand (1 Sep 2026).
+            // Parents last, for the same reason dependencies are: a child may sort
+            // before its parent (`req-rows` before `requirements-table`) and a
+            // grandchild always can, and inserting one first aborted the whole load —
+            // every read failed until the row was repaired by hand (1 Sep 2026).
             let parent = t.parent.take();
             plan.add_task(t).map_err(structural)?;
             if let Some(p) = parent {
@@ -1267,6 +1267,36 @@ mod tests {
         // The relations stay independent through storage.
         assert!(plan.task(&"struct".into()).unwrap().depends_on.is_empty());
         assert!(plan.task(&"tests".into()).unwrap().parent.is_none());
+    }
+
+    #[test]
+    fn repro_grandchild_sorts_before_parent() {
+        let s = store();
+        s.save_project(&project()).unwrap();
+        // Every id ordering of a four-deep chain, saved parent-first so the rows exist.
+        for perm in [
+            ["a", "b", "c", "d"],
+            ["d", "c", "b", "a"],
+            ["b", "d", "a", "c"],
+            ["c", "a", "d", "b"],
+            ["d", "a", "c", "b"],
+            ["b", "c", "d", "a"],
+        ] {
+            let s = store();
+            s.save_project(&project()).unwrap();
+            s.save_task(&task(perm[0])).unwrap();
+            s.save_task(&task(perm[1]).under(perm[0])).unwrap();
+            s.save_task(&task(perm[2]).under(perm[1])).unwrap();
+            s.save_task(&task(perm[3]).under(perm[2])).unwrap();
+            let plan = s.load_plan().unwrap_or_else(|e| panic!("{perm:?}: {e}"));
+            for pair in perm.windows(2) {
+                assert_eq!(
+                    plan.task(&pair[1].into()).unwrap().parent,
+                    Some(TaskId::new(pair[0])),
+                    "{perm:?}"
+                );
+            }
+        }
     }
 
     #[test]
