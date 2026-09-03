@@ -134,6 +134,9 @@ struct App {
     /// Whether the ledger tail is under the table. Off until it is asked for: the rows a
     /// pane takes are the tree's, and the screen `enter` opens is one keystroke away.
     tail: bool,
+    /// Whether the panel of what waits on the operator may draw. On, unlike the tail:
+    /// that pane answers a question somebody asked, this one is the question.
+    waiting: bool,
     status: String,
     quit: bool,
 }
@@ -170,6 +173,7 @@ impl App {
             collapsed: HashSet::new(),
             query: String::new(),
             tail: false,
+            waiting: true,
             status: "j/k move · / filter · : go to · v view · enter open · ? help · q quit"
                 .into(),
             quit: false,
@@ -603,6 +607,10 @@ impl App {
             }
             // The ledger as it is written, under the table, and away again with the same
             KeyCode::Char('t') => self.tail = !self.tail,
+            KeyCode::Char('w') => {
+                self.waiting = !self.waiting;
+                self.status = if self.waiting { "waiting shown" } else { "waiting hidden" }.into();
+            }
             KeyCode::Char('?') => self.pane = Pane::Help,
             _ => {}
         }
@@ -654,9 +662,14 @@ fn draw(f: &mut Frame, app: &mut App) {
             // Top and bottom borders, plus the column heading.
             .saturating_add(3)
     };
+    // What waits on the operator, on every screen but HOME — where the four groups lead
+    // with these same rows, and a screen answering one question twice is read past.
+    let owed = (app.waiting && !matches!(screen, Screen::Home)).then(|| approvals::owed(app));
+    let owed_height = owed.as_ref().map_or(0, |(r, more)| approvals::height(r, *more));
     let areas = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(active_height),
+        Constraint::Length(owed_height),
         Constraint::Min(6),
         Constraint::Length(if tailing { TAIL } else { 0 }),
         Constraint::Length(1),
@@ -667,17 +680,20 @@ fn draw(f: &mut Frame, app: &mut App) {
     if active_height > 0 {
         active_agents(f, areas[1], app);
     }
+    if let Some((rows, more)) = &owed {
+        approvals::panel(f, areas[2], rows, *more);
+    }
     match &screen {
-        Screen::Task(id) => page(f, areas[2], app, id),
-        Screen::Agents => agents_page(f, areas[2], app),
+        Screen::Task(id) => page(f, areas[3], app, id),
+        Screen::Agents => agents_page(f, areas[3], app),
         Screen::Home | Screen::Project(_) => {
-            table(f, areas[2], app);
+            table(f, areas[3], app);
             if tailing {
-                tail(f, areas[3], app);
+                tail(f, areas[4], app);
             }
         }
     }
-    footer(f, areas[4], app);
+    footer(f, areas[5], app);
 
     if app.pane == Pane::Help {
         help(f, f.area());
@@ -689,6 +705,9 @@ fn draw(f: &mut Frame, app: &mut App) {
 /// agent, which attempt, or whether two agents are working at once.
 mod agents;
 use agents::{active_agents, agents_page};
+
+/// What waits on the operator, and the one command that clears each.
+mod approvals;
 
 /// The execution stores the launcher's session. Ledger rows written later by a
 /// delegated worker can carry that worker's agent name while retaining the session,
@@ -885,7 +904,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
 
 fn help(f: &mut Frame, area: Rect) {
     let w = 54u16.min(area.width.saturating_sub(4));
-    let h = 24u16.min(area.height.saturating_sub(2));
+    let h = 26u16.min(area.height.saturating_sub(2));
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -905,6 +924,7 @@ fn help(f: &mut Frame, area: Rect) {
         Line::from("v a          open active agents".to_string()),
         Line::from("v h          open home".to_string()),
         Line::from("t            show or hide the ledger as it is written".to_string()),
+        Line::from("w            show or hide what waits on you".to_string()),
         Line::from("a            show or hide what is filed away".to_string()),
         Line::from("r            reload now".to_string()),
         Line::from("q            quit".to_string()),
@@ -994,7 +1014,7 @@ mod tests {
     use wecode_gov::{Action, Decision, Record, Source};
 
     /// Renders one frame into an in-memory backend and returns it as text.
-    fn render(app: &mut App, w: u16, h: u16) -> String {
+    pub(super) fn render(app: &mut App, w: u16, h: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test backend");
         terminal.draw(|f| draw(f, app)).expect("draw");
         let buf = terminal.backend().buffer().clone();
@@ -1010,7 +1030,7 @@ mod tests {
 
     /// A cockpit over its own store: in memory, and one per test, since they run in
     /// parallel and shared state means one test wipes another's mid-write.
-    fn app() -> App {
+    pub(super) fn app() -> App {
         app_on(None)
     }
 
@@ -1052,11 +1072,11 @@ mod tests {
         App::new(store, company, opening).expect("app")
     }
 
-    fn on(id: &str) -> Screen {
+    pub(super) fn on(id: &str) -> Screen {
         Screen::Project(ProjectId::new(id))
     }
 
-    fn onto(id: &str) -> Screen {
+    pub(super) fn onto(id: &str) -> Screen {
         Screen::Task(TaskId::new(id))
     }
 
