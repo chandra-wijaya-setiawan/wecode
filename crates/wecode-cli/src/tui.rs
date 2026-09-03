@@ -96,6 +96,10 @@ struct App {
     /// with the plan, so a row's defect count agrees with `wecode check`.
     gates: board::DesignGates,
     plan: Plan,
+    /// The ledger as recorded, used by every view except ACTIVE AGENTS.
+    ledger: Vec<AuditLine>,
+    /// A copy used by the agents view, with each run attributed to the agent that
+    /// launched it rather than to a delegated agent's later action in the same session.
     audit: Vec<AuditLine>,
     /// Runs that have not ended yet. Kept beside the plan and ledger because all three
     /// are one reading of the cockpit, refreshed on the same tick.
@@ -141,11 +145,15 @@ impl App {
         opening: Option<Screen>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let plan = store.load_plan()?;
+        let ledger = store.audit(&AuditQuery::default())?;
+        let active_agents = store.unfinished_executions()?;
+        let audit = launcher_attribution(&store, &ledger, &active_agents)?;
         let mut app = Self {
             gates: crate::commands::ctx::design_gates(&company, &plan),
             plan,
-            audit: store.audit(&AuditQuery::default())?,
-            active_agents: store.unfinished_executions()?,
+            ledger,
+            audit,
+            active_agents,
             known_repos: company.repos.iter().map(|r| r.name.clone()).collect(),
             store,
             company,
@@ -192,11 +200,17 @@ impl App {
             self.store.unfinished_executions(),
         ) {
             (Ok(p), Ok(a), Ok(active)) => {
-                self.gates = crate::commands::ctx::design_gates(&self.company, &p);
-                self.plan = p;
-                self.audit = a;
-                self.active_agents = active;
-                self.rebuild();
+                match launcher_attribution(&self.store, &a, &active) {
+                    Ok(attribution) => {
+                        self.gates = crate::commands::ctx::design_gates(&self.company, &p);
+                        self.plan = p;
+                        self.ledger = a;
+                        self.audit = attribution;
+                        self.active_agents = active;
+                        self.rebuild();
+                    }
+                    Err(e) => self.status = format!("reload failed: {e}"),
+                }
             }
             (Err(e), _, _) => self.status = format!("reload failed: {e}"),
             (_, Err(e), _) => self.status = format!("reload failed: {e}"),
@@ -228,7 +242,7 @@ impl App {
                 .count();
             Some((subject, occurrence))
         });
-        let l = board::ledger_index(&self.audit);
+        let l = board::ledger_index(&self.ledger);
         let tree = Tree {
             plan: &self.plan,
             ledger: &l,
@@ -322,7 +336,7 @@ impl App {
             &self.store,
             &self.company,
             &self.plan,
-            &self.audit,
+            &self.ledger,
             &self.gates,
             id,
         )
@@ -676,6 +690,26 @@ fn draw(f: &mut Frame, app: &mut App) {
 mod agents;
 use agents::{active_agents, agents_page};
 
+/// The execution stores the launcher's session. Ledger rows written later by a
+/// delegated worker can carry that worker's agent name while retaining the session,
+/// so recency cannot answer who launched the work. The session row can.
+fn launcher_attribution(
+    store: &Store,
+    ledger: &[AuditLine],
+    active: &[Execution],
+) -> Result<Vec<AuditLine>, wecode_store::StoreError> {
+    let mut attributed = ledger.to_vec();
+    for run in active {
+        let Some(session) = store.session(&run.session)? else {
+            continue;
+        };
+        for line in attributed.iter_mut().filter(|line| line.session == run.session) {
+            line.agent.clone_from(&session.agent);
+        }
+    }
+    Ok(attributed)
+}
+
 fn header(f: &mut Frame, area: Rect, app: &App) {
     let line = Line::from(vec![
         Span::styled(
@@ -807,7 +841,7 @@ fn tail(f: &mut Frame, area: Rect, app: &App) {
     // Coloured whole: an ordinary act is dim because the eye is here for the one that
     // is not, and a refusal or an alarm is the reading this pane exists to carry.
     let mut lines: Vec<Line<'static>> =
-        board::newest(&app.audit, project, task, area.height.saturating_sub(2) as usize)
+        board::newest(&app.ledger, project, task, area.height.saturating_sub(2) as usize)
             .iter()
             .map(|l| {
                 let words = format!(
