@@ -83,6 +83,8 @@ PLAN
   wecode show <id>                     one project or task in full
   wecode check <id>                    the admission verdict
   wecode status <project|task> <status>   set a status by hand
+        `hold` parks it on the board — the tick skips it until you move it
+        back (a task to `waiting`, a project to `active`)
   wecode archive <project> | unarchive <project>
         hide a project from the cockpit, or bring it back (--force if work is live)
 

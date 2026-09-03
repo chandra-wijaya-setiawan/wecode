@@ -133,3 +133,6 @@ override; Temporal defaults to 100 slots per kind. A configured integer with a
 specific refusal beats an implicit unbounded default — `[attention]
 max_open_items` is already that number, and after this change it will finally
 mean what it says.
+
+Held work occupies no slot and is not competition for a scope — the one honest way
+to shrink the collision graph without archiving or deleting anything.
