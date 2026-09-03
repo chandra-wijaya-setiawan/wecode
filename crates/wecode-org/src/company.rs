@@ -101,6 +101,16 @@ pub enum OrgError {
     /// one. Without a fetch it would never run, and the operator who wrote it would be
     /// left tapping buttons that stay silent for a reason nothing states.
     AnswerWithoutFetch,
+    /// A harness declaring an output shape nothing here can read.
+    ///
+    /// Refused at load for the reason every setting in this file is: it reads as
+    /// configured and decides nothing. A name outside the list meters nothing on every
+    /// run of that harness, which is what an honest `plain` also does — so left to
+    /// dispatch, a typo and a decision are the same blank column.
+    UnknownProtocol {
+        agent: String,
+        protocol: String,
+    },
     /// A credential declaring a variable that decides which program runs.
     ///
     /// The same rule the build cache has and refused for the same reason: `PATH` and the
@@ -161,6 +171,12 @@ impl fmt::Display for OrgError {
                 f,
                 "[telegram] answer is set but fetch is not — nothing would read \
                  the taps it answers"
+            ),
+            Self::UnknownProtocol { agent, protocol } => write!(
+                f,
+                "[agents.{agent}] protocol = \"{protocol}\" is not a shape wecode reads — \
+                 one of {}, or leave it out for a harness that reports nothing",
+                Protocol::NAMES.join(", ")
             ),
             Self::SecretVarForbidden { id, var } => write!(
                 f,
@@ -266,6 +282,51 @@ pub struct Templates {
     pub task_envelope: String,
 }
 
+/// The shape of a harness's output, and so what can be read back out of it.
+///
+/// `[agents.*] protocol` is the one field in this file whose vocabulary is not the
+/// org's own: it names a reader in the layer that runs the process. The list lives
+/// beside the type rather than in `agent` for that reason, and an unrecognised name is
+/// refused at load rather than ignored at dispatch — a protocol nothing reads meters
+/// nothing, on every run of that harness, and says so nowhere. That is
+/// indistinguishable from an honest [`Protocol::Plain`], which is exactly why the
+/// honest one has to be written down.
+///
+/// None of it is a list of harnesses. A coding CLI holds a seat by declaring which of
+/// these shapes its output has; wecode learns no harness's format, and guesses at none.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Protocol {
+    /// `claude --output-format stream-json`: one JSON object per line, usage on the
+    /// `assistant` lines and the run's own total on the `result` line.
+    ClaudeStreamJson,
+    /// The contract wecode publishes for anything else willing to meet it: one JSON
+    /// object per line, any line carrying a `usage` object being that turn's spend, a
+    /// line typed `result` being the run's total.
+    GenericJsonl,
+    /// Prose, or a format nobody here has read. Unmetered, and honestly: the spend
+    /// column stays blank rather than zero.
+    Plain,
+}
+
+impl Protocol {
+    /// Every name that may be written, for the message that refuses the rest.
+    pub const NAMES: [&'static str; 3] = ["claude-stream-json", "generic-jsonl", "plain"];
+
+    /// The protocol this name is, or `None` for a name nothing reads.
+    ///
+    /// Absent is [`Protocol::Plain`] — which is what every company written before this
+    /// list existed already says, and what it already got.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim() {
+            "" | "plain" => Some(Self::Plain),
+            "claude-stream-json" => Some(Self::ClaudeStreamJson),
+            "generic-jsonl" => Some(Self::GenericJsonl),
+            _ => None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------- domain ------
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -339,10 +400,28 @@ impl Company {
     /// the seats that name it, a seat before the level it is staffed at. That ordering
     /// is what keeps a typo reported as a typo — a post naming an agent that has no
     /// block is an unknown agent, not a harness that declared no models.
+    ///
+    /// The last is the file's own rather than a block's: `protocol` is held to a list
+    /// that belongs to the layer reading the harness's output, so it is checked beside
+    /// [`Protocol`] and not in `agent`.
     fn validate(&self) -> Result<(), OrgError> {
         role::check(self)?;
         chart::check(self)?;
         agent::check(self)?;
+        self.protocols()?;
+        Ok(())
+    }
+
+    /// Every harness declares an output shape this build can read.
+    fn protocols(&self) -> Result<(), OrgError> {
+        for (name, agent) in &self.agents {
+            if Protocol::parse(&agent.protocol).is_none() {
+                return Err(OrgError::UnknownProtocol {
+                    agent: name.clone(),
+                    protocol: agent.protocol.clone(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -761,6 +840,50 @@ mod tests {
     /// The minimal file plus whatever blocks a test is about.
     fn declaring(blocks: &str) -> Result<Company, OrgError> {
         Company::parse(&format!("{MINIMAL}\n{blocks}"))
+    }
+
+    /// The minimal file with its one harness declaring an output shape.
+    fn speaking(protocol: &str) -> Result<Company, OrgError> {
+        Company::parse(&MINIMAL.replace(
+            "command = \"claude\"",
+            &format!("command = \"claude\"\nprotocol = \"{protocol}\""),
+        ))
+    }
+
+    #[test]
+    fn a_harness_holds_a_seat_by_naming_a_shape_wecode_reads() {
+        // The whole vocabulary, and the point of there being one: what a seat needs
+        // from its occupant is a declaration, not an integration.
+        for name in Protocol::NAMES {
+            assert!(speaking(name).is_ok(), "{name} should be a protocol");
+        }
+        assert_eq!(Protocol::parse("plain"), Some(Protocol::Plain));
+        assert_eq!(
+            Protocol::parse(""),
+            Some(Protocol::Plain),
+            "a harness that declares nothing reports nothing — every file written \
+             before this list says so by saying nothing"
+        );
+        assert!(Company::parse(MINIMAL).is_ok(), "and still loads");
+    }
+
+    #[test]
+    fn a_shape_nothing_reads_is_refused_where_it_is_written() {
+        // Left to dispatch this is a blank spend column on every run of that harness —
+        // which is exactly what an honest `plain` looks like, so the typo and the
+        // decision would be indistinguishable afterwards.
+        match speaking("claude-stream-jsonl").unwrap_err() {
+            OrgError::UnknownProtocol { agent, protocol } => {
+                assert_eq!(agent, "claude-code");
+                assert_eq!(protocol, "claude-stream-jsonl");
+            }
+            other => panic!("expected UnknownProtocol, got {other}"),
+        }
+        // And the message carries the repair, which is the list itself.
+        let said = speaking("opencode-json").unwrap_err().to_string();
+        for name in Protocol::NAMES {
+            assert!(said.contains(name), "{said} should offer {name}");
+        }
     }
 
     /// One credential, declared the way the first real one is: a command that prints
