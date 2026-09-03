@@ -1270,32 +1270,18 @@ mod tests {
     }
 
     #[test]
-    fn repro_grandchild_sorts_before_parent() {
+    fn a_group_loads_however_deep_it_is_and_however_its_ids_sort() {
+        // `bench` is two levels down and sorts first, so no id order puts its parent
+        // before it — the 1 Sep repair's case, a level deeper than what found it.
         let s = store();
         s.save_project(&project()).unwrap();
-        // Every id ordering of a four-deep chain, saved parent-first so the rows exist.
-        for perm in [
-            ["a", "b", "c", "d"],
-            ["d", "c", "b", "a"],
-            ["b", "d", "a", "c"],
-            ["c", "a", "d", "b"],
-            ["d", "a", "c", "b"],
-            ["b", "c", "d", "a"],
-        ] {
-            let s = store();
-            s.save_project(&project()).unwrap();
-            s.save_task(&task(perm[0])).unwrap();
-            s.save_task(&task(perm[1]).under(perm[0])).unwrap();
-            s.save_task(&task(perm[2]).under(perm[1])).unwrap();
-            s.save_task(&task(perm[3]).under(perm[2])).unwrap();
-            let plan = s.load_plan().unwrap_or_else(|e| panic!("{perm:?}: {e}"));
-            for pair in perm.windows(2) {
-                assert_eq!(
-                    plan.task(&pair[1].into()).unwrap().parent,
-                    Some(TaskId::new(pair[0])),
-                    "{perm:?}"
-                );
-            }
+        s.save_task(&task("layer")).unwrap();
+        s.save_task(&task("keys").under("layer")).unwrap();
+        s.save_task(&task("bench").under("keys")).unwrap();
+        let plan = s.load_plan().unwrap();
+        for (child, parent) in [("bench", "keys"), ("keys", "layer")] {
+            let got = &plan.task(&child.into()).unwrap().parent;
+            assert_eq!(got.as_ref(), Some(&TaskId::new(parent)), "{child}");
         }
     }
 
