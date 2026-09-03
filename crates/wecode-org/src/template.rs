@@ -124,12 +124,20 @@ tokens = 100000
 
 [roles.engineer]
 read = ["**"]
-write = ["src/**", "crates/**", "lib/**"]
+# The specification is the engineer's own deliverable — 15289 names the information
+# item and no author for it apart from whoever builds the thing — so a seat that ships
+# the code and cannot keep its contract true ships a stale one. It is not a way to
+# self-approve: acceptance is named on the task by whoever defined it, and is never
+# read back out of this file. `report_as_finished.md` stays out because it is generated
+# from `git diff`, and an agent's account of its own work is inadmissible.
+write = ["src/**", "crates/**", "lib/**", "specs/**/specification.md"]
 run = ["cargo *", "npm test*", "npm run build*"]
 tokens = 200000
 wall_secs = 1800
 
 # Writes tests only, so it cannot make a failing test pass by weakening the code.
+# `spec/**` here is rspec's test directory: one letter from the engineer's `specs/**`
+# above and a different owner, so check which you meant with `wecode guard`.
 [roles.tester]
 read = ["**"]
 write = ["tests/**", "spec/**"]
@@ -304,7 +312,10 @@ tokens = 50000
 
 [roles.engineer]
 read = ["**"]
-write = ["src/**", "crates/**"]
+# The specification comes with the code: one seat builds the thing and keeps its
+# contract true. Not a self-approval — acceptance is named on the task, never read back
+# out of this file — and the generated `report_as_finished.md` is deliberately not here.
+write = ["src/**", "crates/**", "specs/**/specification.md"]
 run = ["cargo *"]
 tokens = 200000
 wall_secs = 1800

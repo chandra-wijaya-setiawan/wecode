@@ -48,7 +48,7 @@ path = "~/projects/app"
 
 [roles.engineer]                  # a role is enforced capabilities, or it is nothing
 read = ["**"]
-write = ["src/**", "crates/**"]
+write = ["src/**", "crates/**", "specs/**/specification.md"]   # and its contract; see below
 run = ["cargo *", "npm test*"]
 tokens = 200000
 wall_secs = 1800
@@ -168,6 +168,22 @@ conversation; a cap written in the one scale and checked in the other is over on
 first turn and says nothing thereafter. `wecode run` prints the replayed figure beside
 the spend, because cache reads are billed — at a tenth of the rate — and a number left
 out of a budget should not also be left off the screen.
+
+## Why `engineer` reaches into `specs/`
+
+Both starters give the engineer `specs/**/specification.md` beside its code globs. The
+specification is that seat's own deliverable — ISO/IEC/IEEE 15289 names the information
+item and no author for it apart from whoever builds the thing — so a role that ships
+code and cannot keep its contract true ships a stale one.
+
+| the objection | why it does not hold |
+|---|---|
+| an engineer editing what it is judged by | acceptance commands are named on the **task**, by whoever defined it, and are never read back out of the spec |
+| it could write its own close-out report | `specs/**/report_as_finished.md` is outside the glob: its numbers come from `git diff --numstat`, and an agent's account of its own work is inadmissible |
+| `spec/**` on the tester looks like the same thing | it is rspec's test directory — one letter away, a different owner; settle it with `wecode guard <post> write <path>` rather than by reading |
+
+Named per document, not as `specs/**`, because the folder also carries the template a
+spec is copied from and a README that is nobody's slice.
 
 ## Names that must resolve to one thing
 
