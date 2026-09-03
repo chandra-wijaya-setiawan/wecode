@@ -66,3 +66,6 @@ and the words for it are in the tree below and in `wecode board <id>`.
 `docs/reference/commands.md` for what each command does · `docs/features.md` on stuck
 work · `crates/wecode-cli/src/tui.rs` for the live form, which draws its rows from this
 module rather than reading the statuses a second time.
+
+A held row stays on the board, marked, and is skipped by dispatch — the difference
+from archived, which hides it (ADR-0007).
