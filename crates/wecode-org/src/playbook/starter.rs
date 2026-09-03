@@ -245,6 +245,14 @@ language = "{language}"
 # dispatch = "approved"
 
 {cache}
+# The parts this repository is built out of. A scope in this file may then name one
+# instead of spelling the paths out — `write = ["@store"]` — and the name is resolved
+# as this file is read, so a task still carries paths. What it buys is one table to
+# edit when a part moves, and verdicts a reader can place.
+#
+# [project.components]
+# store = {sources}
+
 [feature]
 worktree  = true
 # Refuse a feature at admission unless a `design` task stands before it. A design

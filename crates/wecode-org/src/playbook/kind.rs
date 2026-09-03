@@ -12,6 +12,7 @@ use serde::Deserialize;
 use wecode_core::TaskKind;
 
 use super::PlaybookError;
+use super::component::Component;
 use super::subtask::{self, SubtaskTemplate};
 
 /// The fields a kind block has. Named here because the strict check is done by hand
@@ -96,8 +97,13 @@ pub struct KindPlaybook {
 /// be silent: a section that is not a kind at all, and a key inside one that is neither
 /// a field nor a declared subtask — a `worktre` that would leave a bug fix without the
 /// worktree its section asked for.
+///
+/// `comps` is `[project.components]`, carried down because a step's scope may name one
+/// instead of a glob. It belongs to the file rather than to any kind, which is why it
+/// arrives from above rather than being read here.
 pub(super) fn kinds_of(
     blocks: BTreeMap<String, KindBlock>,
+    comps: &[Component],
 ) -> Result<BTreeMap<TaskKind, KindPlaybook>, PlaybookError> {
     let mut kinds = BTreeMap::new();
     for (key, block) in blocks {
@@ -117,7 +123,7 @@ pub(super) fn kinds_of(
                 });
             }
         }
-        let subtasks = subtask::templates_of(&key, &block.subtasks, &block.steps)?;
+        let subtasks = subtask::templates_of(&key, &block.subtasks, &block.steps, comps)?;
         kinds.insert(
             kind,
             KindPlaybook {

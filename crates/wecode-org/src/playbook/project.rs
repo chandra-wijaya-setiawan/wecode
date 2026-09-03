@@ -1,6 +1,6 @@
 //! `[project]`: what holds for every kind of work in this repository.
 //!
-//! Four settings and two sub-tables. Three of them are gates — whether a task may be
+//! Four settings and three sub-tables. Three of them are gates — whether a task may be
 //! dispatched before anyone signs for it, whether verified work lands by itself, and what
 //! no task here may write at all — and all three are preferences rather than rules: the
 //! charter outranks each, so a project may be stricter than the company and never laxer.
@@ -19,6 +19,7 @@ use wecode_core::admission::Refusal;
 
 use super::PlaybookError;
 use super::cache::{self, CacheDir};
+use super::component::{self, Component};
 
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +36,10 @@ pub(super) struct ProjectBlock {
     /// variable is the identity: naming one twice is one setting, not two.
     #[serde(default)]
     build_cache: BTreeMap<String, String>,
+    /// Component name to the paths it owns. A table for the third time and the same
+    /// reason: the name is the identity, so declaring one twice is one component.
+    #[serde(default)]
+    components: BTreeMap<String, Vec<String>>,
     /// Path to the reason it is refused. A table for the same reason `build_cache` is
     /// one — the path is the identity, so naming it twice is one refusal — and the value
     /// is what makes it answerable rather than a wall: whoever has to narrow the scope is
@@ -57,6 +62,9 @@ pub struct ProjectSettings {
     pub dispatch: DispatchPolicy,
     /// Directories every worktree of this project shares, in variable order.
     pub build_cache: Vec<CacheDir>,
+    /// The parts this repository is built out of, in name order — what a scope here
+    /// may name instead of spelling out paths. See [`super::component`].
+    pub components: Vec<Component>,
     /// Paths no task of this project may declare it writes, in path order.
     ///
     /// The admission gate's own type rather than one of this module's, exactly as
@@ -171,6 +179,7 @@ pub(super) fn settings_of(b: &ProjectBlock) -> Result<ProjectSettings, PlaybookE
             })?,
         },
         build_cache: cache::parse_build_cache(&b.build_cache)?,
+        components: component::components_of(&b.components)?,
         // Nothing is refused about a refusal, deliberately. A glob that matches nothing
         // costs a line nobody trips over, and one that matches everything is discovered
         // by the next `task add` naming the exact line that said no — which is a better
