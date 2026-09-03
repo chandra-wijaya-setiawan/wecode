@@ -4,11 +4,17 @@
 //! which is the binding constraint on concurrency and the scarcest thing here;
 //! `[invariants]` bounds every agent's, and outranks every grant that would exceed it;
 //! `[session]` bounds how long an interactive one may sit idle.
+//!
+//! One key here is not a ceiling: `[[invariants.auto_merge]]` is where the operator says
+//! yes in advance, by condition, to merges `approval_to_merge` would otherwise stop on
+//! them one at a time. It is written beside the invariant it answers because that is the
+//! only place it can be written — an amendment to what the charter demands is a
+//! hand-edited file, never a signature. See [`wecode_gov::StandingOrder`].
 
 use std::time::Duration;
 
 use serde::Deserialize;
-use wecode_gov::{Charter, Invariant};
+use wecode_gov::{Charter, Invariant, StandingOrder};
 
 use super::agent::Intelligence;
 use super::{OrgError, parse_duration};
@@ -68,6 +74,27 @@ pub(super) fn budgets_of(b: &BudgetsBlock) -> Budgets {
     Budgets { enforce: b.enforce }
 }
 
+/// `[[invariants.auto_merge]]`: one standing merge authorisation.
+///
+/// Beside `approval_to_merge` because it is the answer to it, and in this file because
+/// it can only be written here. A per-task signature can be given by any seat that
+/// holds `approve merge`; saying yes to every merge of a shape *in advance* changes what
+/// the charter demands, and the charter is amended by hand, in a diff — never on a
+/// signature. `[project] merge = "auto"` is the project's own preference and is
+/// outranked by the invariant; this is the operator's, and it is what the invariant
+/// answers to.
+///
+/// `projects` is optional and narrows it. Leaving it out authorises every project's
+/// merges onto the branch, which is a wide thing to write and is why the narrower form
+/// is documented first.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StandingBlock {
+    to: String,
+    #[serde(default)]
+    projects: Vec<String>,
+}
+
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InvariantBlock {
@@ -77,6 +104,9 @@ pub(super) struct InvariantBlock {
     never_run: Vec<String>,
     #[serde(default)]
     approval_to_merge: Vec<String>,
+    /// The merges the operator has already decided about. See [`StandingBlock`].
+    #[serde(default)]
+    auto_merge: Vec<StandingBlock>,
     max_tokens: Option<u64>,
     max_wall_secs: Option<u64>,
     /// The strongest model any seat may be staffed with, as a level.
@@ -131,6 +161,17 @@ pub(super) fn session_ttl(b: &SessionBlock) -> Result<Duration, OrgError> {
 ///
 /// An empty list is not an invariant of "nothing", so a key nobody wrote contributes
 /// nothing rather than a rule that permits everything.
+///
+/// The standing orders ride along beside them rather than being folded into
+/// `approval_to_merge`, because a merge pre-authorisation is not a narrower invariant: it
+/// is conditioned on which project's work is landing, which no glob over branch names can
+/// say. Folding it in would also lose the distinction a reader needs — `wecode org` shows
+/// what is protected and what the operator has already answered as two lines, not one.
+///
+/// A standing order over a branch nothing protects is inert rather than wrong. Those
+/// merges already land, so it grants nothing; it is left in place because deleting the
+/// `approval_to_merge` entry is how a protection is withdrawn, and an order that survives
+/// the withdrawal is what makes putting it back a one-line change.
 pub(super) fn charter_of(b: &InvariantBlock) -> Charter {
     let mut out = Vec::new();
     if !b.never_touch.is_empty() {
@@ -148,7 +189,12 @@ pub(super) fn charter_of(b: &InvariantBlock) -> Charter {
     if let Some(n) = b.max_wall_secs {
         out.push(Invariant::MaxWallSecs(n));
     }
-    Charter::with(out)
+    Charter::with(out).pre_authorising(
+        b.auto_merge
+            .iter()
+            .map(|s| StandingOrder::to_merge(&s.to).for_projects(&s.projects))
+            .collect(),
+    )
 }
 
 /// The ceiling on how clever a seat may be staffed.
@@ -199,5 +245,51 @@ mod tests {
                 .contains(&Invariant::NeverTouch(vec!["**/*.pem".to_string()]))
         );
         assert!(c.charter.invariants.contains(&Invariant::MaxTokens(500)));
+    }
+
+    /// The block as an operator writes it: a protection, and the merges already answered.
+    const STANDING: &str = "\n[invariants]\napproval_to_merge = [\"main\", \"release/**\"]\n\n\
+         [[invariants.auto_merge]]\nto = \"main\"\nprojects = [\"docs-site\"]\n\n\
+         [[invariants.auto_merge]]\nto = \"release/*\"\n";
+
+    #[test]
+    fn a_standing_order_is_read_beside_the_invariant_it_answers() {
+        let c = Company::parse(&format!("{MINIMAL}{STANDING}")).unwrap();
+        // The protection is untouched: this adds an answer to it, not a hole in it.
+        let protects =
+            Invariant::ApprovalToMerge(vec!["main".to_string(), "release/**".to_string()]);
+        assert!(c.charter.invariants.contains(&protects));
+        assert_eq!(c.charter.standing.len(), 2);
+        assert_eq!(c.charter.standing[0].branch(), "main");
+        assert_eq!(c.charter.standing[0].projects(), ["docs-site"]);
+        // No `projects` is every project, which is what an empty list means.
+        assert!(c.charter.standing[1].projects().is_empty());
+    }
+
+    #[test]
+    fn the_charter_answers_which_merges_still_stop_on_a_person() {
+        let c = Company::parse(&format!("{MINIMAL}{STANDING}")).unwrap();
+        let asks = |project, branch| c.charter.demands_signature_to_merge(project, branch);
+        assert!(!asks(Some("docs-site"), "main"), "pre-authorised");
+        assert!(asks(Some("payments"), "main"), "another project's merge");
+        assert!(asks(None, "main"), "a merge that named no project");
+        assert!(!asks(Some("payments"), "release/2026-09"), "open to all");
+        assert!(
+            asks(Some("payments"), "release/hot/fix"),
+            "no order reaches it"
+        );
+        assert!(!asks(Some("payments"), "dev"), "nothing protects it");
+    }
+
+    #[test]
+    fn a_standing_order_needs_a_branch_to_be_about() {
+        // `deny_unknown_fields` catches the typo; this catches the omission. Without it
+        // the entry would parse as an order over the empty branch and match nothing,
+        // which reads as configured and decides nothing.
+        let text = format!("{MINIMAL}\n[[invariants.auto_merge]]\nprojects = [\"docs\"]\n");
+        assert!(matches!(
+            Company::parse(&text).unwrap_err(),
+            OrgError::Parse(_)
+        ));
     }
 }

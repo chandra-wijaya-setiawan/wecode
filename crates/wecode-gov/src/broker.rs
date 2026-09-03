@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::glob;
 use crate::grant::{ActionKind, Effective, Introspect, WorkKind};
+use crate::standing::StandingOrder;
 
 /// Something a post wants to do.
 ///
@@ -206,20 +207,52 @@ pub enum Invariant {
     NeverRun(Vec<String>),
     MaxTokens(u64),
     MaxWallSecs(u64),
-    /// Merging these branches always needs a holder's signature.
+    /// Merging these branches needs a holder's signature — per merge, unless a
+    /// [`StandingOrder`] says the operator already gave one for merges of this shape.
     ApprovalToMerge(Vec<String>),
 }
 
 /// A unit's identity: purpose plus the limits that outrank every grant beneath it.
+///
+/// The standing orders sit here beside the invariants they answer, and for the reason
+/// the signed exceptions do *not* (see [`Broker::exceptions`]): both of these are read
+/// from `company.toml`, hold for every session alike, and change only when somebody
+/// edits a file in the open. An exception varies by who is asking; neither of these does.
 #[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub struct Charter {
     pub invariants: Vec<Invariant>,
+    /// Merges the operator authorised by condition rather than one at a time.
+    pub standing: Vec<StandingOrder>,
 }
 
 impl Charter {
     #[must_use]
     pub fn with(invariants: Vec<Invariant>) -> Self {
-        Self { invariants }
+        Self {
+            invariants,
+            standing: Vec::new(),
+        }
+    }
+
+    /// Adds the standing orders the operator wrote.
+    #[must_use]
+    pub fn pre_authorising(mut self, standing: Vec<StandingOrder>) -> Self {
+        self.standing = standing;
+        self
+    }
+
+    /// Whether landing `project`'s work on `branch` has to be signed for.
+    ///
+    /// The one answer to that question, so nothing has to re-derive it: the invariant
+    /// says which branches are protected, and a standing order says which of those
+    /// merges the operator has already decided about. Asked by the Broker before it
+    /// gates a merge, and by anything that wants to say so before offering to.
+    #[must_use]
+    pub fn demands_signature_to_merge(&self, project: Option<&str>, branch: &str) -> bool {
+        let protected = self.invariants.iter().any(|inv| {
+            matches!(inv, Invariant::ApprovalToMerge(globs) if glob::any_matches(globs, branch))
+        });
+        protected && !self.standing.iter().any(|s| s.covers(project, branch))
     }
 }
 
@@ -660,7 +693,7 @@ impl Broker {
                 alarm: true,
             };
         }
-        if let Some(kind) = self.approval_required(action) {
+        if let Some(kind) = self.approval_required(session, action) {
             return Decision::RequireApproval { by: kind };
         }
 
@@ -817,15 +850,19 @@ impl Broker {
         None
     }
 
-    fn approval_required(&self, action: &Action) -> Option<ActionKind> {
-        for inv in &self.charter.invariants {
-            if let (Invariant::ApprovalToMerge(globs), Action::Merge { branch }) = (inv, action)
-                && glob::any_matches(globs, branch)
-            {
-                return Some(ActionKind::Merge);
-            }
-        }
-        None
+    /// Whether this action stops on a person, and which signature it stops on.
+    ///
+    /// A [`StandingOrder`] is consulted here and nowhere else, because this is the only
+    /// place a signature is demanded. It does not remove the invariant: every merge the
+    /// operator did not pre-authorise still stops here, and the seat still has to hold
+    /// the branch either way.
+    fn approval_required(&self, session: &Session, action: &Action) -> Option<ActionKind> {
+        let Action::Merge { branch } = action else {
+            return None;
+        };
+        self.charter
+            .demands_signature_to_merge(session.project.as_deref(), branch)
+            .then_some(ActionKind::Merge)
     }
 
     /// Records something we observed rather than decided.
