@@ -592,3 +592,29 @@ So the two halves of a landed task's record sit where each is readable. The ledg
 the events — the approval, the spend, the decisions — and answers *what happened, in
 order*. The repository holds one generated document per task and answers *what this task
 did*, to a reader who has only the code.
+
+## A design is not in here either — it lives as a digest
+
+There is no `designs` table, for the reason above and ADR-0005's about decisions: "the
+table is the index, `docs/adr/*.md` is the text". A design is argued at length, reviewed
+as a diff and signed once, all of which git does better than a column. What the database
+is for is the join nothing else can make — *which document is this story built on* —
+and `Store::design_of(story)` folds it out of rows the plan already has.
+
+| field | folded from |
+|---|---|
+| `task` | the `design` task under the story, or one it comes after — transitively, both edges |
+| `document` | that task's `task_scopes` write globs, first concrete `.md`; else `docs/wecode/<task>/design.md` |
+| `decided` | its `tasks.status` — `done`, because a design is finished when somebody signs it |
+| `digest` | nothing. A checksum of the file, minted by whoever opened it |
+
+`digest` is the one field with no row behind it, and that is the point rather than a gap.
+A stored checksum is a claim about a file that stops being true the next time somebody
+saves it, with nothing in the file to say that it has. So it is taken on the pass that
+needs it, over the document's words with whitespace collapsed —
+`scripts/design-check.sh` normalises the same way, and for the same reason: two documents
+differing only in how they were wrapped are one document.
+
+Nobody has filled it means nobody has looked, and `Design::unchanged` therefore answers
+`false` there. Reading *unchanged* out of *unrecorded* is how a drift check comes to
+certify drift.
