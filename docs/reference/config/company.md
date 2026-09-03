@@ -275,11 +275,39 @@ run` prints it beside what the run cost.
 | key | default | meaning |
 |---|---|---|
 | `enforce` | `false` | whether a task's token budget stops a run or only measures it |
+| `max_tokens_per_hour` | unset | tokens a task's attempts may add up to in a trailing hour before the next dispatch onto it is refused |
 
 Off, a run that spends past its budget is never killed: the overrun lands on the
 board in red and the ledger keeps the true figure, but the work in the tree
 survives. On, the supervisor stops the run shortly after the budget is crossed.
 Wall clocks are not behind this flag — time is the operator's; tokens are money.
+
+`max_tokens_per_hour` is the circuit breaker, and it is a second key rather than a wider
+reading of the first because a budget is a figure *per attempt*: three retries of a task
+budgeted at 200k are each inside their budget and have burned six hundred thousand tokens
+in twenty minutes. The rate is what sees that.
+
+```toml
+[budgets]
+max_tokens_per_hour = 500000
+```
+
+It refuses to *start* the next run rather than killing one in flight, so a ceiling set too
+low costs a queue that stands still instead of a worktree full of half-written change —
+which is why it is safe to turn on without `enforce`. Nothing is latched: the hour slides,
+so an hour of quiet closes the circuit with nobody clearing anything. `wecode show <task>`
+prints the same figure under the run table, as `spike`, whenever more than one attempt
+falls inside one hour.
+
+Unset means no breaker, which is what every company written before this key says. `0` is a
+real ceiling and not a way to spell "off" — it refuses the next dispatch as soon as any
+attempt has reported a token.
+
+**Not wired yet.** The rate is read and reported; the refusal is `scheduler::burning`, and
+the call that consults it belongs beside `scheduler::contended` in
+`crates/wecode-cli/src/claim.rs`, which was outside the scope of the task that built this.
+Until that one line lands, setting the key changes what `wecode show` reports and does not
+yet stop a dispatch.
 
 ## `[[invariants.auto_merge]]` — saying yes once
 

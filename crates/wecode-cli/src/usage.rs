@@ -56,8 +56,28 @@
 //! figure that exists is the sum — so a task was killed for a spend it had not made,
 //! against a count nothing that survived the run agreed with. See [`Meter::line`] for
 //! what makes a restatement recognisable.
+//!
+//! # The circuit breaker
+//!
+//! A budget is a figure per attempt, and nothing in it is a *rate*. Three retries of a
+//! task budgeted at 200k tokens are inside their budget three times over and have burned
+//! six hundred thousand tokens in twenty minutes — which is the shape every expensive
+//! evening in this repository has had. A per-attempt ceiling cannot see it, because each
+//! attempt on its own was fine.
+//!
+//! [`per_hour`] is what can: the tokens every attempt overlapping one trailing hour
+//! reported, added up. A spike is that figure crossing a rate the operator wrote —
+//! `[budgets] max_tokens_per_hour` — and [`crate::scheduler::burning`] is what does
+//! something about it, at the door, before the next dispatch rather than in the middle
+//! of one.
+//!
+//! It is a breaker rather than a fuse: the window slides, so an hour of quiet closes it
+//! again with nobody having to reset anything. That is the whole reason the figure is
+//! computed from the rows on every ask instead of being latched anywhere — a latch is a
+//! second copy of the truth, and the one that has to be cleared by hand.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use serde_json::Value;
 use wecode_org::company::Protocol;
@@ -282,11 +302,63 @@ fn usage_in(usage: &Value) -> Option<Usage> {
     found.then_some(Usage { fresh, replayed })
 }
 
+/// The stretch a spike is measured over.
+///
+/// An hour because that is the unit the bill arrives in and the unit an operator
+/// estimates in — "what is this costing me right now" is an hourly question. Shorter and
+/// one honest large attempt trips it; longer and a morning's ordinary work sums to
+/// something that looks like a runaway.
+pub(crate) const SPIKE: Duration = Duration::from_secs(3600);
+
+/// Whether this attempt was burning tokens at any point in the hour ending at `at`.
+///
+/// The span, not a single stamp. An attempt that opened four hours ago and has not closed
+/// is spending *now* — that is exactly the runaway worth catching — and a rule that dated
+/// it from its start would walk past the one row that matters most. A row still open has
+/// no end, so the window's own edge stands in for one.
+///
+/// A row that starts after `at` counts for nothing rather than wrapping the subtraction:
+/// a clock stepped backwards must make the breaker slower to trip, never quicker.
+fn burning_in_the_hour_to(r: &wecode_store::Execution, at: u64) -> bool {
+    r.started <= at && r.ended.unwrap_or(at) >= at.saturating_sub(SPIKE.as_secs())
+}
+
+/// Tokens the attempts overlapping the hour ending at `at` reported between them.
+///
+/// The unit is [`Meter::tokens`]', which is the unit budgets are written in — cache
+/// replay is deliberately not in it, for the reason the module docs give. An attempt
+/// nobody could meter contributes nothing rather than a guess, which makes this a floor
+/// on the real rate; a breaker that invented the missing figures would cut off the seats
+/// whose harness is quiet rather than the ones spending money.
+#[must_use]
+pub(crate) fn per_hour(runs: &[wecode_store::Execution], at: u64) -> u64 {
+    runs.iter()
+        .filter(|r| burning_in_the_hour_to(r, at))
+        .filter_map(|r| r.spent_tokens)
+        .fold(0, u64::saturating_add)
+}
+
+/// When the last of these attempts was charged, which is the hour a report is about.
+///
+/// A report asks what the most recent burst cost, so it is dated from the burst rather
+/// than from the wall clock: `wecode show` says the same thing about a task tomorrow as
+/// it does tonight. The breaker asks a different question — *is it still burning* — and
+/// passes the wall clock instead, which is what makes an hour of quiet close it.
+fn last_charged(runs: &[wecode_store::Execution]) -> Option<u64> {
+    runs.iter().map(|r| r.ended.unwrap_or(r.started)).max()
+}
+
 /// Every run of a task, so a retry does not erase what happened last time.
 ///
 /// The heading counts the attested rows as well as the attempts, and that is the whole
 /// of the warning: the figures below do not all come from the same place, and a reader
 /// adding them up is entitled to know before doing the arithmetic rather than after.
+///
+/// The rate goes underneath, and only when more than one attempt is inside the hour. One
+/// attempt's cost is already on its own row, and restating it as a rate would be the same
+/// number twice; a spike is a thing several attempts do together, and it is the figure
+/// [`crate::scheduler::burning`] refuses the next dispatch on — so the operator reading
+/// the refusal can find where it came from.
 #[must_use]
 pub(crate) fn executions(runs: &[wecode_store::Execution]) -> String {
     if runs.is_empty() {
@@ -314,6 +386,13 @@ pub(crate) fn executions(runs: &[wecode_store::Execution]) -> String {
             cost(r),
             account(r)
         ));
+    }
+    if let Some(at) = last_charged(runs) {
+        let n = runs.iter().filter(|r| burning_in_the_hour_to(r, at)).count();
+        let spent = per_hour(runs, at);
+        if n > 1 && spent > 0 {
+            out.push_str(&format!("  spike  {spent}t over {n} attempts in one hour\n"));
+        }
     }
     out
 }
@@ -697,6 +776,96 @@ mod tests {
         // And the metered row is left exactly as it was: an annotation that leaked onto
         // it would say wecode did not run something it ran.
         assert!(out.contains("exit 0\n"), "{out}");
+    }
+
+    /// One attempt with its clocks and its spend, for the rate tests.
+    fn burst(
+        n: i64,
+        started: u64,
+        ended: Option<u64>,
+        spent: Option<u64>,
+    ) -> wecode_store::Execution {
+        let mut r = attempt(n, spent, None);
+        r.started = started;
+        r.ended = ended;
+        r
+    }
+
+    #[test]
+    fn a_spike_is_what_the_attempts_added_up_to_inside_one_hour() {
+        // The case a per-attempt budget cannot see: three retries each inside a 200k
+        // budget, six hundred thousand tokens in twenty minutes.
+        let runs = [
+            burst(1, 0, Some(400), Some(200_000)),
+            burst(2, 400, Some(800), Some(200_000)),
+            burst(3, 800, Some(1200), Some(200_000)),
+        ];
+        assert_eq!(per_hour(&runs, 1200), 600_000);
+    }
+
+    #[test]
+    fn an_hour_of_quiet_closes_the_circuit_without_anybody_clearing_it() {
+        // A breaker rather than a fuse. The window slides with the clock, so the same
+        // rows read as a spike now and as nothing at all two hours later.
+        let runs = [burst(1, 0, Some(60), Some(900_000))];
+        assert_eq!(per_hour(&runs, 100), 900_000);
+        assert_eq!(per_hour(&runs, 3660), 900_000, "the last minute of the hour");
+        assert_eq!(per_hour(&runs, 3661), 0, "and out the other side");
+    }
+
+    #[test]
+    fn a_run_still_open_is_still_spending() {
+        // The row worth catching most, and the one a rule dated from `started` would
+        // walk past: an attempt opened four hours ago that nothing has closed.
+        let runs = [burst(1, 0, None, Some(500_000))];
+        assert_eq!(per_hour(&runs, 14_400), 500_000);
+    }
+
+    #[test]
+    fn a_clock_stepped_backwards_makes_the_breaker_slower_rather_than_wrong() {
+        // Same rule as the sweep's: a future-dated row reads as not yet spent, so a
+        // backwards step delays a cut-off instead of inventing one.
+        let runs = [burst(1, 9000, Some(9100), Some(900_000))];
+        assert_eq!(per_hour(&runs, 1000), 0);
+    }
+
+    #[test]
+    fn an_unmetered_attempt_lowers_the_rate_rather_than_being_guessed_at() {
+        // A floor on the real spend, deliberately. Inventing the missing figure would
+        // cut off the seats whose harness is quiet rather than the ones spending money.
+        let runs = [
+            burst(1, 0, Some(60), Some(100_000)),
+            burst(2, 60, Some(120), None),
+        ];
+        assert_eq!(per_hour(&runs, 120), 100_000);
+    }
+
+    #[test]
+    fn the_run_table_names_the_rate_the_next_dispatch_would_be_refused_on() {
+        // Where the operator meets the figure: the refusal quotes a number, and this is
+        // the page that says which attempts made it.
+        let out = executions(&[
+            burst(1, 0, Some(400), Some(200_000)),
+            burst(2, 400, Some(800), Some(200_000)),
+        ]);
+        assert!(
+            out.contains("spike  400000t over 2 attempts in one hour"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn one_attempt_is_a_cost_and_not_a_rate() {
+        // Its figure is already on its own row; restating it underneath would be the
+        // same number twice, and a table where every task has a spike line has none.
+        let alone = executions(&[burst(1, 0, Some(400), Some(900_000))]);
+        assert!(!alone.contains("spike"), "{alone}");
+        // Two attempts an hour apart are two costs, not a burst.
+        let apart = executions(&[
+            burst(1, 0, Some(60), Some(900_000)),
+            burst(2, 9000, Some(9060), Some(900_000)),
+        ]);
+        assert!(!apart.contains("spike"), "{apart}");
     }
 
     #[test]

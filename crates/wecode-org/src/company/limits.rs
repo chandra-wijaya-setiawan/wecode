@@ -50,28 +50,49 @@ impl Default for AttentionBlock {
     }
 }
 
-/// `[budgets]`: whether a spend figure is a ceiling or a reading.
+/// `[budgets]`: whether a spend figure is a ceiling or a reading, and how fast a seat
+/// may burn money before it is cut off.
 ///
-/// Off by default, deliberately. A budget killed mid-run destroys the work already
-/// paid for — the tree keeps a half-written change nobody can accept — while the
+/// `enforce` is off by default, deliberately. A budget killed mid-run destroys the work
+/// already paid for — the tree keeps a half-written change nobody can accept — while the
 /// overrun it prevents was going to land on the board in red either way. Monitoring
 /// is free; enforcement has a body count. An operator who wants the hard stop turns
 /// it on knowing that.
+///
+/// `max_tokens_per_hour` is the other half and is a separate key rather than a wider
+/// reading of the first, because it costs nothing to be wrong about. It refuses to
+/// *start* the next run rather than killing one in flight, so a ceiling set too low
+/// leaves a queue standing still instead of a worktree full of half-written change. The
+/// two are independent for exactly that reason: an operator can have the circuit breaker
+/// without the body count.
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 pub(super) struct BudgetsBlock {
     #[serde(default)]
     enforce: bool,
+    #[serde(default)]
+    max_tokens_per_hour: Option<u64>,
 }
 
-/// Whether a task's token budget stops a run or only measures it.
+/// What a spend figure is allowed to do: stop a run, and stop the next one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Budgets {
     pub enforce: bool,
+    /// The tokens every attempt on one task may add up to inside a trailing hour before
+    /// the next dispatch onto it is refused.
+    ///
+    /// `None` — the default — is no breaker at all, which is what every company written
+    /// before this key says. It is deliberately not derived from `[invariants]
+    /// max_tokens`: that is a ceiling on a whole session's spend and it is judged after
+    /// the money is gone, where this is a *rate* and is judged at the door.
+    pub max_tokens_per_hour: Option<u64>,
 }
 
 pub(super) fn budgets_of(b: &BudgetsBlock) -> Budgets {
-    Budgets { enforce: b.enforce }
+    Budgets {
+        enforce: b.enforce,
+        max_tokens_per_hour: b.max_tokens_per_hour,
+    }
 }
 
 /// `[[invariants.auto_merge]]`: one standing merge authorisation.
@@ -232,6 +253,22 @@ mod tests {
         assert_eq!(c.attention.max_open_items, 5);
         assert_eq!(c.attention.max_interrupts_per_hour, 3);
         assert_eq!(c.attention.digest_interval_mins, 20);
+    }
+
+    #[test]
+    fn the_circuit_breaker_is_off_until_a_rate_is_written() {
+        // The compatibility story: every company written before the key says `None`,
+        // and `None` is no breaker rather than a breaker at zero.
+        let c = Company::parse(MINIMAL).unwrap();
+        assert!(!c.budgets.enforce);
+        assert_eq!(c.budgets.max_tokens_per_hour, None);
+
+        let text = format!("{MINIMAL}\n[budgets]\nmax_tokens_per_hour = 250000\n");
+        let c = Company::parse(&text).unwrap();
+        assert_eq!(c.budgets.max_tokens_per_hour, Some(250_000));
+        // And it is independent of the mid-run kill, which is the point of it being its
+        // own key: refusing to start the next run has no body count.
+        assert!(!c.budgets.enforce, "the breaker did not turn enforce on");
     }
 
     #[test]
