@@ -307,21 +307,69 @@ fn what_the_agent_reported_spending_reaches_the_row_it_was_spent_on() {
     org.run(&["show", "t"]).assert_contains("90t");
 }
 
-#[test]
-fn an_agent_that_reports_nothing_leaves_the_column_empty_rather_than_zero() {
-    // The stub speaks no protocol wecode can read, so there is no number. Printing
-    // one would be a claim nobody made, and the budget would be checked against it.
-    let (org, _) = with_agent("run-unmetered", "echo done >> a.txt");
+/// Declares what the workspace's one harness reports, in place of claude's dialect.
+fn speaking(org: &Org, protocol: &str) {
     let conf = org.path("company.toml");
     let text = std::fs::read_to_string(&conf).unwrap();
-    std::fs::write(
-        &conf,
-        text.replace(
-            "protocol = \"claude-stream-json\"",
-            "protocol = \"invented\"",
-        ),
-    )
-    .unwrap();
+    let said = text.replace(
+        "protocol = \"claude-stream-json\"",
+        &format!("protocol = \"{protocol}\""),
+    );
+    assert_ne!(said, text, "the protocol line was not replaced");
+    std::fs::write(&conf, said).unwrap();
+}
+
+#[test]
+fn a_harness_that_is_not_claude_holds_the_seat_and_is_still_metered() {
+    // The whole of what a coding CLI has to do to hold a seat: be named in `command`,
+    // and declare the shape of what it writes. This one speaks no dialect anything in
+    // the crate knows — no `assistant` lines, no `type` at all on the turns — and there
+    // is no adapter for it anywhere. It meets the published contract, so the run has a
+    // spend, a budget it is held to, and a row that means what every other row means.
+    let (org, _) = with_agent(
+        "run-generic",
+        "echo done >> a.txt; \
+         echo '{\"id\":\"s1\",\"usage\":{\"input_tokens\":40,\"output_tokens\":20}}'; \
+         echo '{\"type\":\"result\",\"usage\":{\"input_tokens\":60,\"output_tokens\":30}}'",
+    );
+    speaking(&org, "generic-jsonl");
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("spent    90 tokens");
+    org.run(&["board", "caching"])
+        .assert_ok("board")
+        .assert_contains("90/100");
+    org.run(&["audit", "--task", "t"])
+        .assert_contains("90t/")
+        .assert_contains("harness");
+}
+
+#[test]
+fn a_shape_nothing_reads_is_refused_before_a_budget_is_spent_on_it() {
+    // A typo in `protocol` is not a harness reporting nothing — it is a harness
+    // reporting something nobody read, and it would look identical for ever: a blank
+    // spend column on every run, with no decision behind it. Refused where the file is
+    // loaded, naming the shapes there are.
+    let (org, _) = with_agent("run-typo", "echo done >> a.txt");
+    a_task(&org, "t", "a.txt", "grep -q done a.txt");
+    speaking(&org, "claude-stream-jsonl");
+
+    let r = org.run(&["run", "t"]);
+    assert!(!r.ok(), "a protocol nothing reads must not dispatch");
+    r.assert_contains("claude-stream-jsonl")
+        .assert_contains("generic-jsonl")
+        .assert_contains("plain");
+}
+
+#[test]
+fn an_agent_that_reports_nothing_leaves_the_column_empty_rather_than_zero() {
+    // A harness whose output wecode cannot read says so in one word, and gets a blank
+    // column rather than a number. Printing one would be a claim nobody made, and the
+    // budget would be checked against it.
+    let (org, _) = with_agent("run-unmetered", "echo done >> a.txt");
+    speaking(&org, "plain");
     a_task(&org, "t", "a.txt", "grep -q done a.txt");
 
     org.run(&["run", "t"])

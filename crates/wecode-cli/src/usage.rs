@@ -8,9 +8,14 @@
 //! it was measured.
 //!
 //! One adapter per protocol, selected by the `protocol` field of the agent template.
-//! An unrecognised protocol meters nothing and says so: inventing a number from an
-//! output format nobody has read would be worse than a blank column, because a blank
-//! column is obviously blank.
+//! Two of them read a number, and neither is a harness: `claude-stream-json` is one
+//! CLI's output as it happens to be, and `generic-jsonl` is a shape wecode publishes
+//! for anything willing to emit it. A harness that does neither declares `plain` and
+//! is metered as nothing — inventing a number from an output format nobody has read
+//! would be worse than a blank column, because a blank column is obviously blank.
+//! Which is also why a name outside the list is refused where `company.toml` is loaded
+//! rather than here: a typo silently metering nothing is that blank column with no
+//! decision behind it. See [`wecode_org::company::Protocol`].
 //!
 //! # The unit
 //!
@@ -55,26 +60,17 @@
 use std::collections::BTreeSet;
 
 use serde_json::Value;
+use wecode_org::company::Protocol;
 
-/// The output formats a token count can be read out of.
+/// What one line of output is, under the protocol that was declared.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Protocol {
-    /// `claude --output-format stream-json`: one JSON object per line, where an
-    /// `assistant` line carries that turn's usage and a final `result` line carries
-    /// the whole run's.
-    ClaudeStreamJson,
-    /// Everything else, including the empty string. Its output may well contain a
-    /// count; nothing here claims to know where.
-    Unmetered,
-}
-
-impl Protocol {
-    fn parse(s: &str) -> Self {
-        match s {
-            "claude-stream-json" => Self::ClaudeStreamJson,
-            _ => Self::Unmetered,
-        }
-    }
+enum Report {
+    /// The run's own account of itself, which supersedes anything summed here.
+    Total,
+    /// One turn, however many lines it took to announce itself.
+    Turn,
+    /// Neither, and most lines are neither.
+    None,
 }
 
 /// One usage report, split by the two units it mixes.
@@ -122,16 +118,39 @@ pub(crate) struct Meter {
 impl Meter {
     pub(crate) fn for_protocol(protocol: &str) -> Self {
         Self {
-            protocol: Protocol::parse(protocol),
+            // A name outside the vocabulary is refused where the file declaring it is
+            // loaded, so what reaches here from a company is always one of the three.
+            // A template built in code can still name anything, and meters nothing
+            // rather than guessing — which is what `plain` already means.
+            protocol: Protocol::parse(protocol).unwrap_or(Protocol::Plain),
             total: None,
             turns: None,
             counted: BTreeSet::new(),
         }
     }
 
+    /// What this protocol makes of a line announcing itself as `ty`.
+    ///
+    /// The whole difference between the two readers. `claude-stream-json` knows the
+    /// type names its harness writes and counts nothing else, so a line of some other
+    /// kind that happens to carry a usage object cannot be mistaken for a turn. The
+    /// generic contract has no names to rely on — that is what makes it general — so
+    /// any line offering usage is a turn, and `result` keeps the one meaning wecode
+    /// asks a harness to reserve.
+    fn report(&self, ty: Option<&str>) -> Report {
+        match (self.protocol, ty) {
+            (Protocol::Plain, _) => Report::None,
+            (_, Some("result")) => Report::Total,
+            (Protocol::ClaudeStreamJson, Some("assistant")) | (Protocol::GenericJsonl, _) => {
+                Report::Turn
+            }
+            _ => Report::None,
+        }
+    }
+
     /// Offers one line of the agent's output to the meter.
     pub(crate) fn line(&mut self, line: &str) {
-        if self.protocol == Protocol::Unmetered {
+        if self.protocol == Protocol::Plain {
             return;
         }
         // Most lines are not usage, and some are not JSON at all — a coding CLI
@@ -140,12 +159,12 @@ impl Meter {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             return;
         };
-        match v.get("type").and_then(Value::as_str) {
+        match self.report(v.get("type").and_then(Value::as_str)) {
             // The run's own account of itself, which supersedes anything summed
             // here: a compacted or resumed conversation is charged for turns this
             // process never saw a line for.
-            Some("result") => {
-                if let Some(u) = v.get("usage").and_then(usage_in) {
+            Report::Total => {
+                if let Some(u) = usage_on(&v) {
                     self.total = Some(u);
                 }
             }
@@ -155,12 +174,12 @@ impl Meter {
             // it was split into. Only a line that was actually counted claims its id,
             // so a first announcement carrying no usage does not silence the one that
             // does.
-            Some("assistant") => {
-                let id = v.pointer("/message/id").and_then(Value::as_str);
+            Report::Turn => {
+                let id = id_on(&v);
                 if id.is_some_and(|id| self.counted.contains(id)) {
                     return;
                 }
-                if let Some(u) = v.pointer("/message/usage").and_then(usage_in) {
+                if let Some(u) = usage_on(&v) {
                     self.turns = Some(self.turns.unwrap_or_default().add(u));
                     // An unidentified message is counted and not remembered: there is
                     // nothing to recognise it by later, and dropping every anonymous
@@ -170,7 +189,7 @@ impl Meter {
                     }
                 }
             }
-            _ => {}
+            Report::None => {}
         }
     }
 
@@ -198,12 +217,33 @@ impl Meter {
     }
 }
 
+/// The usage a line carries, wherever on it that is.
+///
+/// Both spellings are already in the one stream `claude-stream-json` reads — a turn
+/// nests it under the message it belongs to, the run's total sits at the top — so
+/// asking for either is what the two readers have in common rather than a concession
+/// to the second. A harness meeting the published contract writes whichever suits it.
+fn usage_on(v: &Value) -> Option<Usage> {
+    v.pointer("/usage")
+        .or_else(|| v.pointer("/message/usage"))
+        .and_then(usage_in)
+}
+
+/// What names the turn a line belongs to, so a turn restated across several lines is
+/// counted once. `None` is a line with nothing to recognise it by — see [`Meter::line`]
+/// for why that is counted anyway.
+fn id_on(v: &Value) -> Option<&str> {
+    v.pointer("/message/id")
+        .or_else(|| v.pointer("/id"))
+        .and_then(Value::as_str)
+}
+
 /// The one key naming context that was re-read rather than sent.
 ///
 /// Named, not pattern-matched, and only this one: it is the field
-/// `claude-stream-json` emits, which is the only protocol anything here claims to
-/// read. Guessing that some other harness spells it the same way is how a made-up
-/// number reaches a budget — the same reason an unknown protocol meters nothing.
+/// `claude-stream-json` emits, and the spelling the published contract asks a harness
+/// for. Recognising some other name for the same thing is how a made-up number reaches
+/// a budget — the same reason a protocol nobody declared meters nothing.
 const REPLAY_KEY: &str = "cache_read_input_tokens";
 
 /// What one `usage` object accounts for, split into the two units.
@@ -344,6 +384,10 @@ mod tests {
             m.line(l);
         }
         m.replayed()
+    }
+
+    fn generic(lines: &[&str]) -> Option<u64> {
+        meter("generic-jsonl", lines)
     }
 
     #[test]
@@ -531,11 +575,62 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_protocol_meters_nothing_even_when_the_output_looks_familiar() {
-        // Guessing at an unread format is how a made-up number reaches a budget.
+    fn a_harness_that_declares_nothing_is_metered_as_nothing() {
+        // `plain` is a decision and not a gap: the harness reports a spend wecode
+        // cannot read, so the column stays blank rather than being filled from an
+        // output format nobody here has read. The empty string says the same, which is
+        // what every company written before the vocabulary existed says.
         let line = r#"{"type":"result","usage":{"input_tokens":1200,"output_tokens":340}}"#;
-        assert_eq!(meter("generic-jsonl", &[line]), None);
+        assert_eq!(meter("plain", &[line]), None);
         assert_eq!(meter("", &[line]), None);
+        // A name outside the vocabulary never reaches here from a file — it is refused
+        // at load — and is metered as nothing rather than guessed at if it does.
+        assert_eq!(meter("opencode-json", &[line]), None);
+    }
+
+    #[test]
+    fn a_harness_meeting_the_published_contract_is_metered_without_being_known() {
+        // The point of there being a contract: no adapter, no name in a match arm,
+        // nothing about this harness anywhere in the crate. It writes a usage object
+        // per line and states its total on a `result` line, and the run has a spend.
+        assert_eq!(
+            generic(&[
+                r#"{"event":"step","usage":{"input_tokens":10,"output_tokens":20}}"#,
+                r#"{"event":"step","usage":{"input_tokens":30,"output_tokens":40}}"#,
+            ]),
+            Some(100),
+            "turns are summed"
+        );
+        assert_eq!(
+            generic(&[
+                r#"{"event":"step","usage":{"input_tokens":10,"output_tokens":20}}"#,
+                r#"{"type":"result","usage":{"total_tokens":900}}"#,
+            ]),
+            Some(900),
+            "and a stated total supersedes them"
+        );
+    }
+
+    #[test]
+    fn the_generic_contract_keeps_the_rules_the_unit_depends_on() {
+        // Everything the claude reader was taught the hard way holds here too: cache
+        // reads are their own scale, and a turn restated is one turn.
+        let line = r#"{"id":"t1","usage":{"input_tokens":10,"output_tokens":5,
+            "cache_read_input_tokens":4000}}"#;
+        assert_eq!(generic(&[line, line]), Some(15));
+        let mut m = Meter::for_protocol("generic-jsonl");
+        m.line(line);
+        assert_eq!(m.replayed(), Some(4000));
+    }
+
+    #[test]
+    fn the_two_readers_differ_only_in_what_they_are_willing_to_count() {
+        // A line of some other kind carrying a usage object. `claude-stream-json`
+        // knows the type names its harness writes and counts nothing else; the generic
+        // reader has no names to rely on, which is the trade it makes to be general.
+        let line = r#"{"type":"user","message":{"usage":{"input_tokens":700}}}"#;
+        assert_eq!(claude(&[line]), None);
+        assert_eq!(generic(&[line]), Some(700));
     }
 
     /// One closed attempt, so a test can vary what it reported and nothing else.

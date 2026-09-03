@@ -90,19 +90,70 @@ inherited. Absent a container, that is the only network control there is.
 
 `{{prompt}}` in `args` is where the rendered envelope goes.
 
-`protocol` names the shape of the agent's output, and is what lets wecode read a token
-count out of it. One value is understood today:
+## What a harness has to do to hold a seat
+
+Nothing, beyond being declarable in the block above. There are no adapters in the
+crate and no list of supported coding CLIs: an `[agents.*]` block is four
+declarations, and any executable that satisfies them is a seat's occupant.
+
+| declaration | how | absent |
+|---|---|---|
+| how it is told | `{{prompt}}` in `args` | it is launched with no task |
+| what it may do | `{{tools}}` in `args` | no allow-list flag — the grant is enforced anyway |
+| what it reports | `protocol` | `plain`: unmetered |
+| which model | `models`, `model_flag` | wecode names none |
+
+`{{tools}}` renders claude's `--allowedTools Bash(cargo *),Read,Edit` syntax, so a
+harness that spells an allow-list differently — or has none — leaves the placeholder
+out and passes the flag no other way. Nothing is lost that was load-bearing: the flag
+is a courtesy that refuses a command early, and the enforcement is the scope check
+over `git diff --name-only` and the charter's `never_run`, which run whatever the
+harness did or did not honour.
+
+### `protocol`
+
+The shape of the agent's output, which is what lets wecode read a token count out of
+it. Three values, and a name outside them is refused when the file loads — a protocol
+nothing reads meters nothing on every run of that harness and says so nowhere, which
+is indistinguishable from an honest `plain`.
 
 | | |
 |---|---|
 | `claude-stream-json` | one JSON object per line; usage on the `assistant` and `result` lines |
-| anything else | **unmetered** — the run's spend column stays blank |
+| `generic-jsonl` | one JSON object per line; **any** line carrying a `usage` object is that turn's spend, and a line with `"type": "result"` states the run's total |
+| `plain`, or omitted | **unmetered** — the run's spend column stays blank |
 
-It must match what `args` actually asks for: declaring `claude-stream-json` without
-`--output-format stream-json` produces prose, and prose reports nothing. Unmetered is
-not an error — the run still happens, is still timed, and still lands its wall spend on
-the ledger. It only means the token half of the spend column has nothing to show, which
-is the truth and not a zero.
+`generic-jsonl` is a contract wecode publishes rather than a format it has read: a
+`usage` object at the top level or under `message`, with `*_tokens` fields, and
+`cache_read_input_tokens` for context re-read rather than sent. A turn restated across
+several lines carries the same `id` and is counted once. A harness that states a
+*running* total on every line rather than each turn's addition does not meet it and
+should say `plain` — the figure would otherwise be summed as if it were new spend.
+
+`protocol` must match what `args` actually asks for: declaring `claude-stream-json`
+without `--output-format stream-json` produces prose, and prose reports nothing.
+Unmetered is not an error — the run still happens, is still timed, and still lands its
+wall spend on the ledger. It only means the token half of the spend column has nothing
+to show, which is the truth and not a zero.
+
+Worked, for two harnesses wecode knows nothing about:
+
+```toml
+[agents.opencode]                 # takes its instruction as an argument, says nothing
+command = "opencode"
+protocol = "plain"
+args = ["run", "{{prompt}}"]
+env_allowlist = ["OPENCODE_API_KEY", "PATH", "HOME", "LANG"]
+wall_secs = 1800
+
+[agents.hermes]                   # emits the published contract, so its runs are metered
+command = "hermes"
+protocol = "generic-jsonl"
+args = ["--task", "{{prompt}}", "--events", "jsonl"]
+env_allowlist = ["HERMES_TOKEN", "PATH", "HOME", "LANG"]
+models = ["small", "large"]
+model_flag = "--model"
+```
 
 Every `tokens` number in this file — the `max_tokens` invariant, a role's cap, a
 playbook's default — counts the tokens a run **adds**: its prompts, what it writes to a
