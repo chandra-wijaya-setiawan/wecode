@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use support::merge::{landed_task, mergeable};
-use support::{Org, git_out};
+use support::{Org, git, git_out};
 
 // ----------------------------------------------------------------- merge ------
 
@@ -469,4 +469,155 @@ fn merging_twice_is_refused_rather_than_silently_doing_nothing() {
     let r = org.run(&["merge", "t"]);
     assert!(!r.ok(), "a no-op merge must not read as success");
     r.assert_contains("already merged");
+}
+
+// ------------------------------------------- the executable it produced ---------
+
+// The merge-side half of installing. What each refusal *says* is unit-tested inside
+// `src/install.rs`; that a landed merge builds and installs, that a decline is a line
+// in a report the merge still commits, and that `wecode install` is the same step
+// typed, are `tests/install.rs`. What is here is what only a merge can be asked: where
+// the install lands among the merge's other facts, whose build cache it used, that a
+// binary the operator is running gets replaced rather than written through, and that
+// the repository being merged has no say in where its own executable goes.
+
+/// Names where the `app` repo's executable installs, in the one file that may say so.
+///
+/// Edited the way an operator edits it, because no command does it on purpose: the
+/// destination is an authority to write outside every repository, and only a
+/// hand-edited file can carry one.
+fn installs_to(org: &Org, dest: &Path) {
+    let conf = org.path("company.toml");
+    let text = std::fs::read_to_string(&conf).unwrap();
+    let replaced = text.replace(
+        "name = \"app\"\n",
+        &format!("name = \"app\"\ninstalls = \"{}\"\n", dest.display()),
+    );
+    assert_ne!(replaced, text, "the app repo block was not found");
+    std::fs::write(&conf, replaced).unwrap();
+}
+
+/// A mergeable workspace whose repo really is a crate producing `app`, and a
+/// destination that really exists. `dev` carries the crate, because `dev` is what
+/// gets built.
+///
+/// The same fixture `tests/install.rs` stands up. It is a candidate for
+/// `support::merge` now that a second area wants it — a move outside this task's
+/// scope, and the reason this copy exists rather than a shared one.
+fn installable(name: &str, main_rs: &str) -> (Org, PathBuf, PathBuf) {
+    let (org, repo) = mergeable(name, "auto");
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("src/main.rs"), main_rs).unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "the repo produces an executable"]);
+    git(&repo, &["branch", "-f", "dev"]);
+
+    std::fs::create_dir_all(org.path("bin")).unwrap();
+    let dest = org.path("bin/app");
+    installs_to(&org, &dest);
+    (org, repo, dest)
+}
+
+#[test]
+fn what_a_merge_installed_is_recorded_beside_what_it_did_to_the_machine() {
+    let (org, repo, dest) = installable(
+        "merge-install-record",
+        "fn main() { println!(\"made by the merge\"); }\n",
+    );
+    landed_task(&org, "t");
+
+    org.run(&["merge", "t"])
+        .assert_ok("merge")
+        .assert_contains(&format!("install    {} ← ", dest.display()));
+
+    // In the summary, between the worktree line and the undo line: those two and this
+    // are the facts a merge creates about the machine it ran on rather than about the
+    // branch, and the way back stays last because it is what anyone acts on.
+    let file = git_out(&repo, &["show", "dev:docs/wecode/t/report.md"]);
+    let at = |needle: &str| {
+        file.find(needle)
+            .unwrap_or_else(|| panic!("no {needle:?} in:\n{file}"))
+    };
+    assert!(at("worktree   ") < at("install    "), "{file}");
+    assert!(at("install    ") < at("undo       "), "{file}");
+
+    // And it was built in the repository's own cache, not a cache of the scratch tree's
+    // own. That tree is cut fresh for every merge and comes down after, so a build with
+    // a target directory of its own would cost the merge path a full compile every
+    // time — the shared cache is what makes this affordable enough to be automatic.
+    assert!(
+        repo.join("target/debug/app").is_file(),
+        "the artefact should be in the repo's target/, not the merge tree's"
+    );
+}
+
+#[test]
+fn a_merge_replaces_the_binary_the_operator_is_running_without_disturbing_it() {
+    // Writing the destination in place gives ETXTBSY exactly when the operator has a
+    // `wecode board` open, which is the moment a merge is most likely to happen. The
+    // rename swaps a directory entry and leaves the running process on its old inode —
+    // so the proof is two facts at once: a new inode at the destination, and a child
+    // that never noticed.
+    use std::os::unix::fs::MetadataExt;
+
+    let (org, _repo, dest) = installable(
+        "merge-install-running",
+        "fn main() { std::thread::sleep(std::time::Duration::from_secs(20)); }\n",
+    );
+    // The first install is the typed one — bootstrapping reach out of a merge you must
+    // already be at a terminal to run is circular.
+    org.run(&["install"]).assert_ok("the first install");
+    let before = std::fs::metadata(&dest).unwrap().ino();
+
+    let mut running = Command::new(&dest)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("the installed binary runs");
+
+    landed_task(&org, "t");
+    let r = org.run(&["merge", "t"]);
+    let after = std::fs::metadata(&dest).unwrap().ino();
+    let alive = running
+        .try_wait()
+        .expect("the child can be asked")
+        .is_none();
+    // Killed before the assertions, so a failure here does not leave it sleeping.
+    let _ = running.kill();
+    let _ = running.wait();
+
+    r.assert_ok("a busy destination is not a reason to fail a merge")
+        .assert_contains(&format!("install    {} ← ", dest.display()));
+    assert_ne!(before, after, "the destination should be a new inode");
+    assert!(alive, "the running process should not have been disturbed");
+}
+
+#[test]
+fn no_repository_can_name_where_its_own_executable_installs() {
+    // The load-bearing half of putting the destination in `company.toml`: a playbook is
+    // committed *inside* the repository being merged, so a playbook field would let any
+    // repo acquire the right to write to the operator's machine by committing a line to
+    // itself. `deny_unknown_fields` on `[project]` is what keeps that unsayable, and it
+    // is refused before the merge rather than ignored after it.
+    let (org, repo) = mergeable("merge-install-playbook", "auto");
+    landed_task(&org, "t");
+    let dest = org.path("bin/app");
+    org.playbook(
+        &repo,
+        &format!(
+            "[project]\nlanguage = \"text\"\nmerge_to = \"dev\"\nmerge = \"auto\"\n\
+             installs = \"{}\"\n\n[chore]\nworktree = true\nassign_to = \"impl\"\n\
+             accept = [\"true\"]\ntokens = 100\nwall_secs = 30\nguidance = \"x\"\n",
+            dest.display()
+        ),
+    );
+
+    let r = org.run(&["merge", "t"]);
+    assert!(!r.ok(), "an unreadable playbook is not a merge");
+    r.assert_contains(".wecode/playbook.toml")
+        .assert_contains("unknown field `installs`");
+    assert!(!dest.exists(), "and nothing was written where it asked");
 }
