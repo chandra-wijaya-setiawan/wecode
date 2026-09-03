@@ -192,6 +192,8 @@ pub enum ProjectStatus {
     #[default]
     Draft,
     Active,
+    /// Visible on the board, but its tasks are not dispatched.
+    Hold,
     Done,
     Dropped,
 }
@@ -202,6 +204,7 @@ impl ProjectStatus {
         match self {
             Self::Draft => "draft",
             Self::Active => "active",
+            Self::Hold => "hold",
             Self::Done => "done",
             Self::Dropped => "dropped",
         }
@@ -211,6 +214,7 @@ impl ProjectStatus {
         Some(match s {
             "draft" => Self::Draft,
             "active" => Self::Active,
+            "hold" => Self::Hold,
             "done" => Self::Done,
             "dropped" => Self::Dropped,
             _ => return None,
@@ -226,7 +230,7 @@ impl ProjectStatus {
     /// without a second hand-maintained copy drifting out of sync.
     #[must_use]
     pub fn all() -> &'static [Self] {
-        &[Self::Draft, Self::Active, Self::Done, Self::Dropped]
+        &[Self::Draft, Self::Active, Self::Hold, Self::Done, Self::Dropped]
     }
 
     /// The glyph the board and the tree show.
@@ -239,6 +243,7 @@ impl ProjectStatus {
         match self {
             Self::Draft => '·',
             Self::Active => '>',
+            Self::Hold => '⏸',
             Self::Done => '✓',
             Self::Dropped => '-',
         }
@@ -264,6 +269,8 @@ pub enum TaskStatus {
     Waiting,
     /// Admitted and unblocked — the scheduler's queue.
     Ready,
+    /// Explicitly held by an operator; remains visible but is not dispatched.
+    Hold,
     /// An execution is in flight.
     Running,
     /// The agent finished; acceptance and scope checks are running.
@@ -285,6 +292,7 @@ impl TaskStatus {
             Self::Draft => "draft",
             Self::Waiting => "waiting",
             Self::Ready => "ready",
+            Self::Hold => "hold",
             Self::Running => "running",
             Self::Verifying => "verifying",
             Self::NeedsApproval => "needs-approval",
@@ -300,6 +308,7 @@ impl TaskStatus {
             "draft" => Self::Draft,
             "waiting" => Self::Waiting,
             "ready" => Self::Ready,
+            "hold" => Self::Hold,
             "running" => Self::Running,
             "verifying" => Self::Verifying,
             "needs-approval" => Self::NeedsApproval,
@@ -359,6 +368,7 @@ impl TaskStatus {
             Self::Draft,
             Self::Waiting,
             Self::Ready,
+            Self::Hold,
             Self::Running,
             Self::Verifying,
             Self::NeedsApproval,
@@ -375,6 +385,7 @@ impl TaskStatus {
             Self::Draft => '·',
             Self::Waiting => '⋯',
             Self::Ready => '○',
+            Self::Hold => '⏸',
             Self::Running => '>',
             Self::Verifying => '?',
             Self::NeedsApproval => '!',
@@ -422,10 +433,10 @@ mod tests {
             assert_eq!(ProjectStatus::parse(s.as_str()), Some(*s));
             marks.push(s.mark());
         }
-        assert_eq!(marks.len(), 4);
+        assert_eq!(marks.len(), 5);
         marks.sort_unstable();
         marks.dedup();
-        assert_eq!(marks.len(), 4, "two statuses share a glyph");
+        assert_eq!(marks.len(), 5, "two statuses share a glyph");
     }
 
     #[test]
@@ -490,6 +501,7 @@ mod tests {
         for s in [
             ProjectStatus::Draft,
             ProjectStatus::Active,
+            ProjectStatus::Hold,
             ProjectStatus::Done,
             ProjectStatus::Dropped,
         ] {
@@ -503,6 +515,7 @@ mod tests {
         assert!(TaskStatus::Ready.is_schedulable());
         for s in [
             TaskStatus::Draft,
+            TaskStatus::Hold,
             TaskStatus::Running,
             TaskStatus::Verifying,
             TaskStatus::Done,
@@ -522,7 +535,12 @@ mod tests {
         ] {
             assert!(s.needs_a_human(), "{s:?}");
         }
-        for s in [TaskStatus::Waiting, TaskStatus::Ready, TaskStatus::Running] {
+        for s in [
+            TaskStatus::Waiting,
+            TaskStatus::Ready,
+            TaskStatus::Hold,
+            TaskStatus::Running,
+        ] {
             assert!(!s.needs_a_human(), "{s:?} resolves without a person");
         }
     }
@@ -538,6 +556,7 @@ mod tests {
             TaskStatus::Draft,
             TaskStatus::Waiting,
             TaskStatus::Ready,
+            TaskStatus::Hold,
             TaskStatus::Running,
             TaskStatus::Verifying,
             TaskStatus::NeedsApproval,

@@ -431,6 +431,13 @@ pipes, logs, and anywhere there is no terminal — a different consumer, not a d
 view. `wecode tui` refuses to start without a tty and says so, naming `board` as what to
 run instead.
 
+**`wecode status <project|task> hold`** pauses dispatch without removing anything from
+its board. Holding a task leaves its project and sibling tasks moving; holding a project
+skips every task in that project. Restore the appropriate active queue state explicitly,
+for example with `wecode status <task> waiting` or `wecode status <project> active`.
+A hold is not an archive: held rows remain visible, and their `hold` status explains why
+the loop skipped them.
+
 **`wecode archive task <id>`** files a task away *with its subtasks*, and
 `wecode unarchive task <id>` brings the group back. A bare id — `wecode archive caching` —
 is a project, as it always was.

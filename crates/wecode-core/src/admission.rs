@@ -1,6 +1,6 @@
 //! The admission gate: is this well enough formed to be worked on?
 
-use crate::common::Measure;
+use crate::common::{Measure, TaskStatus};
 use crate::id::{ProjectId, TaskId};
 use crate::plan::Plan;
 use crate::project::Project;
@@ -346,9 +346,9 @@ pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defec
         out.push(Defect::DesignMissing);
     }
 
-    // Nothing in a parked project ever starts — `Plan::ready_tasks` and the scheduler
-    // both skip it — so a task there is not competition for anyone, itself included.
-    if parked(plan, &t.project) {
+    // Held work remains visible but cannot run, so it is no competition for scope.
+    // The same applies to every task in a held (or archived) project.
+    if t.status == TaskStatus::Hold || parked(plan, &t.project) {
         return out;
     }
 
@@ -382,13 +382,14 @@ pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defec
     out
 }
 
-/// Whether a project is archived, and so dispatches nothing.
+/// Whether a project is archived or held, and so dispatches nothing.
 ///
 /// A project the plan does not hold is treated as live: the task being admitted may
 /// name a project that is about to be created, and skipping the whole check on that
 /// basis would let the first task of a new project claim anything.
 fn parked(plan: &Plan, id: &ProjectId) -> bool {
-    plan.project(id).is_some_and(|p| p.archived)
+    plan.project(id)
+        .is_some_and(|p| p.archived || p.status == crate::ProjectStatus::Hold)
 }
 
 /// Whether two tasks would be editing the same checkout.
