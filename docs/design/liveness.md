@@ -49,3 +49,7 @@ owner asked for — and the same shape as the doc-freshness gate, one level up.
 
 A held task is not schedulable, so it is neither dispatched nor swept: `hold` takes
 work out of the runner without pretending anything about its liveness.
+
+A cut-off seat is not a dead one: the circuit breaker withholds the next dispatch
+and says so. Liveness is about whether a supervisor still speaks; the breaker is
+about whether a seat may start again.
