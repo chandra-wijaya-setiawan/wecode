@@ -13,6 +13,13 @@
 //! tasks, so it is derived from them ([`wecode_core::requirement::requirement_is_met`])
 //! rather than written back.
 //!
+//! ADRs are here on the same terms, and ADR-0005 says why in one line: "the table is the
+//! index (id, status, supersedes), `docs/adr/*.md` is the text". An index of that shape is
+//! four fields, three of which are the ledger already — a decision is *taken* by somebody
+//! at a moment — so it is a `decide` row here and a `supersede` row for each replacement,
+//! folded by [`Store::adrs`]. The prose stays in git, where review, diff and history
+//! already live, and the number in the id names the file for anyone who wants it.
+//!
 //! The other half of ADR-0005's shape, `task.requirement_id`, *is* a column, and the
 //! split is between state and event. Which obligation a task serves is a fact about the
 //! task now, so it lives on the task's row and moves when the task does. That it claimed
@@ -132,6 +139,107 @@ impl Requirement {
             ReqKind::Functional
         }
     }
+}
+
+/// One decision the repository has taken, folded out of the rows that recorded it.
+///
+/// The index and not the text: id, title, and what replaced it. A digest and a path were
+/// in ADR-0005's first sketch of the table and are not here — the number in the id names
+/// `docs/adr/NNNN-*.md` for ever, which a path column would only be a second, staler copy
+/// of, and there is nothing yet that reads a digest.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Adr {
+    /// `ADR-0004`, as the decision's own heading writes it.
+    pub id: String,
+    pub title: String,
+    /// The repository that decided it, as its standing project (ADR-0002).
+    pub project: ProjectId,
+    /// The decision that replaced this one, where one has.
+    pub superseded_by: Option<String>,
+    /// When it was last recorded.
+    pub at: u64,
+    /// The person who recorded it, or the post when the row named no person.
+    pub by: String,
+}
+
+impl Adr {
+    /// `accepted`, or `superseded by ADR-0004`.
+    ///
+    /// Derived, for the reason ADR-0005 gives about a requirement's `status`: a word
+    /// written into a row goes stale the moment the next decision lands, and here the
+    /// successor cannot be recorded without naming what it replaces. So the state and
+    /// its evidence arrive together, or neither does.
+    #[must_use]
+    pub fn status(&self) -> String {
+        match &self.superseded_by {
+            Some(next) => format!("superseded by {next}"),
+            None => "accepted".to_string(),
+        }
+    }
+}
+
+/// What an ADR's own text says about itself: its heading, and its `Status:` line.
+///
+/// Parsed here, never read here. A document is somebody else's repository's file, so the
+/// caller opens it and hands the text over — the idiom [`wecode_core::docs`] already uses
+/// for the same reason. Which is also why the index is minted from the text on every pass
+/// rather than edited: the file is the authority, and this is a cache of its first lines.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AdrHead {
+    pub id: String,
+    pub title: String,
+    /// The first word of the `Status:` line, verbatim.
+    pub status: String,
+    /// The decision this one replaces, where the status line names one.
+    pub supersedes: Option<String>,
+    /// The decision that replaced this one, where the status line names one.
+    pub superseded_by: Option<String>,
+}
+
+impl AdrHead {
+    /// The index fields, or `None` when the text is not an ADR — no `# ADR-nnnn: <title>`
+    /// heading, which is what `docs/adr/README.md` is and what a template is.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let heading = text.lines().find(|l| l.starts_with("# ADR-"))?;
+        let (id, title) = heading.trim_start_matches("# ").split_once(':')?;
+        let status = text.lines().find(|l| l.starts_with("Status:")).unwrap_or("");
+        Some(Self {
+            id: id.trim().to_string(),
+            title: title.trim().to_string(),
+            status: status
+                .trim_start_matches("Status:")
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+            // Two distinct phrases, not one with a suffix: `supersedes ADR-3` is never a
+            // substring of `superseded by ADR-3`, so neither match can steal the other's.
+            supersedes: named_after(status, "supersedes "),
+            superseded_by: named_after(status, "superseded by "),
+        })
+    }
+
+    /// Whether the repository has actually decided this one.
+    ///
+    /// A proposal is a document about a decision not yet taken, and an index listing it
+    /// beside the decisions would answer "what did we decide?" with something nobody
+    /// decided. It is left out rather than marked, and comes in when its status changes.
+    #[must_use]
+    pub fn decided(&self) -> bool {
+        matches!(self.status.as_str(), "accepted" | "superseded")
+    }
+}
+
+/// The handle after `marker` — `ADR-0004` in `superseded by ADR-0004 (31 Aug 2026)`.
+fn named_after(line: &str, marker: &str) -> Option<String> {
+    let handle = line
+        .split(marker)
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+    (!handle.is_empty()).then(|| handle.to_string())
 }
 
 /// Who is writing a row no Broker decided.
@@ -322,7 +430,7 @@ impl Store {
         let mine = self.requirements(None, Some(story))?;
         let n = mine.iter().filter(|r| r.kind() == kind).count() + 1;
         let id = format!("{story}/{}-{n}", kind.as_str());
-        let at = self.append_stated(by, project, story, "require", &id, wording)?;
+        let at = self.append_stated(by, project, Some(story), "require", &id, wording)?;
         Ok(Requirement {
             id,
             story: story.clone(),
@@ -349,8 +457,108 @@ impl Store {
         task: &TaskId,
         requirement: &str,
     ) -> Result<(), StoreError> {
-        self.append_stated(by, project, task, "serve", requirement, "")?;
+        self.append_stated(by, project, Some(task), "serve", requirement, "")?;
         Ok(())
+    }
+
+    /// Indexes one decision, and returns what the index now holds for it.
+    ///
+    /// `None`, and nothing written, for a document the repository has not decided —
+    /// see [`AdrHead::decided`]. Recording it is idempotent: the same head indexed twice
+    /// restates the same handle, as a restated requirement does, so a pass over
+    /// `docs/adr/` can be run as often as anyone likes.
+    ///
+    /// Supersession is written in whichever direction the file in hand states it, and
+    /// both are stated in practice — ADR-0004 says it supersedes ADR-0003 and ADR-0003
+    /// says it was superseded by ADR-0004. Recording either is what makes the index agree
+    /// with itself however the directory is walked, and while only one file has been seen.
+    pub fn record_adr(
+        &self,
+        by: By<'_>,
+        project: &ProjectId,
+        head: &AdrHead,
+    ) -> Result<Option<Adr>, StoreError> {
+        if !head.decided() {
+            return Ok(None);
+        }
+        let at = self.append_stated(by, project, None, "decide", &head.id, &head.title)?;
+        if let Some(old) = &head.supersedes {
+            self.append_stated(by, project, None, "supersede", old, &head.id)?;
+        }
+        if let Some(next) = &head.superseded_by {
+            self.append_stated(by, project, None, "supersede", &head.id, next)?;
+        }
+        Ok(Some(Adr {
+            id: head.id.clone(),
+            title: head.title.clone(),
+            project: project.clone(),
+            // What this file says. What the successor's file says about it arrives in
+            // the fold, which is the only place the whole index is in view.
+            superseded_by: head.superseded_by.clone(),
+            at,
+            by: person_or_post(by),
+        }))
+    }
+
+    /// Every decision the repository has taken, by number.
+    ///
+    /// Keyed by id, which for a four-digit handle sorts as the numbers do — the order
+    /// `docs/adr/README.md` lists them in, and the order a reader arriving from a
+    /// citation expects. The requirements fold below cannot do this, because `FR-10`
+    /// sorts between `FR-1` and `FR-2`; a zero-padded handle is what buys it here.
+    ///
+    /// A superseded decision stays in the index, exactly as it stays in the directory:
+    /// the row is how a reader arriving from an old citation learns which decision
+    /// replaced it. A supersession naming a decision nothing recorded is dropped, on the
+    /// same terms as a task pointing at a requirement nobody stated — inventing the row
+    /// would hide that the tree cites a decision the index has never seen.
+    pub fn adrs(&self) -> Result<Vec<Adr>, StoreError> {
+        let mut stmt = self.conn().prepare(
+            "SELECT at, post, human, project_id, action, target, detail
+             FROM audit_log WHERE action IN ('decide','supersede') ORDER BY seq",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    crate::int::from_row(r.get(0)?, 0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut found: BTreeMap<String, Adr> = BTreeMap::new();
+        let mut replaced: BTreeMap<String, String> = BTreeMap::new();
+        for (at, post, human, in_project, action, target, detail) in rows {
+            if action == "supersede" {
+                replaced.insert(target, detail);
+                continue;
+            }
+            // The newest recording is the index; an earlier one is a file as it read
+            // before somebody fixed the title, and nothing is served by keeping it.
+            found.insert(
+                target.clone(),
+                Adr {
+                    id: target,
+                    title: detail,
+                    project: ProjectId::new(&in_project),
+                    superseded_by: None,
+                    at,
+                    by: if human.is_empty() { post } else { human },
+                },
+            );
+        }
+        Ok(found
+            .into_values()
+            .map(|a| Adr {
+                superseded_by: replaced.get(&a.id).cloned(),
+                ..a
+            })
+            .collect())
     }
 
     /// One ledger row that states a fact rather than reporting a verdict.
@@ -358,11 +566,15 @@ impl Store {
     /// `supervisor`, not `broker`: nothing was decided here. The Broker's own row for
     /// the `define` that authorised the declaration sits beside this one, and a reader
     /// filtering the ledger for what was *judged* must not pick this up as a judgement.
+    ///
+    /// No task, for a fact about the repository rather than about one piece of work. An
+    /// ADR is the case: it is decided once and outlives every task that cites it, so the
+    /// column is NULL rather than carrying whichever task happened to index it.
     fn append_stated(
         &self,
         by: By<'_>,
         project: &ProjectId,
-        task: &TaskId,
+        task: Option<&TaskId>,
         action: &str,
         target: &str,
         detail: &str,
@@ -380,7 +592,7 @@ impl Store {
                 by.agent,
                 by.human,
                 project.as_str(),
-                task.as_str(),
+                task.map(TaskId::as_str),
                 action,
                 target,
                 detail,
@@ -722,6 +934,144 @@ mod tests {
         s.save_task(&Task::new("parse", "caching", "parse a reply").serving("ghost/FR-1"))
             .unwrap();
         assert!(s.requirements(None, None).unwrap().is_empty());
+    }
+
+    /// An ADR as this repository writes one: front-matter, heading, status line.
+    fn adr_text(id: &str, title: &str, status: &str) -> String {
+        format!("---\nclass: record\n---\n# {id}: {title}\n\nStatus: {status}\n\n## Context\n")
+    }
+
+    fn indexer() -> By<'static> {
+        By {
+            session: "s-1",
+            post: "lead",
+            agent: "claude-code",
+            human: "Chandra",
+        }
+    }
+
+    #[test]
+    fn a_head_is_read_off_the_heading_and_the_status_line() {
+        let h = AdrHead::parse(&adr_text(
+            "ADR-0004",
+            "The aggregating kind is `epic`, not `milestone`",
+            "accepted (31 Aug 2026) · supersedes ADR-0003",
+        ))
+        .unwrap();
+        assert_eq!(h.id, "ADR-0004");
+        assert_eq!(h.title, "The aggregating kind is `epic`, not `milestone`");
+        assert_eq!(h.status, "accepted");
+        assert_eq!(h.supersedes.as_deref(), Some("ADR-0003"));
+        // The two phrases are distinct, so neither match steals the other's handle.
+        assert_eq!(h.superseded_by, None);
+
+        let old = AdrHead::parse(&adr_text(
+            "ADR-0003",
+            "Grouping is a task kind, not a project",
+            "superseded by ADR-0004 (31 Aug 2026)",
+        ))
+        .unwrap();
+        assert_eq!(old.status, "superseded");
+        assert_eq!(old.superseded_by.as_deref(), Some("ADR-0004"));
+        assert_eq!(old.supersedes, None);
+
+        // The directory's own README is not a decision, and neither is anything else
+        // without the heading. Nothing to skip by name.
+        assert!(AdrHead::parse("# Architecture Decision Records\n").is_none());
+    }
+
+    #[test]
+    fn the_index_holds_what_was_decided_and_what_replaced_it() {
+        let s = store();
+        s.save_project(&Project::new("wecode", "run agents as staff", "wecode"))
+            .unwrap();
+        let project = ProjectId::new("wecode");
+        let record = |text: &str| {
+            s.record_adr(indexer(), &project, &AdrHead::parse(text).unwrap())
+                .unwrap()
+        };
+        // Out of order on purpose: the index is by number, not by when it was walked.
+        record(&adr_text("ADR-0004", "epic aggregates", "accepted · supersedes ADR-0003"));
+        record(&adr_text("ADR-0003", "grouping is a kind", "superseded by ADR-0004"));
+        record(&adr_text("ADR-0001", "the codemap is a cache", "accepted"));
+
+        let found = s.adrs().unwrap();
+        let ids: Vec<&str> = found.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["ADR-0001", "ADR-0003", "ADR-0004"]);
+        assert_eq!(found[1].status(), "superseded by ADR-0004");
+        assert_eq!(found[2].status(), "accepted");
+        assert_eq!(found[0].title, "the codemap is a cache");
+        assert_eq!(found[0].by, "Chandra");
+        assert_eq!(found[0].project, project);
+    }
+
+    #[test]
+    fn indexing_the_directory_twice_indexes_it_once() {
+        // The index is minted from the text on every pass, so a pass must be repeatable:
+        // the file is the authority and the row is a cache of its first lines.
+        let s = store();
+        let project = ProjectId::new("wecode");
+        let text = adr_text("ADR-0007", "hold is not archive", "accepted");
+        for _ in 0..3 {
+            s.record_adr(indexer(), &project, &AdrHead::parse(&text).unwrap())
+                .unwrap();
+        }
+        let renamed = adr_text("ADR-0007", "`hold` suspends work", "accepted");
+        s.record_adr(indexer(), &project, &AdrHead::parse(&renamed).unwrap())
+            .unwrap();
+
+        let found = s.adrs().unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].title, "`hold` suspends work", "the newest pass wins");
+    }
+
+    #[test]
+    fn a_proposal_is_not_a_decision_and_leaves_no_row() {
+        // The question the index answers is "what did we decide?", and a proposal is a
+        // document about a decision nobody has taken yet.
+        let s = store();
+        let text = adr_text("ADR-0008", "a shape being argued", "proposed");
+        let head = AdrHead::parse(&text).unwrap();
+        assert!(!head.decided());
+        assert_eq!(
+            s.record_adr(indexer(), &ProjectId::new("wecode"), &head)
+                .unwrap(),
+            None
+        );
+        assert!(s.adrs().unwrap().is_empty());
+        assert!(s.audit(&AuditQuery::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_supersession_of_a_decision_nothing_recorded_invents_no_row() {
+        // The same rule as a task pointing at a requirement nobody stated: conjuring the
+        // row would hide that the tree cites a decision the index has never seen.
+        let s = store();
+        let project = ProjectId::new("wecode");
+        let text = adr_text("ADR-0004", "epic aggregates", "accepted · supersedes ADR-0003");
+        s.record_adr(indexer(), &project, &AdrHead::parse(&text).unwrap())
+            .unwrap();
+        let ids: Vec<String> = s.adrs().unwrap().into_iter().map(|a| a.id).collect();
+        assert_eq!(ids, vec!["ADR-0004"], "no ADR-0003 conjured out of a citation");
+    }
+
+    #[test]
+    fn a_decision_is_the_repositorys_and_belongs_to_no_task() {
+        // A task indexes it; the decision outlives the task. A task id on the row would
+        // make `wecode check <that task>` claim the decision as its own doing.
+        let s = store();
+        let text = adr_text("ADR-0002", "one repo, one standing project", "accepted");
+        s.record_adr(
+            indexer(),
+            &ProjectId::new("wecode"),
+            &AdrHead::parse(&text).unwrap(),
+        )
+        .unwrap();
+        let rows = s.audit(&AuditQuery::default()).unwrap();
+        assert_eq!(rows[0].action, "decide");
+        assert_eq!(rows[0].source, "supervisor", "nothing was judged here");
+        assert!(rows[0].task.is_empty());
+        assert_eq!(rows[0].project, "wecode");
     }
 
     #[test]

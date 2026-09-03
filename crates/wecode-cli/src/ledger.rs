@@ -8,6 +8,14 @@
 //! The ledger is append-only and `seq` is assigned by the database, so these queries
 //! compare positions rather than timestamps — which is what lets a signature be judged
 //! *stale* rather than merely present.
+//!
+//! Not everything in that ledger is about a task, and this module reads only the part
+//! that is. The ADR index shares the same table — a `decide` row per decision the
+//! repository has taken and a `supersede` row per replacement (ADR-0005) — and those rows
+//! carry no task id, because a decision outlives every task that cites it. So [`lines`]
+//! never returns one, and no gate here can be tripped or satisfied by an ADR landing.
+//! Read the index through [`wecode_store::Store::adrs`], which folds the whole of it;
+//! filtering this module's rows for it would find nothing and say so quietly.
 
 use wecode_core::TaskId;
 use wecode_gov::ActionKind;
