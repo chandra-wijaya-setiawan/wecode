@@ -178,3 +178,7 @@ never has more agents than that working at once.
 
 Held work occupies no slot and is not competition for a scope — the one honest way
 to shrink the collision graph without archiving or deleting anything.
+
+A seat that spends faster than its declared rate is cut off before its next
+dispatch, not mid-run: the runaway is stopped at the door, and work already paid
+for still finishes (Shopify's circuit breaker, [budgets] enforce stays off).

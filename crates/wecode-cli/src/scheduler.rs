@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use wecode_core::{ExecutionStatus, Plan, ProjectStatus, Task, TaskId, TaskStatus};
+use wecode_org::company::Budgets;
 use wecode_store::Execution;
 use wecode_store::execution::OpenRun;
 
@@ -161,6 +162,51 @@ pub(crate) fn contended(id: &TaskId, held: TaskStatus, runs: &[Execution]) -> Op
             "{id} is already running — another dispatch has it\n  \
              `wecode show {id}` for the attempt in flight, \
              or `wecode status {id} ready` to hand it back"
+        )
+    })
+}
+
+/// Why a dispatch may not take this task, because the seat behind it is burning money.
+///
+/// The circuit breaker. A token budget is a figure *per attempt*, so three retries of a
+/// task budgeted at 200k are each inside their budget and have spent six hundred thousand
+/// tokens between them in twenty minutes. Nothing in a per-attempt ceiling can see that,
+/// because every attempt it can see was fine — the spike is in the rate, and the rate is
+/// what [`crate::usage::per_hour`] reads off the rows the attempts already wrote.
+///
+/// At the door and not in the run, which is what makes it cheap to be wrong about.
+/// `[budgets] enforce` kills a run in flight and destroys the work already paid for; this
+/// declines to *start* the next one, so a ceiling set too low costs a queue that stands
+/// still rather than a worktree full of half-written change. That is why the two are
+/// separate keys and why this one is safe to turn on first.
+///
+/// It resets itself. The window slides with `now`, so an hour of quiet closes the circuit
+/// with nobody clearing anything — the operator who wants it back sooner raises the
+/// ceiling, and the one who wants it never raises it takes the key out of the file.
+///
+/// Returned rather than raised, and beside [`contended`] because it is the same door and
+/// the same shape of answer: a task the operator's own budget says to leave alone is not
+/// a failure of the pass that skipped it. Off entirely when no ceiling is written, which
+/// is what every company that has never heard of this says.
+#[allow(
+    dead_code,
+    reason = "the call site in commands::exec is out of this task's scope"
+)]
+#[must_use]
+pub(crate) fn burning(
+    id: &TaskId,
+    budgets: Budgets,
+    runs: &[Execution],
+    now: u64,
+) -> Option<String> {
+    let ceiling = budgets.max_tokens_per_hour?;
+    let spent = crate::usage::per_hour(runs, now);
+    (spent > ceiling).then(|| {
+        format!(
+            "{id} is cut off — its attempts burned {spent} tokens in the last hour, over \
+             the {ceiling} `[budgets] max_tokens_per_hour` allows\n  \
+             `wecode show {id}` for the attempts that spent it — the hour slides, so \
+             this clears itself"
         )
     })
 }
@@ -514,6 +560,74 @@ mod tests {
         ] {
             assert_eq!(contended(&TaskId::new("a"), s, &open), None, "{s:?}");
         }
+    }
+
+    /// One closed attempt with a clock and a spend, for the breaker's tests.
+    fn burnt(n: i64, started: u64, ended: u64, spent: u64) -> Execution {
+        let mut r = attempt(ExecutionStatus::Completed, Some(ended));
+        r.attempt = n;
+        r.started = started;
+        r.spent_tokens = Some(spent);
+        r
+    }
+
+    /// The ceiling an operator wrote, or none at all.
+    fn ceiling(n: Option<u64>) -> Budgets {
+        Budgets {
+            enforce: false,
+            max_tokens_per_hour: n,
+        }
+    }
+
+    #[test]
+    fn a_seat_that_burned_the_hours_ceiling_is_cut_off_before_the_next_dispatch() {
+        // Three retries, each inside a 200k per-attempt budget, six hundred thousand
+        // tokens in twenty minutes. The budget saw nothing wrong with any of them.
+        let runs = [
+            burnt(1, 0, 400, 200_000),
+            burnt(2, 400, 800, 200_000),
+            burnt(3, 800, 1200, 200_000),
+        ];
+        let why = burning(&TaskId::new("a"), ceiling(Some(500_000)), &runs, 1200)
+            .expect("the rate is over the ceiling");
+        assert!(why.contains("600000 tokens in the last hour"), "{why}");
+        assert!(why.contains("500000"), "the ceiling it crossed: {why}");
+        // And where the figure came from, because the refusal is a number on its own.
+        assert!(why.contains("wecode show a"), "{why}");
+    }
+
+    #[test]
+    fn a_seat_inside_the_rate_is_dispatched_exactly_as_before() {
+        let runs = [burnt(1, 0, 400, 200_000)];
+        assert_eq!(
+            burning(&TaskId::new("a"), ceiling(Some(500_000)), &runs, 400),
+            None
+        );
+        // Equal is not over: a ceiling is the most that may be spent, not the least
+        // that trips.
+        let spent = [burnt(1, 0, 400, 500_000)];
+        assert_eq!(
+            burning(&TaskId::new("a"), ceiling(Some(500_000)), &spent, 400),
+            None
+        );
+    }
+
+    #[test]
+    fn no_ceiling_is_no_breaker_rather_than_a_breaker_at_zero() {
+        // What every company written before the key says, and it must keep meaning
+        // exactly what it meant.
+        let runs = [burnt(1, 0, 400, 9_000_000)];
+        assert_eq!(burning(&TaskId::new("a"), ceiling(None), &runs, 400), None);
+    }
+
+    #[test]
+    fn the_circuit_closes_itself_an_hour_later() {
+        // A breaker, not a fuse. Nothing is latched, so nothing has to be cleared —
+        // the same rows stop being a spike as the window slides off them.
+        let runs = [burnt(1, 0, 60, 900_000)];
+        let cut = |now| burning(&TaskId::new("a"), ceiling(Some(500_000)), &runs, now);
+        assert!(cut(100).is_some(), "still inside the hour");
+        assert!(cut(3661).is_none(), "and out the other side");
     }
 
     #[test]
