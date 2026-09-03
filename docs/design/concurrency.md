@@ -35,6 +35,47 @@ What it implies instead:
 Read: docs/design/liveness.md (the beat is per run, not per loop), ADR-0007
 (hold is not competition), and the A2A state table in execution.rs.
 
+## What the loop does now (3 Sep 2026)
+
+`serve` opens one `std::thread::scope` around the whole loop and dispatches
+every task the width allows in the same pass, each on a supervisor of its own.
+A pass reaps the reports that have arrived, sweeps, promotes, reads replies and
+tops the width back up — none of which waits on a run. Before this the queue
+was drained one agent at a time, so `max_open_items = 5` bought one agent's
+throughput and the number was decoration.
+
+| Question | Answer, and where it is |
+| --- | --- |
+| What is the record of a run? | The `task_executions` row, opened before the agent starts and beaten while it lives. `wecode board` in another terminal enumerates it. |
+| What is the thread, then? | Transport, and nothing else: `exec::Dispatch` says only which task this process is currently carrying. |
+| Who owns a key? | One supervisor per task. `exec::triage` will not offer a `held` task, `scheduler::contended` refuses the dispatch already aimed at one. |
+| Where does the width come from? | `scheduler::parallelism(max_open_items, cores)`, narrowed per pass by `exec::slots_free` — the union of `running` in the plan and what this loop is carrying, so another terminal's `wecode run` narrows the loop too. |
+| Permit or claim first? | Permit. `slots` is the pass's whole allowance; the claim is taken inside the run. |
+| What if a supervisor dies? | Nothing is re-attached. The row stops beating and `claim::sweep` closes it — unchanged, and now the reason a lost thread costs only the carrying. |
+
+Not built, and deliberately named rather than implied:
+
+  - **the interrupted slot class.** `input-required` and `auth-required` still
+    have no way in from a local run, so there are two slot classes and not
+    three. A question from an agent has nowhere to live until there is an
+    inbox for the answer — which is the next task, not this one.
+  - **`attempt` in the `WHERE` of every status write.** The fencing token
+    exists and is unused; a returning zombie can still overwrite a verdict.
+    `wecode-store` was outside this task's scope.
+  - **the self-restarting drain.** Width is topped up on the next tick rather
+    than the instant a slot frees, so a finished run costs up to
+    `scheduler::INTERVAL` of idleness. Cheap to keep, cheap to change later.
+
+Sharp edges that are real and bounded:
+
+  - one SQLite writer at a time, and each supervisor opens its own connection.
+    rusqlite sets a 5s busy timeout on every connection, and wecode's writes
+    are single statements, so contention costs milliseconds — but a write that
+    does time out fails that run and leaves its row to the sweep.
+  - `git worktree add` and the shared build cache both serialise under the
+    hood. Five agents on one repository are five checkouts and one `target/`,
+    so cargo's own lock is the ceiling on parallel acceptance, not the width.
+
 ## What to copy, from source that ships (researched 2 Sep 2026)
 
 Read before writing code. Every row was verified in primary source; the ones
@@ -131,5 +172,6 @@ at all (only `subagent_depth`, default 1), and a2a-python has no semaphore in
 `src/a2a/server/`. Claude Code caps at 20 with a named error and an env
 override; Temporal defaults to 100 slots per kind. A configured integer with a
 specific refusal beats an implicit unbounded default — `[attention]
-max_open_items` is already that number, and after this change it will finally
-mean what it says.
+max_open_items` is that number, and as of the section above it means what it
+says: the loop prints the width it resolved on the line it starts with, and
+never has more agents than that working at once.

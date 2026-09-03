@@ -348,17 +348,28 @@ pub(crate) fn unsigned(
 /// A playbook that cannot be read counts as ungated here, and the task goes on to
 /// `prepare`, which reads it again and refuses properly. Two accounts of the same broken
 /// file would be worse than one, and this is not the place that reports it.
+///
+/// `held` is what makes concurrency *serial per task, parallel across tasks*: the tasks
+/// this loop already has supervisors on. A dispatch's first act is to claim its task, so
+/// a supervisor on a still-`ready` row is a window one write wide — and offering that
+/// row inside the window puts two agents in one worktree, which is the one thing
+/// preparation cannot survive. [`scheduler::contended`] is the same refusal one door
+/// further in, for the dispatch that is already aimed.
 fn triage(
     store: &Store,
     company: &Company,
     plan: &Plan,
     slots: usize,
+    held: &[TaskId],
 ) -> Result<(Vec<TaskId>, Vec<TaskId>), Box<dyn std::error::Error>> {
     let (mut go, mut waiting) = (Vec::new(), Vec::new());
     if slots == 0 {
         return Ok((go, waiting));
     }
-    for t in scheduler::dispatchable(plan, usize::MAX) {
+    for t in scheduler::dispatchable(plan, usize::MAX)
+        .into_iter()
+        .filter(|t| !held.contains(&t.id))
+    {
         let pb = plan
             .project(&t.project)
             .and_then(|p| playbook_of(company, p).ok().flatten());
@@ -489,11 +500,83 @@ pub(crate) fn tick(a: &Args) -> Res {
     Ok(out)
 }
 
-/// The background loop: tick, then dispatch, forever.
+/// One run this loop is carrying: the task it holds, and the thread that supervises it.
+///
+/// The thread is transport and never the record. What identifies the run is the
+/// `task_executions` row [`run_task`] opens before the agent starts — attempt, pid,
+/// worktree, beat — on disk, and enumerable by `wecode board` from another terminal
+/// while it is in flight. This handle says only which task this process is carrying, so
+/// losing it to a crash costs the carrying and nothing else: the row is already written,
+/// and [`claim::sweep`] closes the ones whose beat stopped. docs/design/concurrency.md
+/// forbids the other arrangement, where a thread's own stack is all there is.
+struct Dispatch<'s> {
+    task: TaskId,
+    thread: std::thread::ScopedJoinHandle<'s, Result<String, String>>,
+}
+
+/// The width left this pass: the slots [`scheduler::free_slots`] counts from the stored
+/// statuses, less the dispatches this loop is carrying whose claim has not landed yet.
+///
+/// The status is the shared answer, and that is why the width is derived rather than
+/// counted in memory: `running` is what any dispatch in any process writes, so a second
+/// terminal's `wecode run` narrows the loop exactly as one of its own runs does. What
+/// the store cannot know is the instant between a supervisor leaving here and its claim
+/// arriving there — one write wide, and enough to give a slot away twice. Counted as a
+/// union, so a held task the store already calls `running` is one slot and not two.
+fn slots_free(plan: &Plan, limit: usize, held: &[TaskId]) -> usize {
+    let unclaimed = held
+        .iter()
+        .filter(|id| {
+            plan.task(id)
+                .is_some_and(|t| t.status != TaskStatus::Running)
+        })
+        .count();
+    scheduler::free_slots(plan, limit).saturating_sub(unclaimed)
+}
+
+/// The dispatches that have finished: reported, and taken out of `live`.
+///
+/// A pass takes only what is already done, which is what keeps the cycle turning while
+/// agents work — the sweep, the promotions and the replies all happen beside runs in
+/// flight rather than after them. `wait` is `--once`, where a single pass still owes a
+/// verdict for what it started and so joins instead of stepping over.
+///
+/// Whole reports rather than a stream: several agents' output interleaved on one
+/// terminal is output nobody can attribute. `▶` goes out, `◀` comes back.
+fn reap(live: &mut Vec<Dispatch<'_>>, wait: bool) -> String {
+    let (mut out, mut still) = (String::new(), Vec::new());
+    for d in std::mem::take(live) {
+        if !wait && !d.thread.is_finished() {
+            still.push(d);
+            continue;
+        }
+        let Dispatch { task, thread } = d;
+        out.push_str(&format!("  ◀ {task}\n"));
+        out.push_str(&match thread.join() {
+            Ok(Ok(report)) => format!("{}\n", indent(&report)),
+            Ok(Err(e)) => format!("    error: {e}\n"),
+            // A panicking supervisor is a bug in wecode, not a verdict on the task, so
+            // nothing here writes one: the row stays open and the sweep closes it, the
+            // same way it closes a supervisor that was killed.
+            Err(_) => format!("    error: supervisor panicked — {task} left to the sweep\n"),
+        });
+    }
+    *live = still;
+    out
+}
+
+/// The background loop: sweep, tick, then dispatch as widely as the attention budget
+/// allows, forever.
 ///
 /// Two passes per cycle, kept separate. Promotion is a record of work becoming
 /// startable; dispatch is a record of it being started. Collapsing them would lose
 /// the first, and it is the one that explains why the second happened.
+///
+/// Dispatch does not hold the cycle. Every run gets a supervisor of its own and the
+/// pass goes on, so the next one sweeps, promotes, reads replies and tops the width back
+/// up while agents are still working. That is what makes `[attention] max_open_items`
+/// the number of agents at once rather than the number the loop may start and then wait
+/// out one at a time — drained serially, a five in the config bought one agent.
 ///
 /// Runs in the foreground. Backgrounding is the operator's job — `&`, systemd, a cron
 /// entry — because a daemon that forks is a daemon whose logs you cannot find.
@@ -516,91 +599,100 @@ pub(crate) fn serve(a: &Args) -> Res {
         company.name, company.attention.max_open_items
     );
 
-    loop {
-        // The sweep before promotion, so the queue is honest before anything is taken
-        // from it: a run whose supervisor is gone holds a slot until its row closes.
-        // Reported and stepped over on error, like the reply channel below — the loop
-        // keeps working unattended.
-        match claim::sweep(a, &ws, &store, &company, &mut suspects) {
-            Ok(swept) => print!("{swept}"),
-            Err(e) => println!("  ⚠ sweep: {e}"),
-        }
+    // Scoped, so no supervisor can outlive the loop accountable for it: every thread
+    // still standing is joined before `serve` returns, whichever way it returns.
+    // Nothing is detached, and there is no `'static` handle nobody holds.
+    std::thread::scope(|threads| -> Res {
+        let mut live: Vec<Dispatch<'_>> = Vec::new();
+        loop {
+            // The verdicts that landed while the loop slept, before anything reads a
+            // slot count: a finished supervisor still in `live` holds a slot nothing can
+            // use.
+            print!("{}", reap(&mut live, false));
 
-        let plan = store.load_plan()?;
-
-        // Promotion first, and recorded, so the queue is honest before anything is
-        // taken from it.
-        let moves = scheduler::transitions(&plan);
-        for m in &moves {
-            store.set_task_status(&m.task, m.to)?;
-            println!("  {}  {} → {}", m.task, m.from.as_str(), m.to.as_str());
-            // The loop announces its own promotions, which is what makes the claim
-            // below — that everything in `blocked` was announced by whatever wrote its
-            // status — true of a manual task as well. It was not: the tick wrote that
-            // status and said nothing, so the one wait whose message is the work itself
-            // was the only wait nobody was told about.
-            print!("{}", on_promotion(&company, ws.root(), &plan, m));
-        }
-
-        let mut stale = !moves.is_empty();
-
-        // Then the replies, and before anything is dispatched. What a bare `approve`
-        // means is read off the task, so this has to come after promotion — a task
-        // still recorded as `waiting` has nothing outstanding to sign for, and would be
-        // answered with a refusal one second before becoming the thing that was meant.
-        // Coming before dispatch is the other half: a signature that arrived on
-        // somebody's phone releases work on the pass that finds it, not the one after.
-        //
-        // Printed only when it did something, unlike the pauses below: this runs every
-        // pass whether or not anybody has replied, and a loop that says `nothing to
-        // sign` five seconds apart forever is a loop whose output nobody reads.
-        if company.telegram.fetch.is_some() {
-            match telegram::drain_channel(&ws, &store, &company, false) {
-                Ok(report) if report.trim() == "nothing to sign" => {}
-                Ok(report) => {
-                    print!("{report}");
-                    // Signing a design finishes it. Nothing else here changes a status,
-                    // but reloading on any report is cheaper than being wrong about
-                    // which ones do.
-                    stale = true;
-                }
-                // Reported and stepped over, like a notify hook that failed. A channel
-                // that cannot be reached is a reason to keep working unattended, not a
-                // reason to stop.
-                Err(e) => println!("  ⚠ telegram: {e}"),
+            // The sweep before promotion, so the queue is honest before anything is
+            // taken from it: a run whose supervisor is gone holds a slot until its row
+            // closes. Reported and stepped over on error, like the reply channel below
+            // — the loop keeps working unattended.
+            match claim::sweep(a, &ws, &store, &company, &mut suspects) {
+                Ok(swept) => print!("{swept}"),
+                Err(e) => println!("  ⚠ sweep: {e}"),
             }
-        }
 
-        let plan = if stale { store.load_plan()? } else { plan };
+            let plan = store.load_plan()?;
 
-        // Nothing new while a person is holding something. More work in flight does
-        // not help an unanswered question, and the attention budget is the point.
-        let blocked = scheduler::awaiting_a_human(&plan);
-        // Asked on every pass and not only on the ones that dispatch: work held behind
-        // an unsigned gate is standing in front of the operator either way, and the
-        // digest below is one message about all of it.
-        let slots = scheduler::free_slots(&plan, limit);
-        let (ready, awaiting_a_signature) = triage(&store, &company, &plan, slots)?;
-        let gated: Vec<&Task> = awaiting_a_signature
-            .iter()
-            .filter_map(|id| plan.task(id))
-            .collect();
+            // Promotion first, and recorded, so the queue is honest before anything is
+            // taken from it.
+            let moves = scheduler::transitions(&plan);
+            for m in &moves {
+                store.set_task_status(&m.task, m.to)?;
+                println!("  {}  {} → {}", m.task, m.from.as_str(), m.to.as_str());
+                // The loop announces its own promotions, which is what makes the claim
+                // below — that everything in `blocked` was announced by whatever wrote
+                // its status — true of a manual task as well. It was not: the tick wrote
+                // that status and said nothing, so the one wait whose message is the
+                // work itself was the only wait nobody was told about.
+                print!("{}", on_promotion(&company, ws.root(), &plan, m));
+            }
 
-        // The standing condition, on the rhythm `[attention] digest_interval_mins`
-        // promises. Every announcement around it fires on an edge and never again; this
-        // is what is still waiting an hour later, sent where the operator actually is.
-        if digest.due(Instant::now()) {
-            print!("{}", notify::on_digest(&company, ws.root(), &blocked, &gated));
-        }
+            let mut stale = !moves.is_empty();
 
-        // Reporting is NOT an alternative to dispatching: one stuck task used to
-        // starve the queue. Nothing runs unsigned anyway — the playbook and the
-        // charter decide that, not this branch.
-        for t in blocked.iter().take(3) {
-            println!("  ⏸ {} needs you — {}", t.id, t.status.as_str());
-        }
+            // Then the replies, and before anything is dispatched. What a bare `approve`
+            // means is read off the task, so this has to come after promotion — a task
+            // still recorded as `waiting` has nothing outstanding to sign for, and would
+            // be answered with a refusal one second before becoming the thing that was
+            // meant. Coming before dispatch is the other half: a signature that arrived
+            // on somebody's phone releases work on the pass that finds it, not the next.
+            //
+            // Printed only when it did something, unlike the pauses below: this runs
+            // every pass whether or not anybody has replied, and a loop that says
+            // `nothing to sign` five seconds apart forever is a loop nobody reads.
+            if company.telegram.fetch.is_some() {
+                match telegram::drain_channel(&ws, &store, &company, false) {
+                    Ok(report) if report.trim() == "nothing to sign" => {}
+                    Ok(report) => {
+                        print!("{report}");
+                        // Signing a design finishes it. Nothing else here changes a
+                        // status, but reloading on any report is cheaper than being
+                        // wrong about which ones do.
+                        stale = true;
+                    }
+                    // Reported and stepped over, like a notify hook that failed. A
+                    // channel that cannot be reached is a reason to keep working
+                    // unattended, not a reason to stop.
+                    Err(e) => println!("  ⚠ telegram: {e}"),
+                }
+            }
 
-        {
+            let plan = if stale { store.load_plan()? } else { plan };
+
+            // Named and carried in the digest, and no more than that: work stopped on a
+            // person is in front of them either way, and holding the queue behind it
+            // starved everything unrelated to it.
+            let blocked = scheduler::awaiting_a_human(&plan);
+            // Asked on every pass and not only on the ones that dispatch: work held
+            // behind an unsigned gate is standing in front of the operator either way,
+            // and the digest below is one message about all of it. The width is asked of
+            // the plan *and* of what this loop is carrying — see [`slots_free`].
+            let held: Vec<TaskId> = live.iter().map(|d| d.task.clone()).collect();
+            let slots = slots_free(&plan, limit, &held);
+            let (ready, awaiting_a_signature) = triage(&store, &company, &plan, slots, &held)?;
+            let gated: Vec<&Task> = awaiting_a_signature
+                .iter()
+                .filter_map(|id| plan.task(id))
+                .collect();
+
+            // The standing condition, on the rhythm `[attention] digest_interval_mins`
+            // promises. Every announcement around it fires on an edge and never again;
+            // this is what is still waiting an hour later, sent where the operator is.
+            if digest.due(Instant::now()) {
+                print!("{}", notify::on_digest(&company, ws.root(), &blocked, &gated));
+            }
+
+            for t in blocked.iter().take(3) {
+                println!("  ⏸ {} needs you — {}", t.id, t.status.as_str());
+            }
+
             // Named every pass, like the tasks that need an answer: the queue standing
             // still because nobody has signed is the operator's business, and a silent
             // idle loop looks like a loop with nothing to do.
@@ -618,22 +710,33 @@ pub(crate) fn serve(a: &Args) -> Res {
                     print!("{}", notify::on_signature_wait(&company, ws.root(), task));
                 }
             }
+            // All of them, at once, and the pass waits for none of them. The permit
+            // comes before the claim: `slots` above is this pass's whole allowance, and
+            // the claim is taken inside the run — a supervisor that took the row first
+            // and then queued for a slot would hold a task nothing else could take. One
+            // failure touches no other and none of them stops the loop: each report
+            // arrives on its own at [`reap`], and the next pass decides again.
             for id in ready {
                 println!("  ▶ {id}");
-                // Serially, and one failure does not stop the loop: the next pass
-                // sees the new state and decides again.
-                match run_task(&forward(a, "run", id.as_str())) {
-                    Ok(out) => println!("{}", indent(&out)),
-                    Err(e) => println!("    error: {e}"),
-                }
+                let args = forward(a, "run", id.as_str());
+                live.push(Dispatch {
+                    task: id,
+                    // A `String`, because `Box<dyn Error>` is not `Send` and the report
+                    // has to cross back to the thread that prints.
+                    thread: threads.spawn(move || run_task(&args).map_err(|e| e.to_string())),
+                });
             }
-        }
 
-        if once {
-            return Ok(String::new());
+            if once {
+                // One pass, and then the runs it started: a `--once` that returned
+                // before its own dispatches had verdicts would report nothing at all
+                // about the work it did.
+                print!("{}", reap(&mut live, true));
+                return Ok(String::new());
+            }
+            std::thread::sleep(scheduler::INTERVAL);
         }
-        std::thread::sleep(scheduler::INTERVAL);
-    }
+    })
 }
 
 pub(crate) fn indent(s: &str) -> String {
@@ -1556,5 +1659,24 @@ mod tests {
         // Neither declares one: nothing to enforce, and no invented limit either.
         let l = limits_for(&harness(None, None), &budgeted(None), false);
         assert_eq!(l.wall, None);
+    }
+
+    #[test]
+    fn a_dispatch_holds_a_slot_before_its_claim_lands_and_never_two() {
+        // The window between a supervisor leaving and its `running` write arriving:
+        // counted from memory inside it, from the status afterwards, and once either
+        // way. Without the first half a pass gives the same slot away twice; without
+        // the union the second half takes a slot off the width for nothing.
+        let (mut plan, _) = chain();
+        let held = [TaskId::new("second")];
+        assert_eq!(slots_free(&plan, 3, &held), 2, "claim not landed yet");
+
+        let mut t = plan.task(&TaskId::new("second")).unwrap().clone();
+        t.status = TaskStatus::Running;
+        plan.update_task(t).unwrap();
+        assert_eq!(slots_free(&plan, 3, &held), 2, "and once it has");
+        assert_eq!(slots_free(&plan, 3, &[]), 2, "the status alone says the same");
+        // Never negative, however narrow the budget.
+        assert_eq!(slots_free(&plan, 1, &held), 0);
     }
 }
