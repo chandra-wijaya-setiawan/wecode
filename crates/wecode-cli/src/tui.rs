@@ -218,7 +218,16 @@ impl App {
         if matches!(self.screen(), Screen::Agents) {
             return;
         }
-        let selected = self.selected().and_then(|r| r.subject.clone());
+        // A subject can appear in an attention group and again in the portfolio. Keep
+        // which occurrence was active; restoring only by subject jumps to its first row.
+        let selected = self.table.selected().and_then(|at| {
+            let subject = self.rows.get(at)?.subject.clone()?;
+            let occurrence = self.rows[..at]
+                .iter()
+                .filter(|row| row.subject.as_ref() == Some(&subject))
+                .count();
+            Some((subject, occurrence))
+        });
         let l = board::ledger_index(&self.audit);
         let tree = Tree {
             plan: &self.plan,
@@ -265,7 +274,21 @@ impl App {
 
         self.rows = rows;
         let restored = selected
-            .and_then(|s| self.rows.iter().position(|r| r.subject.as_ref() == Some(&s)))
+            .and_then(|(subject, occurrence)| {
+                self.rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| row.subject.as_ref() == Some(&subject))
+                    .nth(occurrence)
+                    .map(|(at, _)| at)
+                    // If a group disappeared, keep the subject selected wherever it
+                    // remains rather than falling all the way back to the first row.
+                    .or_else(|| {
+                        self.rows
+                            .iter()
+                            .position(|row| row.subject.as_ref() == Some(&subject))
+                    })
+            })
             .unwrap_or(0);
         self.table.select(if self.rows.is_empty() {
             None
@@ -1133,6 +1156,25 @@ mod tests {
         let before = a.selected().unwrap().subject.clone();
         a.reload();
         assert_eq!(a.selected().unwrap().subject, before);
+    }
+
+    #[test]
+    fn reload_preserves_which_copy_of_a_subject_is_selected() {
+        let mut a = app();
+        let copies: Vec<usize> = a
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.subject == Some(leaf("keys")))
+            .map(|(at, _)| at)
+            .collect();
+        assert!(copies.len() > 1, "task appears in a group and the portfolio");
+        let portfolio_copy = *copies.last().unwrap();
+        a.table.select(Some(portfolio_copy));
+
+        a.reload();
+
+        assert_eq!(a.table.selected(), Some(portfolio_copy));
     }
 
     #[test]
