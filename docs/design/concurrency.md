@@ -175,3 +175,6 @@ specific refusal beats an implicit unbounded default — `[attention]
 max_open_items` is that number, and as of the section above it means what it
 says: the loop prints the width it resolved on the line it starts with, and
 never has more agents than that working at once.
+
+Held work occupies no slot and is not competition for a scope — the one honest way
+to shrink the collision graph without archiving or deleting anything.

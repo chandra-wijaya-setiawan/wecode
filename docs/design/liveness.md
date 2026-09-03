@@ -46,3 +46,6 @@ The nearest prior art is Airflow's SLA misses and Temporal's stuck-workflow
 detection: the system notices elapsed time without progress and says so, rather
 than waiting for a person to notice. That is the shape of the reminder the
 owner asked for — and the same shape as the doc-freshness gate, one level up.
+
+A held task is not schedulable, so it is neither dispatched nor swept: `hold` takes
+work out of the runner without pretending anything about its liveness.

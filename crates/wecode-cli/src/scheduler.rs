@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use wecode_core::{ExecutionStatus, Plan, Task, TaskId, TaskStatus};
+use wecode_core::{ExecutionStatus, Plan, ProjectStatus, Task, TaskId, TaskStatus};
 use wecode_store::Execution;
 use wecode_store::execution::OpenRun;
 
@@ -45,7 +45,11 @@ pub(crate) struct Move {
 pub(crate) fn transitions(plan: &Plan) -> Vec<Move> {
     let mut moves: Vec<Move> = plan
         .tasks()
-        .filter(|t| plan.project(&t.project).is_some_and(|p| !p.archived))
+        // A hold keeps the project and its work on the board while parking the queue.
+        .filter(|t| {
+            plan.project(&t.project)
+                .is_some_and(|p| !p.archived && p.status != ProjectStatus::Hold)
+        })
         .filter_map(|t| {
             let ready = plan.is_ready(&t.id);
             match t.status {
@@ -111,7 +115,11 @@ pub(crate) fn dispatchable(plan: &Plan, slots: usize) -> Vec<&Task> {
         .tasks()
         .filter(|t| t.status == TaskStatus::Ready && t.assignee.is_some())
         .filter(|t| !t.is_done_by_a_person())
-        .filter(|t| plan.project(&t.project).is_some_and(|p| !p.archived))
+        // Task holds fail the `Ready` test above; project holds need their own guard.
+        .filter(|t| {
+            plan.project(&t.project)
+                .is_some_and(|p| !p.archived && p.status != ProjectStatus::Hold)
+        })
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out.truncate(slots);
@@ -366,6 +374,33 @@ mod tests {
     }
 
     #[test]
+    fn a_held_project_is_visible_but_not_scanned_or_dispatched() {
+        let mut p = plan();
+        let mut task = p.task(&TaskId::new("a")).unwrap().clone();
+        task.status = TaskStatus::Ready;
+        task.assignee = Some("impl".into());
+        p.update_task(task).unwrap();
+        let mut project = p.project(&"p".into()).unwrap().clone();
+        project.status = ProjectStatus::Hold;
+        p.update_project(project).unwrap();
+        assert!(transitions(&p).is_empty());
+        assert!(dispatchable(&p, 10).is_empty());
+        assert!(p.project(&"p".into()).is_some());
+    }
+
+    #[test]
+    fn a_held_task_is_not_promoted_or_dispatched() {
+        let mut p = plan();
+        let mut task = p.task(&TaskId::new("a")).unwrap().clone();
+        task.status = TaskStatus::Hold;
+        task.assignee = Some("impl".into());
+        p.update_task(task).unwrap();
+        assert!(transitions(&p).is_empty());
+        assert!(dispatchable(&p, 10).is_empty());
+        assert!(p.task(&TaskId::new("a")).is_some());
+    }
+
+    #[test]
     fn concurrency_comes_from_attention_and_is_narrowed_by_the_machine() {
         // The operator's capacity is the binding constraint; cores only ever reduce it.
         assert_eq!(parallelism(5, 32), 5);
@@ -469,6 +504,7 @@ mod tests {
             TaskStatus::Draft,
             TaskStatus::Waiting,
             TaskStatus::Ready,
+            TaskStatus::Hold,
             TaskStatus::Verifying,
             TaskStatus::NeedsApproval,
             TaskStatus::NeedsInput,

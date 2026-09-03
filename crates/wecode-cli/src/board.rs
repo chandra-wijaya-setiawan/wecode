@@ -669,6 +669,15 @@ fn owed(plan: &Plan, t: &Task) -> Need {
 /// what turns `ready` from a state into a sentence about somebody — and `unassigned` is
 /// the one entry here that no tick will ever clear on its own.
 fn blocking(plan: &Plan, t: &Task) -> String {
+    if t.status == TaskStatus::Hold {
+        return "held".to_string();
+    }
+    if plan
+        .project(&t.project)
+        .is_some_and(|p| p.status == ProjectStatus::Hold)
+    {
+        return "project held".to_string();
+    }
     for b in plan.blockers(&t.id) {
         if let wecode_core::Blocker::Waiting(on) = b {
             return format!("after {on}");
@@ -785,7 +794,7 @@ fn quiet_days(last: u64, now: u64) -> Option<u64> {
 /// And a project the ledger has never named has no silence to measure — unreachable in a
 /// stored workspace, where defining one is itself a record.
 fn quiet_for(plan: &Plan, p: &Project, c: &Counts, now: u64) -> Option<u64> {
-    if p.status.is_closed() || c.last == 0 {
+    if p.status.is_closed() || p.status == ProjectStatus::Hold || c.last == 0 {
         return None;
     }
     let open: Vec<&Task> = plan.tasks_of(&p.id).filter(|t| !t.status.is_closed()).collect();
