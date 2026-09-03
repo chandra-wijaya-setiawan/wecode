@@ -346,8 +346,9 @@ pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defec
         out.push(Defect::DesignMissing);
     }
 
-    // Held work remains visible but cannot run, so it is no competition for scope.
-    // The same applies to every task in a held (or archived) project.
+    // Held work remains visible but cannot run, so it is no competition for scope —
+    // in either direction, the way an archived project is. The same applies to every
+    // task in a held (or archived) project.
     if t.status == TaskStatus::Hold || parked(plan, &t.project) {
         return out;
     }
@@ -356,6 +357,7 @@ pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defec
     for other in plan.tasks() {
         if other.id == t.id
             || other.status.is_closed()
+            || other.status == TaskStatus::Hold
             || parked(plan, &other.project)
             || !share_a_repo(plan, t, other)
             || sequenced(plan, t, other)
@@ -1272,6 +1274,22 @@ mod tests {
             "{:?}",
             check_task(&rival("exports"), &plan, &[])
         );
+    }
+
+    #[test]
+    fn held_work_is_not_competition_in_either_direction() {
+        // A hold parks a row the way archiving parks a project: it cannot be running
+        // while anything else is, so it neither raises an overlap nor is faulted for
+        // one — and releasing it is all it takes to get the conflict back.
+        let mut plan = two_projects();
+        let mut held = plan.task(&"cache-layer".into()).unwrap().clone();
+        held.status = TaskStatus::Hold;
+        plan.update_task(held.clone()).unwrap();
+        assert!(check_task(&held, &plan, &[]).is_empty());
+        assert!(overlap(&check_task(&rival("exports"), &plan, &[])).is_none());
+        held.status = TaskStatus::Waiting;
+        plan.update_task(held).unwrap();
+        assert!(overlap(&check_task(&rival("exports"), &plan, &[])).is_some());
     }
 
     #[test]
