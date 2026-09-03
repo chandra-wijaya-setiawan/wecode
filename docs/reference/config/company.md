@@ -38,6 +38,10 @@ approval_to_merge = ["main", "master", "release/**"]
 max_tokens = 1000000
 max_intelligence = 7.5            # no seat may be staffed above this level; see below
 
+[[invariants.auto_merge]]         # a merge you answer once instead of every time
+to = "release/**"                 # branch glob, required — see below
+projects = ["docs-site"]          # only this project's work; omit for every project
+
 [[repos]]                         # declared by path; they live elsewhere
 name = "app"                      # unique across the file; see below
 path = "~/projects/app"
@@ -260,3 +264,62 @@ Off, a run that spends past its budget is never killed: the overrun lands on the
 board in red and the ledger keeps the true figure, but the work in the tree
 survives. On, the supervisor stops the run shortly after the budget is crossed.
 Wall clocks are not behind this flag — time is the operator's; tokens are money.
+
+## `[[invariants.auto_merge]]` — saying yes once
+
+`approval_to_merge` demands a holder's signature per merge. On the branch somebody lands
+on twice a day that signature stops being a decision and becomes a keystroke, and the
+operator typing it is not governing the merge. A standing order is the same permission
+given once, by condition, in this file.
+
+| key | required | meaning |
+|---|---|---|
+| `to` | yes | branch glob the order is about — `*` stays in one segment, `**` spans them |
+| `projects` | no | project ids it is confined to; omitted means every project |
+
+One block per order, and as many as you like. Nothing else is conditionable: the Broker
+decides as a pure function of its inputs, so a size or a file list — which would mean
+reading a repository — is not on offer.
+
+### Worked example
+
+A company that protects every release branch, and has decided in advance that the docs
+site may land on them:
+
+```toml
+[invariants]
+approval_to_merge = ["main", "master", "release/**"]
+
+[[invariants.auto_merge]]
+to = "release/**"
+projects = ["docs-site"]
+```
+
+```console
+$ wecode guard chief merge release/2026-09 --project docs-site
+chief (claude-code)  merge release/2026-09
+
+  ✓ allowed
+
+$ wecode guard chief merge release/2026-09 --project payments
+chief (claude-code)  merge release/2026-09
+
+  ⏸ needs approval: merge
+     nothing happens until a holder signs.
+```
+
+### The four things it does not do
+
+| | |
+|---|---|
+| grant anything | the seat still needs `merge_to` for the branch; this settles whether a *person* is asked, never whether the seat may act |
+| cover a merge that named no project | an order confined to projects needs to know which one, so an unattributed merge still stops on a signature |
+| open a branch nothing protects | those merges already land; the order is inert, and is left that way so putting a protection back is a one-line edit |
+| reach `wecode merge <task>` **yet** | that command still re-derives protection for itself; until it asks `Charter::demands_signature_to_merge`, `guard` and `merge` can disagree about the same merge |
+
+It also cannot be written anywhere but here. A per-task signature comes from any seat
+holding `approve merge`; answering every merge of a shape in advance changes what the
+charter demands, and the charter is amended by hand, in a diff — never on a signature.
+That is the same reason `wecode approve` grows no `--standing` flag, and the reason
+`[project] merge = "auto"` in a playbook cannot do this: a playbook is committed inside
+the repository being merged, so it may be stricter than the charter and never laxer.
