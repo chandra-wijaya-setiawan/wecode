@@ -135,6 +135,61 @@ fn a_subtask_shares_its_main_tasks_worktree() {
     r.assert_contains("shares").assert_contains("fix-it");
 }
 
+#[test]
+fn a_storys_tasks_share_the_storys_worktree_and_an_epic_owns_none() {
+    // ADR-0006, end to end. The story is the unit that owns a checkout: its tasks land in
+    // one directory on one branch, so they cost one build and land on one signature. The
+    // epic above it owns nothing — a tree there would hold a whole objective's stories and
+    // serialise work nobody sized for it.
+    let body = format!("{}\n[story]\nworktree = true\n", support::playbook::PLAYBOOK);
+    let (org, _) = support::playbook::with_playbook_body("wt-story", &body);
+    org.run(&["task", "add", "faster-export", "cut export latency in half",
+              "--project", "caching", "--kind", "epic"])
+        .assert_ok("the objective");
+    org.run(&["task", "add", "warm-cache", "the export endpoint answers from a warm cache",
+              "--project", "caching", "--kind", "story", "--parent", "faster-export"])
+        .assert_ok("one capability under it");
+    for (id, title, glob) in [
+        ("cache-read", "read through the cache on export", "src/read/**"),
+        ("cache-evict", "evict a stale entry on write", "src/evict/**"),
+    ] {
+        org.run(&["task", "add", id, title, "--project", "caching", "--kind", "bug",
+                  "--parent", "warm-cache", "--write", glob])
+            .assert_ok(id);
+    }
+
+    // The first task cuts the tree. It is the story's, named after the story, on the
+    // story's branch — not its own and not the epic's.
+    let first = org.run(&["start", "cache-read"]);
+    first.assert_ok("start the first task");
+    first
+        .assert_contains("wecode/warm-cache")
+        .assert_contains("shared with warm-cache")
+        .assert_lacks("wecode/cache-read")
+        .assert_lacks("faster-export");
+    let path = started_at(&first);
+    assert!(path.ends_with("warm-cache"), "the story's directory: {path}");
+
+    // The second joins it rather than opening a second checkout of the same capability.
+    let second = org.run(&["start", "cache-evict"]);
+    second.assert_ok("start the second task");
+    assert_eq!(started_at(&second), path, "one tree for the story");
+
+    let all = org.recorded();
+    assert_eq!(all.len(), 1, "one tree, one row: {all:?}");
+    assert_eq!(all[0].task, "warm-cache", "recorded against the story");
+    assert_eq!(all[0].branch, "wecode/warm-cache");
+    let listed = org.run(&["worktree"]).assert_ok("worktree").stdout.clone();
+    assert!(listed.contains("1 tree in 1 repo"), "{listed}");
+    assert!(listed.contains("warm-cache"), "{listed}");
+
+    // And it comes down through the story, so neither task can take it out from under
+    // the other.
+    let r = org.run(&["worktree", "remove", "cache-read"]);
+    assert!(!r.ok(), "should refuse: {}", r.stdout);
+    r.assert_contains("shares").assert_contains("warm-cache");
+}
+
 /// A project and one bug task in it, ready to start.
 fn with_bug(name: &str) -> (Org, PathBuf) {
     let (org, repo) = with_playbook(name);

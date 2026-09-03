@@ -1,8 +1,9 @@
 //! Where work happens: which task owns a worktree, and what it is called.
 //!
-//! One worktree per *main* task. Subtasks share their parent's tree, which is what
-//! makes the two relations pull their weight separately — `parent` decides which tree
-//! you work in, `depends_on` decides when you may start.
+//! One worktree per **story** (ADR-0006), and one per main task where no story stands
+//! above it. Either way it is `parent` that decides it, which is what makes the two
+//! relations pull their weight separately — `parent` decides which tree you work in,
+//! `depends_on` decides when you may start.
 //!
 //! One refusal lives here too, and it is the one that has to come *before* any of that:
 //! a task whose declared credentials expire sooner than the run it is about to be given
@@ -25,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use wecode_core::{Plan, Task, TaskId, TaskStatus};
+use wecode_core::{Plan, Task, TaskId, TaskKind, TaskStatus};
 use wecode_org::Company;
 use wecode_org::company::SecretDef;
 use wecode_org::workspace::expand_home;
@@ -66,14 +67,44 @@ pub(crate) fn cache_root() -> PathBuf {
     }
 }
 
-/// The task whose worktree this task works in: the root of its parent chain.
+/// The task whose worktree this task works in: the story it is part of, else the root
+/// of its parent chain.
+///
+/// ADR-0006. A story is one user-visible capability, so the story is what owns a
+/// checkout: every task beneath it shares the tree and the branch, lands on one merge
+/// signature, and costs one build however many tasks it holds.
+///
+/// The search is for the *nearest story*, not for the top of the chain, because an epic
+/// is the other aggregating kind and owns nothing. An epic decomposes into stories, so a
+/// tree at the epic would put a whole objective's stories in one checkout and serialise
+/// them against each other — the tradeoff a story makes on purpose, taken at a size
+/// nobody chose it at. Above a story there is only more grouping, and grouping is not a
+/// place to work.
+///
+/// Below a story nothing moves: a plain parent chain with no story in it still roots at
+/// its main task, which is what `parent` deciding the tree has always meant. A task filed
+/// straight under an epic owns its own tree for the same reason — the epic is skipped
+/// rather than taken.
+///
+/// One consequence for whoever writes a playbook: `commands::exec::prepare` asks
+/// `for_kind(owner.kind)` whether to cut a tree at all, so a story owns one only where the
+/// repository declares `[story] worktree = true`. Silence is silence, the rule every kind
+/// is read under — and under a silent story the tasks work in the project's own checkout.
 ///
 /// Returns `None` only when the task is not in the plan.
 #[must_use]
 pub(crate) fn owner<'a>(plan: &'a Plan, id: &TaskId) -> Option<&'a Task> {
     let task = plan.task(id)?;
-    // `ancestors` is nearest-first, so the last entry is the root.
-    Some(plan.ancestors(id).last().copied().unwrap_or(task))
+    // `ancestors` is nearest-first, so the first story found is the innermost one, and
+    // the last non-aggregating entry is the root of the work under whatever groups it.
+    let line = plan.ancestors(id);
+    Some(
+        line.iter()
+            .copied()
+            .find(|t| t.kind == TaskKind::Story)
+            .or_else(|| line.iter().copied().rfind(|t| !t.kind.aggregates()))
+            .unwrap_or(task),
+    )
 }
 
 /// The branch for a worktree. Namespaced so every agent-authored branch is visible
@@ -304,6 +335,22 @@ mod tests {
         // A dependency must NOT change ownership — only the parent chain does.
         p.add_task(Task::new("next", "proj", "comes after").after("main-task"))
             .unwrap();
+        // The shape ADR-0006 is about: an objective decomposed into stories, each story
+        // holding the tasks that implement it.
+        p.add_task(Task::new("epic", "proj", "one objective, decomposed").of_kind(TaskKind::Epic))
+            .unwrap();
+        p.add_task(
+            Task::new("story", "proj", "one user-visible capability")
+                .of_kind(TaskKind::Story)
+                .under("epic"),
+        )
+        .unwrap();
+        p.add_task(Task::new("build", "proj", "implement it").under("story"))
+            .unwrap();
+        p.add_task(Task::new("build-test", "proj", "cover it").under("build"))
+            .unwrap();
+        p.add_task(Task::new("loose", "proj", "filed under the objective").under("epic"))
+            .unwrap();
         p
     }
 
@@ -325,6 +372,40 @@ mod tests {
                 "{id} should share the root's tree"
             );
         }
+    }
+
+    #[test]
+    fn every_task_under_a_story_works_in_the_storys_tree() {
+        // ADR-0006, at both depths: the story is the unit that owns a checkout, so its
+        // tasks and their subtasks land in one tree on one branch.
+        let p = plan();
+        for id in ["build", "build-test"] {
+            let o = owner(&p, &TaskId::new(id)).unwrap();
+            assert_eq!(o.id.as_str(), "story", "{id} shares the story's tree");
+        }
+        assert_eq!(
+            owner(&p, &TaskId::new("story")).unwrap().id.as_str(),
+            "story",
+            "and the story owns its own"
+        );
+    }
+
+    #[test]
+    fn an_epic_owns_no_worktree() {
+        // The whole reason the search stops at the nearest story rather than the top of
+        // the chain. A tree at the epic would put every story in one objective into one
+        // checkout — serialising work nobody sized for it.
+        let p = plan();
+        assert_eq!(
+            owner(&p, &TaskId::new("build")).unwrap().id.as_str(),
+            "story",
+            "the story, not the epic above it"
+        );
+        assert_eq!(
+            owner(&p, &TaskId::new("loose")).unwrap().id.as_str(),
+            "loose",
+            "a task filed straight under an epic owns its own tree"
+        );
     }
 
     #[test]

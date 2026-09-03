@@ -26,8 +26,15 @@ pub struct Worktree {
     /// project: several projects share one repository and its worktrees.
     pub repo: String,
     pub branch: String,
-    /// The main task the tree belongs to. Subtasks share it and record nothing of
-    /// their own, because they own nothing of their own.
+    /// The task the tree belongs to: the **story** whose tasks share it, or the main
+    /// task where no story stands above them (ADR-0006). Everything else working here
+    /// records nothing of its own, because it owns nothing of its own — one row is the
+    /// whole point, since one tree is one branch, one merge signature and one build
+    /// however many tasks it holds.
+    ///
+    /// So this is not *who is working here*. Under a story it names an aggregating task
+    /// that is dispatched to nobody, and the tasks actually in the directory are found
+    /// by asking the plan which of them this one owns.
     pub task: String,
     pub created: u64,
     /// When wecode tore it down. `None` while it stands.
@@ -40,6 +47,9 @@ impl Store {
     /// Idempotent for a tree that is already standing for the same task: `wecode start`
     /// on an existing directory resets it rather than creating it, and re-running that
     /// must not restate when the tree was made or pile up a row per attempt.
+    ///
+    /// `task` is the owner, never the task being prepared — so under a story this is
+    /// reached once per task in the story and must land one row, not one per sibling.
     ///
     /// A path whose last row is a tombstone gets a new row rather than a revival. The
     /// tree really is a new one, and the old fact is not edited away.
@@ -105,6 +115,32 @@ impl Store {
             .transpose()
     }
 
+    /// The tree standing for an owning task, wherever it was cut.
+    ///
+    /// The same question as [`Self::worktree_at`], asked from the other end, and story
+    /// ownership is what makes the other end necessary. A path is derived from the owner,
+    /// so *where would this task's tree be* is answerable without the store — until the
+    /// owner changes. Re-parenting a task under a story re-roots it, and the tree it left
+    /// standing is then at a path nothing computes any more: the old owner's row is the
+    /// only thing that still knows where it is.
+    ///
+    /// The newest live row wins if there is more than one, which the derived path cannot
+    /// produce today — one owner, one path, and [`Self::record_worktree`] keeps one live
+    /// row per path.
+    pub fn worktree_of(&self, owner: &TaskId) -> Result<Option<Worktree>, StoreError> {
+        self.conn()
+            .query_row(
+                &format!(
+                    "{SELECT} WHERE task_id = ?1 AND removed IS NULL \
+                     ORDER BY created DESC, id DESC LIMIT 1"
+                ),
+                params![owner.as_str()],
+                read,
+            )
+            .optional()?
+            .transpose()
+    }
+
     /// Every worktree wecode has ever made, oldest first, tombstones included.
     ///
     /// One reader rather than a live one and a complete one. Which trees still stand is
@@ -146,11 +182,18 @@ fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Worktree, StoreError>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wecode_core::{Measure, Project, Task};
+    use wecode_core::{Measure, Project, Task, TaskKind};
 
     fn store() -> Store {
         let s = Store::in_memory().unwrap();
         s.save_project(&Project::new("p", "an objective sentence", "repo"))
+            .unwrap();
+        // A story and one task under it: the shape that owns a tree between them.
+        s.save_task(
+            &Task::new("cap", "p", "one user-visible capability").of_kind(TaskKind::Story),
+        )
+        .unwrap();
+        s.save_task(&Task::new("build", "p", "implement it").under("cap"))
             .unwrap();
         for id in ["t", "other"] {
             s.save_task(
@@ -200,6 +243,52 @@ mod tests {
 
         assert_eq!(s.worktrees().unwrap().len(), 1);
         assert_eq!(s.worktree_at("/run/cws/t").unwrap().unwrap(), first);
+    }
+
+    #[test]
+    fn a_storys_tasks_land_one_row_and_the_story_is_what_finds_it() {
+        // ADR-0006: the tree belongs to the story, so every task under it reaches here
+        // with the story as the owner. One tree, one row — and asking by owner is how the
+        // tree is found once the task that works there is not the one it is named after.
+        let s = store();
+        record(&s, "/run/cws/cap", "cap");
+        record(&s, "/run/cws/cap", "cap");
+        assert_eq!(s.worktrees().unwrap().len(), 1, "one tree, one row");
+
+        let ours = s
+            .worktree_of(&TaskId::new("cap"))
+            .unwrap()
+            .expect("the story's tree");
+        assert_eq!(ours.path, "/run/cws/cap");
+        assert_eq!(ours.branch, "wecode/cap");
+        assert!(
+            s.worktree_of(&TaskId::new("build")).unwrap().is_none(),
+            "a task that works there owns nothing there"
+        );
+    }
+
+    #[test]
+    fn an_owner_left_holding_two_trees_is_answered_with_the_later_one() {
+        // Only reachable by re-rooting: the path is derived from the owner, so one owner
+        // means one path. Both rows stand — neither tree was torn down — and the question
+        // *where does this owner work* has one answer, which is the tree cut last.
+        let s = store();
+        record(&s, "/run/cws/cap-was", "cap");
+        record(&s, "/run/cws/cap", "cap");
+
+        assert_eq!(s.worktrees().unwrap().len(), 2);
+        assert_eq!(
+            s.worktree_of(&TaskId::new("cap")).unwrap().unwrap().path,
+            "/run/cws/cap"
+        );
+    }
+
+    #[test]
+    fn a_tree_torn_down_is_not_found_by_its_owner_either() {
+        let s = store();
+        record(&s, "/run/cws/cap", "cap");
+        s.forget_worktree("/run/cws/cap").unwrap();
+        assert!(s.worktree_of(&TaskId::new("cap")).unwrap().is_none());
     }
 
     #[test]
