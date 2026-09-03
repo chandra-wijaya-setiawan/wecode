@@ -86,6 +86,16 @@ pub enum OrgError {
         want: Intelligence,
         ceiling: Intelligence,
     },
+    /// Two `[[repos]]` blocks claim the same name.
+    ///
+    /// A project owns one repository, by name, so the name is the only handle anything
+    /// downstream has on a path. Two blocks under it make the second path configured and
+    /// unreachable: every project resolves to whichever was typed first, and the work
+    /// lands in that worktree without anything saying which one it chose.
+    RepoClash {
+        name: String,
+        paths: (String, String),
+    },
     /// Two people claim the same chat account.
     ///
     /// A reply carries an account, not a name, so this is not a cosmetic clash: the
@@ -161,6 +171,14 @@ impl fmt::Display for OrgError {
                 f,
                 "post `{post}` asks for intelligence {want}, above the charter's \
                  max_intelligence of {ceiling}"
+            ),
+            Self::RepoClash {
+                name,
+                paths: (a, b),
+            } => write!(
+                f,
+                "two [[repos]] are named `{name}` — `{a}` and `{b}` — so a project \
+                 naming it would work in whichever was typed first"
             ),
             Self::TelegramClash { id, users: (a, b) } => write!(
                 f,

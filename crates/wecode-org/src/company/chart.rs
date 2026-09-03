@@ -139,10 +139,25 @@ impl Company {
 
 /// That every name one of these lists gives resolves to something the file defines.
 ///
-/// All four failures are typos, and all four would otherwise surface at dispatch: a
-/// seat with no role, a seat naming a harness that has no block, a person in a seat
-/// that does not exist, and two people behind one chat account.
+/// All five failures are typos, and all five would otherwise surface at dispatch: two
+/// repositories under one name, a seat with no role, a seat naming a harness that has
+/// no block, a person in a seat that does not exist, and two people behind one chat
+/// account.
 pub(super) fn check(c: &Company) -> Result<(), OrgError> {
+    // A name is what a project owns a repository by, and [`Company::repo`] answers with
+    // the first block that carries it. So a duplicate is not a tidiness problem: the
+    // second path is configured and unreachable, the work lands in whichever worktree
+    // was typed first, and [`Company::repo_names`] offers the same name twice to the
+    // admission check that a project names a real one.
+    let mut paths: BTreeMap<&str, &str> = BTreeMap::new();
+    for repo in &c.repos {
+        if let Some(first) = paths.insert(&repo.name, &repo.path) {
+            return Err(OrgError::RepoClash {
+                name: repo.name.clone(),
+                paths: (first.to_string(), repo.path.clone()),
+            });
+        }
+    }
     for post in &c.posts {
         if !c.roles.contains_key(&post.role) {
             return Err(OrgError::UnknownRole {
@@ -216,6 +231,35 @@ mod tests {
             c.repo("wecode").unwrap().installs.as_deref(),
             Some("~/.local/bin/wecode")
         );
+    }
+
+    #[test]
+    fn two_repos_may_not_share_one_name() {
+        // The name is the whole handle: a project owns a repository by it, and `repo`
+        // answers with the first block that matches. Shared, the second path is
+        // configured and never reached, and the work goes to the wrong tree in silence.
+        let text = format!(
+            "{MINIMAL}\n[[repos]]\nname = \"app\"\npath = \"~/projects/app\"\n\
+             [[repos]]\nname = \"app\"\npath = \"~/work/app\"\n"
+        );
+        match Company::parse(&text).unwrap_err() {
+            OrgError::RepoClash { name, paths } => {
+                assert_eq!(name, "app");
+                assert_eq!(
+                    paths,
+                    ("~/projects/app".to_string(), "~/work/app".to_string())
+                );
+            }
+            other => panic!("expected RepoClash, got {other}"),
+        }
+        // Two names over one path is not the same fault. A repository checked out twice,
+        // or two names for one monorepo, resolves unambiguously in the direction that
+        // matters, and nothing here is the file's business.
+        let text = format!(
+            "{MINIMAL}\n[[repos]]\nname = \"app\"\npath = \"~/projects/app\"\n\
+             [[repos]]\nname = \"web\"\npath = \"~/projects/app\"\n"
+        );
+        assert_eq!(Company::parse(&text).unwrap().repo_names().len(), 2);
     }
 
     #[test]
