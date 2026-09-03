@@ -121,11 +121,12 @@ fn every_group_answers_the_question_its_own_rows_raise() {
     let moving = row_in(&out, "MOVING", "cache-tests");
     assert!(moving.contains("write tests/cache_spec.rs"), "{moving}");
 
-    // NEEDS YOU — what is wanted, in the words the row already computed.
+    // NEEDS YOU — the category the row stopped in, and the command that clears it.
     org.run(&["status", "cache-tests", "needs-approval"])
         .assert_ok("hold");
     let out = board(&org, &["board"]);
-    assert!(row_in(&out, "NEEDS YOU", "cache-tests").contains("needs-approval"), "{out}");
+    let stopped = row_in(&out, "NEEDS YOU", "cache-tests");
+    assert!(stopped.contains("needs-approval · wecode merge cache-tests"), "{out}");
 
     // LANDED — what landed, in the words somebody wrote when they asked for it. The
     // cost is the spend cell, which every row already carries.
@@ -155,6 +156,63 @@ fn a_row_is_in_exactly_one_group_at_a_time() {
         // Dropped is in none of them: not waiting, not moving, and it did not land.
         let want = usize::from(status != "dropped");
         assert_eq!(held.len(), want, "`{status}` sat in {held:?}:\n{out}");
+    }
+}
+
+/// A task in this project, declared enough to be admitted.
+fn add(org: &Org, id: &str, extra: &[&str]) {
+    let mut argv = vec![
+        "task", "add", id, "another piece of the caching work", "--project", "caching",
+    ];
+    argv.extend_from_slice(extra);
+    org.run(&argv).assert_ok(id).assert_lacks("not saved");
+}
+
+#[test]
+fn every_needs_human_row_names_its_category_and_the_command_that_clears_it() {
+    // What somebody answering wecode from a phone at 02:14 cannot do: look up which of
+    // `merge`, `approve` and `status` this row wants. The status word does not carry it
+    // — one `needs-approval` is a branch to land, another is a design to sign, and a
+    // third is work nobody has done yet. Driven through the CLI rather than a built
+    // plan, because the board's answer turns on the kind and the doer as SQLite gives
+    // them back.
+    let org = Org::new("board-owed", "software-company");
+    org.seed();
+    let design = [
+        "--kind", "design", "--accept-cmd", "true", "--write", "docs/keys.md", "--tokens", "1000",
+    ];
+    add(&org, "keys", &design);
+    add(&org, "mint", &["--kind", "chore", "--by", "person"]);
+    for id in ["cache-tests", "keys", "mint"] {
+        org.run(&["status", id, "needs-approval"]).assert_ok(id);
+    }
+
+    let out = board(&org, &["board"]);
+    for (id, want) in [
+        ("cache-tests", "needs-approval · wecode merge cache-tests"),
+        ("keys", "needs-approval · wecode approve design --task keys"),
+        ("mint", "yours to do · wecode status mint done"),
+    ] {
+        assert!(row_in(&out, "NEEDS YOU", id).contains(want), "{id} wants `{want}`:\n{out}");
+    }
+
+    // The stop with no status of its own. `bench` reads `waiting` and nothing is coming
+    // for it, so the command names the prerequisite rather than the row it is printed on
+    // — reopening that is what takes the flag down.
+    org.run(&["status", "cache-tests", "dropped"]).assert_ok("drop");
+    let out = board(&org, &["board"]);
+    let stuck = row_in(&out, "NEEDS YOU", "bench");
+    assert!(stuck.contains("stuck · wecode status cache-tests waiting"), "{out}");
+
+    // And the two the operator answers themselves: an answer puts it back in the queue,
+    // and exhausted attempts are a decision taken by running it again.
+    for (status, want) in [
+        ("needs-input", "needs-input · wecode status bench ready"),
+        ("failed", "failed · wecode run bench"),
+    ] {
+        org.run(&["status", "bench", status]).assert_ok(status);
+        let out = board(&org, &["board"]);
+        assert!(row_in(&out, "NEEDS YOU", "bench").contains(want), "{status}:\n{out}");
     }
 }
 

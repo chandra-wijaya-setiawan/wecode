@@ -1,16 +1,19 @@
 //! The cockpit: a full-screen board with the same four columns at every level —
-//! what · status · spend · needs-you.
+//! what · status · spend · needs-human.
 //!
 //! The portfolio **leads with attention, not with hierarchy**. A tree is the shape of
-//! the system; four groups in the order a person acts — needs-you, moving, next, landed
+//! the system; four groups in the order a person acts — needs-human, moving, next, landed
 //! — are the shape of the question they opened this to ask, which is *what is mine to
-//! do*. The tree survives underneath, since how the work is organised is a real question
-//! too, just not the first one. Each group stands its tail down to a count at
+//! do*. The first group is drawn `NEEDS YOU` and called *needs-human* here — the screen
+//! addresses whoever is reading, the code names a category — and every row in it reads
+//! `<category> · <command>`: see [`Need`], which is what makes that cell typeable. The
+//! tree survives underneath, since how the work is organised is a real question too,
+//! just not the first one. Each group stands its tail down to a count at
 //! [`ATTENTION`] rows, so the whole answer is one screen however big the plan.
 //!
 //! Health is **computed**, never reported by an agent: it comes from status,
 //! admission defects, the audit ledger and declared budgets. It is not a column,
-//! because every cause of amber or red already writes a needs-you entry — it is
+//! because every cause of amber or red already writes a needs-human entry — it is
 //! the colour of that cell. A health column beside it only ever repeated it, and
 //! a progress bar on a leaf task only ever restated its status.
 //!
@@ -22,7 +25,7 @@
 //! The project row answers *where is this* in one cell: its [`standing`] — `> active
 //! 2/5` — beside the state somebody declared, because `active` reads the same on the day
 //! a project opens as on the day its last task lands. A fraction says how far and not
-//! whether it can go further, so the needs-you cell carries the two ends it cannot —
+//! whether it can go further, so the needs-human cell carries the two ends it cannot —
 //! [`unowned`] work, and work that has all landed under a project still declared open.
 //! Nor can any of it say *when*, being counted off the plan as it stands; the ledger is
 //! the only record of that, and the gap since its newest line reads [`quiet_for`].
@@ -33,6 +36,7 @@ use std::collections::BTreeMap;
 use wecode_core::{
     Number, Plan, Project, ProjectId, ProjectStatus, Task, TaskId, TaskKind, TaskStatus, admission,
 };
+use wecode_gov::ActionKind;
 use wecode_store::{AuditLine, now_secs};
 
 use crate::render::kind_tag;
@@ -407,10 +411,13 @@ fn title_bar(level: &str, subject: &str, hint: &str) -> String {
 /// a board that stopped lining up.
 const STATUS_W: usize = 15;
 
+/// The column names — the last of them the first group's own title lowercased rather
+/// than a second literal, since the column and that group ask one question.
 fn header_row() -> String {
+    let asking = Group::NeedsYou.title().to_lowercase();
     format!(
-        "{DIM}│ {:>4} {:<26} {:<STATUS_W$} {:<12} {}{RESET}\n",
-        "#", "what", "status", "spend", "needs you"
+        "{DIM}│ {:>4} {:<26} {:<STATUS_W$} {:<12} {asking}{RESET}\n",
+        "#", "what", "status", "spend"
     )
 }
 
@@ -429,7 +436,7 @@ fn number_cell(n: Option<Number>) -> String {
 
 /// The declared state alongside the computed one. Both, always: a task can be
 /// entirely healthy and not started, and a board that shows only the faults cannot
-/// say which. The needs-you cell wears the computed health as its colour.
+/// say which. The needs-human cell wears the computed health as its colour.
 ///
 /// A filed-away row is drawn grey. There is nowhere in these columns to write the word
 /// — `what` truncates at 26, so a marker there is the first thing a deep row loses —
@@ -455,7 +462,7 @@ fn row(number: Option<Number>, label: &str, status: &str, v: &Vitals, archived: 
         needs
     );
     if archived {
-        // Re-opened after every reset the row already carries: the needs-you cell closes
+        // Re-opened after every reset the row already carries: the needs-human cell closes
         // its own colour, and the grey would otherwise end wherever that cell does.
         format!(
             "{DIM}{}{RESET}\n",
@@ -469,7 +476,7 @@ fn row(number: Option<Number>, label: &str, status: &str, v: &Vitals, archived: 
 /// How far a project's work has got: finished leaves over the leaves there are.
 ///
 /// `None` when nothing has been planned yet — `0/0` is arithmetic about nothing, and the
-/// needs-you cell already says `no tasks` in words.
+/// needs-human cell already says `no tasks` in words.
 ///
 /// The same leaves [`Plan::progress`] divides, so this cannot disagree with the
 /// percentage `wecode plan` and `wecode show` print; two answers to *how far along is
@@ -544,13 +551,17 @@ impl Group {
     ///
     /// Each group asks something different of the same cell, which is the point of
     /// grouping at all: `> running` is a fact four rows share, and *what it is doing* is
-    /// what tells them apart. Needs-you keeps what the row already computed, that cell
-    /// being the answer to *what wants me* — and it is never empty there, since nothing
-    /// joins that group without either a status a person owes something to or a dead-end
-    /// prerequisite, each of which writes its own words in [`task_vitals`].
-    pub(crate) fn line(self, plan: &Plan, t: &Task, l: &Ledger, v: &Vitals) -> String {
+    /// what tells them apart. Needs-human answers *what wants me* with [`owed`] — the
+    /// category and the command that clears it — rather than with the words
+    /// [`task_vitals`] wrote, which said what was true of the row and left whoever read
+    /// it to work out what to type.
+    ///
+    /// `_v` is the row's vitals, kept in the signature all four groups share. Nothing it
+    /// carries is lost: an incident still colours the row, and its words are in the tree
+    /// below on that task's own row, as they already were for the other three groups.
+    pub(crate) fn line(self, plan: &Plan, t: &Task, l: &Ledger, _v: &Vitals) -> String {
         match self {
-            Self::NeedsYou => v.needs.join(", "),
+            Self::NeedsYou => owed(plan, t).cell(),
             // Every act an agent takes passes the Broker on its way to the ledger, so
             // the newest record is the nearest thing wecode has to the agent's own last
             // line. A run that has not touched anything yet falls back to its title.
@@ -585,6 +596,70 @@ fn group_of(plan: &Plan, t: &Task) -> Option<Group> {
     } else {
         Some(Group::Next)
     }
+}
+
+/// One thing a row wants from a person: the category it stopped in, and the single
+/// command that clears it.
+///
+/// A row that needs human hands used to print its status and stop. `needs-approval` is
+/// true and is not a move, and somebody reading it on a phone at 02:14 is exactly the
+/// person who cannot look up which of `merge`, `approve` and `status` this one wants.
+/// Two fields and not one sentence: the category is a word learned once, and a test
+/// holds it to a closed list and that list to `docs/reference/board.md`.
+struct Need {
+    category: String,
+    /// The command with the id already in it, so it can be typed as printed.
+    action: String,
+}
+
+impl Need {
+    fn cell(&self) -> String {
+        format!("{} · {}", self.category, self.action)
+    }
+}
+
+/// What the person a stopped row belongs to has to do about it.
+///
+/// Neither half is decided here. The category is [`crate::render::waiting_word`]'s, the
+/// function that already answers *what is this row asking* — including the split
+/// `needs-approval` hides, where an agent's task means *look at what I did* and a
+/// person's means the doing is still theirs. The command follows
+/// [`crate::telegram::implied`], which decides what a bare `approve` in a chat signs, so
+/// the board cannot offer a move the channel behind it would refuse.
+///
+/// A dead-end prerequisite is the one stop with no status of its own: this row reads
+/// `waiting` and nothing is coming for it, so the command names the task it waits on.
+fn owed(plan: &Plan, t: &Task) -> Need {
+    let id = &t.id;
+    let category = crate::render::waiting_word(t);
+    if t.status.needs_a_human() {
+        let action = match crate::telegram::implied(t, false) {
+            Some(ActionKind::Design) => format!("wecode approve design --task {id}"),
+            // A person's own task has no branch and nothing ran on it, so there is
+            // nothing to land. What it wants is the work, and then the word for it.
+            Some(_) if t.is_done_by_a_person() => format!("wecode status {id} done"),
+            Some(_) => format!("wecode merge {id}"),
+            // Neither of these is a signature — no reply signs either — and both end the
+            // same way: back in the queue once the person has answered or fixed it.
+            None if t.status == TaskStatus::NeedsInput => format!("wecode status {id} ready"),
+            None => format!("wecode run {id}"),
+        };
+        return Need { category, action };
+    }
+    for b in plan.blockers(&t.id) {
+        let action = match b {
+            // Reopening the prerequisite takes the flag down by itself.
+            wecode_core::Blocker::Stuck(on, _) => format!("wecode status {on} waiting"),
+            // One that does not exist cannot be reopened, so the ordering is what goes.
+            wecode_core::Blocker::Missing(_) => format!("wecode task add {id} --amend --no-after"),
+            wecode_core::Blocker::Waiting(_) => continue,
+        };
+        return Need { category: "stuck".to_string(), action };
+    }
+    // Unreachable: nothing joins this group without a status that stops for a person or
+    // a prerequisite that will not finish. A reading rather than a panic, because a
+    // board is the thing somebody opens to find out what went wrong.
+    Need { category, action: format!("wecode show {id}") }
 }
 
 /// The one thing standing between an open task and a dispatch.
@@ -948,7 +1023,7 @@ pub(crate) fn focus(
 /// is there to prompt.
 fn hint_for(v: &Vitals, hidden: usize) -> String {
     let hint = if v.needs.is_empty() {
-        "nothing needs you here"
+        "nothing here needs a person"
     } else {
         "wecode check <id> · wecode audit --alarms"
     };
@@ -1230,7 +1305,8 @@ mod tests {
         // somebody keeps them agreeing. Measured against the header, so widening one
         // and not the other fails here rather than in a screenshot.
         let out = portfolio(&nested(), &[], &repos(), &no_gates(), false);
-        let header = out.lines().find(|l| l.contains("needs you")).unwrap();
+        let heading = Group::NeedsYou.title().to_lowercase();
+        let header = out.lines().find(|l| l.contains(&heading)).unwrap();
         let spend = column_of(header, "spend");
         for (label, cell) in [
             ("PROJECT caching", spend_cell(0, Some(1000))),
@@ -1386,6 +1462,30 @@ mod tests {
         let v = task_of(&p, &ledger_index(&[]), "t1");
         assert!(v.needs.iter().any(|n| n == "needs-approval"), "{:?}", v.needs);
         assert_eq!(v.health, Health::Amber);
+    }
+
+    /// Every category a needs-human row may name. What each asks somebody to type is
+    /// driven end to end in `tests/board.rs`, where the kind and the doer it turns on
+    /// are the ones SQLite gives back.
+    const CATEGORIES: [&str; 5] =
+        ["needs-approval", "needs-input", "failed", "yours to do", "stuck"];
+
+    #[test]
+    fn the_categories_are_a_closed_list_the_reference_page_carries() {
+        // Two things a new stop must not be able to do quietly: reach the board with no
+        // word of its own, and reach it with no page saying what to type. The statuses
+        // are walked rather than listed, so one added to the vocabulary arrives here as
+        // a failure rather than as a row telling an operator to run `wecode show`.
+        let mut p = plan();
+        for s in TaskStatus::all().iter().filter(|s| s.needs_a_human()) {
+            set(&mut p, "t1", *s);
+            let got = owed(&p, p.task(&TaskId::new("t1")).unwrap()).category;
+            assert!(CATEGORIES.contains(&got.as_str()), "{s:?} says `{got}`");
+        }
+        let page = include_str!("../../../docs/reference/board.md");
+        for c in CATEGORIES {
+            assert!(page.contains(c), "`{c}` is not on the reference page");
+        }
     }
 
     /// Files a task away in a plan, the way the store's cascade would.
