@@ -60,6 +60,23 @@ So: raise the threshold, do not remove the gate.
    the risk assessment the owner asked for, and it is measured rather than
    predicted.
 
+## What tier one landed as
+`check_task_appending` takes the paths a project marks append-only and drops them from
+the overlap scan. `check_task` is that call with nothing marked, so a project that has
+marked nothing is refused exactly what it always was — the rule the design gate and
+`[project.refuses]` both keep.
+
+Containment is one way, unlike the coarse both-ways rule two globs overlap under: an
+append-only `src/generated/**` does not exempt a task claiming `src/**`, because most
+of what that task may write is nobody's append. The scope has to sit *inside* a marked
+path to be excused.
+
+| still to come | where it goes |
+|---|---|
+| the marking itself, as `[project] append_only` | `wecode-org/src/playbook/project.rs`, beside `refuses` |
+| handing the list to each gate site | `wecode-cli/src/commands/ctx.rs`, which resolves the design gate the same way |
+| tiers two and three | symbol-level comparison, then the dry-run merge |
+
 ## The owner's best idea, stated as a rule
 **A symbol collision is a planning signal, not only a refusal.** If two tasks
 want the same symbols, they are one piece of work: the gate should say *"these

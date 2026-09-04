@@ -297,6 +297,24 @@ pub fn check_project(p: &Project, plan: &Plan, known_repos: &[String]) -> Vec<De
 /// not get it by omission.
 #[must_use]
 pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defect> {
+    check_task_appending(t, plan, needs_design, &[])
+}
+
+/// [`check_task`], where the project has marked some of its own paths append-only.
+///
+/// A write scope wholly inside one of them raises no overlap. Two tasks each adding
+/// their own page under `docs/**`, or each bumping a different row of `.max-lines`,
+/// are not editing the same lines — and refusing them was four of every six refusals
+/// this gate made, which is the count in `docs/design/overlap-is-not-conflict.md`.
+/// Handed in for the reason [`Refusal`] is: the marking is a line in somebody else's
+/// playbook and core opens no files, so an empty list is this gate exactly as it was.
+#[must_use]
+pub fn check_task_appending(
+    t: &Task,
+    plan: &Plan,
+    needs_design: &[TaskKind],
+    append_only: &[String],
+) -> Vec<Defect> {
     let mut out = Vec::new();
     check_statement(&t.title, &mut out);
 
@@ -369,7 +387,7 @@ pub fn check_task(t: &Task, plan: &Plan, needs_design: &[TaskKind]) -> Vec<Defec
         // and reads better without a project it was never ambiguous about.
         let elsewhere = (other.project != t.project).then(|| other.project.clone());
         for glob in &t.scope.write {
-            if glob.starts_with(crate::WORKER_DIR) {
+            if glob.starts_with(crate::WORKER_DIR) || appends_only(glob, append_only) {
                 continue;
             }
             if other.scope.write.iter().any(|o| globs_overlap(glob, o)) {
@@ -543,6 +561,19 @@ fn globs_overlap(a: &str, b: &str) -> bool {
     pa.starts_with(&pb) || pb.starts_with(&pa)
 }
 
+/// Whether every file `glob` could reach sits inside a path marked append-only.
+///
+/// Containment one way only, unlike [`globs_overlap`]: an append-only
+/// `src/generated/**` does not exempt a task claiming `src/**`, where most of what it
+/// may write is nobody's append. Coarse in the same direction as the check it excuses.
+fn appends_only(glob: &str, append_only: &[String]) -> bool {
+    let claimed = literal_prefix(glob);
+    append_only.iter().any(|marked| {
+        let marked = literal_prefix(marked);
+        claimed == marked || claimed.starts_with(&format!("{marked}/"))
+    })
+}
+
 fn literal_prefix(glob: &str) -> String {
     let cut = glob.find(['*', '?', '[']).unwrap_or(glob.len());
     glob[..cut].trim_end_matches('/').to_string()
@@ -597,8 +628,6 @@ pub fn check_refusals(t: &Task, refuses: &[Refusal]) -> Vec<Defect> {
     }
     out
 }
-
-
 
 // -------------------------------------------------------------- advice ------
 
@@ -914,6 +943,18 @@ mod tests {
         assert!(d.contains(&Defect::DependencyMissing { on: "ghost".into() }));
     }
 
+    fn overlap(defects: &[Defect]) -> Option<&Defect> {
+        defects.iter().find(|d| matches!(d, Defect::ScopeOverlaps { .. }))
+    }
+
+    /// Whether `t` collides with anything in `plan`, said out loud. The whole verdict
+    /// goes in the message: which defect landed instead is what a reader of the
+    /// failure needs, and every one of these assertions used to spell it out again.
+    fn assert_collides(t: &Task, plan: &Plan, expected: bool, why: &str) {
+        let d = check_task(t, plan, &[]);
+        assert_eq!(overlap(&d).is_some(), expected, "{why}: {d:?}");
+    }
+
     #[test]
     fn concurrent_tasks_may_not_share_a_write_scope() {
         let mut plan = seeded();
@@ -923,12 +964,7 @@ mod tests {
             .accepting(cmd())
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
-        assert!(
-            check_task(&sibling, &plan, &[])
-                .iter()
-                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
-            "two tasks that can run at once must not share paths"
-        );
+        assert_collides(&sibling, &plan, true, "two tasks at once must not share paths");
     }
 
     #[test]
@@ -942,12 +978,7 @@ mod tests {
             .accepting(cmd())
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
-        assert!(
-            !check_task(&later, &plan, &[])
-                .iter()
-                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
-            "a successor cannot collide with its predecessor"
-        );
+        assert_collides(&later, &plan, false, "a successor cannot collide with its predecessor");
     }
 
     #[test]
@@ -971,12 +1002,7 @@ mod tests {
             // The same scope as `cache-layer`, two links back.
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
-        assert!(
-            !check_task(&third, &plan, &[])
-                .iter()
-                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
-            "a task cannot collide with something it transitively waits on"
-        );
+        assert_collides(&third, &plan, false, "nor with what it transitively waits on");
     }
 
     #[test]
@@ -989,12 +1015,7 @@ mod tests {
             .accepting(cmd())
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
-        assert!(
-            check_task(&loose, &plan, &[])
-                .iter()
-                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
-            "two concurrent siblings on the same paths is a real conflict"
-        );
+        assert_collides(&loose, &plan, true, "two concurrent siblings on one path do conflict");
     }
 
     #[test]
@@ -1008,12 +1029,7 @@ mod tests {
             .accepting(cmd())
             .scoped(Scope::write(&["crates/export/keys.rs"]))
             .budgeted(budget());
-        assert!(
-            !check_task(&inner, &plan, &[])
-                .iter()
-                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
-            "a subtask works inside its parent, it does not compete with it"
-        );
+        assert_collides(&inner, &plan, false, "a subtask works inside its parent");
     }
 
     #[test]
@@ -1031,11 +1047,8 @@ mod tests {
             .budgeted(budget());
         plan.add_task(newcomer).unwrap();
 
-        assert!(
-            check_task(&done, &plan, &[]).is_empty(),
-            "a finished task cannot conflict: {:?}",
-            check_task(&done, &plan, &[])
-        );
+        let d = check_task(&done, &plan, &[]);
+        assert!(d.is_empty(), "a finished task cannot conflict: {d:?}");
     }
 
     #[test]
@@ -1052,13 +1065,7 @@ mod tests {
             .accepting(cmd())
             .scoped(Scope::write(&["crates/other/**", ".wecode/run/**"]))
             .budgeted(budget());
-        assert!(
-            !check_task(&other, &plan, &[])
-                .iter()
-                .any(|d| matches!(d, Defect::ScopeOverlaps { .. })),
-            "{:?}",
-            check_task(&other, &plan, &[])
-        );
+        assert_collides(&other, &plan, false, "the worker area is nobody's to compete for");
     }
 
     // ------------------------------------------------- across projects ------
@@ -1083,10 +1090,6 @@ mod tests {
             .accepting(cmd())
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget())
-    }
-
-    fn overlap(defects: &[Defect]) -> Option<&Defect> {
-        defects.iter().find(|d| matches!(d, Defect::ScopeOverlaps { .. }))
     }
 
     #[test]
@@ -1139,17 +1142,9 @@ mod tests {
         // The control on the field: within one project it was never ambiguous, and
         // the message that has always been printed must not gain a clause.
         let plan = two_projects();
-        assert!(
-            matches!(
-                overlap(&check_task(&rival("caching"), &plan, &[])),
-                Some(Defect::ScopeOverlaps {
-                    in_project: None,
-                    ..
-                })
-            ),
-            "{:?}",
-            check_task(&rival("caching"), &plan, &[])
-        );
+        let d = check_task(&rival("caching"), &plan, &[]);
+        let sibling = matches!(overlap(&d), Some(Defect::ScopeOverlaps { in_project: None, .. }));
+        assert!(sibling, "{d:?}");
     }
 
     #[test]
@@ -1161,11 +1156,7 @@ mod tests {
         far.repo = "wemail".into();
         plan.add_project(far).unwrap();
         plan.add_task(good_task()).unwrap();
-        assert!(
-            overlap(&check_task(&rival("exports"), &plan, &[])).is_none(),
-            "{:?}",
-            check_task(&rival("exports"), &plan, &[])
-        );
+        assert_collides(&rival("exports"), &plan, false, "another checkout, another file");
     }
 
     #[test]
@@ -1231,11 +1222,7 @@ mod tests {
         // same way it removes a sibling one.
         let plan = two_projects();
         let later = rival("exports").after("cache-layer");
-        assert!(
-            overlap(&check_task(&later, &plan, &[])).is_none(),
-            "{:?}",
-            check_task(&later, &plan, &[])
-        );
+        assert_collides(&later, &plan, false, "ordering settles it across projects too");
     }
 
     #[test]
@@ -1247,11 +1234,7 @@ mod tests {
         let mut parked = plan.project(&"caching".into()).unwrap().clone();
         parked.archived = true;
         plan.update_project(parked).unwrap();
-        assert!(
-            overlap(&check_task(&rival("exports"), &plan, &[])).is_none(),
-            "{:?}",
-            check_task(&rival("exports"), &plan, &[])
-        );
+        assert_collides(&rival("exports"), &plan, false, "a parked project cannot be running");
 
         // ...and unarchiving is all it takes to get the conflict back.
         let mut live = plan.project(&"caching".into()).unwrap().clone();
@@ -1269,11 +1252,7 @@ mod tests {
         let mut parked = plan.project(&"exports".into()).unwrap().clone();
         parked.archived = true;
         plan.update_project(parked).unwrap();
-        assert!(
-            overlap(&check_task(&rival("exports"), &plan, &[])).is_none(),
-            "{:?}",
-            check_task(&rival("exports"), &plan, &[])
-        );
+        assert_collides(&rival("exports"), &plan, false, "nor is a task inside one");
     }
 
     #[test]
@@ -1307,11 +1286,7 @@ mod tests {
             .accepting(cmd())
             .scoped(Scope::write(&["crates/import/**", ".wecode/run/**"]))
             .budgeted(budget());
-        assert!(
-            overlap(&check_task(&other, &plan, &[])).is_none(),
-            "{:?}",
-            check_task(&other, &plan, &[])
-        );
+        assert_collides(&other, &plan, false, "the exemption has to survive the wider scan");
     }
 
     #[test]
@@ -1320,11 +1295,7 @@ mod tests {
         let mut done = plan.task(&"cache-layer".into()).unwrap().clone();
         done.status = TaskStatus::Done;
         plan.update_task(done).unwrap();
-        assert!(
-            overlap(&check_task(&rival("exports"), &plan, &[])).is_none(),
-            "{:?}",
-            check_task(&rival("exports"), &plan, &[])
-        );
+        assert_collides(&rival("exports"), &plan, false, "a finished scope is history");
     }
 
     #[test]
@@ -1339,11 +1310,7 @@ mod tests {
 
         let mut orphan = rival("exports");
         orphan.project = "nowhere".into();
-        assert!(
-            overlap(&check_task(&orphan, &plan, &[])).is_none(),
-            "{:?}",
-            check_task(&orphan, &plan, &[])
-        );
+        assert_collides(&orphan, &plan, false, "missing data must not invent a conflict");
     }
 
     #[test]
@@ -1357,11 +1324,42 @@ mod tests {
             .accepting(cmd())
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
-        assert!(
-            !check_task(&fresh, &plan, &[])
-                .iter()
-                .any(|d| matches!(d, Defect::ScopeOverlaps { .. }))
-        );
+        assert_collides(&fresh, &plan, false, "a closed sibling blocks nothing");
+    }
+
+    // ------------------------------------------------------- append-only ------
+
+    #[test]
+    fn a_path_the_project_marks_append_only_is_not_competition() {
+        // Tier one of docs/design/overlap-is-not-conflict.md. Both tasks declare the
+        // docs tree and the ratchet; neither goes near a line the other wrote.
+        let mut plan = seeded();
+        let mut first = good_task();
+        first.scope = Scope::write(&["docs/reference/**", ".max-lines"]);
+        plan.add_task(first).unwrap();
+
+        // What this repository would mark: pages that are added rather than edited,
+        // and the ratchet, where two tasks each bump a different row.
+        let marked = ["docs/**".to_string(), ".max-lines".to_string()];
+        let second = rival("caching").scoped(Scope::write(&["docs/design/**", ".max-lines"]));
+        let d = check_task_appending(&second, &plan, &[], &marked);
+        assert!(overlap(&d).is_none(), "{d:?}");
+
+        // And the marking is the project's, not core's opinion about docs: unmarked,
+        // the same two declarations are the refusal they have always been.
+        assert_collides(&second, &plan, true, "a project marking nothing is exempt nowhere");
+    }
+
+    #[test]
+    fn a_scope_wider_than_what_is_marked_still_competes() {
+        // Containment one way. A task claiming the whole crate where one generated
+        // file in it is append-only may write anywhere under it, which is where the
+        // 999 discarded lines went the last time this was permitted.
+        let mut plan = seeded();
+        plan.add_task(good_task()).unwrap();
+        let marked = vec!["crates/export/schema.rs".to_string()];
+        let d = check_task_appending(&rival("caching"), &plan, &[], &marked);
+        assert!(overlap(&d).is_some(), "{d:?}");
     }
 
     // -------------------------------------------------------- design gate ------
