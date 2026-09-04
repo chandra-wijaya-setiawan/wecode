@@ -1,4 +1,4 @@
-//! `archive` and `unarchive` — what stays on the board.
+//! `archive`, `unarchive` and `sweep` — what stays on the board.
 //!
 //! Two levels, and the level is named in the command rather than inferred from the id,
 //! because the two do not archive alike: [`set_archived`] *parks* a project — nothing in
@@ -8,6 +8,10 @@
 //! That difference is what the guards here are about. Filing a task away does not stop
 //! the scheduler, so anything that could still move on its own is refused rather than
 //! hidden: an archived `ready` row would be dispatched with nothing on screen to say so.
+//!
+//! [`sweep`] is the same write over every row that qualifies rather than one named row,
+//! and it is here rather than beside the board because it decides nothing new: it finds
+//! the groups `archive task` would accept and files each of them.
 
 use std::collections::BTreeSet;
 
@@ -174,6 +178,167 @@ fn set_task_archived(a: &Args, archived: bool) -> Res {
     } else {
         format!("  {id}{} visible again\n", with_subtasks(others))
     })
+}
+
+// -------------------------------------------------------------- the sweep ------
+
+/// Files away every task that is finished with, in one command.
+///
+/// The write is [`set_task_archived`]'s, applied to every group that qualifies instead
+/// of one the operator named. It exists because a board's finished work outgrows its
+/// live work inside a week: the clutter `archive task` was built to clear comes straight
+/// back when clearing it costs a dozen commands, and a dozen commands is what nobody
+/// types.
+///
+/// No new rule about what may be hidden. A group is filed when every row in it is
+/// settled, and held back — by name, not dropped quietly — when one is not, because
+/// filing does not park a task: a hidden `ready` row is still dispatched, with nothing
+/// on screen to say so. `--force` overrides that on the terms it overrides one task's.
+///
+/// `--dry-run` writes nothing and authorises nothing, which is not an omission. There is
+/// no decision to record where no state changed, and this is the one filing command
+/// whose reach is worth reading before it happens rather than off the board after.
+pub(crate) fn sweep(a: &Args) -> Res {
+    let dry = a.has("dry-run");
+    let (store, company) = open(a)?;
+    let plan = store.load_plan()?;
+    // A named project narrows the sweep; naming none sweeps what is on the board.
+    // Archived projects are outside the wide form deliberately — their rows are already
+    // off it, and `unarchive` should give back the board that was parked rather than an
+    // emptier one. Naming one reaches it anyway: the operator said which.
+    let only = match a.cmd(1) {
+        "" => None,
+        typed => Some(the_project(&plan, typed)?.id.clone()),
+    };
+
+    let mut heads: Vec<&Task> = Vec::new();
+    let mut held: Vec<(&Task, &Task)> = Vec::new();
+    for t in plan.tasks() {
+        let mine = match &only {
+            Some(p) => t.project == *p,
+            None => plan.project(&t.project).is_some_and(|p| p.is_visible()),
+        };
+        if !mine || !t.is_visible() || !t.status.is_closed() {
+            continue;
+        }
+        // Asked of the group rather than of the row: a done parent over a running step
+        // is exactly what filing one task refuses, and sweeping may not be the way round
+        // it.
+        match part_of(&plan, &t.id).into_iter().find(|g| !is_settled(g)) {
+            Some(live) if !a.has("force") => held.push((t, live)),
+            _ => heads.push(t),
+        }
+    }
+
+    // Each group is filed by its topmost row and the rest of it is reached by the
+    // cascade, so anything another head already covers is dropped rather than filed and
+    // counted twice.
+    let mut reached: BTreeSet<TaskId> = BTreeSet::new();
+    for t in &heads {
+        for g in part_of(&plan, &t.id) {
+            if g.id != t.id {
+                reached.insert(g.id.clone());
+            }
+        }
+    }
+    heads.retain(|t| !reached.contains(&t.id));
+
+    if heads.is_empty() && held.is_empty() {
+        return Ok("  nothing to file away — no finished task is on the board\n".to_string());
+    }
+
+    // Resolved once for the whole sweep, and only where there is something to write.
+    let who = if dry {
+        None
+    } else {
+        Some(actor(a, &store, &company)?)
+    };
+    let mut rows = 0;
+    let mut listed = String::new();
+    // Off the widest id rather than a fixed column: a sweep is the one filing report
+    // that prints thirty rows at once, and ids here run to twice the width a task
+    // view's single row was laid out for.
+    let wide = heads.iter().map(|t| t.id.as_str().len()).max().unwrap_or(0);
+    for t in &heads {
+        let others = part_of(&plan, &t.id)
+            .iter()
+            .filter(|g| g.id != t.id && g.is_visible())
+            .count();
+        rows += match &who {
+            Some(who) => {
+                // Per task, not once for the sweep: an audit record names what it was
+                // about, and one record covering forty rows names none of them.
+                require_allowed(
+                    &store,
+                    &company,
+                    who,
+                    (Some(t.project.to_string()), Some(t.id.to_string())),
+                    &Action::Define {
+                        kind: WorkKind::Task,
+                    },
+                    "sweep finished work off the board",
+                )?;
+                // The store's own answer, so the count is what changed rather than what
+                // the plan looked like a moment before the write.
+                store.set_task_archived(&t.id, true)?.len()
+            }
+            None => 1 + others,
+        };
+        // `as_str`, not the id: `Display for TaskId` writes straight to the formatter,
+        // so a width given to the id itself is silently dropped.
+        listed.push_str(&format!(
+            "    {:<wide$}  {}{}\n",
+            t.id.as_str(),
+            t.status.as_str(),
+            with_subtasks(others)
+        ));
+    }
+
+    let mut out = if heads.is_empty() {
+        "  nothing to file away\n".to_string()
+    } else if dry {
+        format!(
+            "  would file {} away — nothing was written\n\n{listed}",
+            counted(rows, heads.len())
+        )
+    } else {
+        format!(
+            "  filed {} away — `wecode board --all` still shows them\n\n{listed}",
+            counted(rows, heads.len())
+        )
+    };
+
+    if !held.is_empty() {
+        out.push_str("\n  held back — finished work covering something that could still move\n\n");
+        let wide = held.iter().map(|(t, _)| t.id.as_str().len()).max().unwrap_or(0);
+        for (t, live) in held.iter().take(10) {
+            out.push_str(&format!(
+                "    {:<wide$}  {} is {}\n",
+                t.id.as_str(),
+                live.id,
+                live.status.as_str()
+            ));
+        }
+        if held.len() > 10 {
+            out.push_str(&format!("    … and {} more\n", held.len() - 10));
+        }
+        out.push_str("  finish or drop them, or pass --force\n");
+    }
+    Ok(out)
+}
+
+/// `3 tasks`, or `6 tasks in 3 groups` when subtasks came along — the second number is
+/// what says the cascade did something a single count hides.
+fn counted(rows: usize, groups: usize) -> String {
+    let tasks = format!("{rows} task{}", if rows == 1 { "" } else { "s" });
+    if rows == groups {
+        tasks
+    } else {
+        format!(
+            "{tasks} in {groups} group{}",
+            if groups == 1 { "" } else { "s" }
+        )
+    }
 }
 
 /// Nothing, or ` and its 3 subtasks` — so every message above reads as a sentence
