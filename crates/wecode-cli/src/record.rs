@@ -1,4 +1,4 @@
-//! Keeping the merge report in the repository it describes.
+//! Keeping a merge's report, and a story's, in the repository they describe.
 //!
 //! `wecode merge` already built the one document that says what a task did — files,
 //! line counts, acceptance, provenance, what the merge unblocked, what became of the
@@ -39,6 +39,23 @@
 //! body is rendered before the merge as well, from the same functions, minus every line
 //! that is a fact a merge creates: no merge sha, no undo, no `how`. What the signer
 //! reads is what the repository will say about what they signed.
+//!
+//! A story is filed the same way and from a different source. ADR-0006 makes its
+//! completion report generated too, but a story never merges — it aggregates — so there
+//! is no diff and no merge sha to build one out of. What there is instead is the ledger:
+//! the obligations the story stated, the tasks that answered them, and what those runs
+//! cost. [`report::story`] does that join and [`closing_file`] files it, at the same path
+//! and behind the same fence, so `docs/wecode/<story>/` ends up holding the two documents
+//! ADR-0006 leaves standing — one `design.md` somebody wrote, one report nobody could.
+//!
+//! **Not wired yet.** The close command is what calls that pair, and the change that adds
+//! it deletes the two `allow(dead_code)` below. `wecode close <story>` renders
+//! [`report::story`] once from `store.requirements(None, Some(&id))`, the loaded plan and
+//! `store.audit(&AuditQuery::default())`; prints it and stops where [`report::closes`] is
+//! false, since nothing landed and there is nothing to file; and otherwise commits
+//! `closing_file(&story.id, &report)` through [`keep`], exactly as `merge_task` commits
+//! [`report_file`]. The story's branch and the project's integration branch are the only
+//! other arguments [`keep`] wants, and that command already holds both.
 
 use std::path::Path;
 
@@ -48,6 +65,16 @@ use crate::git;
 use crate::install::{Installed, install_line};
 use crate::render;
 use crate::teardown::{Swept, teardown_line};
+
+/// The story report's own renderer.
+///
+/// The file sits under `render/` because of the rule that module states: what it renders
+/// is core's [`Plan`] and the store's `Requirement` rows, and a view of another crate's
+/// concepts belongs there. It is declared from here rather than from `render.rs` because
+/// `render.rs` was outside the scope of the change that wrote it; moving the line is one
+/// edit — `pub(crate) mod report;` there, this attribute and this comment gone.
+#[path = "render/report.rs"]
+pub(crate) mod report;
 
 /// Where a task's work record lives, relative to the repository root.
 ///
@@ -329,12 +356,46 @@ fn by_area(files: &[(String, u32, u32)]) -> Vec<(String, usize, u32, u32)> {
 /// and may I believe it?
 #[must_use]
 pub(crate) fn report_file(task: &TaskId, target: &str, report: &str) -> String {
-    format!(
-        "# {task} → {target}\n\n\
-         Written by wecode when the merge landed, from git and its own record of the\n\
+    filed(
+        &format!("{task} → {target}"),
+        "Written by wecode when the merge landed, from git and its own record of the\n\
          run. Generated, never authored: an agent's account of its own work is\n\
-         inadmissible, and a file it could have written would be too.\n\n\
-         ```text\n{}\n```\n",
+         inadmissible, and a file it could have written would be too.",
+        report,
+    )
+}
+
+/// A story's completion report as the file that gets committed.
+///
+/// No target branch in the heading, unlike [`report_file`]. A merge report is about a
+/// change arriving somewhere and names where; a story's report is about the story, which
+/// landed over as many merges as it had tasks. Naming one of those branches here would
+/// pick a winner among them.
+#[allow(
+    dead_code,
+    reason = "the call site is the close command, out of this task's scope"
+)]
+#[must_use]
+pub(crate) fn closing_file(story: &TaskId, report: &str) -> String {
+    filed(
+        &format!("{story} closed"),
+        "Written by wecode when the story closed, from the ledger and the plan.\n\
+         Generated, never authored: it restates no obligation and quotes no agent, so\n\
+         there is nothing in it that a second reading could have got wrong.",
+        report,
+    )
+}
+
+/// A report as a committed file: a heading, who wrote it and why it may be believed, and
+/// then the report itself inside a fence.
+///
+/// One writer for both, because the fence is the promise. What differs between a merge's
+/// record and a story's is the sentence above it — the two were written at different
+/// moments out of different evidence — and everything a reader has to trust about the
+/// shape is the same either way.
+fn filed(heading: &str, provenance: &str, report: &str) -> String {
+    format!(
+        "# {heading}\n\n{provenance}\n\n```text\n{}\n```\n",
         report.trim_end()
     )
 }
@@ -537,6 +598,24 @@ mod tests {
         assert!(file.contains(report.trim_end()), "{file}");
         assert!(file.contains("Generated, never authored"), "{file}");
         assert!(file.ends_with("```\n"), "{file}");
+    }
+
+    #[test]
+    fn a_story_is_filed_behind_the_same_fence_and_a_different_sentence() {
+        // The fence is what both documents promise: verbatim text, so what a reader saw
+        // and what landed stay comparable word for word. What differs is who wrote it and
+        // out of what — a merge's record from a diff, a story's from the ledger — and that
+        // is the question a reader of a committed file asks before believing any of it.
+        let report = "CLOSED  one-tap-checkout — buy a basket in one step\n";
+        let file = closing_file(&TaskId::new("one-tap-checkout"), report);
+        assert!(file.starts_with("# one-tap-checkout closed\n"), "{file}");
+        assert!(file.contains("when the story closed, from the ledger"), "{file}");
+        assert!(file.contains("Generated, never authored"), "{file}");
+        assert!(file.contains(report.trim_end()), "{file}");
+        assert!(file.ends_with("```\n"), "{file}");
+        // And no branch in the heading. A story landed over as many merges as it had
+        // tasks, so naming one of them would be picking a winner among them.
+        assert!(!file.contains(" → "), "{file}");
     }
 
     #[test]
