@@ -174,6 +174,31 @@ fn a_dependency_is_a_sibling_in_the_tree_not_a_child() {
 }
 
 #[test]
+fn a_design_step_is_prepared_in_the_projects_own_checkout() {
+    // `parent` decides which tree a task works in, and the design is the one kind it
+    // does not decide for: what finishes a design is a person reading the document and
+    // signing it. Filed under a chore — which does own a tree here — the design was
+    // prepared on that chore's branch, under the run root, so the decision the plan was
+    // waiting on sat somewhere the signer could not read without checking it out.
+    let (org, repo) = with_playbook("design-checkout");
+    org.run(&["task", "add", "f", "add response caching to the export endpoint",
+              "--project", "caching", "--kind", "chore", "--write", "src/**",
+              "--accept-cmd", "true", "--tokens", "100", "--wall", "30", "--to", "impl"])
+        .assert_ok("the main task, which owns a tree");
+    org.run(&["task", "add", "d", "decide the cache key format", "--project", "caching",
+              "--kind", "design", "--parent", "f", "--write", "docs/wecode/d/design.md",
+              "--accept-cmd", "true", "--tokens", "100", "--wall", "30", "--to", "impl"])
+        .assert_ok("the design step under it");
+
+    org.run(&["start", "d"])
+        .assert_ok("start the design")
+        // The kind asked is the design's own, and the answer is the project's checkout.
+        .assert_contains("no worktree — the design playbook does not ask for one")
+        .assert_contains(&format!("work in {}", repo.display()))
+        .assert_lacks("wecode/f");
+}
+
+#[test]
 fn ready_reports_only_what_a_dispatcher_could_pick_up() {
     let org = Org::new("ready", "software-company");
     org.seed();

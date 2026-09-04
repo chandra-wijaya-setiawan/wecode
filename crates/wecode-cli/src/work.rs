@@ -67,8 +67,8 @@ pub(crate) fn cache_root() -> PathBuf {
     }
 }
 
-/// The task whose worktree this task works in: the story it is part of, else the root
-/// of its parent chain.
+/// The task whose worktree this task works in: itself when it is a design, else the
+/// story it is part of, else the root of its parent chain.
 ///
 /// ADR-0006. A story is one user-visible capability, so the story is what owns a
 /// checkout: every task beneath it shares the tree and the branch, lands on one merge
@@ -91,10 +91,25 @@ pub(crate) fn cache_root() -> PathBuf {
 /// repository declares `[story] worktree = true`. Silence is silence, the rule every kind
 /// is read under — and under a silent story the tasks work in the project's own checkout.
 ///
+/// **A design is never adopted into another task's tree.** Every other kind is placed by
+/// `parent`; a design is placed by what finishes it, which is a person reading a document
+/// and signing it. Filed as a step of a feature — the shape `[feature.design]` templates
+/// in every starter playbook — it would inherit the feature's tree and write the decision
+/// onto the feature's branch, under the run root, where the signature the whole plan is
+/// waiting on cannot be given without checking that branch out. Answering *itself* here
+/// hands the question back to `[design]`, which is where the rest of wecode already
+/// assumes it is answered: `worktree = false` in every starter, [`crate::handoff`] handing
+/// a design over as its file rather than as a diff, and `verify` judging it in the
+/// checkout it was written in. A project that does declare `[design] worktree = true`
+/// still gets one — a tree of its own, on a branch of its own, which is what it asked for.
+///
 /// Returns `None` only when the task is not in the plan.
 #[must_use]
 pub(crate) fn owner<'a>(plan: &'a Plan, id: &TaskId) -> Option<&'a Task> {
     let task = plan.task(id)?;
+    if task.kind.needs_a_signature() {
+        return Some(task);
+    }
     // `ancestors` is nearest-first, so the first story found is the innermost one, and
     // the last non-aggregating entry is the root of the work under whatever groups it.
     let line = plan.ancestors(id);
@@ -351,6 +366,26 @@ mod tests {
             .unwrap();
         p.add_task(Task::new("loose", "proj", "filed under the objective").under("epic"))
             .unwrap();
+        // The shape every starter playbook templates: the decision and the writing-up
+        // filed as steps of the work they belong to, at both depths a step is filed at.
+        p.add_task(
+            Task::new("plan-it", "proj", "decide the cache key format")
+                .of_kind(TaskKind::Design)
+                .under("main-task"),
+        )
+        .unwrap();
+        p.add_task(
+            Task::new("story-design", "proj", "decide it under a story")
+                .of_kind(TaskKind::Design)
+                .under("story"),
+        )
+        .unwrap();
+        p.add_task(
+            Task::new("write-it", "proj", "document it")
+                .of_kind(TaskKind::Docs)
+                .under("main-task"),
+        )
+        .unwrap();
         p
     }
 
@@ -405,6 +440,31 @@ mod tests {
             owner(&p, &TaskId::new("loose")).unwrap().id.as_str(),
             "loose",
             "a task filed straight under an epic owns its own tree"
+        );
+    }
+
+    #[test]
+    fn a_design_owns_where_it_writes_however_it_is_filed() {
+        // The document is what a person signs, so it has to land where a person is
+        // reading: the project's own checkout, not a branch under the run root. Both
+        // depths, because `[feature.design]` files one under a main task and a story
+        // holds the same step one level up.
+        let p = plan();
+        for id in ["plan-it", "story-design"] {
+            let o = owner(&p, &TaskId::new(id)).unwrap();
+            assert_eq!(o.id.as_str(), id, "{id} is placed by its kind, not its parent");
+        }
+    }
+
+    #[test]
+    fn every_other_kind_still_writes_in_its_parents_tree() {
+        // The exception is the design's alone. A docs step documents the code its
+        // siblings wrote, which is on the branch — so it belongs on the branch too, and
+        // lands with the rest of the work in one merge.
+        let p = plan();
+        assert_eq!(
+            owner(&p, &TaskId::new("write-it")).unwrap().id.as_str(),
+            "main-task"
         );
     }
 
