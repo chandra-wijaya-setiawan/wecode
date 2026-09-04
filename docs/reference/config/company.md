@@ -6,7 +6,8 @@ would otherwise leave a role with no write scope and no complaint.
 
 Two of the blocks below have their own pages, because between them they describe the
 round trip to a person rather than the chart: [`[notify]`](notify.md) is the message out
-and [`[telegram]`](telegram.md) is the answer back. `[templates]` has one too, since what
+and [`[telegram]`](telegram.md) is the answer back — and the asking, since a channel
+somebody can answer from is one they will ask from. `[templates]` has one too, since what
 it configures is what a worker is told rather than what a person may do — see
 [envelope.md](envelope.md).
 
@@ -30,6 +31,9 @@ fetch = "curl -sS -m 20 \"https://api.telegram.org/bot$TG_TOKEN/getUpdates?offse
 answer = "curl -sS -m 20 -d callback_query_id=\"$WECODE_TELEGRAM_CALLBACK\" -d text=\"$WECODE_TELEGRAM_ANSWER\" \"https://api.telegram.org/bot$TG_TOKEN/answerCallbackQuery\""
 timeout = "30s"                   # the same line should edit the message it answers,
                                   # so a decided button stops offering; see telegram.md
+                                  # it also carries the answer to a message that *asks* —
+                                  # status · board · why <task> · agents — into the chat
+                                  # named by $WECODE_TELEGRAM_ASKED, empty for a receipt
 
 [invariants]                      # outrank every grant below; one of them is not here
                                   # and cannot be — this file is on its list, see below

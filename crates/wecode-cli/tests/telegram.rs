@@ -82,9 +82,10 @@ fn tapped_orphaned(id: i64, from: &str, data: &str) -> String {
 /// real `answerCallbackQuery` would prove that only on a machine with a bot token on it.
 ///
 /// The whole environment on one line, in the order a hook uses it: what to acknowledge,
-/// which message to edit, which task was decided, and what to say. `at:/` with nothing
-/// after it is the shape of a button that cannot be taken off anything — see
-/// [`tapped_orphaned`] — and an empty callback is the shape of a decision nobody tapped.
+/// which message to edit, which task was decided, which chat asked, and what to say.
+/// `at:/` with nothing after it is the shape of a button that cannot be taken off
+/// anything — see [`tapped_orphaned`] — and an empty callback is the shape of a decision
+/// nobody tapped. `ask:` empty is everything that is a receipt rather than an answer.
 fn acknowledging(org: &Org) -> PathBuf {
     let said = org.path("answered.txt");
     let conf = org.path("company.toml");
@@ -93,7 +94,7 @@ fn acknowledging(org: &Org) -> PathBuf {
     std::fs::write(
         &conf,
         format!(
-            "{text}answer = \"echo \\\"cb:$WECODE_TELEGRAM_CALLBACK at:$WECODE_TELEGRAM_CHAT/$WECODE_TELEGRAM_MESSAGE for:$WECODE_TASK#$WECODE_TASK_NUMBER $WECODE_TELEGRAM_ANSWER\\\" >> {}\"\n",
+            "{text}answer = \"echo \\\"cb:$WECODE_TELEGRAM_CALLBACK at:$WECODE_TELEGRAM_CHAT/$WECODE_TELEGRAM_MESSAGE for:$WECODE_TASK#$WECODE_TASK_NUMBER ask:$WECODE_TELEGRAM_ASKED $WECODE_TELEGRAM_ANSWER\\\" >> {}\"\n",
             said.display()
         ),
     )
@@ -886,6 +887,168 @@ fn the_profile_says_whether_a_reply_can_sign_anything() {
     org.run(&["company", "show"])
         .assert_ok("show")
         .assert_contains("signed by: you");
+}
+
+// --------------------------------------------------------------- asking ------
+
+#[test]
+fn a_message_that_asks_is_answered_out_of_the_ledger_and_said_into_the_chat() {
+    // The other half of the channel, and the question actually asked six times in two
+    // days: *what is waiting on me*. It used to have one answer, on the machine, in a
+    // terminal — so an operator away from their desk could say yes and could not ask
+    // anything. The reply is the board's own row, wrapped for a phone.
+    let (org, _) = mergeable("tg-asked", "approved");
+    landed_task(&org, "t");
+    let replies = chatting(&org, "48210934");
+    let said = acknowledging(&org);
+    holding(&replies, &[reply(20, "48210934", "board", "")]);
+
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        // The needs-human cell, from the same function `wecode board` draws it with: the
+        // category, and the one command that clears it.
+        .assert_contains("NEEDS YOU (1)")
+        .assert_contains("caching/t")
+        .assert_contains("wecode merge t")
+        // And nothing was signed for asking.
+        .assert_lacks("approved merge");
+
+    // Said back where it was asked, which is the whole point of asking from a phone: an
+    // answer that only reached the machine's own log would be the gap this closes.
+    let back = std::fs::read_to_string(&said).expect("the question was answered");
+    assert!(back.contains("ask:48210934"), "{back}");
+    assert!(back.contains("wecode merge t"), "{back}");
+    // No callback to acknowledge, no message to edit, and no task decided: a question is
+    // not a receipt, and the three variables a receipt travels in stay empty.
+    assert!(back.contains("cb: at:/ for:#"), "{back}");
+
+    // A read moves nothing: no signature, and no row on the ledger for the asking.
+    assert!(!org.run(&["merge", "t"]).ok(), "asking signed something");
+    org.run(&["audit", "--task", "t", "--denied"])
+        .assert_ok("audit")
+        .assert_contains("no matching audit records");
+}
+
+#[test]
+fn the_summary_says_what_is_moving_or_names_the_cause_when_nothing_is() {
+    // `status` and a bare `?`, which is what somebody types one-handed. Four counts alone
+    // describe a workspace that has finished everything and one whose operator forgot to
+    // start `wecode loop` identically, so the line names the cause.
+    let (org, _) = mergeable("tg-status", "approved");
+    landed_task(&org, "t");
+    let replies = chatting(&org, "48210934");
+    holding(&replies, &[reply(21, "48210934", "?", "")]);
+
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        .assert_contains("needs you 1 · moving 0")
+        .assert_contains("nothing is moving: caching/t");
+}
+
+#[test]
+fn why_answers_what_a_task_waits_behind() {
+    // The question a queue makes somebody ask, and the one the board answers with a
+    // column they cannot see from a phone. Both halves: the chain, and whether anything
+    // is coming for it.
+    let (org, _) = mergeable("tg-why", "approved");
+    landed_task(&org, "t");
+    org.run(&[
+        "task", "add", "u", "--project", "caching", "--kind", "chore", "the next one",
+        "--write", "src/**", "--accept-cmd", "true", "--tokens", "100", "--wall", "30",
+        "--to", "impl", "--after", "t",
+    ])
+    .assert_ok("task add");
+    let replies = chatting(&org, "48210934");
+    holding(&replies, &[reply(22, "48210934", "why u", "")]);
+
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        .assert_contains("u  ")
+        .assert_contains("waits on t is not done");
+
+    // A bare number names nothing in a chat, here as everywhere else in the channel: the
+    // sigil is required, and one reading of *which task* serves both grammars.
+    holding(&replies, &[reply(23, "48210934", "why 2", "")]);
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        .assert_contains("why needs a task");
+}
+
+#[test]
+fn agents_says_which_runs_are_open_and_how_long_since_each_moved() {
+    // A stalled run from a phone. `> running` is a fact four rows share; what tells them
+    // apart is the last thing the agent did and how long ago it did it.
+    let (org, _) = mergeable("tg-agents", "approved");
+    landed_task(&org, "t");
+    org.run(&["status", "t", "running"]).assert_ok("force it live");
+    let replies = chatting(&org, "48210934");
+    holding(&replies, &[reply(24, "48210934", "agents", "")]);
+
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        .assert_contains("MOVING (1)")
+        .assert_contains("caching/t");
+}
+
+#[test]
+fn a_free_form_instruction_is_refused_rather_than_taken_as_a_plan() {
+    // The thing this must never become. *"fix the login bug"* wants a scope, a budget, an
+    // acceptance command and somebody's signature, and a chat message carries none of
+    // them. Refused out loud, because an instruction nobody answered reads exactly like
+    // one somebody took care of.
+    let (org, _) = mergeable("tg-instructed", "approved");
+    landed_task(&org, "t");
+    let replies = chatting(&org, "48210934");
+    holding(&replies, &[reply(25, "48210934", "/fix the login bug", "")]);
+
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        .assert_contains("planning is a task with a scope and a signature")
+        .assert_contains("ask: status");
+
+    // And the same sentence said to a person in the chat is that person's business.
+    holding(&replies, &[reply(26, "48210934", "fix the login bug", "")]);
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        .assert_contains("nothing to sign")
+        .assert_lacks("planning is a task");
+}
+
+#[test]
+fn a_question_from_an_account_nobody_claims_is_answered_nowhere() {
+    // The plan, the queue and the ledger are the company's business. A stranger who found
+    // the bot gets nothing out of them — and nothing said back either, since a channel
+    // that answered strangers would be a nuisance anybody could aim. The operator still
+    // sees it, where an operator reads things.
+    let (org, _) = mergeable("tg-asked-stranger", "approved");
+    landed_task(&org, "t");
+    let replies = chatting(&org, "48210934");
+    let said = acknowledging(&org);
+    holding(&replies, &[reply(27, "99999999", "board", "")]);
+
+    org.run(&["telegram"])
+        .assert_ok("read the channel")
+        .assert_contains("no user in company.toml")
+        .assert_lacks("NEEDS YOU");
+    assert!(!said.exists(), "a stranger was talked back to");
+}
+
+#[test]
+fn a_question_is_read_once_like_everything_else_in_the_channel() {
+    // `wecode loop` reads the channel every five seconds. Answering the same question on
+    // every pass is how a channel becomes something nobody reads.
+    let (org, _) = mergeable("tg-asked-once", "approved");
+    landed_task(&org, "t");
+    let replies = chatting(&org, "48210934");
+    holding(&replies, &[reply(28, "48210934", "status", "")]);
+
+    org.run(&["telegram"])
+        .assert_ok("first read")
+        .assert_contains("needs you 1");
+    org.run(&["telegram"])
+        .assert_ok("second read")
+        .assert_contains("nothing to sign")
+        .assert_lacks("needs you");
 }
 
 #[test]

@@ -19,7 +19,15 @@
 //! is not a second way to sign anything. It is the same sentence, delivered without a
 //! keyboard, through the same identity check and the same Broker call.
 //!
-//! Eight things are load-bearing:
+//! And a channel an operator can answer from is one they will ask from. *Why is nothing
+//! running* was the question actually asked, six times in two days, of a machine the phone
+//! could not reach. So a message that asks is parsed into a wecode verb and answered out of
+//! the store — [`asked`] reads the question, [`crate::commands::gov::from_the_ledger`]
+//! answers it from the functions `wecode board` prints. A view onto the ledger, never a
+//! second brain: nothing is kept per chat, so reconnecting shows the same state, the state
+//! never having been in the chat.
+//!
+//! Nine things are load-bearing:
 //!
 //! - **wecode holds no token and speaks no HTTP.** `[telegram] fetch` is a command the
 //!   operator writes — a `curl` of the Bot API's `getUpdates` — and what it prints is
@@ -32,6 +40,13 @@
 //!   at all — there is no fallback seat. What that person may then sign is their
 //!   post's business, decided by the Broker at the moment of signing, exactly as at a
 //!   terminal. A stranger messaging the bot is a stranger, and signs nothing.
+//! - **Asking is a read, and free-form instruction is refused.** A question passes the
+//!   same identity check a signature does — the ledger is not public — and writes no
+//!   record, because `wecode board` writes none either. What the channel will not do is
+//!   take work: *"fix the login bug"* is planning, and planning is a task with a scope, a
+//!   budget and somebody's signature. Addressed to the bot and naming no verb, it is told
+//!   so out loud — silence would read as *taken care of*. Said to a person in the chat
+//!   instead, the same sentence is left alone; see [`instructed`].
 //! - **A message is read once.** Whatever came of an update — signed, refused, or not
 //!   a decision at all — the cursor moves past it. The alternative is a week-old "yes"
 //!   re-applied on every pass, and a "no" answered again every five seconds.
@@ -122,6 +137,73 @@ pub(crate) enum Verdict {
     Decline,
 }
 
+/// What a message asked for, when it asked rather than answered.
+///
+/// Four questions, each a verb wecode already has — a summary, a board, a blocker chain,
+/// the open runs. No new state and no new judgement in any of them:
+/// [`crate::commands::gov::from_the_ledger`] answers all four out of the store, so what
+/// arrives on the phone is what the desk would have printed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Question {
+    /// `status`, or a bare `?` — the summary sentence, and the cause when nothing runs.
+    Status,
+    /// `board` / `what` — what is waiting on a person, with the command that clears each.
+    Board,
+    /// `why <task>` — what that row waits behind, and whether it can clear on its own.
+    Why,
+    /// `agents` — the open runs, and how long since each last did anything.
+    Agents,
+}
+
+/// What a message asked, if it asked anything.
+///
+/// The first word, like [`verdict`], against a list as short — and the two lists are
+/// disjoint on purpose: `what` asks and `ok` answers, and a word that could do either
+/// would be a signature given to somebody who was enquiring.
+///
+/// **The word has to be the whole message**, unlike a verdict's, `why <task>` excepted
+/// because it takes one. *"what is this one doing?"* is a person talking to a person and a
+/// channel that answered it would be a nuisance in every group chat; `what` on its own is
+/// somebody asking the bot. A leading `/` is that said explicitly — Telegram's own way of
+/// addressing one, stripped by [`word`] — and lifts the restriction, since a message
+/// addressed to wecode is one whose first word was meant for it.
+pub(crate) fn asked(text: &str) -> Option<Question> {
+    let mut words = text.split_whitespace();
+    let raw = words.next()?;
+    let asking = words.next().is_none() || raw.starts_with('/');
+    Some(match word(raw).as_str() {
+        "why" => Question::Why,
+        "status" if asking => Question::Status,
+        "board" | "what" if asking => Question::Board,
+        "agents" if asking => Question::Agents,
+        // `?`, and only `?`. The shortest way to ask *how are we doing* from a phone,
+        // spelled as the whole word rather than as "no letters in it" so that a bare 👍
+        // under a notification stays what it is — an answer, not a query.
+        _ if asking && raw.chars().all(|c| c == '?') => Question::Status,
+        _ => return None,
+    })
+}
+
+/// Whether a message is an instruction to wecode that this channel does not take.
+///
+/// The leading `/` is the whole test, and it is what keeps two failures apart. `fix the
+/// login bug` said to somebody in the chat is that person's business; a notifier that
+/// answers every sentence in a channel is one people leave. `/fix the login bug` is aimed
+/// at wecode, and the answer is no.
+fn instructed(text: &str) -> bool {
+    text.split_whitespace()
+        .next()
+        .is_some_and(|w| w.starts_with('/'))
+}
+
+/// What the channel says to an instruction it will not take. Planning is a task — a scope,
+/// a budget, an acceptance command, somebody's signature — and a message carries none of
+/// those. Refused by name rather than by silence: an instruction nobody answered reads
+/// exactly like one somebody took care of.
+const REFUSED: &str = "    ✗ the channel answers questions and signs approvals — \
+     planning is a task with a scope and a signature, not a message\n      \
+     ask: status · board · why <task> · agents\n";
+
 /// One update, in the shape the Bot API hands it over.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Update {
@@ -151,6 +233,12 @@ pub(crate) struct Message {
     /// was tapped. Empty when it answers nothing, which is most chat, and is why an
     /// answer to something is what this reads.
     pub(crate) quoted: String,
+    /// The chat it was said in, which is where an answer to it has to go.
+    ///
+    /// Only a question needs it — a typed signature is its own receipt. Distinct from
+    /// [`Tap::chat`], which is half of an address to *edit* and empty whenever the other
+    /// half is; this is where to *speak*.
+    pub(crate) chat: String,
     /// What a tap has to be answered with, and `None` when a person typed it.
     ///
     /// Load-bearing twice over: it is what `[telegram] answer` is given, and its presence
@@ -233,6 +321,10 @@ fn message_of(m: &Value) -> Option<Message> {
         who,
         text: m.get("text").map(scalar).unwrap_or_default(),
         quoted: text_of(m.get("reply_to_message")),
+        // Where an answer goes back to. Not the account: the two are the same number in a
+        // private chat and nothing alike in a group, and a reply to the wrong one of them
+        // is either silence or somebody else's business said out loud.
+        chat: located(Some(m)).0,
         tap: None,
     })
 }
@@ -260,6 +352,10 @@ fn tap_of(q: &Value) -> Option<Message> {
         // over any more, which is the reason to put the task in the button's `data`: 64
         // bytes is plenty for `approve #12`, and it never goes stale.
         quoted: text_of(q.get("message")),
+        // Nothing to say into: a tap is answered through the callback it arrived on, which
+        // is the receipt a thumb is owed and the only one Telegram will stop a spinner
+        // with. A keyboard is for deciding; asking is typed.
+        chat: String::new(),
         tap: Some(Tap {
             callback: q.get("id").map(scalar)?,
             chat,
@@ -268,7 +364,10 @@ fn tap_of(q: &Value) -> Option<Message> {
     })
 }
 
-/// Where a tapped button is: the chat, and the message in it carrying the keyboard.
+/// Where a message is: the chat, and its id in that chat.
+///
+/// Read of a tapped button's own notification — the keyboard's address — and of a typed
+/// message, whose chat is where an answer to it goes.
 ///
 /// Both or neither, deliberately. What reads these is a shell line the operator wrote,
 /// and an edit half-addressed is a `curl` that fails at the API rather than a branch the
@@ -367,7 +466,11 @@ fn task_named<'a>(raw: &str, plan: &'a Plan) -> Option<&'a Task> {
 /// Ids are slugs, and so is every word put through `TaskId::new` — which is what makes
 /// `approve cache-tests.` and `approve Cache-Tests` find the same task without this
 /// having to strip punctuation itself.
-fn tasks_named(text: &str, plan: &Plan) -> Vec<TaskId> {
+///
+/// Shared with the question side, so `why cache-tests` and `approve cache-tests` resolve
+/// a name by one rule, the `#` on a bare number included. Two readings of *which task* is
+/// how a channel comes to answer about one and sign for another.
+pub(crate) fn tasks_named(text: &str, plan: &Plan) -> Vec<TaskId> {
     let mut out: Vec<TaskId> = Vec::new();
     for w in text.split_whitespace() {
         if let Some(t) = task_named(w, plan)
@@ -464,11 +567,18 @@ pub(crate) fn fetch(company: &Company, org: &Path, offset: i64) -> Result<String
 /// Both halves of what it is told are optional, and neither can be read off the other: a
 /// tap on a keyboard whose message names no task still has a spinner to stop, and a
 /// signature typed at a terminal names its task with no button behind it — see [`settled`].
+///
+/// `asked` is the third thing this line does and the only one that is not a receipt: the
+/// chat a question came from, for the answer to be said into. Empty for everything else,
+/// which is what a hook branches on — the two existing variables keep the meanings they
+/// had, so a line written before questions existed still does its job and says nothing
+/// to one.
 fn answer(
     company: &Company,
     org: &Path,
     task: Option<&Task>,
     tap: Option<&Tap>,
+    asked: &str,
     said: &str,
 ) -> Result<(), String> {
     let Some(command) = company.telegram.answer.as_deref() else {
@@ -500,10 +610,22 @@ fn answer(
             // the key it filed it under. Empty when nothing named a task at all.
             ("WECODE_TASK", task.map_or("", |t| t.id.as_str())),
             ("WECODE_TASK_NUMBER", &number),
-            // Flattened and bounded like everything else that is quoted anywhere, and
-            // for one more reason here: this is a value in a command's environment, and
-            // a newline in it could end the line the operator wrote.
-            ("WECODE_TELEGRAM_ANSWER", &oneline(said, ANSWER)),
+            // The chat a question came from, and empty for a receipt — the one variable
+            // that says *speak* rather than *edit*.
+            ("WECODE_TELEGRAM_ASKED", asked),
+            // Cut to what the destination will take, the two differing by an order of
+            // magnitude: `answerCallbackQuery` refuses a text over 200 characters
+            // outright, and a chat message has a screen. A toast is flattened as well,
+            // being one line by construction; an answer keeps its lines, the way
+            // `[notify]` hands a digest over — a board folded onto one line is unreadable.
+            (
+                "WECODE_TELEGRAM_ANSWER",
+                &if asked.is_empty() {
+                    oneline(said, ANSWER)
+                } else {
+                    bounded(said, SAID)
+                },
+            ),
         ],
     )
     .map(|_| ())
@@ -521,7 +643,7 @@ fn answer(
 /// reached is not a decision that did not happen — and the command that took it still has
 /// to say which of the two failed.
 pub(crate) fn settled(company: &Company, org: &Path, task: &Task, said: &str) -> String {
-    match answer(company, org, Some(task), None, said) {
+    match answer(company, org, Some(task), None, "", said) {
         Ok(()) => String::new(),
         Err(e) => format!("  ⚠ telegram: could not say so in the chat: {e}\n"),
     }
@@ -531,6 +653,11 @@ pub(crate) fn settled(company: &Company, org: &Path, task: &Task, said: &str) ->
 /// answered callback — asking it to show more is a call it refuses outright, which would
 /// turn a long refusal into no answer at all.
 const ANSWER: usize = 200;
+
+/// How much of an answer a question gets. A phone screen, and a long way inside the 4096
+/// characters a chat message allows: the rows are already bounded by the board's own
+/// attention limit, so this is the backstop rather than the shape of the reply.
+const SAID: usize = 1000;
 
 /// Runs one of the operator's command lines, with what wecode has to tell it in the
 /// environment, bounded by `[telegram] timeout`.
@@ -645,17 +772,22 @@ fn echo(said: &str) -> String {
 
 /// One line of at most `limit` characters, whatever it was given.
 ///
-/// Shared by both places a string leaves this module — the report an operator reads and
-/// the answer a tap is given — because the two need the same thing for two reasons. The
-/// report must not gain a line that looks like one of wecode's; the answer is a value in
-/// a command's environment, where a newline could end the line the operator wrote and a
-/// long one is a call Telegram refuses outright. Counted in characters and never bytes:
-/// cutting a multi-byte one in half would panic.
+/// Shared by the two places one line is the whole of what there is room for — the report
+/// an operator reads and the toast a tap is given — because the two need it for two
+/// reasons. The report must not gain a line that looks like one of wecode's; the toast is
+/// a value in a command's environment, where a newline could end the line the operator
+/// wrote and a long one is a call Telegram refuses outright.
 fn oneline(said: &str, limit: usize) -> String {
-    let flat: String = said.split_whitespace().collect::<Vec<_>>().join(" ");
-    match flat.char_indices().nth(limit) {
-        Some((at, _)) => format!("{}…", &flat[..at]),
-        None => flat,
+    bounded(&said.split_whitespace().collect::<Vec<_>>().join(" "), limit)
+}
+
+/// As much of what was said as the channel will take, lines and all.
+///
+/// Counted in characters and never bytes: cutting a multi-byte one in half would panic.
+fn bounded(said: &str, limit: usize) -> String {
+    match said.char_indices().nth(limit) {
+        Some((at, _)) => format!("{}…", &said[..at]),
+        None => said.to_string(),
     }
 }
 
@@ -748,37 +880,74 @@ fn apply(store: &Store, company: &Company, org: &Path, msg: &Message, dry: bool)
         .as_ref()
         .and_then(|plan| target(msg, plan).ok().and_then(|id| plan.task(&id)));
 
-    // Every tap, whatever it came to, and no typed reply ever — the module's fifth
-    // reason. Not in a dry run: what it moves is the chat, and a dry run moves nothing.
-    if let Some(tap) = &msg.tap
-        && !dry
-        && let Err(e) = answer(company, org, about, Some(tap), &outcome)
+    // Every tap, whatever it came to, and every question — and no typed signature ever.
+    // The module's fifth reason and its extension: a typed `approve` is its own receipt,
+    // in front of the person who typed it, but the answer to a question was never in the
+    // chat at all, and one answered into a log on the machine is the gap this direction of
+    // the channel exists to close. Not in a dry run, which moves nothing anywhere.
+    //
+    // A question from an account nobody claims is reported above and answered nowhere: a
+    // channel that talked back to strangers would be a nuisance anybody could aim.
+    let asked_in = asked(&msg.text)
+        .filter(|_| company.user_by_telegram(&msg.from).is_some())
+        .map_or("", |_| msg.chat.as_str());
+    if !dry
+        && (msg.tap.is_some() || !asked_in.is_empty())
+        && let Err(e) = answer(company, org, about, msg.tap.as_ref(), asked_in, &outcome)
     {
         // Reported under the outcome rather than in place of it. The signature is
-        // already given; what failed is saying so, and an operator whose taps have gone
-        // quiet needs to see which of the two it was. It is also the only place a button
-        // left offering will be mentioned: the chat is precisely where nothing was said.
+        // already given, and the answer is already worked out; what failed is saying so,
+        // and an operator whose taps have gone quiet needs to see which of the two it was.
+        // It is also the only place a button left offering will be mentioned: the chat is
+        // precisely where nothing was said.
         report.push_str(&format!("    ⚠ could not say so in the chat: {e}\n"));
     }
     report
 }
 
-/// What one message decided, and `None` for one that decided nothing.
+/// What came of one message, and `None` for one that wanted nothing.
 ///
-/// Separate from the reporting because a tap needs this sentence twice: once in the
-/// output of the pass it arrived on, and once back on the phone that sent it.
+/// Separate from the reporting because a tap and a question each need this sentence twice:
+/// once in the output of the pass it arrived on, and once back in the chat that sent it.
+///
+/// Three things a message can be, read in this order. Asking is read first because the two
+/// grammars must not overlap and this is where that is enforced. Deciding is next. What is
+/// left is chat, or — where it was addressed to the bot — an instruction, which is the one
+/// thing the channel says no to.
 fn decided(store: &Store, company: &Company, msg: &Message, dry: bool) -> Option<String> {
-    let verdict = verdict(&msg.text)?;
+    if let Some(question) = asked(&msg.text) {
+        // The same account check a signature gets, and for a reason of its own: the plan,
+        // the queue and the ledger are this company's business, and a stranger who found
+        // the bot is owed nothing out of them.
+        if company.user_by_telegram(&msg.from).is_none() {
+            return Some(unclaimed(&msg.from, "nothing answered"));
+        }
+        return Some(
+            match commands::gov::from_the_ledger(store, company, question, &msg.text) {
+                Ok(said) => said,
+                Err(e) => format!("    ✗ {e}\n"),
+            },
+        );
+    }
+    let Some(verdict) = verdict(&msg.text) else {
+        return instructed(&msg.text).then(|| REFUSED.to_string());
+    };
     let Some(user) = company.user_by_telegram(&msg.from) else {
-        return Some(format!(
-            "    ✗ no user in company.toml gives telegram = \"{}\" — nothing signed\n",
-            echo(&msg.from)
-        ));
+        return Some(unclaimed(&msg.from, "nothing signed"));
     };
     Some(match decide(store, company, msg, user, verdict, dry) {
         Ok(report) => report,
         Err(e) => format!("    ✗ {e}\n"),
     })
+}
+
+/// The one identity failure, said the same way whatever the message wanted. An account no
+/// `[[users]]` entry names is a stranger, and there is no fallback seat to be one instead.
+fn unclaimed(from: &str, got: &str) -> String {
+    format!(
+        "    ✗ no user in company.toml gives telegram = \"{}\" — {got}\n",
+        echo(from)
+    )
 }
 
 /// Everything about one reply that can go wrong, in one place with one error type.
@@ -1003,6 +1172,7 @@ mod tests {
             &std::env::temp_dir(),
             None,
             Some(&tap("4382abc")),
+            "",
             said,
         )
     }
@@ -1022,6 +1192,7 @@ mod tests {
             who: "cws".into(),
             text: text.into(),
             quoted: quoted.into(),
+            chat: "48210934".into(),
             tap: None,
         }
     }
@@ -1258,6 +1429,32 @@ mod tests {
         for chat in ["", "what is this one doing?", "I approve of that", "maybe"] {
             assert_eq!(verdict(chat), None, "{chat}");
         }
+    }
+
+    #[test]
+    fn asking_and_deciding_are_two_grammars_that_do_not_overlap() {
+        for (text, q) in [
+            ("status", Question::Status),
+            ("?", Question::Status),
+            ("/board", Question::Board),
+            ("what", Question::Board),
+            ("/status now", Question::Status),
+            ("why cache-tests", Question::Why),
+            ("Agents!", Question::Agents),
+        ] {
+            assert_eq!(asked(text), Some(q), "{text}");
+            // The property that matters: no word asks and decides. A message read both
+            // ways would be a signature given to somebody who was enquiring.
+            assert_eq!(verdict(text), None, "{text}");
+        }
+        // Deciding words ask nothing; a sentence a verb happens to start is chat, as is a
+        // thumbs-up — which is an answer somebody typed, not a query.
+        for chat in ["approve", "no", "", "what is this one doing?", "status at 5", "👍"] {
+            assert_eq!(asked(chat), None, "{chat}");
+        }
+        // Addressed to the bot and naming no verb: planning, which is a task.
+        assert!(instructed("/fix the login bug"));
+        assert!(!instructed("fix the login bug"));
     }
 
     #[test]

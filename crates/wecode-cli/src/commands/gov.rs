@@ -8,7 +8,7 @@ use wecode_store::{AuditQuery, Store};
 use crate::args::Args;
 use crate::commands::ctx::*;
 use crate::render;
-use crate::{git, install, ledger, notify, record, teardown, telegram, work};
+use crate::{board, git, install, ledger, notify, record, teardown, telegram, work};
 
 pub(crate) fn parse_action(a: &Args) -> Result<Action, String> {
     let verb = a.cmd(2);
@@ -227,6 +227,182 @@ pub(crate) fn inbox(a: &Args) -> Res {
         return Err(why.into());
     }
     telegram::drain_channel(&ws, &store, &company, a.has("dry-run"))
+}
+
+/// Answers a question asked in the chat, out of the state the board already prints.
+///
+/// The other half of [`inbox`], and beside it for that reason: the channel is a view onto
+/// the ledger rather than a second brain. Every answer here is composed from
+/// [`crate::board`]'s own functions — the same four groups `wecode board` leads with, the
+/// same needs-human cell, the same vitals — so a reply read on a phone and the board read
+/// at a desk cannot come to different conclusions about what needs a person. A second
+/// rendering of *what is happening* would be a second thing to keep true.
+///
+/// Nothing is stored and no record is written. A question is a read, and `wecode board`
+/// writes none either; a channel that appended a row per poll would fill the ledger with
+/// the answering rather than the work.
+pub(crate) fn from_the_ledger(
+    store: &Store,
+    company: &wecode_org::Company,
+    asked: telegram::Question,
+    text: &str,
+) -> Res {
+    let plan = store.load_plan()?;
+    let audit = store.audit(&AuditQuery::default())?;
+    let l = board::ledger_index(&audit);
+    let gates = design_gates(company, &plan);
+    // The projects a board would show, filed-away work excluded: `--all` is a flag
+    // somebody types at a desk while looking at the tree, and there is no tree here.
+    let projects: Vec<&wecode_core::Project> = plan.projects().collect();
+    let groups = board::attention_groups(&plan, &projects, &l, false);
+    let asking = Asking {
+        plan: &plan,
+        audit: &audit,
+        l: &l,
+        gates: &gates,
+        groups: &groups,
+    };
+    Ok(match asked {
+        telegram::Question::Status => asking.summary(),
+        telegram::Question::Board => {
+            asking.rows(board::Group::NeedsYou, "nothing is waiting on you")
+        }
+        telegram::Question::Agents => asking.rows(board::Group::Moving, "nothing is running"),
+        telegram::Question::Why => asking.why(text)?,
+    })
+}
+
+/// What one question is answered out of: the plan, the ledger folded two ways, and the
+/// grouping. Bundled because all four answers read most of it, and read the same copy —
+/// two loads of the plan inside one reply could disagree with each other.
+struct Asking<'a> {
+    plan: &'a wecode_core::Plan,
+    audit: &'a [wecode_store::AuditLine],
+    l: &'a crate::board::Ledger,
+    gates: &'a crate::board::DesignGates,
+    groups: &'a [(board::Group, Vec<&'a wecode_core::Task>, usize)],
+}
+
+impl Asking<'_> {
+    /// How many rows a group holds, the ones it stood down to a count included.
+    fn count(&self, want: board::Group) -> usize {
+        self.groups
+            .iter()
+            .find(|(g, _, _)| *g == want)
+            .map_or(0, |(_, shown, hidden)| shown.len() + hidden)
+    }
+
+    /// The summary sentence, and — when nothing is moving — the row that says why.
+    ///
+    /// Four counts alone describe a workspace that has finished everything and one whose
+    /// operator forgot to start `wecode loop` identically, which is the whole reason this
+    /// line names a cause. The cause is a row rather than a diagnosis: the first thing
+    /// waiting on a person, else the first thing queued, each in the words its own group
+    /// already uses.
+    fn summary(&self) -> String {
+        let moving = self.count(board::Group::Moving);
+        // The group titles, in the order the board leads with them, so the counts and the
+        // rows a follow-up question returns are named the same thing.
+        let mut out = format!(
+            "    needs you {} · moving {moving} · next {} · landed {}\n",
+            self.count(board::Group::NeedsYou),
+            self.count(board::Group::Next),
+            self.count(board::Group::Landed),
+        );
+        if moving > 0 {
+            return out;
+        }
+        let cause = [board::Group::NeedsYou, board::Group::Next]
+            .iter()
+            .find_map(|want| self.first(*want));
+        out.push_str(&match cause {
+            Some(line) => format!("      nothing is moving: {line}\n"),
+            None if self.plan.is_empty() => "      no projects yet\n".to_string(),
+            None => "      nothing is moving: all work is done\n".to_string(),
+        });
+        out
+    }
+
+    /// The leading row of a group, as that group describes it.
+    fn first(&self, want: board::Group) -> Option<String> {
+        let (_, shown, _) = self.groups.iter().find(|(g, _, _)| *g == want)?;
+        shown.first().map(|t| self.row(want, t))
+    }
+
+    /// A group as a phone reads it: the rows it leads with, the sentence that group asks
+    /// of each, and the tail it stood down to a count. `empty` is what an empty group says
+    /// — a heading over nothing would make the reader work out which nothing it was.
+    fn rows(&self, want: board::Group, empty: &str) -> String {
+        let group = self.groups.iter().find(|(g, _, _)| *g == want);
+        let Some((_, shown, hidden)) = group.filter(|(_, rows, _)| !rows.is_empty()) else {
+            return format!("    {empty}\n");
+        };
+        let mut out = format!("    {} ({})\n", want.title(), shown.len() + hidden);
+        for t in shown {
+            out.push_str(&format!("      {}\n", self.row(want, t)));
+        }
+        if *hidden > 0 {
+            out.push_str(&format!("      … and {hidden} more\n"));
+        }
+        out
+    }
+
+    /// One row: which task, what its group has to say about it, and its beat.
+    fn row(&self, want: board::Group, t: &wecode_core::Task) -> String {
+        let v = board::task_vitals(self.plan, t, self.l, self.gates);
+        format!(
+            "{}/{}  {}{}",
+            t.project,
+            t.id,
+            want.line(self.plan, t, self.l, &v),
+            self.beat(t)
+        )
+    }
+
+    /// How long since the ledger last said anything about a task, and nothing at all for
+    /// one it has never named.
+    ///
+    /// The age is what makes a run readable on a phone. `write src/lib.rs` is the same row
+    /// whether the agent wrote that four seconds or four hours ago, and the difference
+    /// between those two is the whole of whether somebody has to go and look.
+    fn beat(&self, t: &wecode_core::Task) -> String {
+        board::newest(self.audit, "", t.id.as_str(), 1)
+            .first()
+            .map_or_else(String::new, |l| {
+                let since = wecode_store::now_secs().saturating_sub(l.at);
+                format!("  {}", board::ago(since))
+            })
+    }
+
+    /// Why one task is where it is: the row's own words, and what it stands behind.
+    ///
+    /// Two halves, because the question has two answers. [`crate::board::task_vitals`]
+    /// carries the first — the same cell the board colours — and the blockers carry the
+    /// second, with [`blocker_note`]'s distinction between a prerequisite that is merely
+    /// unfinished and one no tick will ever release. That distinction is the question
+    /// actually asked from a phone: *will this clear on its own, or is it mine?*
+    fn why(&self, text: &str) -> Result<String, String> {
+        let named = telegram::tasks_named(text, self.plan);
+        let [id] = named.as_slice() else {
+            return Err(match named.len() {
+                0 => "why needs a task: `why cache-tests`, or `why #4` by number".to_string(),
+                n => format!("that names {n} tasks — ask about one"),
+            });
+        };
+        // Named by the same reader that resolved it, so this cannot fail.
+        let t = self.plan.task(id).ok_or("no such task")?;
+        let v = board::task_vitals(self.plan, t, self.l, self.gates);
+        // The status in full, unlike the board's own column: a chat message has room, and
+        // `needs-approval` is the word the operator will type back.
+        let mut out = format!("    {id}  {} {}\n", t.status.mark(), t.status.as_str());
+        for b in self.plan.blockers(id) {
+            out.push_str(&format!("      waits on {}\n", blocker_note(&b)));
+        }
+        if !v.needs.is_empty() {
+            out.push_str(&format!("      {}\n", v.needs.join(" · ")));
+        }
+        Ok(out)
+    }
 }
 
 pub(crate) fn audit(a: &Args) -> Res {
