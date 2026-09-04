@@ -28,7 +28,7 @@
 //! the column: an attempt that has since been pointed elsewhere is not still a claim on
 //! what it used to serve.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::params;
 use wecode_core::{ProjectId, TaskId};
@@ -240,6 +240,24 @@ fn named_after(line: &str, marker: &str) -> Option<String> {
         .next()?
         .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
     (!handle.is_empty()).then(|| handle.to_string())
+}
+
+/// Whether `next` is a decision taken after `id` — `ADR-0004` against `ADR-0003`.
+///
+/// By number rather than by text, because a handle nobody zero-padded sorts `ADR-12`
+/// before `ADR-9`, and the numbers are minted in the order the decisions were taken. A
+/// handle carrying no number is let through: this refuses a supersession running the
+/// wrong way, which is a thing it can see, and does not police what a handle looks like.
+fn is_later(next: &str, id: &str) -> bool {
+    match (number_in(next), number_in(id)) {
+        (Some(a), Some(b)) => a > b,
+        _ => true,
+    }
+}
+
+/// `4` in `ADR-0004`.
+fn number_in(id: &str) -> Option<u32> {
+    id.rsplit('-').next()?.parse().ok()
 }
 
 /// Who is writing a row no Broker decided.
@@ -511,7 +529,13 @@ impl Store {
     /// the row is how a reader arriving from an old citation learns which decision
     /// replaced it. A supersession naming a decision nothing recorded is dropped, on the
     /// same terms as a task pointing at a requirement nobody stated — inventing the row
-    /// would hide that the tree cites a decision the index has never seen.
+    /// would hide that the tree cites a decision the index has never seen. That holds at
+    /// both ends of one: a decision is retired only by a *later* decision the repository
+    /// actually took, so a supersession is believed only while its successor is itself in
+    /// the index ([`AdrHead::decided`] keeps a proposal out of it) and only while it runs
+    /// forward. Neither is a guess about what somebody meant — a status line failing
+    /// either says something the repository has not decided, and the index answers "what
+    /// did we decide?" with what stands until the file that retires it is written.
     pub fn adrs(&self) -> Result<Vec<Adr>, StoreError> {
         let mut stmt = self.conn().prepare(
             "SELECT at, post, human, project_id, action, target, detail
@@ -535,7 +559,11 @@ impl Store {
         let mut replaced: BTreeMap<String, String> = BTreeMap::new();
         for (at, post, human, in_project, action, target, detail) in rows {
             if action == "supersede" {
-                replaced.insert(target, detail);
+                // Refused here rather than at the end, so a backwards claim cannot
+                // displace the live supersession it was recorded after.
+                if is_later(&detail, &target) {
+                    replaced.insert(target, detail);
+                }
                 continue;
             }
             // The newest recording is the index; an earlier one is a file as it read
@@ -552,10 +580,15 @@ impl Store {
                 },
             );
         }
+        // The decisions taken, which is what a successor has to be one of.
+        let decided: BTreeSet<String> = found.keys().cloned().collect();
         Ok(found
             .into_values()
             .map(|a| Adr {
-                superseded_by: replaced.get(&a.id).cloned(),
+                superseded_by: replaced
+                    .get(&a.id)
+                    .filter(|next| decided.contains(*next))
+                    .cloned(),
                 ..a
             })
             .collect())
@@ -1053,6 +1086,68 @@ mod tests {
             .unwrap();
         let ids: Vec<String> = s.adrs().unwrap().into_iter().map(|a| a.id).collect();
         assert_eq!(ids, vec!["ADR-0004"], "no ADR-0003 conjured out of a citation");
+    }
+
+    #[test]
+    fn a_decision_is_retired_only_by_a_successor_the_repository_decided() {
+        // The other end of the same rule. A decision pointing forward at a document
+        // nobody has accepted — a proposal, or a number the tree never reached — would
+        // otherwise read as retired, and a reader following the pointer arrives nowhere.
+        let s = store();
+        let project = ProjectId::new("wecode");
+        let record = |text: &str| {
+            s.record_adr(indexer(), &project, &AdrHead::parse(text).unwrap())
+                .unwrap()
+        };
+        record(&adr_text("ADR-0003", "grouping is a kind", "superseded by ADR-0009"));
+        record(&adr_text("ADR-0009", "a shape being argued", "proposed"));
+
+        let found = s.adrs().unwrap();
+        assert_eq!(found.len(), 1, "the proposal is not in the index");
+        assert_eq!(
+            found[0].status(),
+            "accepted",
+            "a decision stands until the one that retires it is taken"
+        );
+
+        // And it is retired the moment that one is.
+        record(&adr_text("ADR-0009", "a shape now settled", "accepted"));
+        let found = s.adrs().unwrap();
+        assert_eq!(found[0].status(), "superseded by ADR-0009");
+    }
+
+    #[test]
+    fn a_supersession_running_backwards_retires_nothing() {
+        // Numbers are minted in the order the decisions were taken, so a status line
+        // naming an earlier decision as the replacement is a typo. Believed, it would
+        // retire the newer of the two — the inversion of what a supersession means.
+        let s = store();
+        let project = ProjectId::new("wecode");
+        let record = |text: &str| {
+            s.record_adr(indexer(), &project, &AdrHead::parse(text).unwrap())
+                .unwrap()
+        };
+        record(&adr_text("ADR-0002", "one repo, one standing project", "accepted"));
+        record(&adr_text("ADR-0007", "hold is not archive", "superseded by ADR-0002"));
+
+        let status = |id: &str| {
+            s.adrs()
+                .unwrap()
+                .into_iter()
+                .find(|a| a.id == id)
+                .unwrap_or_else(|| panic!("{id} is in the index"))
+                .status()
+        };
+        assert_eq!(status("ADR-0007"), "accepted", "the newer decision still stands");
+        assert_eq!(status("ADR-0002"), "accepted");
+
+        // Stated the other way round it is the same claim, and refused on the same terms.
+        record(&adr_text(
+            "ADR-0002",
+            "one repo, one standing project",
+            "accepted · supersedes ADR-0007",
+        ));
+        assert_eq!(status("ADR-0007"), "accepted");
     }
 
     #[test]
