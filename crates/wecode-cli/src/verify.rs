@@ -8,6 +8,10 @@
 //!   do its work. Acceptance cannot catch this and never could: the commands a task is
 //!   held to are the repository's own, and they passed on the tree before it started, so
 //!   a run that changed nothing came back green — see [`Changed::delivered_nothing`].
+//! - **And if it did nothing, could it have?** A run that left its report and wrote
+//!   nothing decided that; a run that left no trace at all was stopped before it could
+//!   decide anything. One wants a better instruction and the other wants its log read,
+//!   and they used to arrive in the same sentence — see [`Empty`].
 //! - **Did the documentation move with it?** A page declaring a `subject:` that stayed out
 //!   of a diff touching one is refused beside a scope violation — [`wecode_core::docs`].
 //! - **Does it pass?** By running the acceptance commands here, not by being told.
@@ -121,10 +125,35 @@ pub(crate) struct Changed {
     /// been consulted, so a verdict that skipped the scope half invents no finding out
     /// of the half that did run.
     owed: Cell<bool>,
+    /// Whether the run left anything in its worker area — see [`left_a_report`]. Kept as
+    /// the one bit rather than the paths: the area is not the work, so it is never listed
+    /// as a delivery, and the only question asked of it is whether the run got that far.
+    reported: bool,
     /// Documents this diff touched the subject of and left where they were. Read beside
     /// the diff rather than beside [`violations`] because the join needs both halves at
     /// once: the paths to match, and the tree holding the pages that declared them.
     stale: Vec<docs::Stale>,
+}
+
+/// Why a diff carries none of this task's own work — three readings of one empty list.
+///
+/// Two of them earn the same verdict and want opposite things done about them, which is
+/// the whole reason they are named apart. A run that left its report and wrote nothing
+/// **had its turn**: it reached the end of the envelope and put nothing in the tree, so
+/// what to change is the instruction. A run that left nothing at all did not have its
+/// turn — every envelope ends by telling the agent to write its result, and wecode makes
+/// the directory for it before the process starts, so an untouched tree is a run killed,
+/// refused its tools, or never started. Retrying *that* on a better prompt buys the same
+/// empty tree twice. Neither reading moves the verdict; what moves is the sentence, which
+/// is the part a person and a retry act on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Empty {
+    /// Its steps wrote on the branch it owns: not missing work, and not its own.
+    Delegated,
+    /// It reported and wrote nothing. It could have written and did not.
+    Reported,
+    /// Nothing anywhere, its own report included. It could not write.
+    Silent,
 }
 
 impl Changed {
@@ -156,7 +185,24 @@ impl Changed {
     /// the scope it declared. Failing the parent for writing nothing of its own would
     /// fail it for the shape the playbook asked for, after every step had passed.
     pub(crate) fn delivered_nothing(&self) -> bool {
-        self.owed.get() && self.paths.is_empty() && self.delegated.is_empty()
+        self.owed.get() && matches!(self.why_empty(), Some(Empty::Reported | Empty::Silent))
+    }
+
+    /// Which of the three readings this empty diff has, and `None` when it is not empty.
+    ///
+    /// Ordered by what answers for the emptiness, strongest first: work on the branch
+    /// under another name settles it outright, and after that the only question left is
+    /// whether the run got as far as saying anything. See [`Empty`].
+    pub(crate) fn why_empty(&self) -> Option<Empty> {
+        if !self.is_empty() {
+            None
+        } else if !self.delegated.is_empty() {
+            Some(Empty::Delegated)
+        } else if self.reported {
+            Some(Empty::Reported)
+        } else {
+            Some(Empty::Silent)
+        }
     }
 }
 
@@ -273,6 +319,33 @@ fn is_worker_area(path: &str) -> bool {
     path.starts_with(wecode_core::WORKER_DIR)
 }
 
+/// Whether the run put anything in that area — the report the envelope asked for, or
+/// anything else task-local it left beside it.
+///
+/// Asked of the diff **and** of the disk, because the two see different repositories: the
+/// standing advice is to gitignore `.wecode/run/`, and an ignored report is in no diff,
+/// while a repository that has not done it carries the report like any other file. One of
+/// the two answers in every tree, and neither answer is the agent's.
+///
+/// It is an observation about a directory wecode itself prepared: `exec::worker_area`
+/// makes it before the process starts, so anything in it afterwards is this run's. The
+/// file is never opened — *a report exists* is wecode's own reading of a tree it made,
+/// where *what the report says* is the agent's account of itself and inadmissible.
+///
+/// Exact on a first attempt and conservative on a retry: `git clean -fd` leaves ignored
+/// files alone, so a previous attempt's report can survive into the next tree and read as
+/// this one's. That falls to [`Empty::Reported`], the quieter of the two findings, which
+/// is the right way for the ambiguity to fall — and it changes no verdict either way.
+fn left_a_report(dir: &Path, paths: &[String]) -> bool {
+    paths.iter().any(|p| is_worker_area(p))
+        // A diff read from nowhere — the unit fixtures — has no tree to consult, and a
+        // relative path here would ask about whatever directory the process happens to
+        // be standing in.
+        || (dir.is_absolute()
+            && std::fs::read_dir(dir.join(wecode_core::WORKER_DIR))
+                .is_ok_and(|mut entries| entries.next().is_some()))
+}
+
 /// Every path this task's work touched in `dir`, committed attempts included.
 ///
 /// Not the uncommitted diff alone, which is what this used to be and what left a hole
@@ -334,6 +407,14 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Option<Changed>, git::G
     // A file a step delivered and this task then edited is this task's own work, and
     // saying so twice would report one path as both.
     delegated.retain(|p| !all.contains(p));
+    // Asked before the area is dropped: the diff is one of the two places the answer is.
+    let reported = left_a_report(dir, &all);
+    // The worker's own area is not the work, in either list. The envelope orders the
+    // report and wecode makes the directory for it, so a diff that counted it let a run
+    // answer *did it do anything* by doing exactly what it was told and nothing else —
+    // one file, `delivered_nothing` false, green acceptance, and on to a merge.
+    all.retain(|p| !is_worker_area(p));
+    delegated.retain(|p| !is_worker_area(p));
     // This task's diff only: a step was judged against its own scope, page included, and
     // charging a parent for its children's coupling is the same error as `delegated`.
     // Both halves at one revision — the run's own last attempt, or the tree it is still
@@ -348,6 +429,7 @@ pub(crate) fn changed(dir: &Path, id: &TaskId) -> Result<Option<Changed>, git::G
         paths: all,
         delegated,
         owed: Cell::new(false),
+        reported,
         stale,
     }))
 }
@@ -569,16 +651,15 @@ pub(crate) fn verdict(
 
     if let Some(c) = &v.changed {
         out.push_str(&format!("\ndiff — {} file{}\n", c.len(), s(c.len())));
-        if c.is_empty() {
-            // Not neutral: a task that declared a write scope and changed nothing did not
-            // do its work — unless its steps did the writing, which is the one reading of
-            // an empty diff that is not a finding.
-            out.push_str(if c.delegated().is_empty() {
-                "  nothing changed\n"
-            } else {
-                "  nothing of its own — its steps did the writing\n"
-            });
-        }
+        // Not neutral, and not one sentence. An empty diff has three readings — see
+        // [`Empty`] — and the one it is given is what the reader does next: open the
+        // instruction, open the log, or nothing at all.
+        out.push_str(match c.why_empty() {
+            Some(Empty::Delegated) => "  nothing of its own — its steps did the writing\n",
+            Some(Empty::Reported) => "  nothing changed — it reported and wrote nothing\n",
+            Some(Empty::Silent) => "  nothing changed — and no report either\n",
+            None => "",
+        });
         for path in c {
             let bad = v.violations.contains(path);
             out.push_str(&format!(
@@ -702,6 +783,17 @@ pub(crate) fn verdict(
                     "  ✗ nothing changed — this task declared a write scope and produced no diff\n\
                      \x20   the acceptance above ran against a tree the work never touched\n",
                 );
+                // And which of the two nothings it is, because the next move differs. A
+                // run that reported chose what it left; a run that left nothing at all
+                // never got the choice, and retrying it on a better prompt buys the same
+                // empty tree a second time. See [`Empty`].
+                if v.changed.as_ref().and_then(Changed::why_empty) == Some(Empty::Silent) {
+                    out.push_str(
+                        "\x20   nor the report every envelope asks for, into a directory \
+                         wecode made for it:\n\x20   this run was stopped or refused \
+                         before it could write. Read its log, not its prompt.\n",
+                    );
+                }
             }
             let n = v.violations.len();
             if n > 0 {
@@ -775,9 +867,11 @@ mod tests {
     /// no tree to point at — and one that is not under the run root is one wecode never
     /// commits in, which is exactly the guard.
     fn touched(list: &[&str]) -> Option<Changed> {
+        let paths = paths(list);
         Some(Changed {
+            reported: left_a_report(Path::new(""), &paths),
             dir: PathBuf::new(),
-            paths: paths(list),
+            paths,
             delegated: Vec::new(),
             owed: Cell::new(false),
             stale: Vec::new(),
