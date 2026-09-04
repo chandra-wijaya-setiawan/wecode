@@ -19,12 +19,16 @@ use super::App;
 use crate::board::{self, Group, Health, Vitals};
 
 /// One stopped row: where the work is, what it is asking for, and what to type.
+///
+/// Read by the dashboard's `Need you` pane as well as by this panel, and by neither one
+/// twice: the pane has room for the first two fields, this has room for all three, and
+/// both are the same rows in the same order.
 #[derive(Debug)]
 pub(super) struct Owed {
-    at: String,
+    pub(super) at: String,
     /// The category, a word learned once — `needs-approval`, `needs-input`, `failed`,
     /// `yours to do`, `stuck`. Held to a closed list by `docs/reference/board.md`.
-    word: String,
+    pub(super) word: String,
     /// The one command that clears it, with the id already in it.
     key: String,
 }

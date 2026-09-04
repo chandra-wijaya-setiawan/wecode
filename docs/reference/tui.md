@@ -12,18 +12,44 @@ moving between screens is navigation rather than a fresh invocation, and no scre
 reachable only by restarting with a different command. `wecode board` is the same state
 printed once and exited; `wecode up` and `wecode cockpit` are older spellings of `tui`.
 
+It **opens on `DASHBOARD`**, not on the board. The first question an operator has is never
+*what tasks exist* — it is *is anything wrong, and is anything waiting for me*. `HOME`
+answers the first question and is `v h`, one key away.
+
 ## Screens
 
 | screen | holds | reached by |
 |---|---|---|
-| `HOME` | the four attention groups over the portfolio, with the is-part-of tree under them | the bottom of the stack, `v h` |
+| `DASHBOARD` | six panes: a status band, then Agent, Need you, Blocked and Roadmap, then the key bar | the bottom of the stack, `v d` |
+| `HOME` | the four attention groups over the portfolio, with the is-part-of tree under them | `v h` |
 | `PROJECT` | that project's task tree, to the leaves | `enter` on a project row |
 | `TASK` | one task in full: where it sits, what it waits on, each attempt against its budget, its report, its incidents | `enter` on a task row |
 | `ACTIVE AGENTS` | every run still in flight | `v a` |
+| `NEED YOU` | every stopped row with the command that clears it, at full width | `v y` |
+| `BLOCKED` | what waits on what, as a diagram | `v g` |
+| `ROADMAP` | what is part of what, with each aggregate's completion | `v r` |
 
 `esc` goes back to the row the screen was opened from, never up the is-part-of chain:
-the stack is history, not hierarchy. `wecode tui <id>` opens *on* a screen with HOME
-still underneath it.
+the stack is history, not hierarchy. `wecode tui <id>` opens *on* a screen with
+`DASHBOARD` still underneath it.
+
+## The front page
+
+Nothing on it scrolls. A pane that overflows shows what fits and counts the rest, and the
+count in each title is that pane's whole answer — so it is never the thing pushed off.
+Every pane names its own key, in the pane and again in the bar, because a cockpit that has
+to be remembered is one that gets closed.
+
+The summary is a sentence, not a status word. `healthy` is the **services'** word — the
+machinery around wecode, listed only where the profile configured it, because a reach
+nobody asked for cannot be down. Whether anything is **moving** is the clause after the
+semicolon, and when nothing is it names the cause and the command that would clear it:
+*System is healthy; no agents are running due to 3 queued and nothing is dispatching —
+wecode loop.*
+
+`BLOCKED` and `ROADMAP` are diagrams because both ask a shape question — what waits on
+what, what is part of what — and a list cannot show a shape. `docs/design/tui-dashboard.md`
+is the drawing all of this is held to, and `crates/wecode-cli/tests/tui.rs` holds it.
 
 ## Keys
 
@@ -35,6 +61,7 @@ still underneath it.
 | `esc` `⌫` `h` `←` | back to the screen it came from |
 | `space` | fold or unfold the selection |
 | `z` `Z` | fold or unfold everything |
+| `v` then a letter | open a screen: `d` dashboard · `h` home · `a` agents · `y` needs-you · `g` blocked · `r` roadmap |
 | `/` | narrow this screen to the rows that answer what you type |
 | `:` | ask the same of the whole workspace, and open what it finds |
 | `t` | the ledger as it is written, under the table |
@@ -60,8 +87,9 @@ closed list of categories and the command each maps to.
 
 Three rules, and each of them is a row the panel does not draw:
 
-- **Not on HOME**, where the four groups already lead with these same rows. A screen
-  that answers one question twice teaches a reader to skip both answers.
+- **Not on HOME or `DASHBOARD`**, where the four groups and the `Need you` pane already
+  lead with these same rows. A screen that answers one question twice teaches a reader to
+  skip both answers.
 - **Nothing when nothing waits.** An empty box on every screen would cost the tree a row
   in order to say there was nothing to say.
 - **Five, then a count.** The company's own `[attention] max_open_items`, as on the
