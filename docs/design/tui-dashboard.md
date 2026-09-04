@@ -59,3 +59,27 @@ wrong, and is anything waiting for me".
 | Need you(n) | `tui/approvals.rs::owed` — already built |
 | Blocked(n) | `task_depends_on` where the prerequisite is unfinished, and its status |
 | Roadmap(n) | open epics and stories with their completion |
+
+## As built, 4 Sep 2026
+
+`crates/wecode-cli/src/tui/dashboard.rs`. `Screen::Dash(Panel)` carries the front page and
+the three screens its panes open; the stack's bottom is `Panel::Dashboard`, which is where
+rule 6 lives. `v-y` is the approvals panel at full width — the same rows, room for the
+command. `v-g` and `v-r` are indented trees over the plan's own edges, depth-capped at 8
+so a cycle somebody has just written cannot hang the instrument they opened to find it.
+
+Two sources in the table above are decided and not yet built, so the module computes them
+itself until they are. Neither substitute may outlive the real thing: three surfaces that
+decide idleness separately are three that will disagree, and the phone is the one believed.
+
+| named source | what stands in | what it cannot say |
+|---|---|---|
+| `idle-inspector` | `dashboard::cause` — its ranking, less rows 3 and 4 | nothing wecode stores says a `wecode loop` is alive, so *dispatchable and nothing running* stands in for row 2 and cannot tell an absent driver from one that started a second ago |
+| `background-services-indicator` | `dashboard::services` — store, supervisor, and each reach the profile configures | whether a configured reach *answers*; that needs a probe, which is `wecode doctor`'s and may not run every frame |
+
+Two readings the drawing left open, and how each was settled:
+
+| question | settled |
+|---|---|
+| is a workspace with no Telegram *degraded*? | no — a reach nobody configured is not listed. A front page that opened amber on a solo profile doing what it was told teaches its reader to stop believing the word |
+| does *healthy* cover idleness? | no. `healthy` is the services' word; whether anything is **moving** is the clause after the semicolon. That is what lets the owner's own example — healthy, and nothing running, and the cause named — be one sentence |

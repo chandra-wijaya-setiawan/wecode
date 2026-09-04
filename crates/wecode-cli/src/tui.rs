@@ -46,6 +46,9 @@ enum Pane {
 /// has gone, which is not what they need to know; `TASK cache-keys` says what they see.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Screen {
+    /// The front page and the three screens its panes open. One variant for the four:
+    /// they share a stack, a key prefix and a way back, and only the name differs.
+    Dash(dashboard::Panel),
     Home,
     Agents,
     Project(ProjectId),
@@ -56,14 +59,21 @@ impl Screen {
     /// The row this screen was opened from, so `esc` can land the cursor back on it.
     fn subject(&self) -> Option<Subject> {
         match self {
-            Self::Home | Self::Agents => None,
+            Self::Home | Self::Agents | Self::Dash(_) => None,
             Self::Project(id) => Some(Subject::Project(id.clone())),
             Self::Task(id) => Some(Subject::Task(id.clone())),
         }
     }
 
+    /// Whether this screen is a page of words rather than a table of rows: the keys that
+    /// move a cursor scroll one, and neither the tail nor the tree has anything to say.
+    fn is_page(&self) -> bool {
+        matches!(self, Self::Task(_) | Self::Agents | Self::Dash(_))
+    }
+
     fn title(&self) -> String {
         match self {
+            Self::Dash(p) => p.title().to_string(),
             Self::Home => "HOME".to_string(),
             Self::Agents => "ACTIVE AGENTS".to_string(),
             Self::Project(id) => format!("PROJECT {id}"),
@@ -104,6 +114,11 @@ struct App {
     /// Runs that have not ended yet. Kept beside the plan and ledger because all three
     /// are one reading of the cockpit, refreshed on the same tick.
     active_agents: Vec<Execution>,
+    /// The same open runs as the sweep reads them, with the second each supervisor last
+    /// said it was still there. Kept apart from `active_agents` rather than folded into
+    /// it: that row says a run exists, and this says somebody is still watching it —
+    /// which is the difference between the front page reading `running` and `stalled`.
+    beats: Vec<wecode_store::execution::OpenRun>,
     /// The screens the operator has open, HOME at the bottom and never empty. A stack
     /// because `esc` means *back*, not *up*: a task opened from a HOME group row belongs
     /// to a project they never visited, and walking them up the is-part-of chain would
@@ -157,12 +172,17 @@ impl App {
             ledger,
             audit,
             active_agents,
+            beats: store.open_runs()?,
             known_repos: company.repos.iter().map(|r| r.name.clone()).collect(),
             store,
             company,
-            // HOME is under whatever was named, rather than instead of it: `wecode tui
-            // <id>` is a starting screen, and `esc` from one has somewhere to go.
-            stack: std::iter::once(Screen::Home).chain(opening).collect(),
+            // The dashboard is under whatever was named, rather than instead of it:
+            // `wecode tui <id>` is a starting screen, and `esc` from one has somewhere
+            // to go. It is also the bottom of the stack, so a bare `wecode tui` opens on
+            // the six panes — the board is `v h`, one key away.
+            stack: std::iter::once(Screen::Dash(dashboard::Panel::Dashboard))
+                .chain(opening)
+                .collect(),
             rows: Vec::new(),
             table: TableState::default().with_selected(Some(0)),
             scroll: 0,
@@ -184,7 +204,7 @@ impl App {
 
     /// The screen on the glass.
     fn screen(&self) -> &Screen {
-        self.stack.last().expect("HOME is never popped")
+        self.stack.last().expect("the dashboard is never popped")
     }
 
     /// Whether the store is due to be re-read: on the tick, but never while the keys
@@ -211,6 +231,10 @@ impl App {
                         self.ledger = a;
                         self.audit = attribution;
                         self.active_agents = active;
+                        // Best effort, unlike the three above: a beat that could not be
+                        // read costs the front page one word about a run it is still
+                        // drawing, which is not a reason to report the tick as failed.
+                        self.beats = self.store.open_runs().unwrap_or_default();
                         self.rebuild();
                     }
                     Err(e) => self.status = format!("reload failed: {e}"),
@@ -231,9 +255,9 @@ impl App {
     /// unrolled, each stopped at whatever depth its author wrote out, which is how the
     /// portfolio came to end at root tasks.
     fn rebuild(&mut self) {
-        // ACTIVE AGENTS has no plan rows of its own. Keep the rows and selection of the
-        // screen underneath so leaving the view lands exactly where it was opened.
-        if matches!(self.screen(), Screen::Agents) {
+        // The front page and ACTIVE AGENTS have no plan rows of their own. Keep the rows
+        // and selection underneath, so leaving one lands exactly where it was opened.
+        if matches!(self.screen(), Screen::Agents | Screen::Dash(_)) {
             return;
         }
         // A subject can appear in an attention group and again in the portfolio. Keep
@@ -278,7 +302,7 @@ impl App {
                     tree.push_project(&mut rows, p, &self.known_repos);
                 }
             }
-            Screen::Agents => unreachable!("handled above"),
+            Screen::Agents | Screen::Dash(_) => unreachable!("handled above"),
             // TASK is a page of the view's own words rather than a table: what a leaf
             // task holds — its runs, its spend, its report — is not rows.
             Screen::Task(_) => {}
@@ -369,14 +393,14 @@ impl App {
         self.show_archived
             || match self.screen() {
                 Screen::Project(id) => self.plan.project(id).is_some_and(|p| p.archived),
-                Screen::Home | Screen::Agents | Screen::Task(_) => false,
+                _ => false,
             }
     }
 
     fn move_by(&mut self, delta: isize) {
         // A page of words has no selection to move, so the same keys move the page: `j`
         // is *next* on every screen, and what is next on a page is the line below.
-        if matches!(self.screen(), Screen::Task(_) | Screen::Agents) {
+        if self.screen().is_page() {
             self.scroll = self
                 .scroll
                 .saturating_add_signed(if delta > 0 { 1 } else { -1 });
@@ -433,7 +457,12 @@ impl App {
         self.stack.push(screen);
         self.scroll = 0;
         self.rebuild();
-        self.table.select(Some(self.land_on(0, true)));
+        // Only a screen with rows of its own starts at the top of them. A page kept the
+        // rows underneath it, and moving their cursor would mean `esc` came back to a
+        // row nobody had been on — which is the whole of what the stack is for.
+        if !self.screen().is_page() {
+            self.table.select(Some(self.land_on(0, true)));
+        }
     }
 
     /// Folds the selected row shut, or opens it again.
@@ -481,7 +510,7 @@ impl App {
     /// group is three `enter`s and three `esc`s, not three searches.
     fn back(&mut self) {
         if self.stack.len() < 2 {
-            self.status = "HOME — q quits".into();
+            self.status = "dashboard — q quits".into();
             return;
         }
         let gone = self.stack.pop().expect("checked just above");
@@ -542,14 +571,18 @@ impl App {
         }
         if self.pane == Pane::View {
             self.pane = Pane::Board;
-            match k.code {
-                KeyCode::Char('a') if !matches!(self.screen(), Screen::Agents) => {
-                    self.open(Screen::Agents);
-                }
-                KeyCode::Char('h') if !matches!(self.screen(), Screen::Home) => {
-                    self.open(Screen::Home);
-                }
-                _ => self.status = "view: a agents · h home".into(),
+            // A screen already on the glass is not opened a second time: `v` twice would
+            // otherwise leave a stack `esc` has to be pressed twice to get out of.
+            let want = match k.code {
+                KeyCode::Char('a') => Some(Screen::Agents),
+                KeyCode::Char('h') => Some(Screen::Home),
+                KeyCode::Char(c) => dashboard::Panel::of_key(c).map(Screen::Dash),
+                _ => None,
+            };
+            match want {
+                Some(s) if &s != self.screen() => self.open(s),
+                Some(_) => {}
+                None => self.status = format!("view: {}", dashboard::KEYS),
             }
             return;
         }
@@ -592,13 +625,9 @@ impl App {
             }
             KeyCode::Char('v') => {
                 self.pane = Pane::View;
-                self.status = "view: a agents · h home".into();
+                self.status = format!("view: {}", dashboard::KEYS);
             }
-            KeyCode::Char('/')
-                if !matches!(self.screen(), Screen::Task(_) | Screen::Agents) =>
-            {
-                self.ask();
-            }
+            KeyCode::Char('/') if !self.screen().is_page() => self.ask(),
             // TASK and ACTIVE AGENTS have no plan rows to narrow, so the only search
             // that means anything there is the one `:` asks anyway.
             KeyCode::Char('/' | ':') => {
@@ -652,8 +681,10 @@ fn needs_span(v: &Vitals) -> Span<'static> {
 fn draw(f: &mut Frame, app: &mut App) {
     // The same header and footer on every screen, because the frame is the application
     let screen = app.screen().clone();
-    let tailing = app.tail && !matches!(screen, Screen::Task(_) | Screen::Agents);
-    let active_height = if app.active_agents.is_empty() || matches!(screen, Screen::Agents) {
+    let tailing = app.tail && !screen.is_page();
+    // Never over the front page, whose own Agent pane is these same runs said better.
+    let elsewhere = matches!(screen, Screen::Agents | Screen::Dash(_));
+    let active_height = if app.active_agents.is_empty() || elsewhere {
         0
     } else {
         u16::try_from(app.active_agents.len())
@@ -664,7 +695,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     };
     // What waits on the operator, on every screen but HOME — where the four groups lead
     // with these same rows, and a screen answering one question twice is read past.
-    let owed = (app.waiting && !matches!(screen, Screen::Home)).then(|| approvals::owed(app));
+    let led = matches!(screen, Screen::Home | Screen::Dash(_));
+    let owed = (app.waiting && !led).then(|| approvals::owed(app));
     let owed_height = owed.as_ref().map_or(0, |(r, more)| approvals::height(r, *more));
     let areas = Layout::vertical([
         Constraint::Length(1),
@@ -684,6 +716,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         approvals::panel(f, areas[2], rows, *more);
     }
     match &screen {
+        Screen::Dash(p) => dashboard::draw(f, areas[3], app, *p),
         Screen::Task(id) => page(f, areas[3], app, id),
         Screen::Agents => agents_page(f, areas[3], app),
         Screen::Home | Screen::Project(_) => {
@@ -705,6 +738,10 @@ fn draw(f: &mut Frame, app: &mut App) {
 /// agent, which attempt, or whether two agents are working at once.
 mod agents;
 use agents::{active_agents, agents_page};
+
+/// The front page: six panes answering *is anything wrong, and is anything waiting for
+/// me* — the two questions an operator has before *what tasks exist*.
+mod dashboard;
 
 /// What waits on the operator, and the one command that clears each.
 mod approvals;
@@ -921,8 +958,10 @@ fn help(f: &mut Frame, area: Rect) {
         Line::from("g / G        first / last".to_string()),
         Line::from("/            narrow this screen to what answers".to_string()),
         Line::from(":            go to anything, from anywhere".to_string()),
-        Line::from("v a          open active agents".to_string()),
-        Line::from("v h          open home".to_string()),
+        Line::from("v d          the dashboard — the front page".to_string()),
+        Line::from("v h          the board · v a active agents".to_string()),
+        Line::from("v y          what waits on you, in full".to_string()),
+        Line::from("v g / v r    blocked and roadmap, as diagrams".to_string()),
         Line::from("t            show or hide the ledger as it is written".to_string()),
         Line::from("w            show or hide what waits on you".to_string()),
         Line::from("a            show or hide what is filed away".to_string()),
@@ -1028,14 +1067,18 @@ mod tests {
             .join("\n")
     }
 
-    /// A cockpit over its own store: in memory, and one per test, since they run in
-    /// parallel and shared state means one test wipes another's mid-write.
+    /// A cockpit over its own store, on the board: in memory, and one per test, since
+    /// they run in parallel and shared state means one test wipes another's mid-write.
+    ///
+    /// HOME rather than the front page, because that is the screen most of these are
+    /// about — and it is where `v h` puts an operator, so the stack is the real one.
     pub(super) fn app() -> App {
-        app_on(None)
+        app_on(Some(Screen::Home))
     }
 
-    /// The same, started on a named screen — what `wecode tui <id>` does.
-    fn app_on(opening: Option<Screen>) -> App {
+    /// The same, started on a named screen — what `wecode tui <id>` does, and with
+    /// `None` what a bare `wecode tui` does.
+    pub(super) fn app_on(opening: Option<Screen>) -> App {
         let store = Store::in_memory().expect("store");
         store
             .save_project(
@@ -1080,10 +1123,14 @@ mod tests {
         Screen::Task(TaskId::new(id))
     }
 
+    pub(super) fn dash(p: dashboard::Panel) -> Screen {
+        Screen::Dash(p)
+    }
+
     /// Puts the cursor on a subject's first row, the way `j` and `k` would. First,
     /// because a leaf is now on screen twice — once in the group asking about it, once
     /// in the tree — and the group row is the one the cockpit opens on.
-    fn select(a: &mut App, subject: &Subject) {
+    pub(super) fn select(a: &mut App, subject: &Subject) {
         let pos = a
             .rows
             .iter()
@@ -1096,7 +1143,7 @@ mod tests {
         Subject::Project(ProjectId::new(id))
     }
 
-    fn leaf(id: &str) -> Subject {
+    pub(super) fn leaf(id: &str) -> Subject {
         Subject::Task(TaskId::new(id))
     }
 
@@ -1118,7 +1165,7 @@ mod tests {
         }
     }
 
-    fn task(id: &str, title: &str, glob: &str) -> Task {
+    pub(super) fn task(id: &str, title: &str, glob: &str) -> Task {
         Task::new(id, "caching", title)
             .accepting(Measure::Command {
                 cmd: "cargo test".into(),
@@ -1420,20 +1467,20 @@ mod tests {
         }
         assert_eq!(a.selected().unwrap().subject, Some(project("caching")));
 
-        // HOME is the bottom of the stack: esc there is not a way out of the cockpit.
+        // The dashboard is the bottom of the stack, and HOME is a screen above it like
+        // any other: esc walks out through the front page rather than out of the cockpit.
         a.back();
-        assert_eq!(a.screen(), &Screen::Home);
-        assert!(a.status.contains("q quits"), "{}", a.status);
+        assert_eq!(a.screen(), &Screen::Dash(dashboard::Panel::Dashboard));
 
-        // `wecode tui <id>` is a starting point rather than a mode: HOME goes under what
-        // it names, so `esc` from there behaves as it does anywhere else.
+        // `wecode tui <id>` is a starting point rather than a mode: the front page goes
+        // under what it names, so `esc` from there behaves as it does anywhere else.
         assert_eq!(opening(&a.plan, "caching"), Ok(on("caching")));
         assert_eq!(opening(&a.plan, "keys"), Ok(onto("keys")));
         assert!(opening(&a.plan, "nope").is_err());
         let mut b = app_on(Some(onto("keys")));
         assert_eq!(b.screen(), &onto("keys"));
         b.back();
-        assert_eq!(b.screen(), &Screen::Home);
+        assert_eq!(b.screen(), &Screen::Dash(dashboard::Panel::Dashboard));
 
         a.key(KeyEvent::from(KeyCode::Char('?')));
         assert!(a.pane == Pane::Help);
@@ -1478,55 +1525,6 @@ mod tests {
         assert_eq!(a.scroll, 0);
         a.key(KeyEvent::from(KeyCode::Char('k')));
         assert_eq!(a.scroll, 0, "and stops at the top");
-    }
-
-    #[test]
-    fn active_agents_stay_on_the_cockpit_until_their_run_ends() {
-        let mut a = app();
-        let id = TaskId::new("keys");
-        let run = a
-            .store
-            .start_execution(&id, "agent-7", None, Some(1234))
-            .unwrap();
-        a.reload();
-
-        let out = render(&mut a, 118, 30);
-        assert!(out.contains("ACTIVE AGENTS"), "{out}");
-        assert!(out.contains("agent-7"), "the session identifies the agent:\n{out}");
-        assert!(out.contains("keys #1"), "the task and attempt are visible:\n{out}");
-        assert!(out.contains("design the cache keys"), "its objective is visible:\n{out}");
-        assert!(out.contains("working"), "its live state is visible:\n{out}");
-
-        a.store
-            .finish_execution(
-                run,
-                wecode_core::ExecutionStatus::Completed,
-                "exit 0",
-                wecode_store::execution::Spend::default(),
-            )
-            .unwrap();
-        a.reload();
-        assert!(
-            !render(&mut a, 118, 30).contains("ACTIVE AGENTS"),
-            "finished work leaves the active panel"
-        );
-    }
-
-    #[test]
-    fn v_a_opens_active_agents_and_back_returns_to_the_same_place() {
-        let mut a = app();
-        select(&mut a, &leaf("keys"));
-        let selected = a.selected().and_then(|row| row.subject.clone());
-
-        a.key(KeyEvent::from(KeyCode::Char('v')));
-        assert_eq!(a.screen(), &Screen::Home);
-        a.key(KeyEvent::from(KeyCode::Char('a')));
-        assert_eq!(a.screen(), &Screen::Agents);
-        assert!(render(&mut a, 118, 24).contains("no active agents"));
-
-        a.key(KeyEvent::from(KeyCode::Esc));
-        assert_eq!(a.screen(), &Screen::Home);
-        assert_eq!(a.selected().and_then(|row| row.subject.clone()), selected);
     }
 
     #[test]

@@ -69,3 +69,60 @@ pub(super) fn agents_table(f: &mut Frame, area: Rect, app: &App, limit: Option<u
     f.render_widget(table, area);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{app, leaf, render, select};
+    use super::super::Screen;
+    use crossterm::event::{KeyCode, KeyEvent};
+    use wecode_core::TaskId;
+
+    #[test]
+    fn active_agents_stay_on_the_cockpit_until_their_run_ends() {
+        let mut a = app();
+        let id = TaskId::new("keys");
+        let run = a
+            .store
+            .start_execution(&id, "agent-7", None, Some(1234))
+            .unwrap();
+        a.reload();
+
+        let out = render(&mut a, 118, 30);
+        assert!(out.contains("ACTIVE AGENTS"), "{out}");
+        assert!(out.contains("agent-7"), "the session identifies the agent:\n{out}");
+        assert!(out.contains("keys #1"), "the task and attempt are visible:\n{out}");
+        assert!(out.contains("design the cache keys"), "its objective is visible:\n{out}");
+        assert!(out.contains("working"), "its live state is visible:\n{out}");
+
+        a.store
+            .finish_execution(
+                run,
+                wecode_core::ExecutionStatus::Completed,
+                "exit 0",
+                wecode_store::execution::Spend::default(),
+            )
+            .unwrap();
+        a.reload();
+        assert!(
+            !render(&mut a, 118, 30).contains("ACTIVE AGENTS"),
+            "finished work leaves the active panel"
+        );
+    }
+
+    #[test]
+    fn v_a_opens_active_agents_and_back_returns_to_the_same_place() {
+        let mut a = app();
+        select(&mut a, &leaf("keys"));
+        let selected = a.selected().and_then(|row| row.subject.clone());
+
+        a.key(KeyEvent::from(KeyCode::Char('v')));
+        assert_eq!(a.screen(), &Screen::Home);
+        a.key(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(a.screen(), &Screen::Agents);
+        assert!(render(&mut a, 118, 24).contains("no active agents"));
+
+        a.key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(a.screen(), &Screen::Home);
+        assert_eq!(a.selected().and_then(|row| row.subject.clone()), selected);
+    }
+}
+
