@@ -8,6 +8,12 @@
 //! changes nothing about a verdict already earned — in either direction. Proving that
 //! needs a real branch, a real attempt commit, and the real command run twice over them,
 //! which is this file and not a unit test.
+//!
+//! The second half of the file is `verify`'s other reading of a diff nobody could have
+//! unit-tested either: **why it is empty**. A run that left its report and wrote nothing
+//! decided that, and a run that left no trace at all was stopped before it could decide —
+//! `verify::Empty`. The evidence is a real agent process against a real worktree, since
+//! what is being claimed is that wecode can tell the two apart without asking either one.
 
 mod support;
 
@@ -175,4 +181,109 @@ fn a_subject_narrowed_after_the_run_cannot_excuse_it() {
     org.run(&["verify", "t"])
         .assert_ok("verify again")
         .assert_contains("docs/cache.md did not move with src/cache.rs");
+}
+
+// ------------------------------------- an empty run, and which kind of empty ------
+
+/// The agent every one of these stands in for: one that finishes and writes no code.
+/// `REPORTS` does what the envelope asks and nothing else; `SILENT` does not get that
+/// far. Both exit 0, both leave the source exactly as they found it, and the tree is the
+/// only thing that tells them apart.
+///
+/// The report is empty on purpose. Nothing in `verify` opens it — what is claimed here is
+/// that a run reached the point of writing one, and a file with a verdict in it would
+/// invite the reading that wecode believed what it said.
+const REPORTS: &str = "mkdir -p .wecode/run && touch .wecode/run/result.json";
+const SILENT: &str = "exit 0";
+
+#[test]
+fn an_agent_that_wrote_only_its_own_report_delivered_nothing() {
+    // The hole this closes, and why the file is the wrong thing to count: the envelope
+    // orders the report, so a diff that included it let a run answer *did it do
+    // anything* by doing exactly what it was told. The toy fixture does not gitignore
+    // `.wecode/run/`, which is what put the file in the diff — one changed file, and a
+    // green `true` behind it, on its way to a merge.
+    let (org, _repo) = with_agent("empty-reported", REPORTS);
+    a_task(&org, "t", &["src/**"]);
+
+    org.run(&["run", "t"])
+        .assert_contains("diff — 0 files")
+        .assert_contains("it reported and wrote nothing")
+        .assert_contains("produced no diff")
+        .assert_contains("failed")
+        // Its own report is not a delivery, so it is not listed as one — and it is not a
+        // violation either, which is the rule that was already there.
+        .assert_lacks("result.json")
+        .assert_lacks("outside scope");
+}
+
+#[test]
+fn an_agent_that_left_no_trace_at_all_is_reported_as_stopped_rather_than_idle() {
+    // The distinction itself. Same empty diff, same failed status, same green acceptance
+    // — and a different sentence, because the next move is different. wecode made
+    // `.wecode/run/` before the process started and this run put nothing in it, which is
+    // a run that never got to the writing rather than one that had nothing to write.
+    let (org, _repo) = with_agent("empty-silent", SILENT);
+    a_task(&org, "t", &["src/**"]);
+
+    org.run(&["run", "t"])
+        .assert_contains("nothing changed — and no report either")
+        .assert_contains("stopped or refused before it could write")
+        .assert_contains("Read its log, not its prompt")
+        .assert_contains("failed");
+}
+
+#[test]
+fn a_repository_that_gitignores_the_worker_area_still_tells_the_two_apart() {
+    // The configuration this project itself runs under, and the one the diff half of the
+    // observation is blind to: an ignored report is in no diff, so the tree is the only
+    // place left to ask. Same script and same task as the run above, and it has to reach
+    // the same reading — which is why the question is put to both halves.
+    let (org, repo) = with_agent("empty-ignored", REPORTS);
+    std::fs::write(repo.join(".gitignore"), ".wecode/run/\n").unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "-qm", "ignore the worker area"]);
+    a_task(&org, "t", &["src/**"]);
+
+    org.run(&["run", "t"])
+        .assert_contains("diff — 0 files")
+        .assert_contains("it reported and wrote nothing")
+        .assert_lacks("no report either");
+}
+
+#[test]
+fn the_two_empty_runs_do_not_borrow_each_others_sentence() {
+    // Or the pair above is satisfied by printing both lines every time. Each reading is
+    // asserted absent from the other run, over the same task and the same acceptance.
+    let (reported, _r) = with_agent("empty-not-silent", REPORTS);
+    a_task(&reported, "t", &["src/**"]);
+    reported
+        .run(&["run", "t"])
+        .assert_lacks("no report either")
+        .assert_lacks("stopped or refused");
+
+    let (silent, _s) = with_agent("empty-not-reported", SILENT);
+    a_task(&silent, "t", &["src/**"]);
+    silent
+        .run(&["run", "t"])
+        .assert_lacks("it reported and wrote nothing");
+}
+
+#[test]
+fn a_run_that_wrote_code_is_neither_of_them() {
+    // The other half, or all of this is satisfied by never passing. The same stub agent
+    // with one line of work in it earns the tick, and none of the empty-diff readings
+    // appears — including on the report it writes beside the code.
+    let (org, _repo) = with_agent(
+        "empty-none",
+        "echo '// evicts' >> src/cache.rs && mkdir -p .wecode/run && touch .wecode/run/result.json",
+    );
+    a_task(&org, "t", &["src/**"]);
+
+    org.run(&["run", "t"])
+        .assert_ok("run")
+        .assert_contains("✓ passed")
+        .assert_contains("diff — 1 file")
+        .assert_lacks("nothing changed")
+        .assert_lacks("result.json");
 }
