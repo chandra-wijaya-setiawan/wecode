@@ -20,8 +20,10 @@ use rusqlite::Connection;
 /// being read off the agent's output and printed, and nothing kept it. 10 adds
 /// `tasks.doer`, without which a manual task read as an agent's on the next tick.
 /// 11 adds `tasks.steps`: a person's task is dispatched by being described, and until
-/// this column existed there was nowhere for the description to live.
-pub const VERSION: i64 = 11;
+/// this column existed there was nowhere for the description to live. 12 adds
+/// `run_journal`, so a step's intent is on disk before the step happens and a restart
+/// settles what a dead process left rather than inferring it.
+pub const VERSION: i64 = 12;
 
 const SCHEMA: &str = r"
 CREATE TABLE projects (
@@ -254,6 +256,46 @@ CREATE TABLE short_numbers (
 ) STRICT;
 ";
 
+/// The `run_journal` table — see [`crate::journal`] for what the columns are for.
+///
+/// Written as its own constant and appended to both [`SCHEMA`] and [`UPGRADES`], so a
+/// fresh file and an upgraded one get the same table from the same text. Every table
+/// above it predates that habit and is spelled twice; this one is not.
+///
+/// Not the ledger and not columns on `task_executions`: the argument is in the module,
+/// and the short of it is that ledger rows are evidence while these are retractable,
+/// and the first step of a run happens before an execution row exists.
+///
+/// No foreign key on `task_id`, like `worktrees` and `short_numbers`. The row is the
+/// record of a process left holding something, and deleting the task does not stop the
+/// process.
+const RUN_JOURNAL: &str = "
+CREATE TABLE run_journal (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT    NOT NULL,   -- no FK: outlives the task
+    exec_id      INTEGER,            -- NULL before the execution row exists
+    step         TEXT    NOT NULL,   -- 'prepare'|'spawn'|'commit'|'verdict'|'reclaim'
+    resolve      TEXT    NOT NULL,   -- 'redo'|'verify'|'refuse'
+    target       TEXT    NOT NULL,   -- the worktree, the launch line, the branch
+    token        TEXT    NOT NULL,   -- laid into the child's environment
+    host         TEXT    NOT NULL,
+    boot         TEXT    NOT NULL,
+    owner_pid    INTEGER NOT NULL,   -- the wecode process that wrote this intent
+    owner_start  INTEGER NOT NULL,
+    child_pid    INTEGER,            -- written the moment the child exists; == its pgid
+    child_start  INTEGER,
+    -- The task status the dispatch took, so handing it back is not a guess.
+    prior        TEXT,
+    opened       INTEGER NOT NULL,
+    settled      INTEGER,            -- NULL while in doubt
+    outcome      TEXT                -- 'done'|'undone'|'abandoned'
+) STRICT;
+
+-- Partial, because the only query that matters is `what is still open`, and a
+-- workspace accumulates one settled row per step of every run it ever made.
+CREATE INDEX journal_open ON run_journal(task_id) WHERE settled IS NULL;
+";
+
 /// The `task_executions` table, as an upgrade for a database that predates it.
 ///
 /// Frozen at the shape version 3 had. A file arriving from version 2 runs this and
@@ -433,6 +475,12 @@ const UPGRADES: &[(i64, &str)] = &[
     // wrote instructions* into *the instructions are the title again*, which is the one
     // thing the column exists to tell apart.
     (10, "ALTER TABLE tasks ADD COLUMN steps TEXT"),
+    // Nothing backfills, and here there is nothing that could: a row says a *live*
+    // process was holding something, and every process that ran before this table
+    // existed has long since stopped. A workspace upgrading has no runs in doubt by
+    // construction, which is the one migration in this list where an empty table is
+    // the complete truth rather than a decision about the past.
+    (11, RUN_JOURNAL),
 ];
 
 /// Applies the schema if the database is empty, and enables foreign keys plus WAL.
@@ -451,6 +499,9 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             // In-memory databases do not support it, hence the ignored result.
             let _ = conn.pragma_update(None, "journal_mode", "WAL");
             conn.execute_batch(SCHEMA)?;
+            // The same text the 11→12 upgrade runs, rather than a second copy of it
+            // in `SCHEMA` that has to be kept in step by hand.
+            conn.execute_batch(RUN_JOURNAL)?;
             conn.pragma_update(None, "user_version", VERSION)?;
             Ok(())
         }
@@ -842,6 +893,55 @@ mod tests {
             .expect("tasks.steps exists");
         assert_eq!(title, "mint the fares token", "the plan survived");
         assert_eq!(steps, None, "the title is not passed off as instructions");
+    }
+
+    #[test]
+    fn a_version_eleven_file_gains_the_journal_and_keeps_its_plan() {
+        // The compatibility promise: an existing workspace opens, upgrades in place,
+        // and arrives with an empty journal. Empty is the whole truth here — a row
+        // says a live process is holding something, and every process that ran before
+        // the table existed has stopped.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch(
+            "INSERT INTO projects (id, repo, objective, status)
+             VALUES ('p','wecode','an objective','active');
+             INSERT INTO tasks (id, project_id, kind, title, status)
+             VALUES ('mint','p','chore','mint the fares token','running');",
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 11i64).unwrap();
+
+        migrate(&c).unwrap();
+
+        let open: i64 = c
+            .query_row("SELECT count(*) FROM run_journal", [], |r| r.get(0))
+            .expect("run_journal exists");
+        assert_eq!(open, 0);
+        let title: String = c
+            .query_row("SELECT title FROM tasks WHERE id = 'mint'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(title, "mint the fares token", "the plan survived");
+    }
+
+    #[test]
+    fn a_fresh_install_and_an_upgrade_agree_about_the_journal() {
+        // The two paths run the same text, and this is what says so: a column added to
+        // `RUN_JOURNAL` reaches both, where a table spelled twice reaches whichever
+        // copy was remembered.
+        let fresh = db();
+        let upgraded = Connection::open_in_memory().unwrap();
+        upgraded.execute_batch(SCHEMA).unwrap();
+        upgraded.pragma_update(None, "user_version", 11i64).unwrap();
+        migrate(&upgraded).unwrap();
+
+        let columns = |c: &Connection| -> Vec<String> {
+            let mut stmt = c.prepare("SELECT name FROM pragma_table_info('run_journal')").unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert_eq!(columns(&fresh), columns(&upgraded));
+        assert!(columns(&fresh).contains(&"child_pid".to_string()));
     }
 
     #[test]

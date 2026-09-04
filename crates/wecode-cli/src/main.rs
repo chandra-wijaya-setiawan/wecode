@@ -7,9 +7,11 @@ mod commands;
 mod doctor;
 mod git;
 mod handoff;
+mod identity;
 mod ledger;
 mod map;
 mod notify;
+mod reclaim;
 mod record;
 mod render;
 mod scheduler;
@@ -29,6 +31,7 @@ use commands::exec::*;
 use commands::gov::*;
 use commands::org::*;
 use commands::plan::*;
+use commands::trees::*;
 use commands::view::*;
 
 const USAGE: &str = "\
@@ -202,6 +205,12 @@ fn run(a: &Args) -> Res {
         ("merge", _) => merge_task(a),
         ("rollback", _) => rollback_task(a),
         ("run", _) => run_task(a),
+        // Absent from USAGE above, and that is a scope defect rather than a decision:
+        // `docs/reference/commands.md` is `wecode help` verbatim and a test holds it
+        // to that, and this task may not write outside `crates/**`. Adding the entry
+        // here would have failed the suite every other task in this repo runs as its
+        // acceptance. `wecode doctor` names the command in its report meanwhile.
+        ("reclaim", _) => reclaim::command(a),
         ("tick", _) => tick(a),
         ("loop", _) | ("serve", _) => serve(a),
         ("worktree", "remove") | ("worktree", "rm") => worktree_remove(a),

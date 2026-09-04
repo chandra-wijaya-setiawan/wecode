@@ -25,6 +25,10 @@ crossterm = "0.29.0"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# For the reclaim drill only. It has to put the database into a state no API can
+# reach — a spawn that died in the window before its pid was written down — which is
+# exactly the case the token scan exists for and the only way to arrange it.
+rusqlite = { workspace = true }
 
 [lints]
 workspace = true

@@ -8,6 +8,7 @@ pub mod audit;
 pub mod execution;
 pub mod inbox;
 mod int;
+pub mod journal;
 pub mod plan;
 pub mod schema;
 pub mod session;
@@ -21,6 +22,7 @@ use rusqlite::Connection;
 
 pub use audit::{AuditLine, AuditQuery};
 pub use execution::Execution;
+pub use journal::{Doubt, Intent, Owner};
 pub use session::SessionInfo;
 pub use short::Level;
 pub use worktree::Worktree;

@@ -1,10 +1,17 @@
 //! Views of the concepts the crates below this one own.
 //!
 //! Rendering lives with the thing it renders. A worktree listing belongs beside the
-//! code that knows where worktrees are, a run report beside the supervisor that watched
-//! the run, a merge report beside the record it is committed as — and every one of
-//! those things is defined in this crate, so every one of those renderers now sits in
-//! the module that defines it. What is left here is the half `wecode-cli` cannot put
+//! code that knows where worktrees are, a merge report beside the record it is
+//! committed as — and every one of those things is defined in this crate, so every one
+//! of those renderers now sits in the module that defines it.
+//!
+//! [`run`] is the exception the rule earned. A run report was beside the supervisor on
+//! exactly that argument, and the file it was in is the one holding the clock, the
+//! meter, the pipes and the signals — the code that must stay readable when a run is
+//! being killed wrongly. Supervising a process and describing one are different jobs
+//! that happen to share a subject, so the view moved and the supervisor stayed.
+//!
+//! What is left here is the half `wecode-cli` cannot put
 //! beside its subject: a [`wecode_core::Plan`] is core's, a `Playbook` and a `Company`
 //! are org's, a `Grant` and a `Decision` are gov's, and none of those crates may know
 //! that a terminal exists — `core` has no dependencies at all, which is the ordering
@@ -22,6 +29,7 @@ pub(crate) mod gov;
 pub(crate) mod org;
 pub(crate) mod plan;
 pub(crate) mod playbook;
+pub(crate) mod run;
 
 use wecode_core::{Task, TaskKind, TaskStatus};
 
