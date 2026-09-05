@@ -71,3 +71,12 @@ file said as much when it was written.
 It is superseded rather than amended: a derived roadmap cannot hold priority, rationale,
 or the parked/blocked distinction, and those are the three things the hand-kept file
 proves an operator needs.
+
+## It replaces the derived pane
+The dashboard's Roadmap pane stops listing open containers and reads the `roadmap`
+table instead — items by priority, with their state. The derived listing is not kept
+alongside it under another name: 43 open containers answered no question anyone was
+asking, and a pane that must be explained is a pane that failed.
+
+Open containers remain visible where they belong — under their project on the home
+screen, which is what the portfolio is for.
