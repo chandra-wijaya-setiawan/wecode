@@ -51,3 +51,55 @@ Three rules the classes are useless without:
 Not auto-widening scope, not auto-resolving conflicts, not re-running a failed
 acceptance in the hope of a different result. Recovery restores work the machinery
 broke; it never decides something a person declined to.
+
+## How recovery runs (owner, 5 Sep)
+
+*"Rather than the supervisor being alive all the time, it is better to have a
+deterministic scheduled process that scans for liveness, stuck, etc. and clears
+deterministically. If any remain stuck, kick a chore agent: check the wecode tasks
+that are stuck, try to clear them, and if it needs a human, tell the human."*
+
+Adopted. It fixes the fragility this very design had: today the only recovery
+lives **inside** `wecode loop`, so a dead loop recovers nothing — and on 4–5 Sep
+the loop died with its session, leaving two runs orphaned for five hours.
+
+### Three rungs, in order
+1. **`wecode recover` — deterministic, scheduled, stateless.** A single pass that
+   closes silent runs, releases dependents of dead work, retires signatures that
+   no longer cover their task, and reports what it did. Safe to run from cron or a
+   timer, safe to run twice, and it needs no process to have been watching.
+2. **An inspector agent — only for what rung 1 could not clear.** Dispatched as an
+   ordinary chore, with a template that says: here is what is still stuck and what
+   was already tried; clear what you can; whatever needs a person, say so plainly.
+   It is a fallback, never the first responder — judgment costs money and rung 1 is
+   free.
+3. **The human — only for what the inspector escalates**, arriving as a
+   `needs-human` row with its category and the command that clears it.
+
+### The consequence nobody should discover later
+The heartbeat sweep confirms suspicion across **two passes 60 seconds apart**, and
+that memory lives in the loop's process (`scheduler::Suspects`). A scheduled
+process has no such memory: every run is the first pass, so nothing would ever be
+confirmed. **Suspicion must move into the store** — a `suspected_at` column, set on
+the pass that first reads a run stale and cleared when it beats again. That is the
+one schema change this design requires, and without it rung 1 either never acts or
+acts on a single reading, which is the laptop-suspend bug the window exists to
+prevent.
+
+### What the inspector may and may not do
+| may | may not |
+|---|---|
+| re-arm a failed task, repoint an edge off dead work, close a stale row | approve anything, merge anything, widen a scope |
+| write a `needs-human` row naming what it could not clear | decide something a person declined |
+| read every record in the ledger | dispatch more agents |
+
+It holds an ordinary seat with an ordinary role, and the Broker judges it exactly
+as it judges any other. An inspector that could approve its own findings would be
+a second operator, not a fallback.
+
+### Guards
+- Rung 2 runs only when rung 1 leaves something behind, and at most once per scan.
+- An inspector that finds nothing twice in a row backs off — a fallback that fires
+  on every quiet pass is a cost with no signal.
+- The inspector's own run is subject to the same sweep. Nothing is exempt from the
+  mechanism it maintains.
