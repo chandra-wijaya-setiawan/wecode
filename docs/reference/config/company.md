@@ -411,6 +411,12 @@ chief (claude-code)  merge release/2026-09
 | open a branch nothing protects | those merges already land; the order is inert, and is left that way so putting a protection back is a one-line edit |
 | reach `wecode merge <task>` **yet** | that command still re-derives protection for itself; until it asks `Charter::demands_signature_to_merge`, `guard` and `merge` can disagree about the same merge |
 
+The last row is the one to know about, because it is the row an operator gets wrong: a
+standing order settles what `wecode guard` answers and what the Broker records, and
+`wecode merge <task>` refuses the same merge anyway, one gate in front of the Broker.
+Until it lands, a pre-authorised merge is still landed by hand with a signature. The
+line and the test it wants are named at the foot of `crates/wecode-cli/tests/merge-policy.rs`.
+
 It also cannot be written anywhere but here. A per-task signature comes from any seat
 holding `approve merge`; answering every merge of a shape in advance changes what the
 charter demands, and the charter is amended by hand, in a diff — never on a signature.

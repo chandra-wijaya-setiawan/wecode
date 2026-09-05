@@ -153,3 +153,24 @@ fn an_order_over_a_branch_nothing_protects_grants_nothing_and_breaks_nothing() {
 // instead of asking `Charter::demands_signature_to_merge`, which is now the single answer
 // to that question. Until that line changes, `guard` and `merge` can disagree about the
 // same merge — so there is no test here claiming otherwise.
+//
+// Located, so the fix is not re-derived a third time. In `commands::gov::merge_task`:
+//
+//     let protected = company.charter.invariants.iter().any(|inv| { .. });
+//     let needs_signature = protected || policy == wecode_org::MergePolicy::Approved;
+//
+// becomes `charter.demands_signature_to_merge(Some(project.id.as_str()), &target)` in
+// place of `protected` — and `protected` stays as its own binding, because the refusal
+// it prints says `charter: protects it | silent` and a pre-authorised protected branch
+// is neither. `merge` asks about the *playbook's* `merge_to`, not a branch anyone typed,
+// which is the one thing `guard` cannot reach and the reason this file stops here.
+//
+// The test that then belongs here needs `support::merge::mergeable(_, "auto")`:
+// `merge = "approved"` keeps the signature by design — a project may be stricter than
+// the charter, never laxer — so an order over one would read as inert and prove nothing.
+// Widen `approval_to_merge` to cover that fixture's `dev` the way `tests/merge.rs` does,
+// pre-authorise `to = "dev"`, land a task, and assert `wecode merge` needs no signature.
+//
+// One thing to decide with it, in `record::merged`: it is handed `needs_signature` and
+// prints `how  signed off | automatic`. A pre-authorised merge is neither — the operator
+// authorised it, in `company.toml`, before it existed.
