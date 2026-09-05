@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use wecode_core::{Plan, Task, TaskId, WORKER_DIR, admission};
 use wecode_org::{Company, Workspace};
 use wecode_store::Store;
+use wecode_store::journal::{self, Resolve, Step};
 
 use crate::commands::ctx::*;
-use crate::{cache, git, handoff, render, work};
+use crate::{cache, git, handoff, identity, render, work};
 
 use super::queue::unsigned;
 
@@ -87,6 +88,12 @@ pub(crate) struct Prepared {
     pub(crate) a2a: wecode_a2a::Task,
     /// What preparation did, for the operator to read.
     pub(crate) notes: String,
+    /// The journal row this preparation opened. Open while this process owns the task,
+    /// and what a restart settles if this process does not survive to.
+    pub(crate) journal: i64,
+    /// The name this dispatch's agent is launched under, so an orphan is findable by
+    /// what it is carrying rather than only by a number.
+    pub(crate) token: String,
 }
 
 /// Makes the scratch directory the envelope names, and answers with it.
@@ -198,11 +205,36 @@ pub(crate) fn prepare(
     let mut notes = String::new();
     // The project's own checkout, kept apart from `cwd` rather than shadowed by it: a
     let repo = repo_path(company, project)?;
-    let mut cwd = repo.clone();
+    // Resolved before anything is cut, because the row below has to name the tree it is
+    // about to make and has to be committed first.
+    let cwd = if wants_worktree {
+        work::worktree_for(&work::org_name(ws.root()), &owner.id)
+    } else {
+        repo.clone()
+    };
+
+    // The rule, at the first step it applies to: cutting a worktree changes something
+    // outside this database, so the intent goes in before it and is settled after — see
+    // [`crate::reclaim`]. `redo`, because `worktree add` followed by `reset --hard` is
+    // already idempotent, so a second preparation overwrites the first rather than
+    // leaving two trees.
+    //
+    // This row stays open for as long as *this process* owns the task, which is longer
+    // than the step: it is what tells a restart there is a tree standing and a claim to
+    // hand back. `start` settles it on the way out, because from there the tree is an
+    // operator's and an operator is not a process whose liveness anything can prove.
+    let token = identity::token(&id);
+    let journal = store.open_intent(
+        &journal::Intent::new(&id, Step::Prepare, Resolve::Redo, &cwd.to_string_lossy(), &token)
+            .owned_by(identity::me())
+            // The one row that carries it. `Claim` recorded this status in memory, and
+            // memory is exactly what the crash took.
+            .taking(task.status),
+    )?;
 
     if wants_worktree {
         let branch = work::branch_for(&owner.id);
-        let path = work::worktree_for(&work::org_name(ws.root()), &owner.id);
+        let path = cwd.clone();
         if !git::is_repo(&repo) {
             return Err(format!("{} is not a git repository", repo.display()).into());
         }
@@ -244,7 +276,6 @@ pub(crate) fn prepare(
         if owner.id != id {
             notes.push_str(&format!("  shared with {} (its main task)\n", owner.id));
         }
-        cwd = path;
     } else {
         notes.push_str(&format!(
             "  no worktree — the {} playbook does not ask for one\n  work in {}\n",
@@ -289,6 +320,8 @@ pub(crate) fn prepare(
         cwd,
         cache: shared,
         notes,
+        journal,
+        token,
     })
 }
 

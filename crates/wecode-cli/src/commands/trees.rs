@@ -1,4 +1,10 @@
-//! Seeing and removing the worktrees in play, whoever owns them.
+//! Commands over the trees work happens in: what is standing, whose it is, and taking
+//! one down.
+//!
+//! Apart from [`crate::commands::exec`], which cuts them. Preparing a worktree is a step
+//! of a run and belongs with the run; listing and removing them are the operator's own
+//! commands, aimed at directories rather than at tasks — a path reaches trees no task
+//! id can, which is the whole reason they are separate concerns.
 
 use std::path::PathBuf;
 

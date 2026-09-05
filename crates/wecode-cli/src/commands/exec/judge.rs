@@ -6,7 +6,7 @@ use wecode_store::Store;
 
 use crate::args::Args;
 use crate::commands::ctx::*;
-use crate::{cache, git, notify, spawn, verify, work};
+use crate::{cache, git, notify, verify, work};
 
 /// Judges a finished task from its diff and its acceptance commands.
 ///
@@ -180,7 +180,9 @@ pub(crate) fn commit_attempt(
     store: &Store,
     id: &TaskId,
     cwd: &std::path::Path,
-    outcome: &spawn::Outcome,
+    // The cause as a sentence, not the `Outcome` it usually comes from: `reclaim`
+    // commits an attempt nobody watched end, and it has no Outcome to hand over.
+    cause: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     if !cwd.starts_with(work::run_root()) {
         return Ok(String::new());
@@ -191,7 +193,7 @@ pub(crate) fn commit_attempt(
     // by their first line, and the handoff and the scope check both read that match.
     // A failed attempt's commit is the thing a retry is handed as a diff — the reason
     // it failed belongs beside the diff rather than only in the database next door.
-    let message = format!("{id}: attempt {attempt}\n\n{}", outcome.cause());
+    let message = format!("{id}: attempt {attempt}\n\n{cause}");
     Ok(match git::commit_all(cwd, &message)? {
         Some(sha) => format!("  committed {sha} — attempt {attempt}\n"),
         None => "  nothing to commit — the agent changed no files\n".to_string(),

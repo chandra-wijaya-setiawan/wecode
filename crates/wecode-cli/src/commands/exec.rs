@@ -1,22 +1,21 @@
 //! Commands that make work happen: prepare it, run it, judge it, schedule it.
 //!
 //! Split by reason-to-change: `prepare` cuts the tree and writes the envelope,
-//! `queue` decides what may go and promotes, `dispatch` runs the agents, `judge`
-//! reads the diff, and `view` shows and removes the worktrees. The small helpers
+//! `queue` decides what may go and promotes, `dispatch` runs the agents, and `judge`
+//! reads the diff. Listing and removing trees is `commands::trees` — an operator's
+//! command aimed at a directory, not a step of a run. The small helpers
 //! both sides share stay here, with the re-exports that keep every command's path.
 
 mod dispatch;
 mod judge;
 mod prepare;
 mod queue;
-mod view;
 #[cfg(test)]
 mod test_support;
 
 pub(crate) use dispatch::{run_task, serve, start};
-pub(crate) use judge::verify_task;
+pub(crate) use judge::{commit_attempt, verify_task};
 pub(crate) use queue::{tick, unsigned};
-pub(crate) use view::{worktree_list, worktree_remove};
 // Kept at `exec::prepare` for path stability: `prepare` has only in-tree callers today
 // (each reaches it as `super::prepare::prepare`), so the re-export is otherwise unused.
 #[allow(unused_imports)]

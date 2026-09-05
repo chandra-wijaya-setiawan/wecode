@@ -1,9 +1,11 @@
 //! Exercising what a task will depend on, before a task depends on it.
 //!
-//! Two halves, in the order they are needed. [`machine`] asks whether this computer can
-//! do the work at all — a `git`, somewhere to cut worktrees, a repository to cut them
-//! from, a coding CLI to run inside them, and the environment that CLI is launched with.
-//! [`hooks`] asks whether the operator can be reached once it stops, and can answer.
+//! Three halves — the third arrived late and is named honestly below. [`machine`] asks
+//! whether this computer can do the work at all: a `git`, somewhere to cut worktrees, a
+//! repository to cut them from, a coding CLI to run inside them, and the environment
+//! that CLI is launched with. [`hooks`] asks whether the operator can be reached once it
+//! stops, and can answer. `runs` asks whether anything in the workspace is still being
+//! held by a process that is gone.
 //!
 //! Both halves are configuration nothing else checks. `company.toml` is hand-edited by
 //! design — a role's write scope is exactly the thing you want to review in a diff — and
@@ -119,20 +121,25 @@ struct Section {
 
 /// `wecode doctor`.
 ///
-/// The store is never opened here, and that is the guarantee rather than an economy:
-/// the drill has no handle on anything it could write. What state it does reach it
-/// reaches through the hook — a `[notify] command` that calls `wecode` back is the
-/// operator's own line doing the operator's own thing, and the charter is what bounds
-/// that, exactly as when the loop fires it.
+/// The drill **changes nothing**, and that is the guarantee. It used to be kept by not
+/// opening the store at all, which was the stronger version of the same promise and the
+/// reason the earlier note here said so. It cannot be kept that way any more: `reclaim`
+/// acts and this reports what it would do — the split [`crate::teardown`] draws between
+/// naming a thing and doing it — and the runs in doubt are in the database. So the store
+/// is opened, read, and never written.
 ///
-/// It follows that the drill reads `company.toml` and nothing else. That is a bound on
+/// A workspace with no database yet is not an error: nothing has run, so nothing can be
+/// in doubt, and the two other halves still have everything they need.
+///
+/// The rest of the drill still reads `company.toml` and nothing else. That is a bound on
 /// what it can check as well as on what it can break: the toolchain a *particular* task
 /// declares as its acceptance lives in the plan, so what is checked here is what every
 /// task needs rather than what any one of them asked for.
 pub(crate) fn run(a: &Args) -> Res {
     let ws = workspace::resolve(a.get("org"))?;
     let company = ws.load()?;
-    let sections = drill(&company, ws.root());
+    let mut sections = drill(&company, ws.root());
+    sections.push(runs(&ws));
     let report = render(&sections);
 
     let broken = sections
@@ -158,6 +165,46 @@ pub(crate) fn run(a: &Args) -> Res {
 /// it stops for.
 fn drill(company: &Company, org: &Path) -> Vec<Section> {
     vec![machine::section(company, org), hooks::section(company, org)]
+}
+
+/// What `wecode reclaim` would settle, and nothing done about it.
+///
+/// Not [`Outcome::Broken`], even when there is work in doubt: a crashed supervisor is
+/// not a misconfiguration, and it must not make `wecode doctor && wecode loop` refuse to
+/// start — `loop` runs the reclaim itself on the way up, so refusing here would stop the
+/// one command that fixes it.
+///
+/// A database that cannot be read *is* broken, though. Every other command opens the
+/// same file, so a drill that stayed quiet about it would pass on a machine where
+/// nothing else could work.
+fn runs(ws: &wecode_org::Workspace) -> Section {
+    let db = ws.db_path();
+    if !db.exists() {
+        return Section {
+            title: "runs",
+            checks: vec![Check::new(
+                "reclaim",
+                Outcome::Absent("no workspace database yet — nothing has run".to_string()),
+            )],
+            note: String::new(),
+        };
+    }
+    let found = wecode_store::Store::open(&db)
+        .map_err(|e| e.to_string())
+        .and_then(|s| crate::reclaim::stranded(&s).map_err(|e| e.to_string()));
+    let outcome = match found {
+        Ok(runs) if runs.is_empty() => Outcome::Sound(crate::reclaim::would_do(&runs)),
+        Ok(runs) => Outcome::Sound(format!(
+            "{} — `wecode reclaim` settles them",
+            crate::reclaim::would_do(&runs)
+        )),
+        Err(why) => Outcome::Broken(why),
+    };
+    Section {
+        title: "runs",
+        checks: vec![Check::new("reclaim", outcome)],
+        note: String::new(),
+    }
 }
 
 /// `1 update`, `2 updates` — a report a person reads should not say `1 updates`.

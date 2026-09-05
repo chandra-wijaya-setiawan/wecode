@@ -5,12 +5,14 @@ use std::time::{Duration, Instant};
 use wecode_core::{Task, TaskId, TaskStatus};
 use wecode_gov::{Action, Broker, Session};
 use wecode_org::AgentTemplate;
+use wecode_store::Store;
 use wecode_store::execution::Spend;
+use wecode_store::journal::{self, Resolve, Settled, Step};
 
 use crate::args::Args;
 use crate::commands::ctx::*;
 use crate::claim::{self, Claim};
-use crate::{notify, scheduler, spawn, telegram};
+use crate::{identity, notify, reclaim, render, scheduler, spawn, telegram};
 
 use super::judge::{commit_attempt, judge};
 use super::prepare::prepare;
@@ -61,6 +63,30 @@ pub(crate) fn start(a: &Args) -> Res {
         task.status.as_str()
     ));
     out.push_str(&prepared.envelope);
+    // And so the journal lets go. From here the tree belongs to a person, and a person
+    // is not a process whose liveness `reclaim` can prove — a row left open would have
+    // it hand the operator's own task back the moment their shell exited.
+    store.settle(prepared.journal, Settled::Done)?;
+    Ok(out)
+}
+
+/// Commits the attempt inside a journal row, so a crash between the commit and the
+/// record of it is a step in doubt rather than a silent one.
+fn journalled_commit(
+    store: &Store,
+    id: &TaskId,
+    prepared: &super::prepare::Prepared,
+    exec: i64,
+    why: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let cwd = prepared.cwd.to_string_lossy().into_owned();
+    let row = store.open_intent(
+        &journal::Intent::new(id, Step::Commit, Resolve::Verify, &cwd, &prepared.token)
+            .owned_by(identity::me())
+            .of_run(exec),
+    )?;
+    let out = commit_attempt(store, id, &prepared.cwd, why)?;
+    store.settle(row, Settled::Done)?;
     Ok(out)
 }
 
@@ -142,6 +168,12 @@ pub(crate) fn serve(a: &Args) -> Res {
         "  watching {} · {limit} at a time ({} open items, {cores} cores)\n  ctrl-c to stop\n",
         company.name, company.attention.max_open_items
     );
+
+    // Before the first pass, and this is the pass that matters: the state a crashed
+    // supervisor leaves is a task the scheduler will never offer again and a seat it
+    // counts as occupied for ever. An unattended restart is exactly the case where
+    // nobody is going to type `wecode reclaim`.
+    print!("{}", reclaim::at_startup(&store, &company));
 
     // Scoped, so no supervisor can outlive the loop accountable for it: every thread
     // still standing is joined before `serve` returns, whichever way it returns.
@@ -410,19 +442,42 @@ pub(crate) fn run_task(a: &Args) -> Res {
     let _beat = claim::Beat::start(&store, exec);
     // The harness's clock, tightened by the wall this task declared and `wecode show`
     // has been printing all along.
+    // And the intent before that, naming the line about to be run. Spawning an agent is
+    // irreversible and, in general, unverifiable — it becomes `verify` because this row
+    // names the process precisely enough to go and look for it afterwards.
+    let spawning = store.open_intent(
+        &journal::Intent::new(&id, Step::Spawn, Resolve::Verify, &launch, &prepared.token)
+            .owned_by(identity::me())
+            .of_run(exec),
+    )?;
+    // The harness's clock, tightened by the wall this task declared and `wecode show`
+    // has been printing all along.
     let limits = limits_for(&template, &task, company.budgets.enforce);
-    let outcome = spawn::run(
+    let outcome = spawn::run_holding(
         &template,
         &prepared.envelope,
         &tools,
         model.as_deref(),
         &prepared.cwd,
         &prepared.cache,
+        None,
         limits,
+        Some(&spawn::Watch {
+            token: &prepared.token,
+            // The child's number, written down while it is still the newest fact in the
+            // process. `task_executions.pid` has meant to hold this since the column
+            // existed and the one call site passed `None`; this is the row that does.
+            born: &|pid| {
+                let _ = store.note_child(spawning, &identity::child(pid));
+            },
+        }),
     )?;
     // The agent ran, however it ended. From here the status is this run's to author, so
     // the claim is not something to hand back.
     claim.kept();
+    // And the process it started is gone: `spawn::run_holding` reaps the group before
+    // it returns, so there is nothing left for a restart to go looking for.
+    store.settle(spawning, Settled::Done)?;
 
     // The exit is a fact we observed, not a claim the agent made. `Allow` even when
     // it exited badly: launching the agent was wecode's own permitted act, and the
@@ -463,7 +518,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
     );
     store.append_records(broker.ledger())?;
 
-    let mut out = spawn::ran(
+    let mut out = render::run::ran(
         &task,
         &post,
         model.as_deref(),
@@ -475,7 +530,16 @@ pub(crate) fn run_task(a: &Args) -> Res {
         // Verification is the same code path a hand-run task takes, so the two can
         // never disagree about what passing means.
         out.push('\n');
+        // Judging writes a status and runs the project's acceptance commands, which is
+        // as much of an effect as anything else here. `verify` because it can simply be
+        // asked again: the tree is what it judges, and the tree is still there.
+        let judging = store.open_intent(
+            &journal::Intent::new(&id, Step::Verdict, Resolve::Verify, "acceptance", &prepared.token)
+                .owned_by(identity::me())
+                .of_run(exec),
+        )?;
         let (verdict, why) = judge(a)?;
+        store.settle(judging, Settled::Done)?;
         // `Rejected` rather than `Failed` when the run itself was clean: the agent
         // finished and we declined what it produced. A2A keeps those apart, and so
         // should the record.
@@ -497,7 +561,7 @@ pub(crate) fn run_task(a: &Args) -> Res {
             spend_of(&outcome),
         )?;
         out.push_str(&verdict);
-        out.push_str(&commit_attempt(&store, &id, &prepared.cwd, &outcome)?);
+        out.push_str(&journalled_commit(&store, &id, &prepared, exec, &outcome.cause())?);
     } else {
         store.set_task_status(&id, TaskStatus::Failed)?;
         store.finish_execution(
@@ -532,8 +596,14 @@ pub(crate) fn run_task(a: &Args) -> Res {
             TaskStatus::Running,
             TaskStatus::Failed,
         ));
-        out.push_str(&commit_attempt(&store, &id, &prepared.cwd, &outcome)?);
+        out.push_str(&journalled_commit(&store, &id, &prepared, exec, &outcome.cause())?);
     }
+    // Last, and only here: this row is what said a tree was cut and a claim was taken,
+    // and both of those are true right up to the point where the run has a verdict and
+    // a commit. Settled on the way out, so the next `reclaim` finds nothing of this run
+    // to settle — and left open by every way out that does not reach here, which is
+    // exactly the set of endings this whole mechanism exists for.
+    store.settle(prepared.journal, Settled::Done)?;
     Ok(out)
 }
 

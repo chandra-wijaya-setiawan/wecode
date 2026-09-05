@@ -10,4 +10,5 @@ pub(crate) mod exec;
 pub(crate) mod gov;
 pub(crate) mod org;
 pub(crate) mod plan;
+pub(crate) mod trees;
 pub(crate) mod view;
