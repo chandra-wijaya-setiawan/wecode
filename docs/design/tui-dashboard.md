@@ -100,3 +100,25 @@ the panes were sized by the grid, not by what they hold.
    Roadmap(43) were truncated at `… and 14 more` directly beneath. Height is
    `min(rows, 10)`, and every line the top row does not use goes to the bottom row.
    A dashboard whose empty half is the half with nothing to say is upside down.
+4. **The status pane uses icons, not bullets.** A service is `✓` or `✗`, and the
+   icon is the only coloured thing on the row — green for up, red for down. The
+   name beside it stays white. This does two jobs at once: the eye finds a red
+   mark without reading, and the row loses the redundant `— running` that made a
+   four-service list take four lines. Four services fit on one:
+
+       ✓ supervisor   ✓ telegram   ✓ notify   ✗ store
+
+   The summary sentence stays above it, because the sentence is the thing a person
+   reads first and the icons are what they scan afterwards.
+
+## Making it nice, concretely
+Not decoration — these are the specific things that make a dense screen readable.
+
+| Rule | Why |
+|---|---|
+| One accent per pane: the border and title. Body text default-white | Colour used everywhere is colour that says nothing |
+| Counts right-aligned in the title, `Blocked(39)` | The number is scanned, not read |
+| A truncated pane says `… and 14 more` in dim, never in the pane's accent | An overflow marker is furniture, not content |
+| Task ids keep their kind prefix (`feat`, `bug`, `story`) in dim; the id itself white | The prefix is a category the eye can skip |
+| `waits for X` in dim | The relationship matters less than the two names |
+| Nothing bold except the summary sentence | Bold everywhere is bold nowhere |
