@@ -15,6 +15,7 @@
 //! and the caller is the one that opens a file.
 
 pub mod admission;
+pub mod collision;
 pub mod common;
 pub mod docs;
 pub mod execution;

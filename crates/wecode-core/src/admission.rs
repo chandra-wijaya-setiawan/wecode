@@ -1,5 +1,6 @@
 //! The admission gate: is this well enough formed to be worked on?
 
+use crate::collision::{appends_only, could_run_beside, globs_overlap, parked};
 use crate::common::{Measure, TaskStatus};
 use crate::id::{ProjectId, TaskId};
 use crate::plan::Plan;
@@ -373,14 +374,7 @@ pub fn check_task_appending(
 
     // The competition is for a working tree, and a working tree belongs to a
     for other in plan.tasks() {
-        if other.id == t.id
-            || other.status.is_closed()
-            || other.status == TaskStatus::Hold
-            || parked(plan, &other.project)
-            || !share_a_repo(plan, t, other)
-            || sequenced(plan, t, other)
-            || nested(plan, t, other)
-        {
+        if other.id == t.id || !could_run_beside(plan, t, other) {
             continue;
         }
         // Named only when it is somewhere else. A sibling conflict is the common one
@@ -402,70 +396,12 @@ pub fn check_task_appending(
     out
 }
 
-/// Whether a project is archived or held, and so dispatches nothing.
-///
-/// A project the plan does not hold is treated as live: the task being admitted may
-/// name a project that is about to be created, and skipping the whole check on that
-/// basis would let the first task of a new project claim anything.
-fn parked(plan: &Plan, id: &ProjectId) -> bool {
-    plan.project(id)
-        .is_some_and(|p| p.archived || p.status == crate::ProjectStatus::Hold)
-}
 
-/// Whether two tasks would be editing the same checkout.
-///
-/// Same project is the common case and settles it without a lookup — a project owns
-/// exactly one repo, so its own tasks always agree. Across projects the repo name each
-/// one registers decides it; an unregistered or absent project answers no, which keeps
-/// this check from inventing conflicts out of missing data. A project with a blank
-/// repo is a defect [`check_project`] already reports, and pairing two of them off
-/// each other would report it a second time as something else.
-fn share_a_repo(plan: &Plan, a: &Task, b: &Task) -> bool {
-    if a.project == b.project {
-        return true;
-    }
-    match (plan.project(&a.project), plan.project(&b.project)) {
-        (Some(x), Some(y)) => !x.repo.trim().is_empty() && x.repo == y.repo,
-        _ => false,
-    }
-}
 
-/// Whether either task waits on the other, in either direction, at any remove.
-///
-/// Transitively, because ordering is transitive: if `c` waits on `b` and `b` waits on
-/// `a`, then `c` and `a` cannot run at the same time, and refusing them for a scope
-/// overlap states something untrue. A chain of tasks each building on the last is the
-/// ordinary shape of a slice, and the direct-only version made the third and every
-/// later link impossible to admit.
-fn sequenced(plan: &Plan, a: &Task, b: &Task) -> bool {
-    // Ordering lifts through containment, or expanded units collide with their sequenced siblings.
-    let fa: Vec<&Task> = std::iter::once(a).chain(plan.ancestors(&a.id)).collect();
-    let fb: Vec<&Task> = std::iter::once(b).chain(plan.ancestors(&b.id)).collect();
-    fa.iter().any(|x| fb.iter().any(|y| waits_on(plan, x, &y.id) || waits_on(plan, y, &x.id)))
-}
 
-/// Whether `t` waits on `target`, directly or through other tasks.
-///
-/// Seeded from `t`'s own declared dependencies rather than looked up by id: the task
-/// being admitted is not in the plan yet, so looking it up would find nothing.
-fn waits_on(plan: &Plan, t: &Task, target: &TaskId) -> bool {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut stack: Vec<TaskId> = t.depends_on.clone();
-    while let Some(id) = stack.pop() {
-        if &id == target {
-            return true;
-        }
-        // A cycle is its own defect, reported by another check. This walk has to
-        // terminate whether or not that check has run yet.
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        if let Some(next) = plan.task(&id) {
-            stack.extend(next.depends_on.iter().cloned());
-        }
-    }
-    false
-}
+
+
+
 
 /// Whether a `design` task stands anywhere before `t` in its dependency chain.
 ///
@@ -508,22 +444,6 @@ fn contains_a_design(plan: &Plan, t: &Task) -> bool {
         .any(|s| s.kind == TaskKind::Design || contains_a_design(plan, s))
 }
 
-/// Whether one task is part of the other, at any depth.
-///
-/// A subtask almost always writes inside its parent's area — that is what makes it
-/// a subtask. Reporting that as a conflict would make the parent relation unusable
-/// for anything that touches files.
-fn nested(plan: &Plan, a: &Task, b: &Task) -> bool {
-    let ancestor_of = |x: &Task, y: &Task| {
-        // `x` is fresh and may not be in the plan yet, so walk from `y` upward and
-        // also check `x`'s own declared parent chain against `y`.
-        plan.ancestors(&y.id).iter().any(|p| p.id == x.id)
-    };
-    a.parent.as_ref() == Some(&b.id)
-        || b.parent.as_ref() == Some(&a.id)
-        || ancestor_of(a, b)
-        || ancestor_of(b, a)
-}
 
 fn check_statement(text: &str, out: &mut Vec<Defect>) {
     let s = text.trim();
@@ -552,46 +472,9 @@ fn is_too_broad(glob: &str) -> bool {
     matches!(glob.trim(), "**" | "*" | "**/*" | "." | "./**" | "/" | "")
 }
 
-/// Prefix-containment overlap. Deliberately coarse: it errs toward reporting a
-/// conflict, and a false positive costs one question while a false negative costs a
-/// corrupted worktree.
-fn globs_overlap(a: &str, b: &str) -> bool {
-    let pa = literal_prefix(a);
-    let pb = literal_prefix(b);
-    under(&pa, &pb) || under(&pb, &pa)
-}
 
-/// Whether `path` is `root` itself or something inside it, comparing **path segments**
-/// rather than characters.
-///
-/// A plain `starts_with` reads `crates/wecode-core-extra` as living inside
-/// `crates/wecode-core`, and two sibling crates were refused as colliding for sharing a
-/// name prefix. The boundary has to be a `/`, or the whole string.
-fn under(path: &str, root: &str) -> bool {
-    if root.is_empty() || path == root {
-        return true;
-    }
-    path.strip_prefix(root)
-        .is_some_and(|rest| rest.starts_with('/'))
-}
 
-/// Whether every file `glob` could reach sits inside a path marked append-only.
-///
-/// Containment one way only, unlike [`globs_overlap`]: an append-only
-/// `src/generated/**` does not exempt a task claiming `src/**`, where most of what it
-/// may write is nobody's append. Coarse in the same direction as the check it excuses.
-fn appends_only(glob: &str, append_only: &[String]) -> bool {
-    let claimed = literal_prefix(glob);
-    append_only.iter().any(|marked| {
-        let marked = literal_prefix(marked);
-        claimed == marked || claimed.starts_with(&format!("{marked}/"))
-    })
-}
 
-fn literal_prefix(glob: &str) -> String {
-    let cut = glob.find(['*', '?', '[']).unwrap_or(glob.len());
-    glob[..cut].trim_end_matches('/').to_string()
-}
 
 // ------------------------------------------------------------ refusals ------
 
@@ -820,6 +703,9 @@ pub fn advise(t: &Task, plan: &Plan, expected: &Expected) -> Vec<Divergence> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The batch selector lives in `collision`, but its tests use this module's plan
+    // fixtures. Keeping them here beats a second copy of `seeded`.
+    use crate::collision::conflict_free;
     use crate::common::{Budget, Cmp, Measure, Scope, TaskStatus};
     use crate::task::{Doer, TaskKind};
 
@@ -979,6 +865,53 @@ mod tests {
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
         assert_collides(&sibling, &plan, true, "two tasks at once must not share paths");
+    }
+
+    fn scoped_task(id: &str, paths: &[&str]) -> Task {
+        Task::new(id, "caching", "do one specific thing here")
+            .accepting(cmd())
+            .scoped(Scope::write(paths))
+            .budgeted(budget())
+    }
+
+    #[test]
+    fn a_batch_takes_everything_that_wants_different_files() {
+        let plan = seeded();
+        let a = scoped_task("one", &["crates/wecode-core/src/plan.rs"]);
+        let b = scoped_task("two", &["crates/wecode-cli/src/tui.rs"]);
+        let picked = conflict_free(&plan, &[&a, &b], 4, &[]);
+        assert_eq!(picked.len(), 2, "disjoint files may run together: {picked:?}");
+    }
+
+    #[test]
+    fn a_batch_takes_one_of_two_that_want_the_same_file() {
+        // The churn this exists to end: offering both means the second is refused at
+        // dispatch, having already been signed.
+        let plan = seeded();
+        let a = scoped_task("one", &["crates/wecode-cli/src/board.rs"]);
+        let b = scoped_task("two", &["crates/wecode-cli/src/board.rs"]);
+        let picked = conflict_free(&plan, &[&a, &b], 4, &[]);
+        assert_eq!(picked.len(), 1, "one file, one taker: {picked:?}");
+        assert_eq!(picked[0].id.as_str(), "one", "the order given is the preference");
+    }
+
+    #[test]
+    fn a_batch_never_exceeds_the_slots_it_was_given() {
+        let plan = seeded();
+        let a = scoped_task("one", &["crates/a/src/x.rs"]);
+        let b = scoped_task("two", &["crates/b/src/y.rs"]);
+        let c = scoped_task("three", &["crates/c/src/z.rs"]);
+        assert_eq!(conflict_free(&plan, &[&a, &b, &c], 2, &[]).len(), 2);
+    }
+
+    #[test]
+    fn an_append_only_path_is_not_a_conflict_in_a_batch() {
+        // Both write docs. Neither is editing the other's page.
+        let plan = seeded();
+        let a = scoped_task("one", &["docs/design/a.md"]);
+        let b = scoped_task("two", &["docs/design/b.md"]);
+        let marked = vec!["docs/**".to_string()];
+        assert_eq!(conflict_free(&plan, &[&a, &b], 4, &marked).len(), 2);
     }
 
     #[test]
