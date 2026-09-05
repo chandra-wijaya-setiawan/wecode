@@ -1,5 +1,6 @@
 //! The queue side: which tasks may go now, promotion, and the width left this pass.
 
+use wecode_core::collision;
 use wecode_core::{Plan, Task, TaskId, TaskStatus};
 use wecode_gov::{Action, ActionKind, Broker, Session};
 use wecode_org::{Company, Playbook};
@@ -78,6 +79,7 @@ pub(crate) fn triage(
     if slots == 0 {
         return Ok((go, waiting));
     }
+    let mut eligible: Vec<&Task> = Vec::new();
     for t in scheduler::dispatchable(plan, usize::MAX)
         .into_iter()
         .filter(|t| !held.contains(&t.id))
@@ -87,9 +89,18 @@ pub(crate) fn triage(
             .and_then(|p| playbook_of(company, p).ok().flatten());
         if unsigned(store, pb.as_ref(), t)?.is_some() {
             waiting.push(t.id.clone());
-        } else if go.len() < slots {
-            go.push(t.id.clone());
+        } else {
+            eligible.push(t);
         }
+    }
+    // Taking the first `slots` of these would hand out work that cannot run together:
+    // the second task wanting a file the first already holds is dispatched, refused by
+    // the gate, and its signature spent for nothing. That churn is what 4-5 Sep looked
+    // like. The gate's own definition of a conflict decides the batch, so the queue and
+    // the gate cannot disagree — `&[]` for the append-only markings, matching what
+    // every `check_task` caller passes today.
+    for t in collision::conflict_free(plan, &eligible, slots, &[]) {
+        go.push(t.id.clone());
     }
     Ok((go, waiting))
 }
