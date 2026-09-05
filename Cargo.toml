@@ -38,6 +38,22 @@ cast_possible_wrap = "warn"
 cast_sign_loss = "warn"
 cast_lossless = "warn"
 
+# Build cost, measured 5 Sep on a 6-core WSL box capped at 16GB.
+#
+# Dependencies get no debug info: 125 crates are compiled from source here (SQLite's
+# amalgamation and six tree-sitter grammars among them, all C), and nobody has ever
+# stepped into one with a debugger. This is what makes a target directory 2.4GB.
+#
+# Our own crates keep line tables — enough for a backtrace to name a file and line,
+# which is all a panic report needs — without the full DWARF that doubles link time.
+[profile.dev.package."*"]
+debug = false
+opt-level = 0
+
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
 [profile.release]
 lto = "thin"
 strip = true
