@@ -122,3 +122,33 @@ Not decoration — these are the specific things that make a dense screen readab
 | Task ids keep their kind prefix (`feat`, `bug`, `story`) in dim; the id itself white | The prefix is a category the eye can skip |
 | `waits for X` in dim | The relationship matters less than the two names |
 | Nothing bold except the summary sentence | Bold everywhere is bold nowhere |
+
+## Roadmap groups by project (5 Sep)
+
+The first roadmap listed 43 containers flat, alphabetically, so `conduit-articles`
+sat beside `container-spend-budgets` and neither said whose work it was. Two
+changes, both asked for after the owner read it:
+
+1. **Group by project.** A project heading, then its epics and stories beneath it.
+   The board is one workspace across several repos, and the roadmap is the one
+   pane where "whose work is this" is the first question. A project with nothing
+   open is not drawn.
+2. **Every row carries its number.** `#577 EPIC conduit-api  0/7`. The short
+   number is how a row is named to every other command — `wecode show 577`,
+   `wecode run 577` — so a pane a person acts on must show it. This applies to
+   every pane, not only the roadmap: Blocked and Need-you name tasks too.
+
+Sketch:
+
+    ┌ Roadmap(43) ─────────────────────────────────────┐
+    │ conduit                                          │
+    │   #577 EPIC conduit-api            0/7           │
+    │   #578 story conduit-auth          0/0           │
+    │ wecode-loop                                      │
+    │   #496 EPIC sdlc-records           2/9           │
+    │   #557 story planning-lifecycle    1/2           │
+    │ … and 18 more                                    │
+    └──────────────────────────────────────────────────┘
+
+The completion fraction stays right-aligned: it is scanned down a column, not read
+along a line.
