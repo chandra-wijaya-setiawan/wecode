@@ -113,6 +113,11 @@ WORK
         confirmed a minute later: the task goes to failed for a person to retry;
         nothing is killed, no worktree is removed, nothing is re-dispatched
   wecode run <task>                    spawn its agent, supervise it, then verify
+  wecode reclaim                       settle what a dead supervisor left behind
+        the journal records each step's intent before it happens, so a process that
+        died mid-run leaves rows in doubt rather than a tree nobody owns. Run at loop
+        startup too, because an unattended restart is exactly the case where nobody
+        types this
   wecode cost <task> "<what was done>"  attribute work wecode never dispatched
         --tokens <n>  --wall <secs>  --replayed <n>    at least one of the first two
         for a task worked in your own session, or a step done by hand in a console:
