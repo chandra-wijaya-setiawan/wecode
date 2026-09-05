@@ -33,6 +33,23 @@ wecode run cache                 # worktree, agent, verification, commit
 wecode board                     # what is happening, and what needs you
 ```
 
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    human(["you — board, approvals, signatures"]) --> cli["wecode — the orchestrator"]
+    cli -->|admit| gate{{"gate — executable acceptance + write scope"}}
+    gate -->|confine| run["run — worktree + budget"]
+    run -->|judge| verdict["verdict — the diff and exit codes"]
+    verdict -->|land| merged["merged — policy and signature"]
+    run --> ledger[("wecode.db — the ledger")]
+```
+
+One orchestrator: a task is admitted only with an executable acceptance and a
+write scope, runs confined to a worktree under a budget, and is judged from the
+diff rather than the agent's account of itself — every step written to one
+ledger. [docs/design/c4.md](docs/design/c4.md) is the full map.
+
 ## Status: pre-MVP, honestly
 
 This is a substantial, actively dogfooded **pre-MVP** alpha — wecode's own
