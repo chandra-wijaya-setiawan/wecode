@@ -7,9 +7,10 @@ having read a page of documentation first. wecode is pre-MVP; the first screen
 is where that mission is stated in the product, not only in the README.
 
 [tui-dashboard.md](tui-dashboard.md) settled the division of labour between the
-two front screens: the dashboard answers *what needs me now*, home answers *what
-is the shape of the work*. This page proposes a third thing home does, and it
-must not become a second copy of either: **teach, when there is nothing to show.**
+two front screens of the cockpit architecture: the dashboard answers *what needs
+me now*, home answers *what is the shape of the work*. This page proposes a
+third thing home does, and it must not become a second copy of either: **teach,
+when there is nothing to show.**
 
 ## The problem
 
