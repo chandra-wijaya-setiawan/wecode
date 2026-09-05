@@ -83,3 +83,20 @@ Two readings the drawing left open, and how each was settled:
 |---|---|
 | is a workspace with no Telegram *degraded*? | no — a reach nobody configured is not listed. A front page that opened amber on a solo profile doing what it was told teaches its reader to stop believing the word |
 | does *healthy* cover idleness? | no. `healthy` is the services' word; whether anything is **moving** is the clause after the semicolon. That is what lets the owner's own example — healthy, and nothing running, and the cause named — be one sentence |
+
+## Revision after first use (5 Sep)
+
+The owner ran it and asked for three changes. All three are about the same thing:
+the panes were sized by the grid, not by what they hold.
+
+1. **Content is white; only the frame carries colour.** Blue and red body text on a
+   black terminal is hard to read, and the box already says which pane it is by its
+   border and title. Body rows render in the default foreground.
+2. **Semantic colour survives, and only that.** `running` green, `down` red,
+   `stuck` and `needs-approval` in their category colour — those words *mean*
+   something, so they keep their colour where a task id does not.
+3. **The top row is capped at ten rows and shrinks to fit.** Agent(1) and
+   Need you(3) held one and three lines inside a pane thirty deep; Blocked(39) and
+   Roadmap(43) were truncated at `… and 14 more` directly beneath. Height is
+   `min(rows, 10)`, and every line the top row does not use goes to the bottom row.
+   A dashboard whose empty half is the half with nothing to say is upside down.
