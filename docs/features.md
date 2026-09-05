@@ -574,6 +574,23 @@ does. The overrun that survives is one turn wide instead of unbounded, it still 
 row red, and nothing is ever refunded. A wall is the stronger half of the same budget,
 because time is the one thing wecode measures itself.
 
+## Done can mean built, not delivered
+
+Acceptance is checked per task, against the component the task touched. Nothing
+requires the capability the task belongs to to be exercised through its real
+interface on the assembled revision — so a task can be marked done while the
+story it serves is undelivered. The standing example is the spend circuit
+breaker: the helper exists, its unit tests pass, the task closed, and dispatch
+was never stopped, because no acceptance ever drove a dispatch through the real
+CLI and asserted the refusal. Integration acceptance — the story-level check
+that the wired system behaves — runs ad hoc where someone remembered to write
+it, and is enforced nowhere: admission does not ask for it and closure does not
+demand its evidence. The gate this needs is specified in
+[design/sdlc.md](design/sdlc.md), the newcomer-facing statement of the mission
+it serves is [design/home-onboarding.md](design/home-onboarding.md), and the
+campaign that will prove it is the Conduit delivery in
+[design/maturity-roadmap.md](design/maturity-roadmap.md).
+
 ## The operator is not governed
 
 Everything above applies to work wecode dispatches. An operator working through their

@@ -38,6 +38,40 @@ reads a playbook: scopes may then be declared *by component name*, collisions ar
 reported in component terms, the board can roll a version up by component. Definition
 in the repo, accountability in the tool — the same division as milestones.
 
+## The gap the owner named, 5 Sep: integration evidence is not enforced
+
+The V&V row above is true per task and false per story. Acceptance commands prove
+the component a task touched; nothing requires the capability the task belongs to
+to be exercised through its real interface on the assembled revision — so a task
+can be *done* while its story is *undelivered*. The spend circuit breaker is the
+standing example: the helper exists and its unit tests pass, and no dispatch is
+stopped, because no check ever drove a dispatch through the real CLI and asserted
+the refusal. The owner's framing: the missing wiring is an SDLC enforcement
+defect — the process allowed "the component exists" to stand in for "the
+capability is delivered."
+
+The evidence ladder this SDLC owes (proposed, not yet enforced):
+
+| level | required evidence |
+|---|---|
+| requirement | an observable behaviour with a defined pass/fail |
+| implementation task | its component behaves correctly |
+| integration task | the behaviour works through the actual public interface |
+| story closure | every required behaviour passing on the assembled revision |
+| release | the complete product passes from a clean installation |
+
+A component task may finish while its story remains incomplete — the ladder is
+what stops that reading as delivery. The rule that makes it a gate rather than a
+wish: **an executable story cannot enter delivery without an integration
+acceptance declared, and cannot close without evidence that acceptance passed
+against its assembled revision.** Admission checks the obligation, command and
+scope exist; the acceptance definition is frozen before implementation;
+verification records the tested revision; changing the revision invalidates the
+evidence. And the test is itself tested: disconnect the wiring and the
+integration check must fail, or it protects nothing. This is the campaign the
+Conduit delivery (see [maturity-roadmap.md](maturity-roadmap.md)) exists to
+prove — autonomy at every step, a deterministic check at every step.
+
 ## What this deliberately does not adopt
 
 Process-heavy readings of the standards (phase sign-offs, document-per-clause).

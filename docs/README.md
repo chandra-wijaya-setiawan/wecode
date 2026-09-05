@@ -17,6 +17,8 @@ Then, by task:
 - **[reference/config/](reference/config/README.md)** — `company.toml` and `.wecode/playbook.toml`, one page per thing configured
 - **[reference/schema.md](reference/schema.md)** — what is in `wecode.db`
 - **[design/decisions.md](design/decisions.md)** — why it is like this
+- **[design/sdlc.md](design/sdlc.md)** — where wecode stands in fifty years of SDLC, including the integration-evidence gap named 5 Sep
+- **[design/home-onboarding.md](design/home-onboarding.md)** — the proposed first screen for a newcomer: what wecode is for, and why
 - **[design/method.md](design/method.md)** — the development method, and which of its rules the machinery enforces rather than an orchestrator remembering
 - **[design/theory.md](design/theory.md)** — prior art, and the open questions
 

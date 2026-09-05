@@ -1,6 +1,8 @@
 # Getting started
 
-Ten minutes to a company that can run a task.
+Ten minutes to a company that can run a task. wecode is pre-MVP: what follows
+works, and the sharp edges are named plainly in
+[../features.md](../features.md).
 
 ## 1. A workspace
 
