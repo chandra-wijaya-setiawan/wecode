@@ -1,10 +1,21 @@
-# Maturity roadmap — from engine to product (29 Aug 2026)
+# Maturity roadmap — from engine to product (29 Aug 2026, amended 5 Sep)
 
 The owner's direction, distilled: reliability before intelligence. wecode's
 orchestration core is sound; the work is making it installable, unstickable,
 and observable before making it smarter. Center stays fixed:
 **wecode = control plane for autonomous software-development projects.**
 It consumes sandboxes, LLMs, CI and Git hosting; it becomes none of them.
+
+The 5 Sep amendment: the project is **pre-MVP**, and the theme of the MVP is
+*enforced process* — agents should not have to remember the SDLC; skipping its
+required steps must be impossible. The named defect is integration evidence (see
+[sdlc.md](sdlc.md#the-gap-the-owner-named-5-sep-integration-evidence-is-not-enforced)):
+tasks close on component checks while the capability they serve is undelivered.
+The proving ground is **Conduit**, the RealWorld API whose vendored spec and
+upstream Hurl suite give an oracle that owes wecode nothing, run as a versioned
+delivery campaign — greenfield release, seeded bug repairs, spec-led change
+requests, interrupted-run recovery — where every failed run becomes a
+reproducible wecode defect.
 
 ## Priorities
 
@@ -21,6 +32,12 @@ It consumes sandboxes, LLMs, CI and Git hosting; it becomes none of them.
 | P2 | Ecosystem | adapter SDK | harness-contract (queued) is its seed |
 
 ## SDLC hardening (the classical chapters still missing)
+
+**Integration acceptance is the missing chapter and now outranks the rest.** An
+executable story should not enter delivery without an integration acceptance
+declared, nor close without evidence it passed on the assembled revision — the
+evidence ladder is specified in [sdlc.md](sdlc.md), and admission, closure and
+revision-invalidation are the gates to build.
 
 decisions/ADR and measurement have queued projects (wecode-decisions,
 wecode-findings). Risk register and spec→code→test traceability have nothing

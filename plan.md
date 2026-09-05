@@ -35,6 +35,18 @@ Three steps, and the order matters because each needs the one before it:
 
 ## Next
 
+**Integration acceptance, enforced.** The SDLC's missing chapter, and the
+owner's main theme: an executable story cannot enter delivery without an
+integration acceptance declared, and cannot close without evidence that it
+passed against the assembled revision. Admission checks the obligation exists,
+verification records the tested revision, and amending the revision invalidates
+the evidence — a component task finishing must stop reading as its capability
+being delivered. Specified in [docs/design/sdlc.md](docs/design/sdlc.md), and
+proven against **Conduit**: the RealWorld API with a vendored spec and an
+upstream Hurl suite, run as a versioned delivery campaign — greenfield release,
+seeded bug repairs, spec-led change requests, interrupted-run recovery — where
+every failed run becomes a reproducible wecode defect.
+
 **Retry.** The envelope already carries the previous attempt and the reason it was
 rejected, so a retry has something to learn from. What is missing is the loop doing it
 by itself, bounded — a count, so a task cannot cycle forever, and a stop that puts it in
