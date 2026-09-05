@@ -7,6 +7,7 @@
 pub mod audit;
 pub mod driver;
 pub mod execution;
+pub mod freeing;
 pub mod inbox;
 mod int;
 pub mod plan;
@@ -23,6 +24,7 @@ use rusqlite::Connection;
 pub use audit::{AuditLine, AuditQuery};
 pub use driver::Driver;
 pub use execution::Execution;
+pub use freeing::{Freed, Residue};
 pub use session::SessionInfo;
 pub use short::Level;
 pub use worktree::Worktree;
