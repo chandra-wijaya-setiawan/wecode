@@ -14,7 +14,7 @@
 //! | `task` | `task add`, `task rm` — what a task is, what the playbook fills, what `--expand` produces |
 //! | `amend` | `task scope`, `task budget`, `task add --amend` — re-declaring one field of an existing task |
 //! | `staff` | `assign`, `status` — who acts next, and where the work stands |
-//! | `filing` | `archive`, `unarchive` — what stays on the board |
+//! | `filing` | `archive`, `unarchive`, `sweep` — what stays on the board |
 //! | `inspect` | `show`, `check` — the two that decide nothing |
 //!
 //! What stays here is what belongs to no single command: the three readers that turn
@@ -50,7 +50,7 @@ mod staff;
 mod task;
 
 pub(crate) use amend::{amount, task_budget, task_scope};
-pub(crate) use filing::set_archived;
+pub(crate) use filing::{set_archived, sweep};
 pub(crate) use inspect::show;
 pub(crate) use project::project_add;
 pub(crate) use staff::{assign, set_status};

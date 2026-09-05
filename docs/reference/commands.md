@@ -87,6 +87,10 @@ PLAN
         back (a task to `waiting`, a project to `active`)
   wecode archive <project> | unarchive <project>
         hide a project from the cockpit, or bring it back (--force if work is live)
+  wecode sweep [<project>] [--dry-run] [--force]
+        file away every finished task at once — each `done` or `dropped` group whose
+        rows are all settled, subtasks with them. Names what it held back, and why;
+        --dry-run reports the same sweep without writing or signing anything
 
 COCKPIT
   wecode tui [<id>]                    one application, three screens that call
@@ -482,6 +486,42 @@ groups as one number.
 `wecode show` and `check` are the exception: they are reached by naming their subject and
 have no `--all`, so hiding there would put a row out of reach. They report every task
 whatever its filing, and mark the filed ones.
+
+**`wecode sweep`** files away every finished task at once, and decides nothing that
+`archive task` does not. It takes each group that is `done` or `dropped` and settled all
+the way down, and files it — the cascade does the subtasks, so a group is named once and
+counted in full:
+
+```
+  filed 6 tasks in 3 groups away — `wecode board --all` still shows them
+
+    cache-keys   done and its 2 subtasks
+    cache-tests  done
+    bench        dropped and its subtask
+```
+
+| | |
+|---|---|
+| `wecode sweep` | every visible project's finished work |
+| `wecode sweep <project>` | that project's, archived or not — it was named |
+| `--dry-run` | the same report, nothing written and nothing signed |
+| `--force` | files the groups it would otherwise hold back |
+
+A finished group covering a row that could still move is **held back and named**, for the
+reason filing one task refuses it: a `done` story over a `running` step would hide the
+step, and the loop would go on dispatching it. `--force` overrides, on the same terms.
+
+Archived projects are left out unless one is named. Their rows are already off the board,
+and `unarchive` should hand back the board that was parked rather than an emptier one.
+
+`--dry-run` authorises nothing, which is the one place this reads differently from
+`archive`. Nothing is recorded because nothing changed, and a sweep is the filing command
+whose reach is worth reading before it happens; the real sweep records a `define` per
+task, so the ledger names each row rather than the batch.
+
+Distinct from the loop's *sweep* of stale runs, which is not a command at all: nothing
+addressable triggers that, and it is a consequence of the tick — see
+[../../specs/011-heartbeat/specification.md](../../specs/011-heartbeat/specification.md).
 
 **`wecode brief`** is how an agent learns what it is. Run it once at the start of a
 session; everything in it is derived from the seat's grant, so it cannot promise

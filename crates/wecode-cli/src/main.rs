@@ -120,6 +120,10 @@ PLAN
         back (a task to `waiting`, a project to `active`)
   wecode archive <project> | unarchive <project>
         hide a project from the cockpit, or bring it back (--force if work is live)
+  wecode sweep [<project>] [--dry-run] [--force]
+        file away every finished task at once — each `done` or `dropped` group whose
+        rows are all settled, subtasks with them. Names what it held back, and why;
+        --dry-run reports the same sweep without writing or signing anything
 
 COCKPIT
   wecode tui [<id>]                    one application, three screens that call
@@ -235,6 +239,7 @@ fn run(a: &Args) -> Res {
         ("worktree", _) => worktree_list(a),
         ("archive", _) => set_archived(a, true),
         ("unarchive", _) => set_archived(a, false),
+        ("sweep", _) => sweep(a),
         ("show", _) => show(a),
         ("check", _) => check(a),
         ("status", _) => set_status(a),
