@@ -49,6 +49,23 @@ language = "rust"
 #   be repaired afterwards. Run `bash scripts/max-lines.sh` before planning: it prints
 #   the tallest file in each half and how much room is left under the number.
 
+[story]
+# A story owns the worktree its implementation tasks share (ADR-0006). Without this
+# block `for_kind(Story)` answers None, `wants_worktree` reads false, and every task
+# a story owns runs in the operator's own checkout instead of a tree of its own — which
+# is what happened to 28 live tasks on 5 Sep when the board was regrouped under stories.
+# A container holds no scope, acceptance or budget of its own (ADR-0004): those belong
+# to the children. The only thing it owns is the checkout they cooperate in.
+worktree  = true
+assign_to = "impl"
+
+[epic]
+# Same reason, one level up. An epic owning a worktree is unusual but must not be
+# undefined: an epic that ends up the nearest non-container ancestor would otherwise
+# hand its children the master checkout.
+worktree  = true
+assign_to = "impl"
+
 [feature]
 worktree  = true
 assign_to = "impl"
