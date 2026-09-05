@@ -558,7 +558,21 @@ fn is_too_broad(glob: &str) -> bool {
 fn globs_overlap(a: &str, b: &str) -> bool {
     let pa = literal_prefix(a);
     let pb = literal_prefix(b);
-    pa.starts_with(&pb) || pb.starts_with(&pa)
+    under(&pa, &pb) || under(&pb, &pa)
+}
+
+/// Whether `path` is `root` itself or something inside it, comparing **path segments**
+/// rather than characters.
+///
+/// A plain `starts_with` reads `crates/wecode-core-extra` as living inside
+/// `crates/wecode-core`, and two sibling crates were refused as colliding for sharing a
+/// name prefix. The boundary has to be a `/`, or the whole string.
+fn under(path: &str, root: &str) -> bool {
+    if root.is_empty() || path == root {
+        return true;
+    }
+    path.strip_prefix(root)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Whether every file `glob` could reach sits inside a path marked append-only.
@@ -965,6 +979,47 @@ mod tests {
             .scoped(Scope::write(&["crates/export/**"]))
             .budgeted(budget());
         assert_collides(&sibling, &plan, true, "two tasks at once must not share paths");
+    }
+
+    #[test]
+    fn crates_that_merely_share_a_name_prefix_do_not_collide() {
+        // Found while making the collision check file-level: the overlap test compared
+        // characters, so `crates/wecode-core-extra/**` read as living inside
+        // `crates/wecode-core/**` and two unrelated crates were refused as competitors.
+        // A path boundary is a `/`, not any common prefix.
+        let mut plan = seeded();
+        plan.add_task(
+            Task::new("core-work", "caching", "change the core crate")
+                .accepting(cmd())
+                .scoped(Scope::write(&["crates/wecode-core/**"]))
+                .budgeted(budget()),
+        )
+        .unwrap();
+
+        let neighbour = Task::new("extra-work", "caching", "change the neighbouring crate")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/wecode-core-extra/**"]))
+            .budgeted(budget());
+        assert_collides(&neighbour, &plan, false, "sibling crates share no path");
+    }
+
+    #[test]
+    fn a_directory_still_contains_what_is_under_it() {
+        // The other half: narrowing the boundary must not lose real containment.
+        let mut plan = seeded();
+        plan.add_task(
+            Task::new("core-work", "caching", "change the core crate")
+                .accepting(cmd())
+                .scoped(Scope::write(&["crates/wecode-core/**"]))
+                .budgeted(budget()),
+        )
+        .unwrap();
+
+        let inside = Task::new("inner-work", "caching", "change one file in that crate")
+            .accepting(cmd())
+            .scoped(Scope::write(&["crates/wecode-core/src/plan.rs"]))
+            .budgeted(budget());
+        assert_collides(&inside, &plan, true, "a file inside the tree still collides");
     }
 
     #[test]
