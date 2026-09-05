@@ -165,3 +165,30 @@ answers *what needs me now*. Two screens, two questions, no overlap.
 
 The four summary sections are removed rather than collapsed — a section that
 duplicates another screen is not made better by being shorter.
+
+## The loop must appear in its own status pane (5 Sep)
+
+After a Windows reboot the dashboard reported the system healthy while **no loop was
+running at all**. The pane lists `store`, `supervisor`, `telegram`, `notify` — and
+`supervisor` is not the loop. It is inferred from run beats:
+
+    ("supervisor", quiet.is_empty())   // quiet = open runs whose beat went stale
+
+With zero open runs `quiet` is empty, so it reads *running* forever. **A dead loop with
+nothing in flight is indistinguishable from a healthy idle one** — which is the single
+worst thing a status pane can get wrong, because it is exactly the moment you need it.
+
+The mechanism already half exists. `drivers (id, host, started, beat, closed)` and
+`wecode-store/src/driver.rs` — its insert, its beat, its close — all landed. **The table
+is empty**: nothing calls them. The storage shipped and the caller never did.
+
+Two changes:
+
+1. **The loop opens a driver row on start, beats it every tick, and closes it on a clean
+   exit.** Same discipline as a run's supervisor, one level up.
+2. **The pane lists `loop` as a service**, running when a driver row has beaten
+   recently — and *down*, in red, when none has. `notify`'s hardcoded `true` goes at the
+   same time: an indicator that cannot say *no* is decoration.
+
+A stale driver row is also what lets a scheduled `wecode recover` know whether a loop is
+expected to be running at all — see docs/design/recovery.md.
