@@ -152,3 +152,16 @@ Sketch:
 
 The completion fraction stays right-aligned: it is scanned down a column, not read
 along a line.
+
+## Home stops repeating the dashboard (5 Sep)
+
+With `v-d` answering *what needs attention*, the home screen's NEEDS YOU / MOVING /
+NEXT / LANDED sections are a second, worse copy of it — and they pushed PORTFOLIO,
+the one thing home is uniquely for, off the bottom of the screen.
+
+Home becomes **the portfolio and nothing else**: projects with their progress, and
+the tasks beneath them. It answers *what is the shape of the work*; the dashboard
+answers *what needs me now*. Two screens, two questions, no overlap.
+
+The four summary sections are removed rather than collapsed — a section that
+duplicates another screen is not made better by being shorter.
