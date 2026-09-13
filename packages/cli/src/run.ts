@@ -23,6 +23,14 @@ const DB = (): string => process.env["WECODE_DB"] ?? resolve(process.cwd(), ".we
 const isStateful = (s: string): s is StatefulEntity => (STATEFUL as readonly string[]).includes(s);
 
 export function run(argv: readonly string[]): number {
+  try {
+    return dispatch(argv);
+  } catch (err) {
+    return fail(err instanceof Missing ? err.message : `${(err as Error).message}`);
+  }
+}
+
+function dispatch(argv: readonly string[]): number {
   const [head, ...rest] = argv;
   if (head === undefined || head === "--help" || head === "-h" || (head === "help" && rest.length === 0)) {
     return usage();
@@ -106,6 +114,25 @@ function answer(args: readonly string[]): number {
 function onboard(args: readonly string[]): number {
   const root = process.cwd();
   const name = args[0] ?? basename(root);
+
+  if (!existsSync(join(root, ".git"))) {
+    return fail(
+      "this is not a git repository, and wecode works in branches and worktrees.\n" +
+        "  git init && git add -A && git commit -m \"seed\"",
+    );
+  }
+  if (gitConfig("user.email") === "") {
+    return fail(
+      "this repository has no git identity, so nothing an agent writes could be attributed.\n" +
+        '  git config user.name "Your Name" && git config user.email you@example.com',
+    );
+  }
+  if (execFileSync("git", ["rev-list", "-n", "1", "--all"], { cwd: root, encoding: "utf8" }).trim() === "") {
+    return fail(
+      "this repository has no commits, so there is nothing to cut a branch from.\n" +
+        '  git add -A && git commit -m "seed"',
+    );
+  }
 
   const stack = detect(root);
   if (stack === null) {
@@ -261,9 +288,17 @@ function show(args: readonly string[]): number {
   return 0;
 }
 
+/** Every command but init and onboard needs a database. A missing one is the commonest
+ *  first contact there is — it used to be an unhandled exception and a stack trace. */
 function db() {
-  return open(DB());
+  const path = DB();
+  if (!existsSync(path)) {
+    throw new Missing(`no wecode here (${path}).\n  wecode onboard   to set this project up`);
+  }
+  return open(path);
 }
+
+class Missing extends Error {}
 
 function showBoard(): number {
   const b = board(db());
