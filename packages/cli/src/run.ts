@@ -1,5 +1,5 @@
-import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
   board,
@@ -22,6 +22,8 @@ export function run(argv: readonly string[]): number {
   if (head === undefined || head === "help" || head === "--help") return usage();
   if (head === "board") return showBoard();
   if (head === "init") return init();
+  if (head === "answer") return answer(rest);
+  if (head === "show") return show(rest);
   return verb(head, rest);
 }
 
@@ -29,7 +31,56 @@ function init(): number {
   const path = DB();
   mkdirSync(dirname(path), { recursive: true });
   open(path).close();
-  process.stdout.write(`wecode at ${path}\n`);
+
+  const config = resolve(process.cwd(), "config");
+  mkdirSync(config, { recursive: true });
+  write(join(config, "roles.yaml"), ROLES);
+  write(join(config, "budget.yaml"), BUDGET);
+
+  process.stdout.write(`wecode at ${path}\nconfig/roles.yaml, config/budget.yaml\n`);
+  return 0;
+}
+
+/** Never over an existing file: a config somebody edited is not ours to replace. */
+function write(path: string, body: string): void {
+  if (existsSync(path)) return;
+  writeFileSync(path, body);
+}
+
+/** `wecode answer <assignment> "<text>"` — the one verb that clears a needs_human.
+ *  An approval is recorded as the operator wrote it; nothing restates it. */
+function answer(args: readonly string[]): number {
+  const id = Number(args[0]);
+  const text = args.slice(1).join(" ");
+  if (!Number.isInteger(id) || text === "") return fail('wecode answer <assignment> "<text>"');
+
+  const conn = db();
+  const row = conn.prepare("SELECT phase, kind FROM assignment WHERE id = ?").get(id) as
+    | { phase: string; kind: string | null }
+    | undefined;
+  if (row === undefined) return fail(`no assignment #${id}`);
+  if (row.phase !== "waiting") return fail(`assignment #${id} is ${row.phase}, and is not waiting on anybody`);
+
+  const who = process.env["WECODE_ACTOR"] ?? "operator";
+  conn
+    .prepare("UPDATE assignment SET answer = ?, answered_by = ?, updated_at = ? WHERE id = ?")
+    .run(text, who, new Date().toISOString(), id);
+  process.stdout.write(`assignment #${id} answered by ${who}\n`);
+  return 0;
+}
+
+/** `wecode show <entity> <id>` — one record, and what hangs off it. */
+function show(args: readonly string[]): number {
+  const [entity, raw] = args;
+  const id = Number(raw);
+  if (entity === undefined || !Number.isInteger(id)) return fail("wecode show <entity> <id>");
+  const conn = db();
+  const row = conn.prepare(`SELECT * FROM ${entity} WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
+  if (row === undefined) return fail(`no ${entity} #${id}`);
+  for (const [k, v] of Object.entries(row)) {
+    if (v === null || v === "") continue;
+    process.stdout.write(`${k.padEnd(18)} ${String(v)}\n`);
+  }
   return 0;
 }
 
@@ -190,6 +241,9 @@ function usage(): number {
       "  wecode board",
       '  wecode <entity> create --parent <id> "<text>"',
       "  wecode <entity> <verb> <id>",
+      '  wecode task scope <id> --write "src/**" --tools bash',
+      '  wecode answer <assignment> "<text>"',
+      "  wecode show <entity> <id>",
       "",
       `entities with states: ${STATEFUL.join(", ")}`,
       "",
@@ -197,3 +251,37 @@ function usage(): number {
   );
   return 0;
 }
+
+const ROLES = `invariants:
+  never_touch: [".github/**", "infra/**", "**/*.pem", "**/*.key", "**/.env"]
+  never_run: ["git push --force*", "npm publish*", "terraform apply*", "rm -rf /*"]
+
+defaults:
+  budget: { tokens: 250000, seconds: 3600 }
+  harness: claude-code
+
+roles:
+  engineer:
+    worker_kind: agent
+    scope:
+      write: ["src/**", "tests/**"]
+      tools: ["bash", "read", "edit", "write"]
+
+  acceptance-tester:
+    worker_kind: agent
+    scope:
+      write: ["tests/acceptance/**"]
+      tools: ["bash", "read", "edit", "write"]
+    budget: { tokens: 120000, seconds: 1800 }
+`;
+
+const BUDGET = `# Raising max_open is the easiest change in this file and usually the wrong one.
+max_open: 3
+
+order:
+  fresh_first: true
+  oldest_first: true
+
+collision:
+  scope_overlap: refuse
+`;

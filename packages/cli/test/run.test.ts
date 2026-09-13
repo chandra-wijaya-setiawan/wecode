@@ -68,3 +68,28 @@ describe("the cli", () => {
     expect(err.join("")).toContain("has no states");
   });
 });
+
+describe("answering", () => {
+  it("refuses an assignment that is not waiting on anybody", () => {
+    run(["init"]);
+    expect(run(["answer", "1", "yes"])).toBe(1);
+    expect(err.join("")).toContain("no assignment #1");
+  });
+
+  it("records the answer and who gave it", () => {
+    run(["init"]);
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const db = new DatabaseSync(process.env["WECODE_DB"] as string);
+    db.prepare(
+      `INSERT INTO worker (slug,name,role,kind,created_at,updated_at) VALUES ('w','w','engineer','agent','t','t')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO assignment (slug,objective_type,objective_id,worker_id,scope,budget,worktree,phase,kind,question,spent,created_at,updated_at)
+       VALUES ('a','task',1,1,'{}','{}','/tmp','waiting','approval','may I?','{}','t','t')`,
+    ).run();
+    db.close();
+
+    expect(run(["answer", "1", "yes,", "go", "ahead"])).toBe(0);
+    expect(said()).toContain("answered by operator");
+  });
+});

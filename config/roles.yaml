@@ -1,0 +1,21 @@
+invariants:
+  never_touch: [".github/**", "infra/**", "**/*.pem", "**/*.key", "**/.env"]
+  never_run: ["git push --force*", "npm publish*", "terraform apply*", "rm -rf /*"]
+
+defaults:
+  budget: { tokens: 250000, seconds: 3600 }
+  harness: claude-code
+
+roles:
+  engineer:
+    worker_kind: agent
+    scope:
+      write: ["src/**", "tests/**"]
+      tools: ["bash", "read", "edit", "write"]
+
+  acceptance-tester:
+    worker_kind: agent
+    scope:
+      write: ["tests/acceptance/**"]
+      tools: ["bash", "read", "edit", "write"]
+    budget: { tokens: 120000, seconds: 1800 }

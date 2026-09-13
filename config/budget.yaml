@@ -1,0 +1,9 @@
+# Raising max_open is the easiest change in this file and usually the wrong one.
+max_open: 3
+
+order:
+  fresh_first: true
+  oldest_first: true
+
+collision:
+  scope_overlap: refuse
