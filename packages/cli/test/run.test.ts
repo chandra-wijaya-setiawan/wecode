@@ -163,3 +163,45 @@ describe("a parent in another project", () => {
     expect(err.join("")).toContain("but you are in #2");
   });
 });
+
+describe("telling the orchestrator, rather than being asked", () => {
+  const tree = (): void => {
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    run(["project", "create", "--parent", "1", "p", "--path", process.cwd()]);
+    run(["release", "create", "--parent", "1", "0.0.1"]);
+    run(["epic", "create", "--parent", "1", "e"]);
+    run(["story", "create", "--parent", "1", "s"]);
+  };
+
+  it("wait returns 0 when the thing reached what the work wanted", () => {
+    tree();
+    run(["story", "start", "1"]);
+    const db = new (require("node:sqlite") as typeof import("node:sqlite")).DatabaseSync(
+      process.env["WECODE_DB"] as string,
+    );
+    db.prepare("UPDATE story SET state = 'delivered' WHERE id = 1").run();
+    db.close();
+
+    out.length = 0;
+    expect(run(["wait", "story", "1"])).toBe(0);
+    expect(said()).toContain("story #1 delivered");
+  });
+
+  it("wait returns 1 when it settled the other way", () => {
+    tree();
+    run(["story", "drop", "1"]);
+    expect(run(["wait", "story", "1"])).toBe(1);
+  });
+
+  it("watch prints one line per transition, oldest first", () => {
+    tree();
+    run(["story", "start", "1"]);
+    out.length = 0;
+    // --since 0 replays, and with no interval left running the first pass is all of it
+    const code = run(["watch", "--since", "0", "--once"]);
+    expect(code).toBe(0);
+    expect(said()).toContain("story #1  planned → in_progress");
+    expect(said()).toContain("start by operator");
+  });
+});

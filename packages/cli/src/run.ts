@@ -57,6 +57,8 @@ function dispatch(argv: readonly string[]): number {
   if (head === "onboard") return onboard(rest);
   if (head === "workspaces") return workspaces();
   if (head === "tree") return showTree(rest);
+  if (head === "watch") return watch(rest);
+  if (head === "wait") return wait(rest);
   return verb(head, rest);
 }
 
@@ -105,6 +107,124 @@ function answer(args: readonly string[]): number {
     .run(text, who, new Date().toISOString(), id);
   process.stdout.write(`assignment #${id} answered by ${who}\n`);
   return 0;
+}
+
+/** `wecode watch [--project N] [--json]` — one line per state change, forever.
+ *
+ *  Read off the ledger, which is append-only, so this is a query with a cursor rather than
+ *  an event bus. An orchestrator that wants to be told instead of asking runs this in the
+ *  background and reads lines. */
+function watch(args: readonly string[]): number {
+  const { values } = parseArgs({
+    args: [...args],
+    options: {
+      project: { type: "string" },
+      json: { type: "boolean" },
+      since: { type: "string" },
+      once: { type: "boolean" },
+    },
+  });
+  const conn = db();
+  const project = values.project === undefined ? null : Number(values.project);
+
+  let cursor =
+    values.since === undefined
+      ? ((conn.prepare("SELECT coalesce(max(id), 0) AS n FROM ledger").get() as { n: number }).n)
+      : Number(values.since);
+
+  const tick = (): void => {
+    const rows = conn
+      .prepare("SELECT id, entity, entity_id, verb, from_state, to_state, actor, at FROM ledger WHERE id > ? ORDER BY id")
+      .all(cursor) as unknown as {
+      id: number;
+      entity: string;
+      entity_id: number;
+      verb: string;
+      from_state: string;
+      to_state: string;
+      actor: string;
+      at: string;
+    }[];
+
+    for (const r of rows) {
+      cursor = r.id;
+      if (project !== null && projectOf(r.entity, r.entity_id)?.id !== project) continue;
+      process.stdout.write(
+        values.json === true
+          ? `${JSON.stringify(r)}\n`
+          : `${r.at}  ${r.entity} #${r.entity_id}  ${r.from_state} → ${r.to_state}  ${r.verb} by ${r.actor}\n`,
+      );
+    }
+  };
+
+  tick();
+  if (values.once === true) return 0;
+
+  const timer = setInterval(tick, 1000);
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => {
+      clearInterval(timer);
+      process.exit(0);
+    });
+  }
+  return 0;
+}
+
+/** `wecode wait <entity> <id> [--timeout <seconds>]` — block until it settles, then exit.
+ *
+ *  The exit code is the answer: 0 if it reached a state the work wanted, 1 if it did not.
+ *  A harness that can run a command in the background gets a notification for free — the
+ *  command finishing *is* the notification. */
+function wait(args: readonly string[]): number {
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { timeout: { type: "string" }, quiet: { type: "boolean" } },
+  });
+  const [entity, raw] = positionals;
+  const id = Number(raw);
+  if (entity === undefined || !Number.isInteger(id)) return fail("wecode wait <entity> <id>");
+  if (!isStateful(entity)) return fail(`${entity} has no states to wait on`);
+
+  const good: Readonly<Record<string, readonly string[]>> = {
+    project: ["dropped"],
+    release: ["released"],
+    epic: ["delivered"],
+    story: ["delivered"],
+    requirement: ["met"],
+    acceptance_criteria: ["accepted"],
+    acceptance_test: ["passed"],
+    task_test: ["passed"],
+    task: ["done"],
+    assignment: ["succeeded"],
+  };
+  const machine = loadMachines()[entity];
+  const settled = new Set([...machine.terminal, ...(good[entity] ?? [])]);
+
+  const conn = db();
+  const col = entity === "assignment" ? "phase" : "state";
+  const deadline = values.timeout === undefined ? null : Date.now() + Number(values.timeout) * 1000;
+
+  const look = (): string | null =>
+    (conn.prepare(`SELECT ${col} AS s FROM ${entity} WHERE id = ?`).get(id) as { s: string } | undefined)?.s ?? null;
+
+  if (look() === null) return fail(`no ${entity} #${id}`);
+
+  // Blocking on purpose, and synchronously: the command exists to not return until the
+  // answer is known, and run() is not async. Atomics.wait is the one sleep that parks the
+  // thread rather than the event loop.
+  const park = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    const state = look();
+    if (state !== null && settled.has(state)) {
+      if (values.quiet !== true) process.stdout.write(`${entity} #${id} ${state}\n`);
+      return (good[entity] ?? []).includes(state) ? 0 : 1;
+    }
+    if (deadline !== null && Date.now() > deadline) {
+      return fail(`${entity} #${id} is still ${state ?? "gone"} after ${values.timeout}s`) + 1;
+    }
+    Atomics.wait(park, 0, 0, 1000);
+  }
 }
 
 /** `wecode tree [project]` — the whole shape, project to task_test. */
@@ -679,6 +799,8 @@ function usage(): number {
       "LOOKING",
       "  wecode show <entity> <id>                  one record",
       "  wecode tree [project]                      the whole shape, project to task_test",
+      "  wecode watch [--project N] [--json]        one line per state change, forever (--once to drain)",
+      "  wecode wait <entity> <id>                  block until it settles; the exit code is the answer",
       "  wecode <entity> --help                     that entity's states and verbs",
       "",
       "RUNNING",
