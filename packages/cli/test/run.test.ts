@@ -93,3 +93,26 @@ describe("answering", () => {
     expect(said()).toContain("answered by operator");
   });
 });
+
+describe("help is what an agent reads first", () => {
+  it("says what the work is shaped like, not only which flags exist", () => {
+    run(["--help"]);
+    const out = said();
+    expect(out).toContain("acceptance_test");
+    expect(out).toContain("wecode onboard");
+    expect(out).toContain("two tasks whose write scopes overlap");
+  });
+
+  it("prints an entity's real states and verbs, off the machine table", () => {
+    run(["task", "--help"]);
+    const out = said();
+    expect(out).toContain("planned · ready · done · failed · dropped");
+    expect(out).toContain("task_may_be_attempted");
+    expect(out).toContain("automatic");
+  });
+
+  it("says so for an entity that has no states", () => {
+    expect(run(["worker", "--help"])).toBe(1);
+    expect(err.join("")).toContain("only verb is create");
+  });
+});

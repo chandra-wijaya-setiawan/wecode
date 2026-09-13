@@ -1,0 +1,67 @@
+# How wecode recognises a repository. A stack is a marker file and four facts.
+#
+# Order matters: the first marker found wins, so the more specific lock files come before
+# the manifests they sit beside.
+
+stacks:
+  pnpm:
+    marker: pnpm-lock.yaml
+    test: pnpm exec vitest run
+    typecheck: pnpm typecheck
+    source: ["src/**", "packages/*/src/**"]
+    tests: ["test/**", "tests/**", "packages/*/test/**"]
+
+  yarn:
+    marker: yarn.lock
+    test: yarn test
+    source: ["src/**"]
+    tests: ["test/**", "tests/**"]
+
+  npm:
+    marker: package-lock.json
+    test: npm test
+    source: ["src/**"]
+    tests: ["test/**", "tests/**"]
+
+  uv:
+    marker: uv.lock
+    test: uv run pytest -q
+    source: ["src/**"]
+    tests: ["tests/**"]
+
+  poetry:
+    marker: poetry.lock
+    test: poetry run pytest -q
+    source: ["src/**"]
+    tests: ["tests/**"]
+
+  python:
+    marker: pyproject.toml
+    test: uv run --with pytest pytest -q
+    source: ["src/**"]
+    tests: ["tests/**"]
+
+  pip:
+    marker: requirements.txt
+    test: uv run --with pytest pytest -q
+    source: ["src/**"]
+    tests: ["tests/**"]
+
+  go:
+    marker: go.mod
+    test: go test ./...
+    source: ["**/*.go"]
+    tests: ["**/*_test.go"]
+
+  cargo:
+    marker: Cargo.toml
+    test: cargo test
+    source: ["src/**", "crates/*/src/**"]
+    tests: ["tests/**"]
+
+  # A package.json with no lock file at all. Last, so a lock file always wins.
+  node:
+    marker: package.json
+    test: npm test
+    source: ["src/**"]
+    tests: ["test/**", "tests/**"]

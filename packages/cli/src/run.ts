@@ -1,17 +1,21 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
   board,
   Engine,
   Maker,
+  detect,
+  loadMachines,
   open,
+  readProjectConfig,
   setTaskScope,
   STATEFUL,
   type StatefulEntity,
   type TestKind,
   type WorkerKind,
+  writeProjectConfig,
 } from "@wecode/core";
 
 const DB = (): string => process.env["WECODE_DB"] ?? resolve(process.cwd(), ".wecode/wecode.db");
@@ -20,12 +24,17 @@ const isStateful = (s: string): s is StatefulEntity => (STATEFUL as readonly str
 
 export function run(argv: readonly string[]): number {
   const [head, ...rest] = argv;
-  if (head === undefined || head === "help" || head === "--help") return usage();
+  if (head === undefined || head === "--help" || head === "-h" || (head === "help" && rest.length === 0)) {
+    return usage();
+  }
+  if (rest[0] === "--help" || rest[0] === "-h") return entityHelp(head);
+  if (head === "help") return entityHelp(rest[0] ?? "");
   if (head === "board") return showBoard();
   if (head === "init") return init();
   if (head === "answer") return answer(rest);
   if (head === "show") return show(rest);
   if (head === "land") return land(rest);
+  if (head === "onboard") return onboard(rest);
   return verb(head, rest);
 }
 
@@ -84,6 +93,97 @@ function answer(args: readonly string[]): number {
     .run(text, who, new Date().toISOString(), id);
   process.stdout.write(`assignment #${id} answered by ${who}\n`);
   return 0;
+}
+
+/** `wecode onboard [name]` — what happens when wecode meets a repository.
+ *
+ *  It learns the stack, records what it learned, and registers the project. Before this,
+ *  every test carried a hand-typed command and every scope a hand-typed path. */
+function onboard(args: readonly string[]): number {
+  const root = process.cwd();
+  const name = args[0] ?? basename(root);
+
+  const stack = detect(root);
+  if (stack === null) {
+    return fail(
+      "no stack recognised here. wecode looks for a lock file or a manifest — see config/stacks.yaml.\n" +
+        "  add one there, or write config/project.yaml by hand.",
+    );
+  }
+
+  const config = resolve(root, "config");
+  mkdirSync(config, { recursive: true });
+  const projectFile = join(config, "project.yaml");
+  const already = readProjectConfig(projectFile);
+  const learned = already ?? writeProjectConfig(projectFile, stack);
+
+  write(join(config, "roles.yaml"), rolesFor(learned));
+  write(join(config, "budget.yaml"), BUDGET);
+  ignore(resolve(root, ".gitignore"), ".wecode/");
+
+  const path = DB();
+  mkdirSync(dirname(path), { recursive: true });
+  const conn = open(path);
+  const make = new Maker(conn);
+
+  const workspace =
+    (conn.prepare("SELECT id FROM workspace ORDER BY id LIMIT 1").get() as { id: number } | undefined)?.id ??
+    make.workspace(basename(resolve(root, "..")), resolve(root, ".."));
+
+  const existing = conn.prepare("SELECT id FROM project WHERE repo = ?").get(root) as { id: number } | undefined;
+  if (existing !== undefined) {
+    process.stdout.write(`project #${existing.id} is already onboarded here\n`);
+    return 0;
+  }
+
+  const project = make.project(workspace, name, root);
+  const release = make.release(project, "0.1");
+  new Engine(conn).apply("project", project, "start", "operator");
+  new Engine(conn).apply("release", release, "start", "operator");
+
+  process.stdout.write(
+    [
+      `stack       ${learned.stack}`,
+      `test        ${learned.test}`,
+      learned.typecheck === null ? null : `typecheck   ${learned.typecheck}`,
+      `source      ${learned.source.join(", ")}`,
+      "",
+      `workspace #${workspace}  project #${project}  release #${release}`,
+      "",
+      "next: wecode epic create --parent " + String(release) + ' "<what this release is for>"',
+      "",
+    ]
+      .filter((l) => l !== null)
+      .join("\n"),
+  );
+  return 0;
+}
+
+/** Roles whose scopes are paths this repository has, rather than paths wecode assumed. */
+function rolesFor(c: { source: readonly string[]; tests: readonly string[] }): string {
+  const globs = (gs: readonly string[]): string => gs.map((g) => JSON.stringify(g)).join(", ");
+  return `invariants:
+  never_touch: [".github/**", "infra/**", "**/*.pem", "**/*.key", "**/.env"]
+  never_run: ["git push --force*", "npm publish*", "terraform apply*", "rm -rf /*"]
+
+defaults:
+  budget: { tokens: 250000, seconds: 3600 }
+  harness: claude-code
+
+roles:
+  engineer:
+    worker_kind: agent
+    scope:
+      write: [${globs([...c.source, ...c.tests])}]
+      tools: ["bash", "read", "edit", "write"]
+
+  acceptance-tester:
+    worker_kind: agent
+    scope:
+      write: [${globs(c.tests)}]
+      tools: ["bash", "read", "edit", "write"]
+    budget: { tokens: 120000, seconds: 1800 }
+`;
 }
 
 /** `wecode land <story>` — merge a delivered story into the branch you have checked out.
@@ -220,9 +320,14 @@ function scope(entity: string, args: readonly string[]): number {
   const list = (v: string | undefined): string[] =>
     v === undefined || v === "" ? [] : v.split(",").map((s) => s.trim()).filter((s) => s !== "");
 
+  const learned = project();
+  const write =
+    values.write === undefined && learned !== null ? [...learned.source, ...learned.tests] : list(values.write);
+  const tools = values.tools === undefined ? ["bash", "read", "edit", "write"] : list(values.tools);
+
   try {
-    setTaskScope(db(), id, { write: list(values.write), tools: list(values.tools) });
-    process.stdout.write(`task #${id} scope set\n`);
+    setTaskScope(db(), id, { write, tools });
+    process.stdout.write(`task #${id} scope ${write.join(", ")}\n`);
     return 0;
   } catch (err) {
     return fail((err as Error).message);
@@ -275,10 +380,10 @@ function create(entity: string, args: readonly string[]): number {
         id = make.criteria(needsParent(), text);
         break;
       case "acceptance_test":
-        id = make.acceptanceTest(needsParent(), text, kindOf(values["kind"]), values["artefact"] ?? null);
+        id = make.acceptanceTest(needsParent(), text, kindOf(values["kind"]), artefactOr(values["artefact"]));
         break;
       case "task_test":
-        id = make.taskTest(needsParent(), text, kindOf(values["kind"]), values["artefact"] ?? null);
+        id = make.taskTest(needsParent(), text, kindOf(values["kind"]), artefactOr(values["artefact"]));
         break;
       case "task":
         id = make.task(needsParent(), text, { role: values["role"] ?? "" });
@@ -296,6 +401,17 @@ function create(entity: string, args: readonly string[]): number {
   }
 }
 
+/** A test with no artefact falls back to the project's own test command, which onboarding
+ *  learned from the repository. Retyping it into every test is how they drift. */
+function artefactOr(given: string | undefined): string | null {
+  if (given !== undefined) return given;
+  return project()?.test ?? null;
+}
+
+function project(): ReturnType<typeof readProjectConfig> {
+  return readProjectConfig(resolve(process.cwd(), "config/project.yaml"));
+}
+
 function kindOf(v: string | undefined): TestKind {
   return v === "judged" ? "judged" : "script";
 }
@@ -308,21 +424,72 @@ function fail(why: string): number {
 function usage(): number {
   process.stdout.write(
     [
-      "wecode — deterministic project management for coding agents",
+      "wecode — deterministic project management for a developer and their coding agents.",
       "",
-      "  wecode init",
-      "  wecode board",
-      '  wecode <entity> create --parent <id> "<text>"',
-      "  wecode <entity> <verb> <id>",
-      '  wecode task scope <id> --write "src/**" --tools bash',
-      '  wecode answer <assignment> "<text>"',
-      "  wecode show <entity> <id>",
-      "  wecode land <story>",
+      "Work is written down as tests before it is built. Agents get one task each inside a",
+      "scope they cannot leave. Nothing is finished because an agent said so: a task is done",
+      "when its tests pass, and a story is delivered when every test that proves it passes.",
       "",
-      `entities with states: ${STATEFUL.join(", ")}`,
+      "THE SHAPE OF THE WORK",
+      "  project → release → epic → story → requirement → acceptance_criteria",
+      "                                      → acceptance_test → task → task_test",
+      "",
+      "  requirement          a rule that must be true",
+      "  acceptance_criteria  one named expectation that proves it",
+      "  acceptance_test      the command that proves the criteria",
+      "  task                 work that exists to make one acceptance_test pass",
+      "  task_test            the task's own unit test",
+      "",
+      "START HERE",
+      "  wecode onboard [name]                      learn this repo, register it, write config",
+      "  wecode board                               what is running, waiting, queued, failed",
+      "",
+      "MAKING WORK",
+      '  wecode <entity> create --parent <id> "<text>" [--artefact "<cmd>"] [--role <name>]',
+      '  wecode task scope <id> --write "a.ts,b.ts"  which files that task may change',
+      "  wecode worker create <name> --role engineer --kind agent",
+      "",
+      "MOVING WORK",
+      "  wecode <entity> <verb> <id>                start, deliver, pass, fail, drop, retry …",
+      '  wecode answer <assignment> "<text>"        clears a needs_human',
+      "  wecode land <story>                        merge a delivered story into your branch",
+      "",
+      "LOOKING",
+      "  wecode show <entity> <id>                  one record",
+      "  wecode <entity> --help                     that entity's states and verbs",
+      "",
+      "RUNNING",
+      "  wecode-runner --once                       one tick: allocate, run an agent, prove, land",
+      "  wecode-runner                              the loop",
+      "  wecode-tui                                 the live board",
+      "",
+      `entities: ${STATEFUL.join(", ")}, workspace, role, worker`,
+      "",
+      "RULES THAT BITE",
+      "  a task needs a scope, a role and a task_test that is ready before it can start",
+      "  two tasks whose write scopes overlap will not run at the same time",
+      "  a failing test is the answer — make another task, do not edit the code by hand",
       "",
     ].join("\n"),
   );
+  return 0;
+}
+
+/** Every state and verb an entity has, read off the machine table — so help cannot drift
+ *  from what the engine will actually allow. */
+function entityHelp(entity: string): number {
+  if (!isStateful(entity)) return fail(`${entity} has no states. Its only verb is create.`);
+
+  const m = loadMachines()[entity];
+  process.stdout.write(`${entity}\n\n  states  ${m.states.join(" · ")}\n\n`);
+
+  const width = Math.max(...m.transitions.map((t) => t.verb.length));
+  for (const t of m.transitions) {
+    const guard = t.guard === undefined ? "" : `  [${t.guard}]`;
+    const who = t.automatic === true ? "  (automatic — nobody invokes it)" : "";
+    process.stdout.write(`  ${t.verb.padEnd(width)}  ${t.from.join(" | ")} → ${t.to}${guard}${who}\n`);
+  }
+  process.stdout.write(`\n  wecode ${entity} <verb> <id>\n\n`);
   return 0;
 }
 
