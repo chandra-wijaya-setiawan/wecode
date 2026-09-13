@@ -40,7 +40,14 @@ function init(): number {
   write(join(config, "budget.yaml"), BUDGET);
   ignore(resolve(process.cwd(), ".gitignore"), ".wecode/");
 
-  process.stdout.write(`wecode at ${path}\nconfig/roles.yaml, config/budget.yaml\n`);
+  process.stdout.write(
+    [
+      `wecode at ${path}`,
+      "wrote config/roles.yaml and config/budget.yaml — commit them, they describe this project",
+      "added .wecode/ to .gitignore",
+      "",
+    ].join("\n"),
+  );
   return 0;
 }
 
@@ -111,8 +118,13 @@ function land(args: readonly string[]): number {
   }
 
   try {
-    const dirty = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
-    if (dirty !== "") return fail("your working tree has changes. Commit or stash them first.");
+    // Tracked changes only. An untracked file does not affect a merge, and git refuses on
+    // its own if one would be overwritten — refusing here as well blocked a landing over
+    // wecode's own config directory.
+    const dirty = execFileSync("git", ["status", "--porcelain", "-uno"], { encoding: "utf8" }).trim();
+    if (dirty !== "") {
+      return fail(`your working tree has changes. Commit or stash them first:\n${dirty}`);
+    }
     execFileSync("git", ["merge", "--no-ff", "-m", `land ${branch}`, branch], { stdio: "inherit" });
   } catch (err) {
     return fail(`git: ${(err as Error).message}`);
