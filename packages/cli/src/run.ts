@@ -9,6 +9,7 @@ import {
   detect,
   currentDatabase,
   databaseOf,
+  listWorkspaces,
   loadMachines,
   open,
   readPointer,
@@ -52,6 +53,7 @@ function dispatch(argv: readonly string[]): number {
   if (head === "show") return show(rest);
   if (head === "land") return land(rest);
   if (head === "onboard") return onboard(rest);
+  if (head === "workspaces") return workspaces();
   return verb(head, rest);
 }
 
@@ -100,6 +102,28 @@ function answer(args: readonly string[]): number {
     .run(text, who, new Date().toISOString(), id);
   process.stdout.write(`assignment #${id} answered by ${who}\n`);
   return 0;
+}
+
+/** `wecode workspaces` — which ones exist, and which one you are talking to. */
+function workspaces(): number {
+  const known = listWorkspaces();
+  if (known.length === 0) {
+    return fail("no workspaces yet.\n  wecode onboard   in a repository, to make one");
+  }
+  const here = currentDatabase();
+  for (const name of known) {
+    const path = databaseOf(name);
+    const n = existsSync(path) ? projectCount(path) : 0;
+    process.stdout.write(`${path === here ? "*" : " "} ${name.padEnd(16)} ${n} project${n === 1 ? "" : "s"}\n`);
+  }
+  return 0;
+}
+
+function projectCount(path: string): number {
+  const conn = open(path);
+  const row = conn.prepare("SELECT count(*) AS n FROM project").get() as { n: number };
+  conn.close();
+  return row.n;
 }
 
 /** `wecode onboard [name]` — what happens when wecode meets a repository.
@@ -490,6 +514,7 @@ function usage(): number {
       "  wecode onboard [name] [--workspace <ws>]   learn this repo, join a workspace, write config",
       "  wecode init                                an empty workspace, before you have a repo",
       "  wecode board                               what is running, waiting, queued, failed",
+      "  wecode workspaces                          which workspaces exist, and which is current",
       "",
       "MAKING WORK",
       '  wecode <entity> create --parent <id> "<text>" [--artefact "<cmd>"] [--role <name>]',

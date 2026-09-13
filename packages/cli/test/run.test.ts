@@ -125,3 +125,12 @@ describe("first contact", () => {
     expect(err.join("")).toContain("wecode onboard");
   });
 });
+
+describe("workspaces", () => {
+  it("says there are none rather than inventing one", () => {
+    process.env["WECODE_HOME"] = "/tmp/wecode-empty-home";
+    expect(run(["workspaces"])).toBe(1);
+    expect(err.join("")).toContain("no workspaces yet");
+    delete process.env["WECODE_HOME"];
+  });
+});

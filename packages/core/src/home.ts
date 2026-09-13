@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -37,6 +37,17 @@ export function readPointer(repo: string): string | null {
  *  an explicit database, an explicit name, this repository's pointer, then the default. */
 export function currentWorkspace(cwd: string = process.cwd()): string {
   return process.env["WECODE_WORKSPACE"] ?? readPointer(cwd) ?? "default";
+}
+
+/** Every workspace that exists. Used to say which ones there are when the one asked for
+ *  is not among them. */
+export function listWorkspaces(): readonly string[] {
+  const root = join(wecodeHome(), "workspaces");
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && existsSync(join(root, e.name, "wecode.db")))
+    .map((e) => e.name)
+    .sort();
 }
 
 export function currentDatabase(cwd: string = process.cwd()): string {
