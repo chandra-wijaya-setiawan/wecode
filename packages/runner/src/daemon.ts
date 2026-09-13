@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { Engine } from "@wecode/core";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { allocate, candidates as readyCandidates, type Candidate, type Pass } from "./allocator.js";
@@ -14,6 +15,8 @@ export interface Tick {
   readonly scripts: ScriptReport;
   readonly committed: readonly number[];
   readonly merged: readonly number[];
+  /** Tasks that ran out of attempts on this tick. */
+  readonly exhausted: readonly number[];
 }
 
 export interface RunnerOptions {
@@ -34,6 +37,7 @@ export class Runner {
   private readonly foreman: Foreman;
   private readonly scripts: Scripts;
   private readonly trees: Trees;
+  private readonly engine: Engine;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -42,6 +46,7 @@ export class Runner {
     this.foreman = new Foreman(db, opts.adapters, opts.deadlineSeconds ?? 3600);
     this.scripts = new Scripts(db);
     this.trees = new Trees(opts.repoRoot, opts.integrationBranch ?? "main");
+    this.engine = new Engine(db);
   }
 
   /** allocate, run, prove, land. The order is the point: a task_test is run in the tree the
@@ -53,11 +58,13 @@ export class Runner {
     const settled = await this.settleEnded();
     const merged = await this.landDoneTasks();
     const acceptance = await this.proveStories();
+    const exhausted = this.enforceRetryLimit();
     return {
       allocated,
       foreman,
       committed: settled.committed,
       merged,
+      exhausted,
       scripts: {
         passed: [...settled.scripts.passed, ...acceptance.passed],
         failed: [...settled.scripts.failed, ...acceptance.failed],
@@ -177,6 +184,20 @@ export class Runner {
       }
     }
     return { committed, scripts: { passed, failed } };
+  }
+
+  /** A task that has used its attempts stops, and says so. Without this the allocator
+   *  retries a broken task forever — a crash loop with the machine holding the stopwatch. */
+  private enforceRetryLimit(): number[] {
+    const rows = this.db
+      .prepare(`SELECT id FROM task WHERE state = 'ready' AND attempts >= max_retry`)
+      .all() as unknown as { id: number }[];
+
+    const stopped: number[] = [];
+    for (const row of rows) {
+      if (this.engine.apply("task", row.id, "give_up", "runner").ok) stopped.push(row.id);
+    }
+    return stopped;
   }
 
   /** Acceptance tests, in the story tree, once the story's tasks are finished. */

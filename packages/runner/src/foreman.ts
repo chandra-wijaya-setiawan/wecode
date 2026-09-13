@@ -172,7 +172,9 @@ export class Foreman {
           "UPDATE assignment SET session = coalesce(?, session), last_seen = ?, spent = ?, commit_sha = ?, updated_at = ? WHERE id = ?",
         )
         .run(seen.session, at, spent, seen.commit, at, id);
-      return this.engine.apply("assignment", id, "finish", "foreman").ok;
+      const ok = this.engine.apply("assignment", id, "finish", "foreman").ok;
+      if (ok) this.countAttempt(id);
+      return ok;
     }
 
     this.db
@@ -183,8 +185,11 @@ export class Foreman {
     return out;
   }
 
-  /** One failed attempt does not fail a task; the retry limit does. Counting is the
-   *  foreman's, deciding is not. */
+  /** Every attempt counts, whatever phase it ended in.
+   *
+   *  A session can exit cleanly having proved nothing — the first live run did exactly
+   *  that — so counting only failures lets a task be retried forever. One attempt does not
+   *  fail a task; the retry limit does. Counting is the foreman's, deciding is not. */
   private countAttempt(id: number): void {
     this.db
       .prepare(

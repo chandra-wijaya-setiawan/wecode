@@ -110,3 +110,41 @@ describe("a tick, end to end", () => {
     expect(existsSync(join(repo, "mail.ts"))).toBe(false);
   });
 });
+
+describe("a task that keeps failing stops", () => {
+  it("gives up once its attempts are spent, rather than being retried forever", async () => {
+    /** A worker that writes nothing, so the task_test never passes. */
+    const idle: WorkerAdapter = {
+      kind: "agent",
+      start: async () => ({ phase: "succeeded", session: "s", spent: { tokens: 1, seconds: 0 }, commit: null }),
+      poll: async () => ({ phase: "running", session: "s", spent: { tokens: 0, seconds: 0 } }),
+      answer: async () => ({ phase: "running", session: "s", spent: { tokens: 0, seconds: 0 } }),
+      kill: async () => {},
+    };
+    db.prepare("UPDATE task SET max_retry = 2 WHERE id = ?").run(task);
+    db.prepare("UPDATE task_test SET artefact = 'test -f never.ts' WHERE parent_id = ?").run(task);
+
+    const r = new Runner(db, {
+      budget: DEFAULT_BUDGET,
+      repoRoot: repo,
+      worktreeRoot: join(repo, ".wecode/worktrees"),
+      adapters: { agent: idle },
+      integrationBranch: "main",
+    });
+
+    // the attempt ends cleanly and proves nothing, so the task is tried again
+    await r.tick();
+    const after = db.prepare("SELECT state, attempts FROM task WHERE id = ?").get(task) as {
+      state: string;
+      attempts: number;
+    };
+    expect(after).toEqual({ state: "ready", attempts: 1 });
+
+    const second = await r.tick();
+    expect(second.exhausted).toContain(task);
+    expect((db.prepare("SELECT state FROM task WHERE id = ?").get(task) as { state: string }).state).toBe("failed");
+
+    const third = await r.tick();
+    expect(third.allocated.created).toBeNull();
+  });
+});
