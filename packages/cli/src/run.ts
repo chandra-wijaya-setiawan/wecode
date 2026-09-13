@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -36,9 +36,17 @@ function init(): number {
   mkdirSync(config, { recursive: true });
   write(join(config, "roles.yaml"), ROLES);
   write(join(config, "budget.yaml"), BUDGET);
+  ignore(resolve(process.cwd(), ".gitignore"), ".wecode/");
 
   process.stdout.write(`wecode at ${path}\nconfig/roles.yaml, config/budget.yaml\n`);
   return 0;
+}
+
+/** The database, the worktrees and the session logs are wecode's, not the project's. */
+function ignore(path: string, line: string): void {
+  const body = existsSync(path) ? readFileSync(path, "utf8") : "";
+  if (body.split("\n").some((l) => l.trim() === line)) return;
+  writeFileSync(path, body === "" || body.endsWith("\n") ? `${body}${line}\n` : `${body}\n${line}\n`);
 }
 
 /** Never over an existing file: a config somebody edited is not ours to replace. */
