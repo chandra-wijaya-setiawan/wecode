@@ -1,0 +1,21 @@
+# systemd --user unit. Install:
+#   cp contrib/wecode-runner.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now wecode-runner
+#
+# KillMode=process so a stop does not take the agent sessions with it: an attempt that is
+# killed mid-run leaves a worktree nobody has looked at.
+[Unit]
+Description=wecode runner
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/wecode
+Environment=PATH=%h/.local/bin:%h/.local/share/pi-node/node-v22.23.1-linux-x64/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/projects/wecode/packages/runner/dist/bin.js --interval 15
+Restart=always
+RestartSec=10
+KillMode=process
+
+[Install]
+WantedBy=default.target
