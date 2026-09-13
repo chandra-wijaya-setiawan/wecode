@@ -14,6 +14,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   constructor(
     private readonly bin = "claude",
     private readonly logDir = join(process.cwd(), ".wecode", "sessions"),
+    /** Edits inside the worktree are accepted without asking. The confinement is the
+     *  worktree and the allowed-tools list, not a prompt nobody is at the terminal to
+     *  answer — an agent that stops to ask permission has burned an attempt and proved
+     *  nothing. Never `bypassPermissions`: the tool list is still a list. */
+    private readonly permissionMode = "acceptEdits",
   ) {}
 
   async start(work: Work): Promise<Observation> {
@@ -62,7 +67,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    *  `Write`, and a name it does not recognise is not an error — it is a permission gate
    *  that silently refuses every edit. The first live run lost a session to exactly that. */
   private scopeFlags(work: Work): string[] {
-    const flags = ["--add-dir", work.worktree];
+    const flags = ["--add-dir", work.worktree, "--permission-mode", this.permissionMode];
     const tools = work.scope.tools.map((t) => TOOL_NAMES[t.toLowerCase()] ?? t).filter((t) => t !== "");
     if (tools.length > 0) flags.push("--allowedTools", tools.join(","));
     return flags;
