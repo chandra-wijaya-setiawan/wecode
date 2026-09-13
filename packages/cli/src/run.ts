@@ -465,11 +465,20 @@ function create(entity: string, args: readonly string[]): number {
       artefact: { type: "string" },
       role: { type: "string" },
       path: { type: "string" },
+      project: { type: "string" },
     },
   });
 
   const text = positionals.join(" ");
   const parent = Number(values["parent"]);
+
+  // Ids are global. A parent in another project's tree is how a story ends up built in the
+  // wrong repository — the agents run wherever the task's project points, which is correct
+  // and was not what anybody meant.
+  if (Number.isInteger(parent) && values["project"] === undefined) {
+    const wrong = crossesProject(entity, parent);
+    if (wrong !== null) return fail(wrong);
+  }
   const make = new Maker(db());
   const needsParent = (): number => {
     if (!Number.isInteger(parent)) throw new Error(`wecode ${entity} create --parent <id> "<text>"`);
@@ -515,7 +524,9 @@ function create(entity: string, args: readonly string[]): number {
       default:
         return fail(`no such entity: ${entity}`);
     }
-    process.stdout.write(`${entity} #${id}\n`);
+    // Say what it joined. --parent takes any number, and ids are global: attaching to
+    // another project's tree is silent otherwise, and was.
+    process.stdout.write(`${entity} #${id}${where(entity, id)}\n`);
     return 0;
   } catch (err) {
     return fail((err as Error).message);
@@ -531,6 +542,94 @@ function artefactOr(given: string | undefined): string | null {
 
 function project(): ReturnType<typeof readProjectConfig> {
   return readProjectConfig(resolve(process.cwd(), "config/project.yaml"));
+}
+
+/** The project a row belongs to, by walking up. Null when the entity has no project. */
+function projectOf(entity: string, id: number): { id: number; name: string; repo: string } | null {
+  const up: Readonly<Record<string, string>> = {
+    release: "SELECT p.id, p.name, p.repo FROM release x JOIN project p ON p.id = x.project_id WHERE x.id = ?",
+    epic: "SELECT p.id, p.name, p.repo FROM epic x JOIN release r ON r.id = x.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    story:
+      "SELECT p.id, p.name, p.repo FROM story x JOIN epic e ON e.id = x.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    requirement:
+      "SELECT p.id, p.name, p.repo FROM requirement x JOIN story s ON s.id = x.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    acceptance_criteria:
+      "SELECT p.id, p.name, p.repo FROM acceptance_criteria x JOIN requirement q ON q.id = x.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    acceptance_test:
+      "SELECT p.id, p.name, p.repo FROM acceptance_test x JOIN acceptance_criteria c ON c.id = x.parent_id JOIN requirement q ON q.id = c.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    task: "SELECT p.id, p.name, p.repo FROM task x JOIN acceptance_test a ON a.id = x.acceptance_test_id JOIN acceptance_criteria c ON c.id = a.parent_id JOIN requirement q ON q.id = c.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    project: "SELECT p.id, p.name, p.repo FROM project p WHERE p.id = ?",
+  };
+  const sql = up[entity];
+  if (sql === undefined) return null;
+  try {
+    return (db().prepare(sql).get(id) as { id: number; name: string; repo: string } | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The parent entity a child of this kind hangs off. */
+const PARENT_OF: Readonly<Record<string, string>> = {
+  release: "project",
+  epic: "release",
+  story: "epic",
+  requirement: "story",
+  acceptance_criteria: "requirement",
+  acceptance_test: "acceptance_criteria",
+  task: "acceptance_test",
+  task_test: "task",
+};
+
+/** Refuse a parent whose project is not the one this repository is. */
+function crossesProject(entity: string, parent: number): string | null {
+  const parentEntity = PARENT_OF[entity];
+  if (parentEntity === undefined || parentEntity === "project") return null;
+
+  const theirs = projectOf(parentEntity, parent);
+  if (theirs === null) return null;
+
+  const here = resolve(process.cwd());
+  const mine = db().prepare("SELECT id, name FROM project WHERE repo = ?").get(here) as
+    | { id: number; name: string }
+    | undefined;
+  if (mine === undefined || mine.id === theirs.id) return null;
+
+  return (
+    `${parentEntity} #${parent} belongs to project #${theirs.id} ${theirs.name} (${theirs.repo}),\n` +
+    `but you are in #${mine.id} ${mine.name}.\n` +
+    `  wecode tree ${mine.id}          to find the right parent\n` +
+    `  --project ${theirs.id}          if you meant it`
+  );
+}
+
+/** The parent this row hangs off, named. */
+function where(entity: string, id: number): string {
+  const parents: Readonly<Record<string, { table: string; fk: string; label: string }>> = {
+    project: { table: "workspace", fk: "workspace_id", label: "name" },
+    release: { table: "project", fk: "project_id", label: "name" },
+    epic: { table: "release", fk: "release_id", label: "version" },
+    story: { table: "epic", fk: "epic_id", label: "title" },
+    requirement: { table: "story", fk: "story_id", label: "title" },
+    acceptance_criteria: { table: "requirement", fk: "requirement_id", label: "statement" },
+    acceptance_test: { table: "acceptance_criteria", fk: "parent_id", label: "statement" },
+    task: { table: "acceptance_test", fk: "acceptance_test_id", label: "statement" },
+    task_test: { table: "task", fk: "parent_id", label: "title" },
+  };
+  const up = parents[entity];
+  if (up === undefined) return "";
+  try {
+    const row = db()
+      .prepare(
+        `SELECT p.id AS id, p.${up.label} AS label FROM ${entity} c JOIN ${up.table} p ON p.id = c.${up.fk} WHERE c.id = ?`,
+      )
+      .get(id) as { id: number; label: string } | undefined;
+    if (row === undefined) return "";
+    const label = row.label.length > 44 ? `${row.label.slice(0, 43)}…` : row.label;
+    return `   under ${up.table} #${row.id}  ${label}`;
+  } catch {
+    return "";
+  }
 }
 
 function kindOf(v: string | undefined): TestKind {

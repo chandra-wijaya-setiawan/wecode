@@ -64,6 +64,55 @@ export class Engine {
     });
   }
 
+  /** Every completion transition whose guard now holds, anywhere.
+   *
+   *  The cascade inside apply() is edge-triggered: it walks up from the row that just
+   *  changed. That misses anything whose guard became true for another reason — a sibling
+   *  settling, a row dropped, a test invalidated — and leaves a criteria sitting in
+   *  in_progress with every test passed. This is the level-triggered half: it reads state
+   *  and fires, so nothing waits for an event that already happened. */
+  settle(): readonly Change[] {
+    const changes: Change[] = [];
+    const order: StatefulEntity[] = [
+      "task",
+      "acceptance_criteria",
+      "requirement",
+      "story",
+      "epic",
+    ];
+
+    for (let pass = 0; pass < order.length; pass++) {
+      let moved = false;
+      for (const entity of order) {
+        const rows = this.db
+          .prepare(`SELECT id, state FROM ${entity}`)
+          .all() as unknown as { id: number; state: string }[];
+
+        for (const row of rows) {
+          const fired = automaticFrom(this.machines[entity], row.state).find(
+            (t) => check(this.machines[entity], row.state, t.verb, this.guards, { entity, id: row.id }).ok,
+          );
+          if (fired === undefined) continue;
+
+          transact(this.db, () => {
+            this.repo.setState(entity, row.id, row.state, fired.to, fired.verb, "settle");
+            changes.push({
+              entity,
+              id: row.id,
+              verb: fired.verb,
+              from: row.state,
+              to: fired.to,
+              automatic: true,
+            });
+          });
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    return changes;
+  }
+
   /** Walk up from a settled child, firing any automatic transition whose guard now holds. */
   private cascade(entity: StatefulEntity, id: number, changes: Change[]): void {
     let up = this.repo.parentOf(entity, id);

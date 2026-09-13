@@ -50,6 +50,7 @@ const say = (t: Tick): void => {
     t.scripts.failed.length > 0 ? `test failed ${t.scripts.failed.join(",")}` : null,
     t.merged.length > 0 ? `merged ${t.merged.join(",")}` : null,
     t.exhausted.length > 0 ? `out of attempts ${t.exhausted.join(",")}` : null,
+    t.settled.length > 0 ? `settled ${t.settled.join(", ")}` : null,
   ].filter((p) => p !== null);
   if (parts.length === 0) return; // a quiet tick says nothing
   process.stdout.write(`${new Date().toISOString()}  ${parts.join("  ")}\n`);

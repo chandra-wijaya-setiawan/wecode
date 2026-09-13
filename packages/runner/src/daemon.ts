@@ -17,6 +17,8 @@ export interface Tick {
   readonly merged: readonly number[];
   /** Tasks that ran out of attempts on this tick. */
   readonly exhausted: readonly number[];
+  /** Completion transitions that fired because their guard had become true. */
+  readonly settled: readonly string[];
 }
 
 export interface RunnerOptions {
@@ -58,6 +60,9 @@ export class Runner {
     const settled = await this.settleEnded();
     const merged = await this.landDoneTasks();
     const acceptance = await this.proveStories();
+    // Level-triggered: anything whose guard became true for a reason other than the verb
+    // that just ran settles here, rather than waiting for an event that already happened.
+    const settled2 = this.engine.settle();
     const exhausted = this.enforceRetryLimit();
     return {
       allocated,
@@ -65,6 +70,7 @@ export class Runner {
       committed: settled.committed,
       merged,
       exhausted,
+      settled: settled2.map((c) => `${c.entity} #${c.id} → ${c.to}`),
       scripts: {
         passed: [...settled.scripts.passed, ...acceptance.passed],
         failed: [...settled.scripts.failed, ...acceptance.failed],

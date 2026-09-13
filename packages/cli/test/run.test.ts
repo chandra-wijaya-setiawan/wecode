@@ -134,3 +134,32 @@ describe("workspaces", () => {
     delete process.env["WECODE_HOME"];
   });
 });
+
+describe("a parent in another project", () => {
+  it("is refused, and names both projects", () => {
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    run(["project", "create", "--parent", "1", "one", "--path", process.cwd()]);
+    run(["release", "create", "--parent", "1", "0.0.1"]);
+    run(["epic", "create", "--parent", "1", "an epic of project one"]);
+    run(["project", "create", "--parent", "1", "two", "--path", "/somewhere/else"]);
+
+    out.length = 0;
+    err.length = 0;
+    // cwd is project one's repo, so an epic of project one is fine…
+    expect(run(["story", "create", "--parent", "1", "fine"])).toBe(0);
+
+    // …and pretending to be elsewhere is not.
+    const db = process.env["WECODE_DB"] as string;
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const conn = new DatabaseSync(db);
+    conn.prepare("UPDATE project SET repo = '/not/here' WHERE id = 1").run();
+    conn.prepare("UPDATE project SET repo = ? WHERE id = 2").run(process.cwd());
+    conn.close();
+
+    err.length = 0;
+    expect(run(["story", "create", "--parent", "1", "wrong tree"])).toBe(1);
+    expect(err.join("")).toContain("belongs to project #1");
+    expect(err.join("")).toContain("but you are in #2");
+  });
+});

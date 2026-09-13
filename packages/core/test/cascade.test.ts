@@ -102,3 +102,28 @@ describe("a failing test does not cascade", () => {
     expect(stateOf(db, "acceptance_criteria", tree.criteria)).toBe("in_progress");
   });
 });
+
+describe("settle is the level-triggered half", () => {
+  it("accepts a criteria whose tests all passed while nothing else happened", () => {
+    engine.apply("task", tree.task, "start", "chief");
+    engine.apply("task_test", tree.taskTest, "pass", "runner");
+
+    // A verdict written straight to the row, as a runner recovering state would: no apply,
+    // so no cascade walks up from it.
+    db.prepare("UPDATE acceptance_test SET state = 'passed' WHERE id = ?").run(tree.acceptance);
+    expect(stateOf(db, "acceptance_criteria", tree.criteria)).toBe("in_progress");
+
+    const changes = engine.settle();
+    expect(changes.map((c) => `${c.entity}:${c.to}`)).toEqual([
+      "acceptance_criteria:accepted",
+      "requirement:met",
+      "story:delivered",
+      "epic:delivered",
+    ]);
+    expect(stateOf(db, "epic", tree.epic)).toBe("delivered");
+  });
+
+  it("does nothing when nothing is owed", () => {
+    expect(engine.settle()).toEqual([]);
+  });
+});
