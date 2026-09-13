@@ -5,13 +5,29 @@ import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const empty: Board = { running: [], needs_human: [], queued: [], failed: [], roadmap: [] };
+const empty: Board = {
+  projects: [],
+  running: [],
+  needs_human: [],
+  queued: [],
+  failed: [],
+  roadmap: [],
+  delivered: [],
+};
 const views = loadViews();
 const strip = (s: string): string => s.replace(/\u001b\[[0-9;]*m/g, "");
 
 describe("views", () => {
   it("loads every box the page orders", () => {
-    expect(views.map((v) => v.name)).toEqual(["running", "needs_human", "queued", "failed", "roadmap"]);
+    expect(views.map((v) => v.name)).toEqual([
+      "projects",
+      "running",
+      "needs_human",
+      "queued",
+      "failed",
+      "roadmap",
+      "delivered",
+    ]);
   });
 
   it("refuses a filter the code does not know", () => {

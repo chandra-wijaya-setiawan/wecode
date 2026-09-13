@@ -9,12 +9,13 @@ process.on("warning", (w) => {
   if (w.name !== "ExperimentalWarning") process.emitWarning(w);
 });
 
-const db = open(process.env["WECODE_DB"] ?? resolve(process.cwd(), ".wecode/wecode.db"));
+const dbPath = process.env["WECODE_DB"] ?? resolve(process.cwd(), ".wecode/wecode.db");
+const db = open(dbPath);
 const views = loadViews();
 
 const draw = (): void => {
   const width = process.stdout.columns ?? 100;
-  process.stdout.write(clear + render(board(db), views, width));
+  process.stdout.write(clear + render(board(db), views, width, dbPath));
   process.stdout.write("\u001b[2m  q quit  r refresh\u001b[0m\n");
 };
 

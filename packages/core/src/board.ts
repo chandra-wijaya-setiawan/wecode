@@ -9,11 +9,13 @@ export interface Row {
 }
 
 export interface Board {
+  readonly projects: readonly Row[];
   readonly running: readonly Row[];
   readonly needs_human: readonly Row[];
   readonly queued: readonly Row[];
   readonly failed: readonly Row[];
   readonly roadmap: readonly Row[];
+  readonly delivered: readonly Row[];
 }
 
 const rows = (db: DatabaseSync, sql: string, ...args: (string | number)[]): Row[] =>
@@ -21,6 +23,22 @@ const rows = (db: DatabaseSync, sql: string, ...args: (string | number)[]): Row[
 
 export function board(db: DatabaseSync): Board {
   return {
+    // What exists, with how much of it is finished. Without this a board with nothing in
+    // flight is indistinguishable from a board with no project at all.
+    projects: rows(
+      db,
+      `SELECT p.id AS id, p.name AS what, p.state AS state,
+              (SELECT count(*) FROM story s
+                 JOIN epic e ON e.id = s.epic_id
+                 JOIN release r ON r.id = e.release_id
+                WHERE r.project_id = p.id AND s.state = 'delivered')
+              || '/' ||
+              (SELECT count(*) FROM story s
+                 JOIN epic e ON e.id = s.epic_id
+                 JOIN release r ON r.id = e.release_id
+                WHERE r.project_id = p.id) || ' stories' AS detail
+         FROM project p ORDER BY p.id`,
+    ),
     running: rows(
       db,
       `SELECT a.id AS id, a.objective_type || ' #' || a.objective_id AS what, a.phase AS state,
@@ -53,6 +71,11 @@ export function board(db: DatabaseSync): Board {
       `SELECT id, title AS what, state AS state,
               'attempts ' || attempts || '/' || max_retry AS detail
          FROM task WHERE state = 'failed' ORDER BY id`,
+    ),
+    delivered: rows(
+      db,
+      `SELECT id, title AS what, state AS state, 'story' AS detail FROM story
+        WHERE state = 'delivered' ORDER BY updated_at DESC LIMIT 20`,
     ),
     roadmap: rows(
       db,

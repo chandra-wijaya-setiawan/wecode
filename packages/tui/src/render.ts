@@ -12,9 +12,10 @@ const pad = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 
  *  in the order the config gives. A box is its filter's rows, trimmed to
  *  the height it declares, and a count of what did not fit \u2014 a row hidden with nothing
  *  said is the bug this line exists to prevent. */
-export function render(board: Board, views: readonly View[], width: number): string {
+export function render(board: Board, views: readonly View[], width: number, where = ""): string {
   const out: string[] = [
-    `${bold("wecode")}  ${dim(`${board.running.length} running, ${board.needs_human.length} needs you`)}`,
+    `${bold("wecode")}  ${dim(`${board.running.length} running, ${board.needs_human.length} needs you`)}` +
+      (where === "" ? "" : `  ${dim(where)}`),
     "",
   ];
   for (const view of views) {

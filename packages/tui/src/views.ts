@@ -15,7 +15,7 @@ export interface View {
   readonly empty: string;
 }
 
-const FILTERS = ["running", "needs_human", "queued", "failed", "roadmap"] as const;
+const FILTERS = ["projects", "running", "needs_human", "queued", "failed", "roadmap", "delivered"] as const;
 
 /** Every name here has to resolve to a filter the code knows. A typo is a refusal to
  *  start, not a blank box on the one screen an operator watches all day. */

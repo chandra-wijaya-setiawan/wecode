@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { Board } from "@wecode/core";
 import { loadViews, render } from "../src/index.js";
 
-const empty: Board = { running: [], needs_human: [], queued: [], failed: [], roadmap: [] };
+const empty: Board = {
+  projects: [],
+  running: [],
+  needs_human: [],
+  queued: [],
+  failed: [],
+  roadmap: [],
+  delivered: [],
+};
 const views = loadViews();
 const strip = (s: string): string => s.replace(/\[[0-9;]*m/g, "");
 const row = (id: number) => ({ id, what: `task ${id}`, state: "ready", detail: "engineer" });
