@@ -5,81 +5,85 @@ import { Engine, now } from "@wecode/core";
 
 const exec = promisify(execFile);
 
-interface Pending {
-  entity: "acceptance_test" | "task_test";
-  id: number;
-  artefact: string;
-  cwd: string;
-}
-
 export interface ScriptReport {
   readonly passed: readonly number[];
   readonly failed: readonly number[];
 }
 
-/** A deterministic test needs no agent. The runner runs the command, reads the exit code,
- *  and records the verdict — no session, no tokens, no scope to negotiate. */
+const nothing: ScriptReport = { passed: [], failed: [] };
+
+/** A deterministic test needs no agent: run the command, read the exit code, record the
+ *  verdict. No session, no tokens, no scope to negotiate.
+ *
+ *  Where it runs is the whole of the correctness here. A task_test proves *one attempt*, so
+ *  it runs in that attempt's worktree, before the tree is released. An acceptance_test
+ *  proves a criteria, so it runs in the story tree, after the tasks have merged. The first
+ *  live run ran both at the repository root and failed a test whose work was three
+ *  directories away. */
 export class Scripts {
   private readonly engine: Engine;
 
   constructor(
     private readonly db: DatabaseSync,
-    private readonly repoRoot: string,
     private readonly timeoutMs = 10 * 60 * 1000,
   ) {
     this.engine = new Engine(db);
   }
 
-  async tick(): Promise<ScriptReport> {
+  /** The ready script task_tests of one task, in that task's attempt tree. */
+  async runTaskTests(taskId: number, cwd: string): Promise<ScriptReport> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, artefact FROM task_test
+          WHERE parent_id = ? AND state IN ('ready','failed') AND kind = 'script' AND artefact IS NOT NULL`,
+      )
+      .all(taskId) as unknown as { id: number; artefact: string }[];
+    return this.runAll("task_test", rows, cwd);
+  }
+
+  /** Every acceptance_test whose tasks are all finished, in the story tree it belongs to. */
+  async runAcceptanceTests(storyId: number, cwd: string): Promise<ScriptReport> {
+    const rows = this.db
+      .prepare(
+        `SELECT a.id AS id, a.artefact AS artefact
+           FROM acceptance_test a
+           JOIN acceptance_criteria c ON c.id = a.parent_id
+           JOIN requirement r ON r.id = c.requirement_id
+          WHERE r.story_id = ?
+            AND a.state IN ('ready','failed') AND a.kind = 'script' AND a.artefact IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM task t WHERE t.acceptance_test_id = a.id
+                             AND t.state NOT IN ('done','dropped'))`,
+      )
+      .all(storyId) as unknown as { id: number; artefact: string }[];
+    return this.runAll("acceptance_test", rows, cwd);
+  }
+
+  private async runAll(
+    entity: "task_test" | "acceptance_test",
+    rows: readonly { id: number; artefact: string }[],
+    cwd: string,
+  ): Promise<ScriptReport> {
+    if (rows.length === 0) return nothing;
     const passed: number[] = [];
     const failed: number[] = [];
 
-    for (const t of this.pending()) {
-      const out = await this.runOne(t);
+    for (const row of rows) {
+      const out = await this.runOne(row.artefact, cwd);
+      const at = now();
       this.db
-        .prepare(`UPDATE ${t.entity} SET last_run_at = ?, last_output = ?, updated_at = ? WHERE id = ?`)
-        .run(now(), out.output.slice(-8000), now(), t.id);
-      const verb = out.ok ? "pass" : "fail";
-      this.engine.apply(t.entity, t.id, verb, "runner");
-      (out.ok ? passed : failed).push(t.id);
+        .prepare(`UPDATE ${entity} SET last_run_at = ?, last_output = ?, updated_at = ? WHERE id = ?`)
+        .run(at, out.output.slice(-8000), at, row.id);
+      this.engine.apply(entity, row.id, out.ok ? "pass" : "fail", "runner");
+      (out.ok ? passed : failed).push(row.id);
     }
 
     return { passed, failed };
   }
 
-  /** Every script test that is ready and has not been judged since its last change.
-   *  A task_test only runs once its task has been attempted; an acceptance_test once its
-   *  tasks are done — otherwise the answer is known in advance. */
-  private pending(): Pending[] {
-    const taskTests = this.db
-      .prepare(
-        `SELECT tt.id AS id, tt.artefact AS artefact
-           FROM task_test tt JOIN task t ON t.id = tt.parent_id
-          WHERE tt.state = 'ready' AND tt.kind = 'script' AND tt.artefact IS NOT NULL
-            AND t.state = 'ready'`,
-      )
-      .all() as unknown as { id: number; artefact: string }[];
-
-    const acceptance = this.db
-      .prepare(
-        `SELECT a.id AS id, a.artefact AS artefact
-           FROM acceptance_test a
-          WHERE a.state = 'ready' AND a.kind = 'script' AND a.artefact IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM task t WHERE t.acceptance_test_id = a.id
-                             AND t.state NOT IN ('done','dropped'))`,
-      )
-      .all() as unknown as { id: number; artefact: string }[];
-
-    return [
-      ...taskTests.map((r) => ({ entity: "task_test" as const, id: r.id, artefact: r.artefact, cwd: this.repoRoot })),
-      ...acceptance.map((r) => ({ entity: "acceptance_test" as const, id: r.id, artefact: r.artefact, cwd: this.repoRoot })),
-    ];
-  }
-
-  private async runOne(t: Pending): Promise<{ ok: boolean; output: string }> {
+  private async runOne(artefact: string, cwd: string): Promise<{ ok: boolean; output: string }> {
     try {
-      const { stdout, stderr } = await exec("bash", ["-lc", t.artefact], {
-        cwd: t.cwd,
+      const { stdout, stderr } = await exec("bash", ["-lc", artefact], {
+        cwd,
         timeout: this.timeoutMs,
         maxBuffer: 4 * 1024 * 1024,
       });

@@ -56,10 +56,15 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     });
   }
 
-  /** A role's scope, as flags. This is the whole of the translation. */
+  /** A role's scope, as flags. This is the whole of the translation.
+   *
+   *  Tool names are the harness's, not ours: a role says `write`, Claude Code calls it
+   *  `Write`, and a name it does not recognise is not an error — it is a permission gate
+   *  that silently refuses every edit. The first live run lost a session to exactly that. */
   private scopeFlags(work: Work): string[] {
     const flags = ["--add-dir", work.worktree];
-    if (work.scope.tools.length > 0) flags.push("--allowedTools", work.scope.tools.join(","));
+    const tools = work.scope.tools.map((t) => TOOL_NAMES[t.toLowerCase()] ?? t).filter((t) => t !== "");
+    if (tools.length > 0) flags.push("--allowedTools", tools.join(","));
     return flags;
   }
 
@@ -115,6 +120,19 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     });
   }
 }
+
+/** ours -> Claude Code's. An unmapped name is passed through, so a role can name a tool
+ *  wecode has never heard of. */
+const TOOL_NAMES: Readonly<Record<string, string>> = {
+  bash: "Bash",
+  read: "Read",
+  edit: "Edit",
+  write: "Write",
+  glob: "Glob",
+  grep: "Grep",
+  webfetch: "WebFetch",
+  websearch: "WebSearch",
+};
 
 const zero = (): Budget => ({ tokens: 0, seconds: 0 });
 

@@ -40,17 +40,29 @@ export class Runner {
     private readonly opts: RunnerOptions,
   ) {
     this.foreman = new Foreman(db, opts.adapters, opts.deadlineSeconds ?? 3600);
-    this.scripts = new Scripts(db, opts.repoRoot);
+    this.scripts = new Scripts(db);
     this.trees = new Trees(opts.repoRoot, opts.integrationBranch ?? "main");
   }
 
+  /** allocate, run, prove, land. The order is the point: a task_test is run in the tree the
+   *  attempt wrote in, before that tree is released, and an acceptance_test in the story
+   *  tree, after the tasks it depends on have merged. */
   async tick(): Promise<Tick> {
     const allocated = await this.allocateOne();
     const foreman = await this.foreman.tick();
-    const committed = await this.settleEnded();
-    const scripts = await this.scripts.tick();
+    const settled = await this.settleEnded();
     const merged = await this.landDoneTasks();
-    return { allocated, foreman, scripts, committed, merged };
+    const acceptance = await this.proveStories();
+    return {
+      allocated,
+      foreman,
+      committed: settled.committed,
+      merged,
+      scripts: {
+        passed: [...settled.scripts.passed, ...acceptance.passed],
+        failed: [...settled.scripts.failed, ...acceptance.failed],
+      },
+    };
   }
 
   /** allocate() is synchronous and cutting a tree is not, so a placement is prepared for
@@ -127,7 +139,7 @@ export class Runner {
   /** An attempt that has ended: commit whatever it wrote onto its task branch, then let the
    *  tree go. The branch is the surviving copy; the directory is a checkout held against a
    *  retry nobody has promised. */
-  private async settleEnded(): Promise<number[]> {
+  private async settleEnded(): Promise<{ committed: number[]; scripts: ScriptReport }> {
     const rows = this.db
       .prepare(
         `SELECT a.id AS id, a.worktree AS worktree, a.objective_id AS task, a.commit_sha AS sha
@@ -137,11 +149,19 @@ export class Runner {
       .all() as unknown as { id: number; worktree: string; task: number; sha: string | null }[];
 
     const committed: number[] = [];
+    const passed: number[] = [];
+    const failed: number[] = [];
+
     for (const row of rows) {
       if (!existsSync(row.worktree)) continue;
       const slugs = this.slugsFor(row.task);
       if (slugs === null) continue;
       try {
+        // The attempt is judged in the tree it wrote in, before that tree goes.
+        const r = await this.scripts.runTaskTests(row.task, row.worktree);
+        passed.push(...r.passed);
+        failed.push(...r.failed);
+
         const sha = await this.trees.commitAttempt(
           row.worktree,
           `task/${slugs.task}`,
@@ -156,7 +176,35 @@ export class Runner {
         // leave the tree standing rather than lose work nobody has seen
       }
     }
-    return committed;
+    return { committed, scripts: { passed, failed } };
+  }
+
+  /** Acceptance tests, in the story tree, once the story's tasks are finished. */
+  private async proveStories(): Promise<ScriptReport> {
+    const stories = this.db
+      .prepare(
+        `SELECT DISTINCT s.id AS id, s.slug AS slug
+           FROM story s
+           JOIN requirement r ON r.story_id = s.id
+           JOIN acceptance_criteria c ON c.requirement_id = r.id
+           JOIN acceptance_test a ON a.parent_id = c.id
+          WHERE s.state = 'in_progress' AND a.state IN ('ready','failed') AND a.kind = 'script'`,
+      )
+      .all() as unknown as { id: number; slug: string }[];
+
+    const passed: number[] = [];
+    const failed: number[] = [];
+    for (const story of stories) {
+      try {
+        const tree = await this.trees.storyTree(story.slug, join(this.opts.worktreeRoot, `story-${story.slug}`));
+        const r = await this.scripts.runAcceptanceTests(story.id, tree);
+        passed.push(...r.passed);
+        failed.push(...r.failed);
+      } catch {
+        // a story with no branch yet has nothing to prove
+      }
+    }
+    return { passed, failed };
   }
 
   /** A task whose tests passed lands on its story branch. */
