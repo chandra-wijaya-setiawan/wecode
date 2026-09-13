@@ -177,7 +177,19 @@ function onboard(args: readonly string[]): number {
   ignore(resolve(root, ".gitignore"), ".wecode/");
 
   // The workspace is named once, and the repository remembers which one it joined.
-  const wsName = values.workspace ?? readPointer(root) ?? process.env["WECODE_WORKSPACE"] ?? "default";
+  //
+  // Falling back to "default" while other workspaces exist put a project on a board its
+  // owner was not looking at. If there is a choice to make, it is made out loud.
+  const known = listWorkspaces();
+  const chosen = values.workspace ?? readPointer(root) ?? process.env["WECODE_WORKSPACE"];
+  if (chosen === undefined && known.length > 0 && !known.includes("default")) {
+    return fail(
+      `which workspace should this project join?\n` +
+        known.map((w) => `  wecode onboard --workspace ${w}`).join("\n") +
+        `\n  wecode onboard --workspace <new-name>   to start another`,
+    );
+  }
+  const wsName = chosen ?? "default";
   writePointer(root, wsName);
 
   const path = databaseOf(wsName);
@@ -207,7 +219,7 @@ function onboard(args: readonly string[]): number {
       learned.typecheck === null ? null : `typecheck   ${learned.typecheck}`,
       `source      ${learned.source.join(", ")}`,
       "",
-      `workspace    ${wsName}  (${path})`,
+      `workspace   ${wsName}  (${path})`,
       `project #${project}  release #${release}`,
       "",
       "next: wecode epic create --parent " + String(release) + ' "<what this release is for>"',

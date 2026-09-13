@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { board, currentDatabase, databaseOf, listWorkspaces, open } from "@wecode/core";
+import { board, currentDatabase, databaseOf, currentWorkspace, listWorkspaces, open } from "@wecode/core";
 import { clear, render } from "./render.js";
 import { loadViews } from "./views.js";
 
@@ -31,11 +31,12 @@ if (!existsSync(dbPath)) {
 }
 
 const db = open(dbPath);
+const wsName = values.workspace ?? currentWorkspace();
 const views = loadViews();
 
 const draw = (): void => {
   const width = process.stdout.columns ?? 100;
-  process.stdout.write(clear + render(board(db), views, width, dbPath));
+  process.stdout.write(clear + render(board(db), views, width, `workspace ${wsName}`));
   process.stdout.write("\u001b[2m  q quit  r refresh\u001b[0m\n");
 };
 
