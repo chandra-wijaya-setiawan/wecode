@@ -347,7 +347,9 @@ function showBoard(): number {
       continue;
     }
     for (const r of rows) {
-      process.stdout.write(`  #${String(r.id).padStart(4)}  ${r.what.padEnd(40)} ${r.state.padEnd(12)} ${r.detail}\n`);
+      // A title longer than the column pushed every other column off the line.
+      const what = r.what.length > 52 ? `${r.what.slice(0, 51)}…` : r.what.padEnd(52);
+      process.stdout.write(`  #${String(r.id).padStart(4)}  ${what}  ${r.state.padEnd(12)} ${r.detail}\n`);
     }
   }
   process.stdout.write("\n");

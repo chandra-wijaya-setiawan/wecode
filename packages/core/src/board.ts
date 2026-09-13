@@ -39,12 +39,21 @@ export function board(db: DatabaseSync): Board {
                 WHERE r.project_id = p.id) || ' stories' AS detail
          FROM project p ORDER BY p.id`,
     ),
+    // pending counts: a worktree is cut and a session is starting. Leaving it out made the
+    // board say nothing was running while an agent was working.
     running: rows(
       db,
-      `SELECT a.id AS id, a.objective_type || ' #' || a.objective_id AS what, a.phase AS state,
-              coalesce(w.name, '?') AS detail
-         FROM assignment a LEFT JOIN worker w ON w.id = a.worker_id
-        WHERE a.phase = 'running' ORDER BY a.id`,
+      `SELECT a.id AS id,
+              coalesce(t.title, a.objective_type || ' #' || a.objective_id) AS what,
+              a.phase AS state,
+              -- || binds tighter than / in SQLite, so every arithmetic term is parenthesised
+              coalesce(w.name, '?')
+                || ' · ' || cast((julianday('now') - julianday(a.created_at)) * 1440 AS int) || 'm'
+                || ' · ' || (coalesce(json_extract(a.spent, '$.tokens'), 0) / 1000) || 'k' AS detail
+         FROM assignment a
+         LEFT JOIN worker w ON w.id = a.worker_id
+         LEFT JOIN task t ON t.id = a.objective_id AND a.objective_type = 'task'
+        WHERE a.phase IN ('pending', 'running') ORDER BY a.id`,
     ),
     needs_human: rows(
       db,
@@ -77,13 +86,25 @@ export function board(db: DatabaseSync): Board {
       `SELECT id, title AS what, state AS state, 'story' AS detail FROM story
         WHERE state = 'delivered' ORDER BY updated_at DESC LIMIT 20`,
     ),
+    // A story carries how far it has got: tasks done out of tasks that exist.
     roadmap: rows(
       db,
       `SELECT id, title AS what, state AS state, 'epic' AS detail FROM epic
         WHERE state NOT IN ('delivered','dropped')
         UNION ALL
-       SELECT id, title AS what, state AS state, 'story' AS detail FROM story
-        WHERE state NOT IN ('delivered','dropped')
+       SELECT s.id AS id, s.title AS what, s.state AS state,
+              (SELECT count(*) FROM task t
+                 JOIN acceptance_test a ON a.id = t.acceptance_test_id
+                 JOIN acceptance_criteria c ON c.id = a.parent_id
+                 JOIN requirement r ON r.id = c.requirement_id
+                WHERE r.story_id = s.id AND t.state = 'done')
+              || '/' ||
+              (SELECT count(*) FROM task t
+                 JOIN acceptance_test a ON a.id = t.acceptance_test_id
+                 JOIN acceptance_criteria c ON c.id = a.parent_id
+                 JOIN requirement r ON r.id = c.requirement_id
+                WHERE r.story_id = s.id) || ' tasks' AS detail
+         FROM story s WHERE s.state NOT IN ('delivered','dropped')
         ORDER BY detail, id`,
     ),
   };
