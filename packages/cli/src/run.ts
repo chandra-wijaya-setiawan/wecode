@@ -27,8 +27,12 @@ export function run(argv: readonly string[]): number {
   if (head === undefined || head === "--help" || head === "-h" || (head === "help" && rest.length === 0)) {
     return usage();
   }
-  if (rest[0] === "--help" || rest[0] === "-h") return entityHelp(head);
-  if (head === "help") return entityHelp(rest[0] ?? "");
+  // --help after a command is the whole manual; after an entity it is that entity's verbs.
+  if (rest[0] === "--help" || rest[0] === "-h") return isStateful(head) ? entityHelp(head) : usage();
+  if (head === "help") {
+    const what = rest[0] ?? "";
+    return isStateful(what) ? entityHelp(what) : usage();
+  }
   if (head === "board") return showBoard();
   if (head === "init") return init();
   if (head === "answer") return answer(rest);
