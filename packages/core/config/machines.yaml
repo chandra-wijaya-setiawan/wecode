@@ -1,0 +1,112 @@
+# The state machines, as data. docs/design/05 is generated from this file.
+#
+# Every transition: verb, from, to, and optionally a guard by name. A guard name must
+# resolve in the guard registry or the machine set is rejected at load.
+# `automatic: true` means no actor invokes it — it fires when its guard becomes true.
+
+project:
+  states: [planned, in_progress, on_hold, dropped]
+  initial: planned
+  terminal: [dropped]
+  transitions:
+    - { verb: start,  from: [planned],            to: in_progress }
+    - { verb: hold,   from: [in_progress],        to: on_hold }
+    - { verb: reopen, from: [on_hold, dropped],   to: in_progress }
+    - { verb: drop,   from: [planned, in_progress, on_hold], to: dropped }
+
+release:
+  states: [planned, in_progress, released, dropped]
+  initial: planned
+  terminal: [released, dropped]
+  transitions:
+    - { verb: start,   from: [planned],     to: in_progress }
+    - { verb: release, from: [in_progress], to: released, guard: every_epic_delivered_or_dropped }
+    - { verb: reopen,  from: [dropped],     to: in_progress }
+    - { verb: drop,    from: [planned, in_progress], to: dropped, guard: every_epic_dropped }
+
+epic:
+  states: [planned, in_progress, on_hold, delivered, dropped]
+  initial: planned
+  terminal: [delivered, dropped]
+  transitions:
+    - { verb: start,   from: [planned],     to: in_progress }
+    - { verb: hold,    from: [in_progress], to: on_hold }
+    - { verb: reopen,  from: [on_hold, delivered, dropped], to: in_progress }
+    - { verb: deliver, from: [in_progress], to: delivered, guard: every_story_delivered_or_dropped, automatic: true }
+    - { verb: drop,    from: [planned, in_progress, on_hold], to: dropped, guard: every_story_dropped }
+
+story:
+  states: [planned, in_progress, on_hold, delivered, dropped]
+  initial: planned
+  terminal: [delivered, dropped]
+  transitions:
+    - { verb: start,   from: [planned],     to: in_progress }
+    - { verb: hold,    from: [in_progress], to: on_hold }
+    - { verb: reopen,  from: [on_hold, delivered, dropped], to: in_progress }
+    - { verb: deliver, from: [in_progress], to: delivered, guard: every_requirement_met_or_dropped, automatic: true }
+    - { verb: drop,    from: [planned, in_progress, on_hold], to: dropped, guard: every_requirement_dropped }
+
+requirement:
+  states: [planned, in_progress, on_hold, met, dropped]
+  initial: planned
+  terminal: [met, dropped]
+  transitions:
+    - { verb: start,  from: [planned],     to: in_progress }
+    - { verb: hold,   from: [in_progress], to: on_hold }
+    - { verb: reopen, from: [on_hold, met, dropped], to: in_progress }
+    - { verb: meet,   from: [in_progress], to: met, guard: every_criteria_accepted_or_dropped, automatic: true }
+    - { verb: drop,   from: [planned, in_progress, on_hold], to: dropped, guard: every_criteria_dropped }
+
+acceptance_criteria:
+  states: [planned, in_progress, accepted, dropped]
+  initial: planned
+  terminal: [accepted, dropped]
+  transitions:
+    - { verb: start,  from: [planned],     to: in_progress }
+    - { verb: accept, from: [in_progress], to: accepted, guard: every_acceptance_test_settled, automatic: true }
+    - { verb: reopen, from: [accepted, dropped], to: in_progress }
+    - { verb: drop,   from: [planned, in_progress], to: dropped }
+
+acceptance_test:
+  states: [planned, ready, passed, failed, dropped]
+  initial: planned
+  terminal: [dropped]
+  transitions:
+    - { verb: deliver,    from: [planned],        to: ready, guard: artefact_resolves }
+    - { verb: pass,       from: [ready, failed],  to: passed }
+    - { verb: fail,       from: [ready, failed],  to: failed }
+    - { verb: invalidate, from: [passed],         to: ready }
+    - { verb: drop,       from: [planned, ready, failed], to: dropped }
+
+task_test:
+  states: [planned, ready, passed, failed, dropped]
+  initial: planned
+  terminal: [dropped]
+  transitions:
+    - { verb: deliver,    from: [planned],        to: ready, guard: artefact_resolves }
+    - { verb: pass,       from: [ready, failed],  to: passed }
+    - { verb: fail,       from: [ready, failed],  to: failed }
+    - { verb: invalidate, from: [passed],         to: ready }
+    - { verb: drop,       from: [planned, ready, failed], to: dropped }
+
+task:
+  states: [planned, ready, done, failed, dropped]
+  initial: planned
+  terminal: [done, dropped]
+  transitions:
+    - { verb: start,   from: [planned], to: ready, guard: task_may_be_attempted }
+    - { verb: finish,  from: [ready],   to: done,  guard: every_task_test_settled, automatic: true }
+    - { verb: give_up, from: [ready],   to: failed, guard: max_retry_reached }
+    - { verb: retry,   from: [failed],  to: ready }
+    - { verb: drop,    from: [planned, ready, failed], to: dropped }
+
+assignment:
+  states: [pending, running, waiting, succeeded, failed]
+  initial: pending
+  terminal: [succeeded, failed]
+  transitions:
+    - { verb: start,  from: [pending],                    to: running }
+    - { verb: ask,    from: [running],                    to: waiting }
+    - { verb: answer, from: [waiting],                    to: running, guard: answer_is_permitted }
+    - { verb: finish, from: [running],                    to: succeeded }
+    - { verb: fail,   from: [pending, running, waiting],  to: failed }

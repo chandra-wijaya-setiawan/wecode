@@ -1,0 +1,6 @@
+project:
+  states: [planned, in_progress]
+  initial: planned
+  terminal: []
+  transitions:
+    - { verb: start, from: [planned], to: in_progress, guard: no_such_guard }

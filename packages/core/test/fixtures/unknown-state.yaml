@@ -1,0 +1,6 @@
+project:
+  states: [planned]
+  initial: planned
+  terminal: []
+  transitions:
+    - { verb: start, from: [planned], to: nowhere }
