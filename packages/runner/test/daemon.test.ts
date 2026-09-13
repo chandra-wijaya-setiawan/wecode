@@ -49,7 +49,7 @@ beforeEach(() => {
 
   const ws = make.workspace("acme", repo);
   const p = make.project(ws, "storefront", repo);
-  const rel = make.release(p, "1.0");
+  const rel = make.release(p, "1.0.0");
   const e = make.epic(rel, "recovery");
   const s = make.story(e, "password reset");
   const req = make.requirement(s, "one change per link");

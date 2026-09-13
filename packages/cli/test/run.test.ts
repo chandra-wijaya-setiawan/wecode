@@ -24,7 +24,7 @@ describe("the cli", () => {
     expect(run(["init"])).toBe(0);
     run(["workspace", "create", "acme"]);
     run(["project", "create", "--parent", "1", "storefront"]);
-    run(["release", "create", "--parent", "1", "1.0"]);
+    run(["release", "create", "--parent", "1", "1.0.0"]);
     run(["epic", "create", "--parent", "1", "recovery"]);
     run(["story", "create", "--parent", "1", "password reset"]);
     run(["requirement", "create", "--parent", "1", "one change per link"]);

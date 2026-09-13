@@ -8,7 +8,7 @@ describe("rows start where their machine says", () => {
     const make = new Maker(db);
     const ws = make.workspace("acme", "/acme");
     const project = make.project(ws, "storefront", "/repo");
-    const release = make.release(project, "1.0");
+    const release = make.release(project, "1.0.0");
     const epic = make.epic(release, "account recovery");
     const story = make.story(epic, "password reset");
 
@@ -44,7 +44,7 @@ describe("rows start where their machine says", () => {
     const make = new Maker(db);
     const ws = make.workspace("acme", "/acme");
     const p = make.project(ws, "s", "/r");
-    const rel = make.release(p, "1.0");
+    const rel = make.release(p, "1.0.0");
     const e = make.epic(rel, "e");
     const s = make.story(e, "s");
     const req = make.requirement(s, "r");
