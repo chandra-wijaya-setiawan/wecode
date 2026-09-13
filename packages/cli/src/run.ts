@@ -330,7 +330,6 @@ function onboard(args: readonly string[]): number {
   const learned = already ?? writeProjectConfig(projectFile, stack);
 
   write(join(config, "roles.yaml"), rolesFor(learned));
-  write(join(config, "budget.yaml"), BUDGET);
   ignore(resolve(root, ".gitignore"), ".wecode/");
 
   // The workspace is named once, and the repository remembers which one it joined.
@@ -351,6 +350,9 @@ function onboard(args: readonly string[]): number {
 
   const path = databaseOf(wsName);
   mkdirSync(dirname(path), { recursive: true });
+  // The budget is the workspace's: attention is one person's and does not divide by how
+  // many repositories they have.
+  write(join(workspaceDir(wsName), "budget.yaml"), BUDGET);
   const conn = open(path);
   const make = new Maker(conn);
 
