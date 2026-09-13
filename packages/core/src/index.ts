@@ -8,3 +8,4 @@ export * from "./checks.js";
 export * from "./apply.js";
 export * from "./create.js";
 export * from "./roles.js";
+export * from "./board.js";
