@@ -23,6 +23,12 @@ export interface StateRow {
   readonly state: string;
 }
 
+/** Every child row of one entity, with its id and state — the free-function form, for
+ *  callers holding a db rather than a Repo. The lookup stays in one place: this is Repo. */
+export function children(db: DatabaseSync, entity: StatefulEntity, id: number): readonly StateRow[] {
+  return new Repo(db).childrenOf(entity, id);
+}
+
 export class Repo {
   constructor(private readonly db: DatabaseSync) {}
 
