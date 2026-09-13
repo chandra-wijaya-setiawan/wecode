@@ -1,0 +1,35 @@
+# The board, declared rather than drawn. A box that differs from the box beside it only in
+# which rows it keeps is not a second component: five of the six things a box declares are
+# data, and the sixth — the filter — has to resolve to a name the code knows.
+#
+# Rearranging, renaming or resizing the board is an edit to this file. A new filter is not.
+
+page:
+  order: [running, needs_human, queued, failed, roadmap]
+
+views:
+  running:
+    title: Running
+    filter: running
+    rows: 5
+    empty: nothing is running
+  needs_human:
+    title: Needs you
+    filter: needs_human
+    rows: 5
+    empty: nothing waits on you
+  queued:
+    title: Queue
+    filter: queued
+    rows: 5
+    empty: nothing is waiting for a slot
+  failed:
+    title: Failed
+    filter: failed
+    rows: 5
+    empty: nothing has given up
+  roadmap:
+    title: Roadmap
+    filter: roadmap
+    rows: 8
+    empty: no epics or stories open
