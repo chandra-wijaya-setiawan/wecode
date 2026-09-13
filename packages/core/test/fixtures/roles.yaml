@@ -1,0 +1,25 @@
+invariants:
+  never_touch: ["infra/**", "**/*.pem"]
+  never_run: ["git push --force*"]
+
+defaults:
+  budget: { tokens: 250000, seconds: 3600 }
+  harness: claude-code
+
+roles:
+  engineer:
+    worker_kind: agent
+    scope:
+      write: ["src/**", "tests/**"]
+      tools: ["bash", "read", "edit", "write"]
+  reviewer:
+    worker_kind: human
+    scope:
+      write: []
+      tools: []
+  tester:
+    worker_kind: agent
+    scope:
+      write: ["tests/acceptance/**"]
+      tools: ["bash"]
+    budget: { tokens: 120000, seconds: 1800 }
