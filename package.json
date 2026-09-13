@@ -3,11 +3,17 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.4.1",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "pnpm -r build",
     "test": "vitest run",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "wecode": "node packages/cli/dist/bin.js",
+    "tui": "node packages/tui/dist/bin.js",
+    "runner": "node packages/runner/dist/bin.js",
+    "link": "pnpm -r --filter @wecode/cli --filter @wecode/tui --filter @wecode/runner exec pnpm link --global"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
