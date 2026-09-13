@@ -98,6 +98,18 @@ function land(args: readonly string[]): number {
   }
 
   const branch = `story/${story.slug}`;
+
+  // The landing commit is the operator's, so it needs the operator's identity. wecode signs
+  // an agent's attempt; it does not sign a person's merge.
+  const who = gitConfig("user.name");
+  const email = gitConfig("user.email");
+  if (who === "" || email === "") {
+    return fail(
+      'this repository has no git identity, so the merge would be unattributed.\n' +
+        '  git config user.name "Your Name" && git config user.email you@example.com',
+    );
+  }
+
   try {
     const dirty = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
     if (dirty !== "") return fail("your working tree has changes. Commit or stash them first.");
@@ -108,6 +120,14 @@ function land(args: readonly string[]): number {
 
   process.stdout.write(`${branch} landed\n`);
   return 0;
+}
+
+function gitConfig(key: string): string {
+  try {
+    return execFileSync("git", ["config", "--get", key], { encoding: "utf8" }).trim();
+  } catch {
+    return "";
+  }
 }
 
 /** `wecode show <entity> <id>` — one record, and what hangs off it. */
