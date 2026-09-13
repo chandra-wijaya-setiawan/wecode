@@ -55,3 +55,20 @@ describe("rows start where their machine says", () => {
     expect(!r.ok && r.why).toContain("wecode task scope");
   });
 });
+
+describe("a release version is major.minor.patch", () => {
+  it("takes 0.0.1 and 2.0.0-rc.1", () => {
+    const db = freshDb();
+    const make = new Maker(db);
+    const p = make.project(make.workspace("a", "/a"), "p", "/r");
+    expect(() => make.release(p, "0.0.1")).not.toThrow();
+    expect(() => make.release(p, "2.0.0-rc.1")).not.toThrow();
+  });
+
+  it("refuses 0.1, and says what it wanted", () => {
+    const db = freshDb();
+    const make = new Maker(db);
+    const p = make.project(make.workspace("a", "/a"), "p", "/r");
+    expect(() => make.release(p, "0.1")).toThrow(/major\.minor\.patch/);
+  });
+});

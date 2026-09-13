@@ -6,6 +6,9 @@ import type { MachineSet, StatefulEntity, TestKind, WorkerKind } from "./types.j
 
 export class CreateError extends Error {}
 
+/** major.minor.patch, with an optional prerelease — semver's shape, without its full grammar. */
+const VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$/;
+
 /** Where a new row starts is the machine's business, not the caller's. */
 const initialOf = (m: MachineSet, e: StatefulEntity): string => m[e].initial;
 
@@ -59,7 +62,16 @@ export class Maker {
     });
   }
 
+  /** A version is `major.minor.patch`, with an optional prerelease. Free-form versions read
+   *  fine one at a time and sort wrongly the moment there are three of them — 0.1 and 0.0.2
+   *  in the same project is how this rule was found. */
   release(project_id: number, version: string): number {
+    if (!VERSION.test(version)) {
+      throw new CreateError(
+        `version must be major.minor.patch, optionally with a prerelease; got ${JSON.stringify(version)}\n` +
+          "  0.0.1   1.2.0   2.0.0-rc.1",
+      );
+    }
     return insert(this.db, "release", { ...this.stamp("release", slugify(version)), project_id, version });
   }
 

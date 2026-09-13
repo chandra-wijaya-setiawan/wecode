@@ -10,6 +10,8 @@ import {
   currentDatabase,
   databaseOf,
   listWorkspaces,
+  tree,
+  type Node,
   loadMachines,
   open,
   readPointer,
@@ -54,6 +56,7 @@ function dispatch(argv: readonly string[]): number {
   if (head === "land") return land(rest);
   if (head === "onboard") return onboard(rest);
   if (head === "workspaces") return workspaces();
+  if (head === "tree") return showTree(rest);
   return verb(head, rest);
 }
 
@@ -103,6 +106,40 @@ function answer(args: readonly string[]): number {
   process.stdout.write(`assignment #${id} answered by ${who}\n`);
   return 0;
 }
+
+/** `wecode tree [project]` — the whole shape, project to task_test. */
+function showTree(args: readonly string[]): number {
+  const only = args[0] === undefined ? undefined : Number(args[0]);
+  const nodes = tree(db(), only);
+  if (nodes.length === 0) return fail(only === undefined ? "no projects yet" : `no project #${only}`);
+
+  const mark: Readonly<Record<string, string>> = {
+    delivered: "✓",
+    released: "✓",
+    met: "✓",
+    accepted: "✓",
+    passed: "✓",
+    done: "✓",
+    dropped: "·",
+    failed: "✗",
+    on_hold: "‖",
+  };
+
+  const walk = (n: Node, prefix: string, last: boolean, top: boolean): void => {
+    const elbow = top ? "" : last ? "└── " : "├── ";
+    const state = mark[n.state] ?? "○";
+    const label = n.label.length > 64 ? `${n.label.slice(0, 63)}…` : n.label;
+    process.stdout.write(`${prefix}${elbow}${state} ${dimNum(n.id)} ${label}  ${grey(n.state)}\n`);
+    const next = top ? "" : prefix + (last ? "    " : "│   ");
+    n.children.forEach((c, i) => walk(c, next, i === n.children.length - 1, false));
+  };
+
+  for (const project of nodes) walk(project, "", true, true);
+  return 0;
+}
+
+const dimNum = (id: number): string => `\u001b[2m#${id}\u001b[0m`;
+const grey = (s: string): string => `\u001b[2m${s}\u001b[0m`;
 
 /** `wecode workspaces` — which ones exist, and which one you are talking to. */
 function workspaces(): number {
@@ -208,7 +245,7 @@ function onboard(args: readonly string[]): number {
   }
 
   const project = make.project(workspace, name, root);
-  const release = make.release(project, "0.1");
+  const release = make.release(project, "0.0.1");
   new Engine(conn).apply("project", project, "start", "operator");
   new Engine(conn).apply("release", release, "start", "operator");
 
@@ -542,6 +579,7 @@ function usage(): number {
       "",
       "LOOKING",
       "  wecode show <entity> <id>                  one record",
+      "  wecode tree [project]                      the whole shape, project to task_test",
       "  wecode <entity> --help                     that entity's states and verbs",
       "",
       "RUNNING",
