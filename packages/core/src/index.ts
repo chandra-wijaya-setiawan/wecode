@@ -9,3 +9,4 @@ export * from "./apply.js";
 export * from "./create.js";
 export * from "./roles.js";
 export * from "./board.js";
+export * from "./edit.js";

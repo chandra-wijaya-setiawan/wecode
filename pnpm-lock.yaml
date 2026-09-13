@@ -176,7 +176,11 @@ importers:
         specifier: ^3.0.0
         version: 3.2.7(@types/node@22.20.2)(yaml@2.9.1)
 
-  packages/cli: {}
+  packages/cli:
+    dependencies:
+      '@wecode/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/core:
     dependencies:

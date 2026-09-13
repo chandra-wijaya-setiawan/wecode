@@ -5,5 +5,13 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "scripts": { "build": "tsc -b" }
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@wecode/core": "workspace:*"
+  },
+  "bin": {
+    "wecode": "./dist/bin.js"
+  }
 }
