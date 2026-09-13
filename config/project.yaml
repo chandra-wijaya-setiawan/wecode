@@ -1,0 +1,10 @@
+stack: pnpm
+test: pnpm exec vitest run
+typecheck: pnpm typecheck
+source:
+  - src/**
+  - packages/*/src/**
+tests:
+  - test/**
+  - tests/**
+  - packages/*/test/**

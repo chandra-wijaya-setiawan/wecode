@@ -2,7 +2,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { open } from "@wecode/core";
+import { currentDatabase, open } from "@wecode/core";
 import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
 import { DEFAULT_BUDGET, loadBudget } from "./budget.js";
 import { loop, Runner, type Tick } from "./daemon.js";
@@ -22,18 +22,23 @@ const { values } = parseArgs({
   },
 });
 
-const dbPath = values.db ?? process.env["WECODE_DB"] ?? resolve(process.cwd(), ".wecode/wecode.db");
+// The workspace, not a repository: one runner serves every project in it, under one
+// attention budget — which is the budget of one person.
+const dbPath = values.db ?? currentDatabase();
 const budgetPath = values.budget ?? resolve(process.cwd(), "config/budget.yaml");
-const repoRoot = values.root ?? process.cwd();
+
+if (!existsSync(dbPath)) {
+  process.stderr.write(`no wecode workspace at ${dbPath}\n  wecode onboard   in a repository\n`);
+  process.exit(1);
+}
 
 const db = open(dbPath);
 const budget = existsSync(budgetPath) ? loadBudget(budgetPath) : DEFAULT_BUDGET;
 
 const runner = new Runner(db, {
   budget,
-  repoRoot,
-  worktreeRoot: resolve(repoRoot, ".wecode/worktrees"),
   adapters: { agent: new ClaudeCodeAdapter() },
+  ...(values.root === undefined ? {} : { repoRoot: values.root }),
 });
 
 const say = (t: Tick): void => {
@@ -58,7 +63,9 @@ if (values.once === true) {
     process.on(sig, () => stop.abort());
   }
   const everyMs = Number(values.interval ?? 15) * 1000;
-  process.stdout.write(`wecode-runner  every ${everyMs / 1000}s  max_open ${budget.max_open}\n`);
+  process.stdout.write(
+    `wecode-runner  ${dbPath}  every ${everyMs / 1000}s  max_open ${budget.max_open}\n`,
+  );
   await loop(runner, everyMs, stop.signal, say);
 }
 

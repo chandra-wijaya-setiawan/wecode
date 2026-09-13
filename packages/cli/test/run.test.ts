@@ -111,9 +111,9 @@ describe("help is what an agent reads first", () => {
     expect(out).toContain("automatic");
   });
 
-  it("says so for an entity that has no states", () => {
-    expect(run(["worker", "--help"])).toBe(1);
-    expect(err.join("")).toContain("only verb is create");
+  it("falls back to the manual for a word that is not an entity", () => {
+    expect(run(["worker", "--help"])).toBe(0);
+    expect(said()).toContain("THE SHAPE OF THE WORK");
   });
 });
 
@@ -121,7 +121,7 @@ describe("first contact", () => {
   it("says where wecode is not, rather than throwing a stack trace", () => {
     process.env["WECODE_DB"] = "/tmp/wecode-nowhere/does-not-exist.db";
     expect(run(["board"])).toBe(1);
-    expect(err.join("")).toContain("no wecode here");
+    expect(err.join("")).toContain("no wecode workspace");
     expect(err.join("")).toContain("wecode onboard");
   });
 });

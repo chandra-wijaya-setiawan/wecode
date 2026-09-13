@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-import { resolve } from "node:path";
-import { board, open } from "@wecode/core";
+import { board, currentDatabase, open } from "@wecode/core";
 import { clear, render } from "./render.js";
 import { loadViews } from "./views.js";
 
@@ -9,7 +8,7 @@ process.on("warning", (w) => {
   if (w.name !== "ExperimentalWarning") process.emitWarning(w);
 });
 
-const dbPath = process.env["WECODE_DB"] ?? resolve(process.cwd(), ".wecode/wecode.db");
+const dbPath = currentDatabase();
 const db = open(dbPath);
 const views = loadViews();
 

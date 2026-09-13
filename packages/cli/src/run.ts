@@ -7,8 +7,13 @@ import {
   Engine,
   Maker,
   detect,
+  currentDatabase,
+  databaseOf,
   loadMachines,
   open,
+  readPointer,
+  workspaceDir,
+  writePointer,
   readProjectConfig,
   setTaskScope,
   STATEFUL,
@@ -18,7 +23,7 @@ import {
   writeProjectConfig,
 } from "@wecode/core";
 
-const DB = (): string => process.env["WECODE_DB"] ?? resolve(process.cwd(), ".wecode/wecode.db");
+const DB = (): string => currentDatabase();
 
 const isStateful = (s: string): s is StatefulEntity => (STATEFUL as readonly string[]).includes(s);
 
@@ -50,25 +55,15 @@ function dispatch(argv: readonly string[]): number {
   return verb(head, rest);
 }
 
+/** `wecode init` — an empty workspace, and nothing else.
+ *
+ *  A workspace holds projects; onboarding a repository is what puts one in it. This exists
+ *  for the case where you want the workspace before you have a repository. */
 function init(): number {
   const path = DB();
   mkdirSync(dirname(path), { recursive: true });
   open(path).close();
-
-  const config = resolve(process.cwd(), "config");
-  mkdirSync(config, { recursive: true });
-  write(join(config, "roles.yaml"), ROLES);
-  write(join(config, "budget.yaml"), BUDGET);
-  ignore(resolve(process.cwd(), ".gitignore"), ".wecode/");
-
-  process.stdout.write(
-    [
-      `wecode at ${path}`,
-      "wrote config/roles.yaml and config/budget.yaml — commit them, they describe this project",
-      "added .wecode/ to .gitignore",
-      "",
-    ].join("\n"),
-  );
+  process.stdout.write(`workspace at ${path}\n  wecode onboard   in a repository, to put a project in it\n`);
   return 0;
 }
 
@@ -112,8 +107,13 @@ function answer(args: readonly string[]): number {
  *  It learns the stack, records what it learned, and registers the project. Before this,
  *  every test carried a hand-typed command and every scope a hand-typed path. */
 function onboard(args: readonly string[]): number {
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { workspace: { type: "string" } },
+  });
   const root = process.cwd();
-  const name = args[0] ?? basename(root);
+  const name = positionals[0] ?? basename(root);
 
   if (!existsSync(join(root, ".git"))) {
     return fail(
@@ -152,14 +152,18 @@ function onboard(args: readonly string[]): number {
   write(join(config, "budget.yaml"), BUDGET);
   ignore(resolve(root, ".gitignore"), ".wecode/");
 
-  const path = DB();
+  // The workspace is named once, and the repository remembers which one it joined.
+  const wsName = values.workspace ?? readPointer(root) ?? process.env["WECODE_WORKSPACE"] ?? "default";
+  writePointer(root, wsName);
+
+  const path = databaseOf(wsName);
   mkdirSync(dirname(path), { recursive: true });
   const conn = open(path);
   const make = new Maker(conn);
 
   const workspace =
-    (conn.prepare("SELECT id FROM workspace ORDER BY id LIMIT 1").get() as { id: number } | undefined)?.id ??
-    make.workspace(basename(resolve(root, "..")), resolve(root, ".."));
+    (conn.prepare("SELECT id FROM workspace WHERE name = ?").get(wsName) as { id: number } | undefined)?.id ??
+    make.workspace(wsName, workspaceDir(wsName));
 
   const existing = conn.prepare("SELECT id FROM project WHERE repo = ?").get(root) as { id: number } | undefined;
   if (existing !== undefined) {
@@ -179,7 +183,8 @@ function onboard(args: readonly string[]): number {
       learned.typecheck === null ? null : `typecheck   ${learned.typecheck}`,
       `source      ${learned.source.join(", ")}`,
       "",
-      `workspace #${workspace}  project #${project}  release #${release}`,
+      `workspace    ${wsName}  (${path})`,
+      `project #${project}  release #${release}`,
       "",
       "next: wecode epic create --parent " + String(release) + ' "<what this release is for>"',
       "",
@@ -293,7 +298,9 @@ function show(args: readonly string[]): number {
 function db() {
   const path = DB();
   if (!existsSync(path)) {
-    throw new Missing(`no wecode here (${path}).\n  wecode onboard   to set this project up`);
+    throw new Missing(
+      `no wecode workspace at ${path}.\n  wecode onboard   to set this project up`,
+    );
   }
   return open(path);
 }
@@ -480,7 +487,8 @@ function usage(): number {
       "  task_test            the task's own unit test",
       "",
       "START HERE",
-      "  wecode onboard [name]                      learn this repo, register it, write config",
+      "  wecode onboard [name] [--workspace <ws>]   learn this repo, join a workspace, write config",
+      "  wecode init                                an empty workspace, before you have a repo",
       "  wecode board                               what is running, waiting, queued, failed",
       "",
       "MAKING WORK",

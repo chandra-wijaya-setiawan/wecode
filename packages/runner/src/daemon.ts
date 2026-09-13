@@ -21,11 +21,11 @@ export interface Tick {
 
 export interface RunnerOptions {
   readonly budget: BudgetConfig;
-  readonly repoRoot: string;
-  readonly worktreeRoot: string;
   readonly adapters: Readonly<Record<string, WorkerAdapter>>;
   readonly deadlineSeconds?: number;
   readonly integrationBranch?: string;
+  /** Only for tests: pretend every project lives here. */
+  readonly repoRoot?: string;
 }
 
 /** The whole engine, one tick at a time: allocate, run, judge.
@@ -36,8 +36,9 @@ export interface RunnerOptions {
 export class Runner {
   private readonly foreman: Foreman;
   private readonly scripts: Scripts;
-  private readonly trees: Trees;
   private readonly engine: Engine;
+  /** One per repository. A workspace holds many projects, and each has its own branches. */
+  private readonly treesByRepo = new Map<string, Trees>();
 
   constructor(
     private readonly db: DatabaseSync,
@@ -45,7 +46,6 @@ export class Runner {
   ) {
     this.foreman = new Foreman(db, opts.adapters, opts.deadlineSeconds ?? 3600);
     this.scripts = new Scripts(db);
-    this.trees = new Trees(opts.repoRoot, opts.integrationBranch ?? null);
     this.engine = new Engine(db);
   }
 
@@ -108,7 +108,8 @@ export class Runner {
     for (const [id, place] of prepared) {
       void id;
       if (pass.created === null || !this.assignmentUses(pass.created, place.worktree)) {
-        await this.trees.release(place.worktree).catch(() => undefined);
+        const slugs = this.slugsFor(id);
+        if (slugs !== null) await this.treesFor(slugs.repo).release(place.worktree).catch(() => undefined);
       }
     }
     return pass;
@@ -127,28 +128,47 @@ export class Runner {
     const slugs = this.slugsFor(c.id);
     if (slugs === null) return { why: "it has no story: nothing to cut a branch from" };
     try {
-      const branch = await this.trees.taskBranch(slugs.story, slugs.task);
-      const path = join(this.opts.worktreeRoot, `${slugs.task}-${Date.now()}`);
-      await this.trees.cut(branch, path);
+      const trees = this.treesFor(slugs.repo);
+      const branch = await trees.taskBranch(slugs.story, slugs.task);
+      const path = join(this.worktreeRoot(slugs.repo), `${slugs.task}-${Date.now()}`);
+      await trees.cut(branch, path);
       return path;
     } catch (err) {
       return { why: (err as Error).message };
     }
   }
 
-  private slugsFor(taskId: number): { task: string; story: string } | null {
+  /** A task's slugs and the repository it belongs to. The repo comes from its project, so
+   *  one runner serves every project in the workspace. */
+  private slugsFor(taskId: number): { task: string; story: string; repo: string } | null {
     const row = this.db
       .prepare(
-        `SELECT t.slug AS task, s.slug AS story
+        `SELECT t.slug AS task, s.slug AS story, p.repo AS repo
            FROM task t
            JOIN acceptance_test a ON a.id = t.acceptance_test_id
            JOIN acceptance_criteria c ON c.id = a.parent_id
            JOIN requirement r ON r.id = c.requirement_id
            JOIN story s ON s.id = r.story_id
+           JOIN epic e ON e.id = s.epic_id
+           JOIN release rel ON rel.id = e.release_id
+           JOIN project p ON p.id = rel.project_id
           WHERE t.id = ?`,
       )
-      .get(taskId) as { task: string; story: string } | undefined;
-    return row ?? null;
+      .get(taskId) as { task: string; story: string; repo: string } | undefined;
+    if (row === undefined) return null;
+    return { ...row, repo: this.opts.repoRoot ?? row.repo };
+  }
+
+  private treesFor(repo: string): Trees {
+    const found = this.treesByRepo.get(repo);
+    if (found !== undefined) return found;
+    const made = new Trees(repo, this.opts.integrationBranch ?? null);
+    this.treesByRepo.set(repo, made);
+    return made;
+  }
+
+  private worktreeRoot(repo: string): string {
+    return join(repo, ".wecode", "worktrees");
   }
 
   private freeWorker(role: string): number | null {
@@ -190,16 +210,13 @@ export class Runner {
         passed.push(...r.passed);
         failed.push(...r.failed);
 
-        const sha = await this.trees.commitAttempt(
-          row.worktree,
-          `task/${slugs.task}`,
-          `${slugs.task}: attempt`,
-        );
+        const trees = this.treesFor(slugs.repo);
+        const sha = await trees.commitAttempt(row.worktree, `task/${slugs.task}`, `${slugs.task}: attempt`);
         if (sha !== null) {
           this.db.prepare("UPDATE assignment SET commit_sha = ? WHERE id = ?").run(sha, row.id);
           committed.push(row.id);
         }
-        await this.trees.release(row.worktree);
+        await trees.release(row.worktree);
       } catch {
         // leave the tree standing rather than lose work nobody has seen
       }
@@ -225,20 +242,24 @@ export class Runner {
   private async proveStories(): Promise<ScriptReport> {
     const stories = this.db
       .prepare(
-        `SELECT DISTINCT s.id AS id, s.slug AS slug
+        `SELECT DISTINCT s.id AS id, s.slug AS slug, p.repo AS repo
            FROM story s
+           JOIN epic e2 ON e2.id = s.epic_id
+           JOIN release rel2 ON rel2.id = e2.release_id
+           JOIN project p ON p.id = rel2.project_id
            JOIN requirement r ON r.story_id = s.id
            JOIN acceptance_criteria c ON c.requirement_id = r.id
            JOIN acceptance_test a ON a.parent_id = c.id
           WHERE s.state = 'in_progress' AND a.state IN ('ready','failed') AND a.kind = 'script'`,
       )
-      .all() as unknown as { id: number; slug: string }[];
+      .all() as unknown as { id: number; slug: string; repo: string }[];
 
     const passed: number[] = [];
     const failed: number[] = [];
     for (const story of stories) {
       try {
-        const tree = await this.trees.storyTree(story.slug, join(this.opts.worktreeRoot, `story-${story.slug}`));
+        const repo = this.opts.repoRoot ?? story.repo;
+        const tree = await this.treesFor(repo).storyTree(story.slug, join(this.worktreeRoot(repo), `story-${story.slug}`));
         const r = await this.scripts.runAcceptanceTests(story.id, tree);
         passed.push(...r.passed);
         failed.push(...r.failed);
@@ -266,10 +287,10 @@ export class Runner {
       const slugs = this.slugsFor(row.id);
       if (slugs === null) continue;
       try {
-        await this.trees.mergeTaskIntoStory(
+        await this.treesFor(slugs.repo).mergeTaskIntoStory(
           `task/${slugs.task}`,
           slugs.story,
-          join(this.opts.worktreeRoot, `story-${slugs.story}`),
+          join(this.worktreeRoot(slugs.repo), `story-${slugs.story}`),
         );
         this.db.prepare("UPDATE task SET updated_at = updated_at WHERE id = ?").run(row.id);
         merged.push(row.id);

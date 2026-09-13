@@ -11,3 +11,4 @@ export * from "./roles.js";
 export * from "./board.js";
 export * from "./edit.js";
 export * from "./stacks.js";
+export * from "./home.js";
