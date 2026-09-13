@@ -5,7 +5,7 @@
 # Rearranging, renaming or resizing the board is an edit to this file. A new filter is not.
 
 page:
-  order: [projects, running, needs_human, queued, failed, roadmap, delivered]
+  order: [projects, running, needs_human, stale, queued, failed, roadmap, delivered]
 
 views:
   projects:
@@ -23,6 +23,11 @@ views:
     filter: needs_human
     rows: 5
     empty: nothing waits on you
+  stale:
+    title: Stale
+    filter: stale
+    rows: 6
+    empty: nothing has been sitting
   queued:
     title: Queue
     filter: queued

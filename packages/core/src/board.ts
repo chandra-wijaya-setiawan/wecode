@@ -10,6 +10,7 @@ export interface Row {
 
 export interface Board {
   readonly projects: readonly Row[];
+  readonly stale: readonly Row[];
   readonly running: readonly Row[];
   readonly needs_human: readonly Row[];
   readonly queued: readonly Row[];
@@ -38,6 +39,41 @@ export function board(db: DatabaseSync): Board {
                  JOIN release r ON r.id = e.release_id
                 WHERE r.project_id = p.id) || ' stories' AS detail
          FROM project p ORDER BY p.id`,
+    ),
+    // Nothing is moving it, and nothing is going to. Derived rather than a state: staleness
+    // is an observation about the world, and the moment it becomes a column somebody has to
+    // keep it in agreement with the world.
+    stale: rows(
+      db,
+      `SELECT t.id AS id, t.title AS what, 'ready' AS state,
+              coalesce(f.why, 'nothing has picked it up')
+                || ' · ' || cast((julianday('now') - julianday(t.updated_at)) * 1440 AS int) || 'm' AS detail
+         FROM task t LEFT JOIN refusal f ON f.task_id = t.id
+        WHERE t.state = 'ready'
+          AND (julianday('now') - julianday(t.updated_at)) * 1440 > 15
+          AND NOT EXISTS (SELECT 1 FROM assignment a
+                           WHERE a.objective_type = 'task' AND a.objective_id = t.id
+                             AND a.phase IN ('pending','running','waiting'))
+        UNION ALL
+       SELECT a.id AS id,
+              coalesce(t.title, a.objective_type || ' #' || a.objective_id) AS what,
+              'waiting' AS state,
+              'waiting on you · ' || cast((julianday('now') - julianday(a.updated_at)) * 1440 AS int) || 'm' AS detail
+         FROM assignment a
+         LEFT JOIN task t ON t.id = a.objective_id AND a.objective_type = 'task'
+        WHERE a.phase = 'waiting'
+          AND (julianday('now') - julianday(a.updated_at)) * 1440 > 15
+        UNION ALL
+       SELECT s.id AS id, s.title AS what, s.state AS state,
+              'no work under it' AS detail
+         FROM story s
+        WHERE s.state = 'in_progress'
+          AND NOT EXISTS (SELECT 1 FROM requirement r
+                           JOIN acceptance_criteria c ON c.requirement_id = r.id
+                           JOIN acceptance_test at2 ON at2.parent_id = c.id
+                           JOIN task t2 ON t2.acceptance_test_id = at2.id
+                          WHERE r.story_id = s.id)
+        ORDER BY 1`,
     ),
     // pending counts: a worktree is cut and a session is starting. Leaving it out made the
     // board say nothing was running while an agent was working.

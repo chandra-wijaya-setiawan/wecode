@@ -7,6 +7,7 @@ import { join } from "node:path";
 
 const empty: Board = {
   projects: [],
+  stale: [],
   running: [],
   needs_human: [],
   queued: [],
@@ -23,6 +24,7 @@ describe("views", () => {
       "projects",
       "running",
       "needs_human",
+      "stale",
       "queued",
       "failed",
       "roadmap",

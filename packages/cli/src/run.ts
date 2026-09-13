@@ -507,6 +507,7 @@ function showBoard(): number {
   const groups: [string, readonly { id: number; what: string; state: string; detail: string }[]][] = [
     ["RUNNING", b.running],
     ["NEEDS YOU", b.needs_human],
+    ["STALE", b.stale],
     ["QUEUE", b.queued],
     ["FAILED", b.failed],
     ["ROADMAP", b.roadmap],

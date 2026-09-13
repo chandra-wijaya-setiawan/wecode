@@ -4,6 +4,7 @@ import { loadViews, render } from "../src/index.js";
 
 const empty: Board = {
   projects: [],
+  stale: [],
   running: [],
   needs_human: [],
   queued: [],
