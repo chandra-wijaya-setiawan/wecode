@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Budget } from "@wecode/core";
@@ -21,8 +21,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     private readonly permissionMode = "acceptEdits",
   ) {}
 
+  /** Sessions this adapter has started and not yet seen finish. The runner is one long
+   *  process, so a session outlives the tick that started it — which is the whole point:
+   *  a tick that waited for the agent could never start a second one, and the attention
+   *  budget was unreachable. */
+  private readonly live = new Map<number, Session>();
+
   async start(work: Work): Promise<Observation> {
-    return this.run(work, [
+    return this.spawn(work, [
       "-p",
       this.prompt(work),
       "--output-format",
@@ -32,15 +38,24 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     ]);
   }
 
-  /** There is nothing to poll: the process is the session, and run() waits for it. A tick
-   *  that finds an assignment already running takes it as still running. */
+  /** What that session has done since. The observation it ended with, or that it is still
+   *  going. */
   async poll(work: Work): Promise<Observation> {
-    return { phase: "running", session: work.session ?? "", spent: zero() };
+    const session = this.live.get(work.id);
+    if (session === undefined) {
+      // Nothing here knows about it: the runner restarted while it was running.
+      return { phase: "failed", session: work.session, spent: zero(), reason: "lost" };
+    }
+    if (session.ended !== null) {
+      this.live.delete(work.id);
+      return session.ended;
+    }
+    return { phase: "running", session: session.id ?? work.session ?? "", spent: session.spent };
   }
 
   async answer(work: Work, answer: string): Promise<Observation> {
     if (work.session === null) return { phase: "failed", session: null, spent: zero(), reason: "lost" };
-    return this.run(work, [
+    return this.spawn(work, [
       "--resume",
       work.session,
       "-p",
@@ -53,9 +68,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async kill(work: Work): Promise<void> {
+    const session = this.live.get(work.id);
+    if (session !== undefined) {
+      session.child.kill("SIGTERM");
+      this.live.delete(work.id);
+    }
     if (work.session === null) return;
     await new Promise<void>((resolve) => {
-      const p = spawn(this.bin, ["stop", work.session as string], { stdio: "ignore" });
+      const p = spawnProcess(this.bin, ["stop", work.session as string], { stdio: "ignore" });
       p.on("close", () => resolve());
       p.on("error", () => resolve());
     });
@@ -83,48 +103,72 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     ].join("\n");
   }
 
-  private run(work: Work, args: readonly string[]): Promise<Observation> {
+  /** Start a session and return at once. What it does afterwards lands in `live`, and the
+   *  next poll reads it. */
+  private spawn(work: Work, args: readonly string[]): Promise<Observation> {
     mkdirSync(this.logDir, { recursive: true });
     const log = join(this.logDir, `assignment-${work.id}.jsonl`);
 
-    return new Promise((resolve) => {
-      // stdin is closed: the harness waits on it otherwise, and nothing is going to type.
-      const child = spawn(this.bin, [...args], { cwd: work.worktree, stdio: ["ignore", "pipe", "pipe"] });
-      let session: string | null = work.session;
-      let spent: Budget = zero();
-      let rest = "";
-
-      child.stdout.on("data", (chunk: Buffer) => {
-        appendFileSync(log, chunk);
-        rest += chunk.toString();
-        const lines = rest.split("\n");
-        rest = lines.pop() ?? "";
-        for (const line of lines) {
-          const event = parse(line);
-          if (event === null) continue;
-          if (typeof event["session_id"] === "string") session = event["session_id"];
-          const usage = event["usage"];
-          if (usage !== null && typeof usage === "object") {
-            const u = usage as Record<string, unknown>;
-            const input = typeof u["input_tokens"] === "number" ? u["input_tokens"] : 0;
-            const output = typeof u["output_tokens"] === "number" ? u["output_tokens"] : 0;
-            spent = { tokens: spent.tokens + input + output, seconds: spent.seconds };
-          }
-        }
-      });
-
-      child.stderr.on("data", (chunk: Buffer) => appendFileSync(log, chunk));
-      child.on("error", () => resolve({ phase: "failed", session, spent, reason: "lost" }));
-      child.on("close", (code) => {
-        if (code === 0) {
-          resolve({ phase: "succeeded", session: session ?? "", spent, commit: null });
-          return;
-        }
-        resolve({ phase: "failed", session, spent, reason: code === null ? "lost" : "other" });
-      });
+    const child = spawnProcess(this.bin, [...args], {
+      cwd: work.worktree,
+      stdio: ["ignore", "pipe", "pipe"],
     });
+    const session: Session = { child, id: work.session, spent: zero(), ended: null };
+    this.live.set(work.id, session);
+
+    let rest = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      appendFileSync(log, chunk);
+      rest += chunk.toString();
+      const lines = rest.split("\n");
+      rest = lines.pop() ?? "";
+      for (const line of lines) {
+        const event = parse(line);
+        if (event === null) continue;
+        if (typeof event["session_id"] === "string") session.id = event["session_id"];
+        const usage = event["usage"];
+        if (usage !== null && typeof usage === "object") {
+          const u = usage as Record<string, unknown>;
+          const input = typeof u["input_tokens"] === "number" ? u["input_tokens"] : 0;
+          const output = typeof u["output_tokens"] === "number" ? u["output_tokens"] : 0;
+          session.spent = {
+            tokens: session.spent.tokens + input + output,
+            seconds: session.spent.seconds,
+          };
+        }
+      }
+    });
+
+    child.stderr?.on("data", (chunk: Buffer) => appendFileSync(log, chunk));
+
+    child.on("error", () => {
+      session.ended = { phase: "failed", session: session.id, spent: session.spent, reason: "lost" };
+    });
+
+    child.on("close", (code) => {
+      session.ended =
+        code === 0
+          ? { phase: "succeeded", session: session.id ?? "", spent: session.spent, commit: null }
+          : {
+              phase: "failed",
+              session: session.id,
+              spent: session.spent,
+              reason: code === null ? "lost" : "other",
+            };
+    });
+
+    return Promise.resolve({ phase: "running", session: session.id ?? "", spent: zero() });
   }
 }
+
+interface Session {
+  readonly child: ChildProcess;
+  id: string | null;
+  spent: Budget;
+  ended: Observation | null;
+}
+
+const zero = (): Budget => ({ tokens: 0, seconds: 0 });
 
 /** ours -> Claude Code's. An unmapped name is passed through, so a role can name a tool
  *  wecode has never heard of. */
@@ -138,8 +182,6 @@ const TOOL_NAMES: Readonly<Record<string, string>> = {
   webfetch: "WebFetch",
   websearch: "WebSearch",
 };
-
-const zero = (): Budget => ({ tokens: 0, seconds: 0 });
 
 function parse(line: string): Record<string, unknown> | null {
   const trimmed = line.trim();

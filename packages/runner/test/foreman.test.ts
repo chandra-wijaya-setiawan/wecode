@@ -189,3 +189,24 @@ describe("a session that finishes in one call", () => {
     expect(phaseOf(id)).toBe("waiting");
   });
 });
+
+describe("a session that keeps running", () => {
+  it("does not hold the tick: a second assignment starts on the next one", async () => {
+    /** Starts, reports running, and never finishes — a real agent mid-task. */
+    const busy: WorkerAdapter = {
+      kind: "agent",
+      start: async () => ({ phase: "running", session: "s", spent: spent() }),
+      poll: async () => ({ phase: "running", session: "s", spent: spent() }),
+      answer: async () => ({ phase: "running", session: "s", spent: spent() }),
+      kill: async () => {},
+    };
+    const a = assign();
+    const b = assign();
+    const foreman = new Foreman(db, { agent: busy });
+
+    const first = await foreman.tick();
+    expect(first.started.sort()).toEqual([a, b].sort());
+    expect(phaseOf(a)).toBe("running");
+    expect(phaseOf(b)).toBe("running");
+  });
+});
