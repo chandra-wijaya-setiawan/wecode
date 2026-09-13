@@ -45,7 +45,7 @@ export class Runner {
   ) {
     this.foreman = new Foreman(db, opts.adapters, opts.deadlineSeconds ?? 3600);
     this.scripts = new Scripts(db);
-    this.trees = new Trees(opts.repoRoot, opts.integrationBranch ?? "main");
+    this.trees = new Trees(opts.repoRoot, opts.integrationBranch ?? null);
     this.engine = new Engine(db);
   }
 
@@ -76,20 +76,28 @@ export class Runner {
    *  the first candidate that has a free worker, and the allocator then decides. */
   private async allocateOne(): Promise<Pass> {
     const prepared = new Map<number, { worker_id: number; worktree: string }>();
+    const trouble = new Map<number, string>();
     for (const c of readyCandidates(this.db)) {
       const worker = this.freeWorker(c.role);
-      if (worker === null) continue;
-      const path = await this.cutTree(c);
-      if (path === null) continue;
-      prepared.set(c.id, { worker_id: worker, worktree: path });
+      if (worker === null) {
+        trouble.set(c.id, `no worker free for role ${c.role || "(none)"}`);
+        continue;
+      }
+      const cut = await this.cutTree(c);
+      if (typeof cut !== "string") {
+        trouble.set(c.id, cut.why);
+        continue;
+      }
+      prepared.set(c.id, { worker_id: worker, worktree: cut });
       break; // one per tick
     }
     const pass = allocate(this.db, this.opts.budget, (c) => prepared.get(c.id) ?? null);
 
     // What the pass decided, on the record, so the board can say why nothing is running.
     for (const r of pass.refused) {
-      if (r.id !== 0) recordRefusal(this.db, r.id, r.why);
+      if (r.id !== 0) recordRefusal(this.db, trouble.get(r.id) ?? r.why, r.id);
     }
+    for (const [id, why] of trouble) recordRefusal(this.db, why, id);
     if (pass.created !== null) {
       const started = this.db.prepare("SELECT objective_id FROM assignment WHERE id = ?").get(pass.created) as
         | { objective_id: number }
@@ -113,16 +121,18 @@ export class Runner {
     return row?.worktree === worktree;
   }
 
-  private async cutTree(c: Candidate): Promise<string | null> {
+  /** A path, or why there is not one. A tree that could not be cut is a git problem the
+   *  operator has to see — it used to be reported as "no worker free". */
+  private async cutTree(c: Candidate): Promise<string | { why: string }> {
     const slugs = this.slugsFor(c.id);
-    if (slugs === null) return null;
+    if (slugs === null) return { why: "it has no story: nothing to cut a branch from" };
     try {
       const branch = await this.trees.taskBranch(slugs.story, slugs.task);
       const path = join(this.opts.worktreeRoot, `${slugs.task}-${Date.now()}`);
       await this.trees.cut(branch, path);
       return path;
-    } catch {
-      return null;
+    } catch (err) {
+      return { why: (err as Error).message };
     }
   }
 

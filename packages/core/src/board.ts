@@ -68,7 +68,7 @@ export function board(db: DatabaseSync): Board {
 
 /** What the last pass decided about a task it did not start. One row per task, replaced
  *  each time, so the board always shows the current reason rather than a history. */
-export function recordRefusal(db: DatabaseSync, taskId: number, why: string): void {
+export function recordRefusal(db: DatabaseSync, why: string, taskId: number): void {
   db.prepare(
     `INSERT INTO refusal (task_id, why, at) VALUES (?, ?, ?)
      ON CONFLICT (task_id) DO UPDATE SET why = excluded.why, at = excluded.at`,

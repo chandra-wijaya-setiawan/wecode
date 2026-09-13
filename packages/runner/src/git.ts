@@ -17,10 +17,24 @@ async function git(cwd: string, args: readonly string[]): Promise<string> {
 
 /** docs/design/09. A branch per story and per task, a worktree per assignment. */
 export class Trees {
+  private resolved: string | null;
+
   constructor(
     private readonly repo: string,
-    private readonly integration = "main",
-  ) {}
+    integration: string | null = null,
+  ) {
+    this.resolved = integration;
+  }
+
+  /** The branch everything is cut from. Asked of the repository rather than assumed: a
+   *  default of "main" is wrong on every repository that says "master", and the failure is
+   *  silent — every tree simply fails to cut. */
+  async integrationBranch(): Promise<string> {
+    if (this.resolved !== null) return this.resolved;
+    const head = await git(this.repo, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "");
+    this.resolved = head === "" ? "main" : head;
+    return this.resolved;
+  }
 
   private async has(ref: string): Promise<boolean> {
     try {
@@ -34,7 +48,7 @@ export class Trees {
   /** Cut from the integration branch, once. */
   async storyBranch(storySlug: string): Promise<string> {
     const name = `story/${storySlug}`;
-    if (!(await this.has(name))) await git(this.repo, ["branch", name, this.integration]);
+    if (!(await this.has(name))) await git(this.repo, ["branch", name, await this.integrationBranch()]);
     return name;
   }
 

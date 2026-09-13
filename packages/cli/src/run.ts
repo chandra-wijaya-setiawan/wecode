@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -24,6 +25,7 @@ export function run(argv: readonly string[]): number {
   if (head === "init") return init();
   if (head === "answer") return answer(rest);
   if (head === "show") return show(rest);
+  if (head === "land") return land(rest);
   return verb(head, rest);
 }
 
@@ -74,6 +76,37 @@ function answer(args: readonly string[]): number {
     .prepare("UPDATE assignment SET answer = ?, answered_by = ?, updated_at = ? WHERE id = ?")
     .run(text, who, new Date().toISOString(), id);
   process.stdout.write(`assignment #${id} answered by ${who}\n`);
+  return 0;
+}
+
+/** `wecode land <story>` — merge a delivered story into the branch you have checked out.
+ *
+ *  The operator runs this, not the runner. Landing moves the branch the operator is sitting
+ *  on; a background process doing that under them would rewrite their working tree without
+ *  asking. Shipping is a decision, and so is this. */
+function land(args: readonly string[]): number {
+  const id = Number(args[0]);
+  if (!Number.isInteger(id)) return fail("wecode land <story>");
+
+  const conn = db();
+  const story = conn.prepare("SELECT slug, state FROM story WHERE id = ?").get(id) as
+    | { slug: string; state: string }
+    | undefined;
+  if (story === undefined) return fail(`no story #${id}`);
+  if (story.state !== "delivered") {
+    return fail(`story #${id} is ${story.state}. Only a delivered story lands.`);
+  }
+
+  const branch = `story/${story.slug}`;
+  try {
+    const dirty = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
+    if (dirty !== "") return fail("your working tree has changes. Commit or stash them first.");
+    execFileSync("git", ["merge", "--no-ff", "-m", `land ${branch}`, branch], { stdio: "inherit" });
+  } catch (err) {
+    return fail(`git: ${(err as Error).message}`);
+  }
+
+  process.stdout.write(`${branch} landed\n`);
   return 0;
 }
 
@@ -252,6 +285,7 @@ function usage(): number {
       '  wecode task scope <id> --write "src/**" --tools bash',
       '  wecode answer <assignment> "<text>"',
       "  wecode show <entity> <id>",
+      "  wecode land <story>",
       "",
       `entities with states: ${STATEFUL.join(", ")}`,
       "",

@@ -85,3 +85,20 @@ describe("merging", () => {
     expect(run(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
   });
 });
+
+describe("the integration branch", () => {
+  it("is whatever the repository's HEAD says, not an assumption", async () => {
+    const other = mkdtempSync(join(tmpdir(), "wecode-master-"));
+    run(other, "init", "-q", "-b", "master");
+    run(other, "config", "user.name", "t");
+    run(other, "config", "user.email", "t@localhost");
+    writeFileSync(join(other, "README.md"), "x\n");
+    run(other, "add", "-A");
+    run(other, "commit", "-q", "-m", "seed");
+
+    const t = new Trees(other);
+    expect(await t.integrationBranch()).toBe("master");
+    await t.storyBranch("s");
+    expect(run(other, "rev-parse", "story/s")).toBe(run(other, "rev-parse", "master"));
+  });
+});
