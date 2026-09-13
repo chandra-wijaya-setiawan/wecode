@@ -153,8 +153,10 @@ export class Maker {
     budget: Budget;
     worktree: string;
   }): number {
-    return insert(this.db, "assignment", {
-      ...this.stamp(null, `${spec.objective_type}-${spec.objective_id}-${Date.now()}`),
+    // The id is the only thing certain to be unique. A timestamp is not: two attempts at
+    // one objective inside the same millisecond collide, and a retry is exactly that.
+    const id = insert(this.db, "assignment", {
+      ...this.stamp(null, `pending-${Math.random().toString(36).slice(2, 10)}`),
       objective_type: spec.objective_type,
       objective_id: spec.objective_id,
       worker_id: spec.worker_id,
@@ -164,5 +166,9 @@ export class Maker {
       phase: initialOf(this.m, "assignment"),
       spent: JSON.stringify({ tokens: 0, seconds: 0 }),
     });
+    this.db
+      .prepare("UPDATE assignment SET slug = ? WHERE id = ?")
+      .run(`${spec.objective_type}-${spec.objective_id}-${id}`, id);
+    return id;
   }
 }
