@@ -148,3 +148,41 @@ describe("a task that keeps failing stops", () => {
     expect(third.allocated.created).toBeNull();
   });
 });
+
+describe("a refused task says why on the board", () => {
+  it("records the reason while the collision lasts", async () => {
+    const { board, Engine: E, Maker: M } = await import("@wecode/core");
+
+    /** Stays running, so its scope stays held. */
+    const busy: WorkerAdapter = {
+      kind: "agent",
+      start: async () => ({ phase: "running", session: "s", spent: { tokens: 0, seconds: 0 } }),
+      poll: async () => ({ phase: "running", session: "s", spent: { tokens: 0, seconds: 0 } }),
+      answer: async () => ({ phase: "running", session: "s", spent: { tokens: 0, seconds: 0 } }),
+      kill: async () => {},
+    };
+
+    const make2 = new M(db);
+    const e2 = new E(db);
+    const at = (db.prepare("SELECT id FROM acceptance_test LIMIT 1").get() as { id: number }).id;
+    const other = make2.task(at, "also edit mail", { role: "engineer", scope: { write: ["mail.ts"], tools: [] } });
+    const tt = make2.taskTest(other, "unit", "script", "true");
+    e2.apply("task_test", tt, "deliver", "chief");
+    e2.apply("task", other, "start", "chief");
+    make2.worker("claude-2", "engineer", "agent");
+
+    const r = new Runner(db, {
+      budget: DEFAULT_BUDGET,
+      repoRoot: repo,
+      worktreeRoot: join(repo, ".wecode/worktrees"),
+      adapters: { agent: busy },
+      integrationBranch: "main",
+    });
+
+    await r.tick(); // starts one of them, and it stays running
+    await r.tick(); // the other now collides with the scope it holds
+
+    const queued = board(db).queued;
+    expect(queued.some((row) => row.detail.includes("overlaps"))).toBe(true);
+  });
+});

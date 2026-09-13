@@ -1,10 +1,20 @@
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SCHEMA = fileURLToPath(new URL("../sql/schema.sql", import.meta.url));
+const MIGRATIONS = fileURLToPath(new URL("../sql/migrations", import.meta.url));
 
-export const SCHEMA_VERSION = 1;
+/** Every file in sql/migrations, in name order. The number in the filename is the version
+ *  it brings the database to, so adding one is a file rather than an edit. */
+function migrations(): readonly { version: number; path: string }[] {
+  return readdirSync(MIGRATIONS)
+    .filter((f) => f.endsWith(".sql"))
+    .sort()
+    .map((f) => ({ version: Number.parseInt(f, 10), path: join(MIGRATIONS, f) }));
+}
+
+export const SCHEMA_VERSION = migrations().reduce((n, m) => Math.max(n, m.version), 0);
 
 export class StoreError extends Error {}
 
@@ -16,12 +26,8 @@ export function open(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys = ON");
 
-  const found = version(db);
-  if (found === null) {
-    db.exec(readFileSync(SCHEMA, "utf8"));
-    db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(SCHEMA_VERSION);
-    return db;
-  }
+  const found = version(db) ?? 0;
+
   if (found > SCHEMA_VERSION) {
     db.close();
     throw new StoreError(
@@ -29,10 +35,14 @@ export function open(path: string): DatabaseSync {
         `Upgrade wecode rather than running an older copy against it.`,
     );
   }
-  if (found < SCHEMA_VERSION) {
-    db.close();
-    throw new StoreError(`the database is at schema ${found}; migration to ${SCHEMA_VERSION} is not implemented`);
+
+  for (const m of migrations()) {
+    if (m.version <= found) continue;
+    db.exec(readFileSync(m.path, "utf8"));
+    db.exec("DELETE FROM schema_version");
+    db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(m.version);
   }
+
   return db;
 }
 

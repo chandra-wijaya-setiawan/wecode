@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { Engine } from "@wecode/core";
+import { clearRefusal, Engine, recordRefusal } from "@wecode/core";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { allocate, candidates as readyCandidates, type Candidate, type Pass } from "./allocator.js";
@@ -85,6 +85,17 @@ export class Runner {
       break; // one per tick
     }
     const pass = allocate(this.db, this.opts.budget, (c) => prepared.get(c.id) ?? null);
+
+    // What the pass decided, on the record, so the board can say why nothing is running.
+    for (const r of pass.refused) {
+      if (r.id !== 0) recordRefusal(this.db, r.id, r.why);
+    }
+    if (pass.created !== null) {
+      const started = this.db.prepare("SELECT objective_id FROM assignment WHERE id = ?").get(pass.created) as
+        | { objective_id: number }
+        | undefined;
+      if (started !== undefined) clearRefusal(this.db, started.objective_id);
+    }
     // A tree cut for a task the allocator then refused is released rather than left behind.
     for (const [id, place] of prepared) {
       void id;

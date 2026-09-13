@@ -35,10 +35,12 @@ export function board(db: DatabaseSync): Board {
          FROM assignment WHERE phase = 'waiting' ORDER BY id`,
     ),
     // ready, and nothing open is attempting it: the queue is what waits on a slot.
+    // The detail is why it is not running: the last pass's refusal, or its role.
     queued: rows(
       db,
-      `SELECT t.id AS id, t.title AS what, t.state AS state, t.role AS detail
-         FROM task t
+      `SELECT t.id AS id, t.title AS what, t.state AS state,
+              coalesce(f.why, t.role) AS detail
+         FROM task t LEFT JOIN refusal f ON f.task_id = t.id
         WHERE t.state = 'ready'
           AND NOT EXISTS (
             SELECT 1 FROM assignment a
@@ -62,6 +64,19 @@ export function board(db: DatabaseSync): Board {
         ORDER BY detail, id`,
     ),
   };
+}
+
+/** What the last pass decided about a task it did not start. One row per task, replaced
+ *  each time, so the board always shows the current reason rather than a history. */
+export function recordRefusal(db: DatabaseSync, taskId: number, why: string): void {
+  db.prepare(
+    `INSERT INTO refusal (task_id, why, at) VALUES (?, ?, ?)
+     ON CONFLICT (task_id) DO UPDATE SET why = excluded.why, at = excluded.at`,
+  ).run(taskId, why, new Date().toISOString());
+}
+
+export function clearRefusal(db: DatabaseSync, taskId: number): void {
+  db.prepare("DELETE FROM refusal WHERE task_id = ?").run(taskId);
 }
 
 /** How many assignments hold a slot. `waiting` counts: waiting on a person is exactly the
