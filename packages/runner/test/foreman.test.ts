@@ -163,3 +163,29 @@ describe("the foreman", () => {
     expect(fake.seen).toContain(`kill:${id}`);
   });
 });
+
+describe("a session that finishes in one call", () => {
+  it("is recorded as having run, not left pending", async () => {
+    const id = assign();
+    const fake = new Fake([{ phase: "succeeded", session: "s", spent: spent(), commit: "abc" }]);
+    await new Foreman(db, { agent: fake }).tick();
+    expect(phaseOf(id)).toBe("succeeded");
+    const row = db.prepare("SELECT session, commit_sha FROM assignment WHERE id = ?").get(id) as {
+      session: string;
+      commit_sha: string;
+    };
+    expect(row.session).toBe("s");
+    expect(row.commit_sha).toBe("abc");
+    const n = db.prepare("SELECT count(*) AS n FROM ledger WHERE entity = 'assignment'").get() as { n: number };
+    expect(n.n).toBe(2); // start, then finish — the attempt is on the record as having run
+  });
+
+  it("asks in the same call it started in", async () => {
+    const id = assign();
+    const fake = new Fake([
+      { phase: "waiting", session: "s", spent: spent(), kind: "approval", question: "ok?", options: [] },
+    ]);
+    await new Foreman(db, { agent: fake }).tick();
+    expect(phaseOf(id)).toBe("waiting");
+  });
+});

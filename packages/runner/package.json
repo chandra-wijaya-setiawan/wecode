@@ -11,5 +11,8 @@
   "dependencies": {
     "@wecode/core": "workspace:*",
     "yaml": "^2.9.1"
+  },
+  "bin": {
+    "wecode-runner": "./dist/bin.js"
   }
 }

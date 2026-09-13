@@ -84,6 +84,13 @@ export class Foreman {
     return { started, advanced, failed };
   }
 
+  private phaseOf(id: number): string {
+    const row = this.db.prepare("SELECT phase FROM assignment WHERE id = ?").get(id) as
+      | { phase: string }
+      | undefined;
+    return row?.phase ?? "";
+  }
+
   private open(): OpenRow[] {
     return this.db
       .prepare(
@@ -135,11 +142,18 @@ export class Foreman {
     const spent = JSON.stringify(seen.spent);
     const at = now();
 
+    // A session can finish, or ask, inside the same call that started it. Neither is legal
+    // from pending, so the start is recorded first: the record must be able to say the
+    // attempt ran, even when it ran for one second.
+    if (seen.phase !== "failed" && this.phaseOf(id) === "pending") {
+      this.engine.apply("assignment", id, "start", "foreman");
+    }
+
     if (seen.phase === "running") {
       this.db
         .prepare("UPDATE assignment SET session = ?, last_seen = ?, spent = ?, updated_at = ? WHERE id = ?")
         .run(seen.session, at, spent, at, id);
-      return this.engine.apply("assignment", id, "start", "foreman").ok;
+      return this.phaseOf(id) === "running";
     }
 
     if (seen.phase === "waiting") {
@@ -154,8 +168,10 @@ export class Foreman {
 
     if (seen.phase === "succeeded") {
       this.db
-        .prepare("UPDATE assignment SET last_seen = ?, spent = ?, commit_sha = ?, updated_at = ? WHERE id = ?")
-        .run(at, spent, seen.commit, at, id);
+        .prepare(
+          "UPDATE assignment SET session = coalesce(?, session), last_seen = ?, spent = ?, commit_sha = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(seen.session, at, spent, seen.commit, at, id);
       return this.engine.apply("assignment", id, "finish", "foreman").ok;
     }
 
