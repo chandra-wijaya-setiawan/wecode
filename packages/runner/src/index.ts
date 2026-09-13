@@ -1,3 +1,4 @@
+export * from "./git.js";
 export * from "./adapters/claude-code.js";
 export * from "./daemon.js";
 export * from "./scripts.js";
