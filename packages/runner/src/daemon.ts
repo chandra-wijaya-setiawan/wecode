@@ -1,14 +1,15 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { clearRefusal, Engine, now, recordRefusal } from "@wecode/core";
-import { join } from "node:path";
 import { promisify } from "node:util";
+import { clearRefusal, Engine, ensureChore, now, recordRefusal, type Violation } from "@wecode/core";
+import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { allocate, candidates as readyCandidates, type Candidate, type Pass } from "./allocator.js";
 import type { BudgetConfig } from "./budget.js";
 import { Foreman, type TickReport } from "./foreman.js";
 import type { WorkerAdapter } from "./ports.js";
-import { Scripts, type ScriptReport } from "./scripts.js";
+import { Doctor, type Invariant } from "./doctor.js";
+import { Examiner, type Refused, type ScriptReport } from "./examiner.js";
 import { Trees } from "./git.js";
 
 const exec = promisify(execFile);
@@ -21,11 +22,29 @@ export interface Tick {
   readonly merged: readonly number[];
   /** Tasks that ran out of attempts on this tick. */
   readonly exhausted: readonly number[];
+  /** Chores wecode owes itself, as of this tick. Every open one, not only the new ones:
+   *  the number is the backlog, and a backlog that shrank is worth seeing. */
+  readonly chores: readonly number[];
+  /** Tasks that have used every attempt while the story that needs them is still open. */
+  readonly drift: readonly Drift[];
   /** Completion transitions that fired because their guard had become true. */
   readonly settled: readonly string[];
   /** Acceptance tests this tick ran at their story's base: red there, or green and so
    *  unable to prove anything. */
   readonly redAtBase: RedAtBase;
+  /** What the invariant set found this tick. Recorded as well as returned, so a view reads
+   *  the table rather than running the pass again. Empty is the healthy answer. */
+  readonly doctor: readonly Violation[];
+}
+
+/** An exhausted task, and the story left waiting on it. Named, because the cost is the
+ *  story: three tasks at 3 of 3 held two stories open for a day and the only thing that
+ *  moved them was a person noticing. */
+export interface Drift {
+  readonly task: number;
+  readonly slug: string;
+  readonly story: string;
+  readonly why: string;
 }
 
 export interface RedAtBase {
@@ -40,6 +59,10 @@ export interface RunnerOptions {
   readonly integrationBranch?: string;
   /** Only for tests: pretend every project lives here. */
   readonly repoRoot?: string;
+  /** The invariant set the tick's doctor runs. Defaults to core's. A caller substitutes
+   *  one only to prove the boundary holds — that a check which throws costs its own
+   *  result and nothing else. */
+  readonly invariants?: readonly Invariant[];
 }
 
 /** The whole engine, one tick at a time: allocate, run, judge.
@@ -49,8 +72,9 @@ export interface RunnerOptions {
  *  optimisation; the timer is the guarantee. */
 export class Runner {
   private readonly foreman: Foreman;
-  private readonly scripts: Scripts;
+  private readonly examiner: Examiner;
   private readonly engine: Engine;
+  private readonly doctor: Doctor;
   /** One per repository. A workspace holds many projects, and each has its own branches. */
   private readonly treesByRepo = new Map<string, Trees>();
 
@@ -59,8 +83,9 @@ export class Runner {
     private readonly opts: RunnerOptions,
   ) {
     this.foreman = new Foreman(db, opts.adapters, opts.deadlineSeconds ?? 3600);
-    this.scripts = new Scripts(db);
+    this.examiner = new Examiner(db);
     this.engine = new Engine(db);
+    this.doctor = new Doctor(db, opts.invariants);
     // A merge is not derivable from the record: a done task with a commit stays done and
     // committed forever, so without this landDoneTasks re-merges it on every tick and every
     // log line carries every task that ever landed.
@@ -70,17 +95,6 @@ export class Runner {
          branch    TEXT NOT NULL,
          sha       TEXT NOT NULL,
          merged_at TEXT NOT NULL
-       )`,
-    );
-    // What a test proved before the work started. Runner-owned like landed_branch: the
-    // ledger says what is true of the work, this says what this machine has witnessed.
-    // A row with no sha is a test that could not be proven, and carries why.
-    db.exec(
-      `CREATE TABLE IF NOT EXISTS red_at_base (
-         test_id        INTEGER PRIMARY KEY,
-         red_at_base_sha TEXT,
-         red_at_base_at  TEXT,
-         reason          TEXT
        )`,
     );
   }
@@ -100,18 +114,38 @@ export class Runner {
     // that just ran settles here, rather than waiting for an event that already happened.
     const settled2 = this.engine.settle();
     const exhausted = this.enforceRetryLimit();
+    // Last, and after settle(): a story becomes delivered in settle(), and the condition
+    // this reads is about a story that already is.
+    const chores = await this.raiseMergeChores();
+    // After enforcement, so a task that ran out of attempts on this very tick is already
+    // named rather than named a minute later.
+    const drift = this.exhaustedTasks();
+    // Last, and reading only: the pass describes the record the tick has finished leaving
+    // behind. Its own failure is not the tick's — Doctor.check throws for nothing, and the
+    // guard here is the belt to that pair of braces.
+    let doctor: readonly Violation[] = [];
+    try {
+      doctor = this.doctor.check();
+    } catch {
+      // A tick that did its work and could not say whether the record drifted is still a
+      // tick that did its work.
+    }
     return {
+      doctor,
       allocated,
       foreman,
       committed: settled.committed,
       merged,
       exhausted,
+      chores,
+      drift,
       redAtBase,
       settled: settled2.map((c) => `${c.entity} #${c.id} → ${c.to}`),
       scripts: {
         passed: [...settled.scripts.passed, ...acceptance.passed],
         failed: [...settled.scripts.failed, ...acceptance.failed],
         skipped: [...settled.scripts.skipped, ...acceptance.skipped],
+        refused: [...(settled.scripts.refused ?? []), ...(acceptance.refused ?? [])],
       },
     };
   }
@@ -250,6 +284,7 @@ export class Runner {
     const passed: number[] = [];
     const failed: number[] = [];
     const skipped: number[] = [];
+    const refused: Refused[] = [];
 
     for (const row of rows) {
       if (!existsSync(row.worktree)) continue;
@@ -259,10 +294,11 @@ export class Runner {
         // The attempt is judged in the tree it wrote in, before that tree goes.
         // The assignment is what makes this attempt distinct: a retry cuts a fresh tree at
         // the same branch tip, so the tip alone would read as "already judged".
-        const r = await this.scripts.runTaskTests(row.task, row.worktree, { attempt: row.id });
+        const r = await this.examiner.runTaskTests(row.task, row.worktree, { attempt: row.id });
         passed.push(...r.passed);
         failed.push(...r.failed);
         skipped.push(...r.skipped);
+        refused.push(...(r.refused ?? []));
 
         const trees = this.treesFor(slugs.repo);
         const sha = await trees.commitAttempt(row.worktree, `task/${slugs.task}`, `${slugs.task}: attempt`);
@@ -275,11 +311,58 @@ export class Runner {
         // leave the tree standing rather than lose work nobody has seen
       }
     }
-    return { committed, scripts: { passed, failed, skipped } };
+    return { committed, scripts: { passed, failed, skipped, refused } };
+  }
+
+  /** Every task that has used its attempts while its story is still open.
+   *
+   *  Reported, never acted on: `retry` is an operator's verb, because the machine cannot
+   *  know whether a task failed three times for a reason a fourth attempt would fix. So
+   *  this is the doctor's read — one line per drift, naming the story that is waiting —
+   *  and `wecode task retry <id> --reason` is the only thing that clears it.
+   *
+   *  A dropped task is not here: abandoning one is a decision, and a decision is not
+   *  drift. */
+  private exhaustedTasks(): Drift[] {
+    const rows = this.db
+      .prepare(
+        `SELECT t.id AS task, t.slug AS slug, t.attempts AS attempts, t.max_retry AS max_retry,
+                s.slug AS story, s.state AS story_state
+           FROM task t
+           JOIN acceptance_test a ON a.id = t.acceptance_test_id
+           JOIN acceptance_criteria c ON c.id = a.parent_id
+           JOIN requirement r ON r.id = c.requirement_id
+           JOIN story s ON s.id = r.story_id
+          WHERE t.state NOT IN ('done', 'dropped')
+            AND t.attempts >= t.max_retry
+            AND s.state NOT IN ('delivered', 'dropped')
+          ORDER BY t.id`,
+      )
+      .all() as unknown as {
+      task: number;
+      slug: string;
+      attempts: number;
+      max_retry: number;
+      story: string;
+      story_state: string;
+    }[];
+
+    return rows.map((row) => ({
+      task: row.task,
+      slug: row.slug,
+      story: row.story,
+      why:
+        `${row.attempts} of ${row.max_retry} attempts used, and story ${row.story} is still ` +
+        `${row.story_state} — wecode task retry ${row.task} --reason "…", or drop it`,
+    }));
   }
 
   /** A task that has used its attempts stops, and says so. Without this the allocator
-   *  retries a broken task forever — a crash loop with the machine holding the stopwatch. */
+   *  retries a broken task forever — a crash loop with the machine holding the stopwatch.
+   *
+   *  It only ever stops one. The runner has no path back the other way: nothing here
+   *  applies `retry`, because bringing an exhausted task back is a judgement about why it
+   *  failed, and the machine has not got one. */
   private enforceRetryLimit(): number[] {
     const rows = this.db
       .prepare(`SELECT id FROM task WHERE state = 'ready' AND attempts >= max_retry`)
@@ -310,8 +393,7 @@ export class Runner {
            JOIN project p ON p.id = rel.project_id
           WHERE s.state = 'in_progress' AND a.state = 'ready' AND a.kind = 'script'
             AND a.artefact IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM red_at_base b
-                             WHERE b.test_id = a.id AND b.red_at_base_sha IS NOT NULL)`,
+            AND a.red_at_base_sha IS NULL`,
       )
       .all() as unknown as { id: number; artefact: string; story: string; repo: string }[];
 
@@ -377,16 +459,24 @@ export class Runner {
     }
   }
 
+  /** The observation goes on the test itself, in the columns `test_has_been_red` reads.
+   *  It used to go in a runner-owned side table, which left the guard reading a null
+   *  column and refusing the pass of a test this machine had watched fail. */
   private recordBaseRun(testId: number, base: string, artefact: string, green: boolean): void {
     const at = now();
     this.db
       .prepare(
-        `INSERT INTO red_at_base (test_id, red_at_base_sha, red_at_base_at, reason) VALUES (?, ?, ?, ?)
-           ON CONFLICT (test_id) DO UPDATE SET red_at_base_sha = excluded.red_at_base_sha,
-                                               red_at_base_at  = excluded.red_at_base_at,
-                                               reason          = excluded.reason`,
+        `UPDATE acceptance_test
+            SET red_at_base_sha = ?, red_at_base_at = ?, red_at_base_reason = ?, updated_at = ?
+          WHERE id = ?`,
       )
-      .run(testId, green ? null : base, green ? null : at, green ? "it passes at base, so it cannot fail" : null);
+      .run(
+        green ? null : base,
+        green ? null : at,
+        green ? "it passes at base, so it cannot fail" : null,
+        at,
+        testId,
+      );
     this.db
       .prepare(
         `INSERT INTO script_run (entity, test_id, fingerprint, ran_at) VALUES ('acceptance_test@base', ?, ?, ?)
@@ -414,21 +504,88 @@ export class Runner {
     const passed: number[] = [];
     const failed: number[] = [];
     const skipped: number[] = [];
+    const refused: Refused[] = [];
     for (const story of stories) {
       try {
         const repo = this.opts.repoRoot ?? story.repo;
         const tree = await this.treesFor(repo).storyTree(story.slug, join(this.worktreeRoot(repo), `story-${story.slug}`));
-        const r = await this.scripts.runAcceptanceTests(story.id, tree);
+        const r = await this.examiner.runAcceptanceTests(story.id, tree);
         passed.push(...r.passed);
         failed.push(...r.failed);
         skipped.push(...r.skipped);
+        refused.push(...(r.refused ?? []));
       } catch {
         // a story with no branch yet has nothing to prove
       }
     }
-    return { passed, failed, skipped };
+    return { passed, failed, skipped, refused };
   }
 
+  /** docs/design/18. A story is delivered and its branch will not merge into the base.
+   *
+   *  Until now that was a sentence in a report: the merge in `landDoneTasks` swallowed the
+   *  conflict, and a delivered story that could not be landed looked exactly like one that
+   *  had been. Four of them sat that way for a day. A chore is the record of it — on the
+   *  board, with a target and a check, and takeable by a worker.
+   *
+   *  This runs every tick and creates nothing on the second one: `ensureChore` is keyed on
+   *  (kind, target), which is the condition itself. Nothing here decides the chore is over
+   *  either — a merge that has since become possible is still the system worker's to make,
+   *  because the merge is what the check proves. */
+  private async raiseMergeChores(): Promise<number[]> {
+    const stories = this.db
+      .prepare(
+        `SELECT s.id AS id, s.slug AS slug, rel.project_id AS project, p.repo AS repo
+           FROM story s
+           JOIN epic e ON e.id = s.epic_id
+           JOIN release rel ON rel.id = e.release_id
+           JOIN project p ON p.id = rel.project_id
+          WHERE s.state = 'delivered'`,
+      )
+      .all() as unknown as { id: number; slug: string; project: number; repo: string }[];
+
+    const open: number[] = [];
+    for (const story of stories) {
+      const repo = this.opts.repoRoot ?? story.repo;
+      const base = await this.treesFor(repo)
+        .integrationBranch()
+        .catch(() => null);
+      if (base === null) continue;
+      if (await this.mergesCleanly(repo, base, `story/${story.slug}`)) continue;
+
+      const chore = ensureChore(this.db, {
+        project_id: story.project,
+        kind: "merge",
+        target_type: "story",
+        target_id: story.id,
+        check: "the branch merges cleanly",
+      });
+      if (chore.state !== "done") open.push(chore.id);
+    }
+    return open;
+  }
+
+  /** Would this branch merge into the base, without touching either?
+   *
+   *  `merge-tree --write-tree` answers it in the object store: no checkout, no index, and
+   *  nothing to clean up if the answer is no.
+   *
+   *  Both refs are checked first, because merge-tree exits 1 for a ref that is not there
+   *  as well as for a conflict. Read off the exit code alone, a story that never had a
+   *  branch gets a merge chore that no merge could ever discharge. */
+  private async mergesCleanly(repo: string, base: string, branch: string): Promise<boolean> {
+    for (const ref of [base, branch]) {
+      const there = await exec("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo })
+        .then(() => true)
+        .catch(() => false);
+      if (!there) return true;
+    }
+    return await exec("git", ["merge-tree", "--write-tree", base, branch], { cwd: repo })
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  /** A task whose tests passed lands on its story branch. */
   /** A task whose tests passed lands on its story branch — once. The merge is recorded
    *  against the branch tip it merged, so a branch that grows a commit afterwards lands
    *  again and one that has not is left alone. */
