@@ -100,7 +100,42 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       `You may change only: ${work.scope.write.join(", ") || "(nothing)"}.`,
       "Write the tests that prove this work, and run them.",
       "If you need a decision from a person, say so and stop rather than guessing.",
+      ...this.before(work),
     ].join("\n");
+  }
+
+  /** What happened before, for a retry. A first attempt gets nothing: no heading, no blank
+   *  line, exactly the prompt it would have got anyway.
+   *
+   *  The point is the commit. A new session remembers nothing, but the branch it is
+   *  standing on already holds the last attempt, so the choice is read it or redo it. */
+  private before(work: Work): string[] {
+    const h = work.history;
+    if (h === null) return [];
+    const out = [
+      "",
+      "## What happened before",
+      "",
+      `This is attempt ${h.attempts + 1}; ${plural(h.attempts)} already been made.`,
+    ];
+    if (h.commit !== null) {
+      out.push(
+        `The last attempt's work is already committed on this branch as ${h.commit} — read it` +
+          " with `git show " +
+          h.commit +
+          "` before changing anything, and do not redo what is already there.",
+      );
+    } else {
+      out.push("The last attempt left no commit on this branch.");
+    }
+    if (h.reason !== null) out.push(`It ended: ${h.reason}.`);
+    if (h.failures.length > 0) {
+      out.push("", "Still failing:");
+      for (const f of h.failures) {
+        out.push(f.line === "" ? `- ${f.statement}` : `- ${f.statement} — ${f.line}`);
+      }
+    }
+    return out;
   }
 
   /** Start a session and return at once. What it does afterwards lands in `live`, and the
@@ -169,6 +204,8 @@ interface Session {
 }
 
 const zero = (): Budget => ({ tokens: 0, seconds: 0 });
+
+const plural = (n: number): string => (n === 1 ? "one has" : `${n} have`);
 
 /** ours -> Claude Code's. An unmapped name is passed through, so a role can name a tool
  *  wecode has never heard of. */
