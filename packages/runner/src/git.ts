@@ -1,7 +1,17 @@
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
+
+/** Symlinked temp roots and `..`-shaped paths are the same directory spelled differently. */
+const real = (path: string): string => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
 
 export class GitError extends Error {}
 
@@ -82,6 +92,8 @@ export class Trees {
   /** Everything the attempt wrote, on its branch. A rejected attempt still commits: the
    *  next one must be able to see what is already there. */
   async commitAttempt(path: string, branch: string, message: string): Promise<string | null> {
+    await this.refuseBaseCheckout(path, "commitAttempt");
+    await this.refuseAttached(path, "commitAttempt");
     await git(path, ["add", "-A"]);
     const staged = await git(path, ["diff", "--cached", "--name-only"]);
     if (staged === "") return null;
@@ -103,13 +115,38 @@ export class Trees {
   /** Released once the attempt is committed — the branch is the surviving copy, and the
    *  directory beside it is a checkout held against a retry nobody has promised. */
   async release(path: string): Promise<void> {
+    await this.refuseBaseCheckout(path, "release");
+    await this.refuseAttached(path, "release");
     await git(this.repo, ["worktree", "remove", "--force", path]);
+  }
+
+  /** The primary checkout: the first tree git lists, and the one a person works in. */
+  private async rootPath(): Promise<string> {
+    const list = await git(this.repo, ["worktree", "list", "--porcelain"]).catch(() => "");
+    return /^worktree (.+)$/m.exec(list)?.[1] ?? this.repo;
+  }
+
+  /** A wecode attempt only ever commits in a detached worktree it cut. The primary checkout
+   *  belongs to a person: an `add -A` there stages their work, and a `worktree remove`
+   *  there is their repository. Named, with what was found, rather than silently skipped. */
+  private async refuseBaseCheckout(path: string, what: string): Promise<void> {
+    const top = await git(path, ["rev-parse", "--show-toplevel"]).catch(() => path);
+    if (real(top) !== real(await this.rootPath())) return;
+    throw new GitError(`${what} refused ${path}: it is the repository root`);
+  }
+
+  /** A branch checked out means the commit lands on a ref nobody pointed this attempt at. */
+  private async refuseAttached(path: string, what: string): Promise<void> {
+    const branch = await git(path, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "");
+    if (branch === "") return;
+    throw new GitError(`${what} refused ${path}: branch ${branch} is checked out, not detached`);
   }
 
   /** One reusable tree at the story branch tip. Acceptance tests run here, after the
    *  tasks they depend on have merged, and this is where a merge happens — the integration
    *  checkout is never touched. */
   async storyTree(storySlug: string, path: string): Promise<string> {
+    await this.refuseBaseCheckout(path, "storyTree");
     const branch = await this.storyBranch(storySlug);
     if (!(await this.isWorktree(path))) {
       await git(this.repo, ["worktree", "add", path, branch]);
@@ -207,6 +244,7 @@ export class Trees {
   /** Guarded by the task's tests passing. Runs in the story tree, so nothing an agent can
    *  be dispatched into is ever the tree holding the integration branch. */
   async mergeTaskIntoStory(taskBranch: string, storySlug: string, storyTreePath: string): Promise<void> {
+    await this.refuseBaseCheckout(storyTreePath, "mergeTaskIntoStory");
     const tree = await this.storyTree(storySlug, storyTreePath);
     await git(tree, [
       "-c",
