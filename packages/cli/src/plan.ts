@@ -55,19 +55,26 @@ export function plan(args: readonly string[]): number {
   // a time is the eighteen commands again.
   const said: string[] = [];
   const shaped = read(doc, config, roles, said);
-  const epic = epicOf(db, shaped?.epic ?? null, values.epic, said);
+  const parent = shaped === null ? null : parentOf(db, shaped, values.epic, said);
 
-  if (said.length > 0 || shaped === null || epic === null) {
+  if (said.length > 0 || shaped === null || shaped.top === null || parent === null) {
     return fail([`${file} is not a plan yet:`, ...said.map((s) => `  ${s}`)].join("\n"));
   }
 
   if (values["dry-run"] === true) {
-    process.stdout.write(render(preview(shaped, epic)));
+    process.stdout.write(render(preview(shaped.top, parent)));
     process.stdout.write("nothing created — this was a dry run\n");
     return 0;
   }
 
-  const made = transact(db, () => create(db, shaped, epic));
+  let made: Made;
+  try {
+    made = transact(db, () => create(db, shaped.top as Level, parent));
+  } catch (err) {
+    // A row the ledger itself refuses — a version that is not major.minor.patch. The
+    // transaction is already rolled back, so nothing is behind us.
+    return fail(`${file} is not a plan yet:\n  ${(err as Error).message}`);
+  }
   begin(db, made);
   process.stdout.write(render(shape(db, made)));
   return 0;
@@ -102,14 +109,33 @@ interface Requirement {
   readonly statement: string;
   readonly criteria: readonly Criteria[];
 }
-interface Plan {
-  readonly story: string;
-  readonly epic: number | null;
+/** One rung of the ladder the file describes. A release holds epics, an epic holds stories,
+ *  a story holds requirements — so one shape, read, created, started and printed once. */
+interface Level {
+  readonly kind: Root;
+  readonly id: number | null;
+  readonly name: string | null;
+  readonly children: readonly Level[];
   readonly requirements: readonly Requirement[];
 }
+/** What the file declared, kept even when its body did not read, so the root it named and
+ *  the parent it hangs off are still judged and reported in the same breath. */
+interface Plan {
+  readonly root: Root;
+  readonly join: number | null;
+  readonly parent: number | null;
+  readonly top: Level | null;
+}
+
+type Root = "story" | "epic" | "release";
+
+const ROOTS: readonly string[] = ["story", "epic", "release"];
+/** The row above each root, which a sentence is created under; and the key holding its children. */
+const ABOVE = { story: "epic", epic: "release", release: null } as const;
+const CHILDREN: Record<Root, string> = { story: "requirements", epic: "stories", release: "epics" };
+const BELOW = { story: null, epic: "story", release: "epic" } as const;
 
 const KEYS = {
-  top: ["story", "epic", "requirements"],
   requirement: ["statement", "criteria"],
   criteria: ["statement", "test", "tasks"],
   task: ["title", "scope", "test", "role"],
@@ -155,27 +181,102 @@ function list(v: unknown, where: string, say: string[]): unknown[] {
   return v;
 }
 
+/** The file's first key names the root. Nothing is created until that much is settled: a
+ *  file with no root, or with two, is refused by name before a parent is even looked up. */
 function read(doc: unknown, config: ProjectConfig | null, roles: RoleConfig | null, say: string[]): Plan | null {
-  const top = mapping(doc, "the file", KEYS.top, say);
-  if (top === null) return null;
+  if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
+    say.push("the file: expected a mapping");
+    return null;
+  }
+  const keys = Object.keys(doc as Record<string, unknown>);
+  const first = keys[0];
+  if (first === undefined || !ROOTS.includes(first)) {
+    say.push(`the file: the first key names the root, and is one of story, epic, release${found(first)}`);
+    return null;
+  }
+  const root = first as Root;
 
-  const story = required(top, "story", "the file", say);
-
-  let epic: number | null = null;
-  if (top["epic"] !== undefined) {
-    const n = Number(top["epic"]);
-    if (!Number.isInteger(n)) say.push("the file: epic must be an id");
-    else epic = n;
+  // A root may carry the key naming the row above it — that is its parent, not a second
+  // root. Any other root key is a second root, and the file has to say which it means.
+  const others = keys.filter((k) => k !== root && k !== ABOVE[root] && ROOTS.includes(k));
+  if (others.length > 0) {
+    say.push(`the file: more than one root — ${[root, ...others].join(" and ")}; a file declares exactly one`);
+    return null;
   }
 
-  const raw = list(top["requirements"], "the file: requirements", say);
-  if (raw.length === 0) say.push("the file: requirements is required, and holds at least one");
+  const allowed = [root, ...(ABOVE[root] === null ? [] : [ABOVE[root] as string]), CHILDREN[root]];
+  const m = mapping(doc, "the file", allowed, say);
+  if (m === null) return null;
 
-  const requirements = raw
-    .map((r, i) => requirement(r, `requirement ${i + 1}`, config, roles, say))
-    .filter((r) => r !== null);
+  let parent: number | null = null;
+  const above = ABOVE[root];
+  if (above !== null && m[above] !== undefined) {
+    const n = Number(m[above]);
+    if (!Number.isInteger(n)) say.push(`the file: ${above} must be an id`);
+    else parent = n;
+  }
 
-  return story === null ? null : { story, epic, requirements };
+  const top = level(m, root, "the file", config, roles, say);
+  return { root, join: top?.id ?? id(m[root]), parent, top };
+}
+
+const found = (key: string | undefined): string => (key === undefined ? "; this one is empty" : `, not ${key}`);
+
+/** A root given as a number joins that existing row; a sentence is created under its parent. */
+function id(v: unknown): number | null {
+  if (typeof v === "number" && Number.isInteger(v)) return v;
+  if (typeof v === "string" && /^\d+$/.test(v.trim())) return Number(v.trim());
+  return null;
+}
+
+function level(
+  m: Record<string, unknown>,
+  kind: Root,
+  where: string,
+  config: ProjectConfig | null,
+  roles: RoleConfig | null,
+  say: string[],
+): Level | null {
+  const joined = id(m[kind]);
+  const name = joined === null ? required(m, kind, where, say) : null;
+
+  const key = CHILDREN[kind];
+  const raw = list(m[key], `${where}: ${key}`, say);
+  if (raw.length === 0) say.push(`${where}: ${key} is required, and holds at least one`);
+
+  const under = (i: number, what: string): string => (where === "the file" ? `${what} ${i}` : `${where}, ${what} ${i}`);
+  const next = BELOW[kind];
+
+  const requirements =
+    next !== null
+      ? []
+      : raw.map((r, i) => requirement(r, under(i + 1, "requirement"), config, roles, say)).filter((r) => r !== null);
+  const children =
+    next === null
+      ? []
+      : raw.map((c, i) => child(c, next, under(i + 1, next), config, roles, say)).filter((c) => c !== null);
+
+  return joined === null && name === null ? null : { kind, id: joined, name, children, requirements };
+}
+
+/** Only the root joins an existing row. A story listed inside a new epic is one this file
+ *  is making; an id there would say the epic both is and is not that story's parent. */
+function child(
+  v: unknown,
+  kind: Root,
+  where: string,
+  config: ProjectConfig | null,
+  roles: RoleConfig | null,
+  say: string[],
+): Level | null {
+  const m = mapping(v, where, [kind, CHILDREN[kind]], say);
+  if (m === null) return null;
+  const made = level(m, kind, where, config, roles, say);
+  if (made !== null && made.id !== null) {
+    say.push(`${where}: ${kind} must be a sentence here — only the root joins an existing row by id`);
+    return null;
+  }
+  return made;
 }
 
 function requirement(
@@ -251,53 +352,94 @@ function task(
   return title === null || scope === null || scope.length === 0 ? null : { title, scope, tools, test, role };
 }
 
-// ── which epic ───────────────────────────────────────────────────────────────────────────
+// ── which parent ─────────────────────────────────────────────────────────────────────────
 
-/** The file's `epic`, then `--epic`, then the newest in-progress epic of this project. */
-function epicOf(db: DatabaseSync, inFile: number | null, flag: string | undefined, say: string[]): number | null {
-  const here = db.prepare("SELECT id, name FROM project WHERE repo = ?").get(resolve(process.cwd())) as
-    | { id: number; name: string }
-    | undefined;
+interface Here {
+  readonly id: number;
+  readonly name: string;
+}
 
-  const asked = inFile ?? (flag === undefined ? null : Number(flag));
-  if (asked !== null) {
-    if (!Number.isInteger(asked)) {
-      say.push(`--epic ${String(flag)} is not an id`);
-      return null;
-    }
-    const theirs = db
-      .prepare(
-        "SELECT p.id AS id, p.name AS name FROM epic e JOIN release r ON r.id = e.release_id " +
-          "JOIN project p ON p.id = r.project_id WHERE e.id = ?",
-      )
-      .get(asked) as { id: number; name: string } | undefined;
+/** Whose project a row is in. Ids are global, so every id a file names is asked this. */
+const OWNER: Record<Root, string> = {
+  story:
+    "SELECT p.id AS id, p.name AS name FROM story s JOIN epic e ON e.id = s.epic_id " +
+    "JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE s.id = ?",
+  epic:
+    "SELECT p.id AS id, p.name AS name FROM epic e JOIN release r ON r.id = e.release_id " +
+    "JOIN project p ON p.id = r.project_id WHERE e.id = ?",
+  release: "SELECT p.id AS id, p.name AS name FROM release r JOIN project p ON p.id = r.project_id WHERE r.id = ?",
+};
 
-    if (theirs === undefined) {
-      say.push(`no epic #${asked}`);
-      return null;
-    }
-    // The same guard `create` has. Ids are global.
-    if (here !== undefined && theirs.id !== here.id) {
-      say.push(
-        `epic #${asked} belongs to project #${theirs.id} ${theirs.name}, but you are in #${here.id} ${here.name}`,
-      );
-      return null;
-    }
-    return asked;
+/** The newest in-progress row of a kind in this project, which a sentence hangs off. */
+const NEWEST: Record<"epic" | "release", string> = {
+  epic:
+    "SELECT e.id AS id FROM epic e JOIN release r ON r.id = e.release_id " +
+    "WHERE r.project_id = ? AND e.state = 'in_progress' ORDER BY e.id DESC LIMIT 1",
+  release: "SELECT id FROM release WHERE project_id = ? AND state = 'in_progress' ORDER BY id DESC LIMIT 1",
+};
+
+/** The same guard `create` has. Ids are global. */
+function owned(db: DatabaseSync, kind: Root, row: number, here: Here | undefined, say: string[]): boolean {
+  const theirs = db.prepare(OWNER[kind]).get(row) as Here | undefined;
+  if (theirs === undefined) {
+    say.push(`no ${kind} #${row}`);
+    return false;
   }
+  if (here !== undefined && theirs.id !== here.id) {
+    say.push(`${kind} #${row} belongs to project #${theirs.id} ${theirs.name}, but you are in #${here.id} ${here.name}`);
+    return false;
+  }
+  return true;
+}
+
+/** The row the file hangs off: the parent named in the file, then `--epic`, then the newest
+ *  in-progress row above it. A root given as an id joins that row instead, and needs none. */
+function parentOf(db: DatabaseSync, p: Plan, flag: string | undefined, say: string[]): number | null {
+  const here = db.prepare("SELECT id, name FROM project WHERE repo = ?").get(resolve(process.cwd())) as Here | undefined;
+
+  if (p.join !== null) {
+    if (!owned(db, p.root, p.join, here, say)) return null;
+    if (p.parent !== null) {
+      say.push(`the file: ${p.root} #${p.join} already exists, so ${String(ABOVE[p.root])} must not be given too`);
+      return null;
+    }
+    return 0;
+  }
+
+  const kind = ABOVE[p.root];
+  // A new release hangs off the project this repository is, and nothing else names it.
+  if (kind === null) {
+    if (here === undefined) {
+      say.push("a new release belongs to a project, and this repository is not an onboarded project");
+      return null;
+    }
+    return here.id;
+  }
+
+  let asked = p.parent;
+  if (asked === null && flag !== undefined) {
+    const n = Number(flag);
+    if (!Number.isInteger(n)) {
+      say.push(`--epic ${flag} is not an id`);
+      return null;
+    }
+    if (kind === "epic") asked = n;
+    else {
+      // `--epic` names an epic; a new epic wants the release that epic is in.
+      if (!owned(db, "epic", n, here, say)) return null;
+      return (db.prepare("SELECT release_id AS id FROM epic WHERE id = ?").get(n) as { id: number }).id;
+    }
+  }
+
+  if (asked !== null) return owned(db, kind, asked, here, say) ? asked : null;
 
   if (here === undefined) {
-    say.push("no epic given, and this repository is not an onboarded project.\n  --epic <id>");
+    say.push(`no ${kind} given, and this repository is not an onboarded project.\n  --epic <id>`);
     return null;
   }
-  const newest = db
-    .prepare(
-      "SELECT e.id AS id FROM epic e JOIN release r ON r.id = e.release_id " +
-        "WHERE r.project_id = ? AND e.state = 'in_progress' ORDER BY e.id DESC LIMIT 1",
-    )
-    .get(here.id) as { id: number } | undefined;
+  const newest = db.prepare(NEWEST[kind]).get(here.id) as { id: number } | undefined;
   if (newest === undefined) {
-    say.push(`no epic given, and project #${here.id} ${here.name} has no in-progress epic.\n  --epic <id>`);
+    say.push(`no ${kind} given, and project #${here.id} ${here.name} has no in-progress ${kind}.\n  --epic <id>`);
     return null;
   }
   return newest.id;
@@ -319,39 +461,52 @@ interface MadeRequirement {
   readonly criteria: readonly MadeCriteria[];
 }
 interface Made {
-  readonly story: number;
+  readonly kind: Root;
+  readonly id: number;
+  /** Whether this file wrote the row, or joined one that was already there. */
+  readonly fresh: boolean;
+  readonly children: readonly Made[];
   readonly requirements: readonly MadeRequirement[];
 }
 
 /** Every row `create` would have written, in the same order. Called inside one transaction:
  *  a file that fails halfway leaves nothing behind. */
-function create(db: DatabaseSync, p: Plan, epic: number): Made {
+function create(db: DatabaseSync, top: Level, parent: number): Made {
   const make = new Maker(db);
-  const story = make.story(epic, p.story);
+  const row = (l: Level, under: number): number => {
+    if (l.id !== null) return l.id;
+    const name = l.name ?? "";
+    if (l.kind === "release") return make.release(under, name);
+    return l.kind === "epic" ? make.epic(under, name) : make.story(under, name);
+  };
 
-  const requirements = p.requirements.map((r) => {
-    const requirement = make.requirement(story, r.statement);
-    const criteria = r.criteria.map((c) => {
-      const id = make.criteria(requirement, c.statement);
-      const test = make.acceptanceTest(id, c.statement, "script", c.test);
-      const tasks = c.tasks.map((t) => {
-        const scope: Scope = { write: [...t.scope], tools: [...t.tools] };
-        const task = make.task(test, t.title, { role: t.role, scope });
-        return { id: task, test: make.taskTest(task, t.title, "script", t.test) };
+  const walk = (l: Level, under: number): Made => {
+    const id = row(l, under);
+    const requirements = l.requirements.map((r) => {
+      const requirement = make.requirement(id, r.statement);
+      const criteria = r.criteria.map((c) => {
+        const criterion = make.criteria(requirement, c.statement);
+        const test = make.acceptanceTest(criterion, c.statement, "script", c.test);
+        const tasks = c.tasks.map((t) => {
+          const scope: Scope = { write: [...t.scope], tools: [...t.tools] };
+          const task = make.task(test, t.title, { role: t.role, scope });
+          return { id: task, test: make.taskTest(task, t.title, "script", t.test) };
+        });
+        return { id: criterion, test, tasks };
       });
-      return { id, test, tasks };
+      return { id: requirement, criteria };
     });
-    return { id: requirement, criteria };
-  });
+    return { kind: l.kind, id, fresh: l.id === null, children: l.children.map((c) => walk(c, id)), requirements };
+  };
 
-  return { story, requirements };
+  return walk(top, parent);
 }
 
 /** Delivers each test whose artefact resolves, and starts everything it created. A chain
  *  that needs six `start` commands afterwards is the same ceremony moved. */
 function begin(db: DatabaseSync, made: Made): void {
   const engine = new Engine(db);
-  const go = (entity: "story" | "requirement" | "acceptance_criteria" | "task", id: number, verb: string): void => {
+  const go = (entity: Root | "requirement" | "acceptance_criteria" | "task", id: number, verb: string): void => {
     engine.apply(entity, id, verb, "operator");
   };
   const deliver = (entity: "acceptance_test" | "task_test", id: number): void => {
@@ -359,19 +514,24 @@ function begin(db: DatabaseSync, made: Made): void {
     engine.apply(entity, id, "deliver", "operator");
   };
 
-  go("story", made.story, "start");
-  for (const r of made.requirements) {
-    go("requirement", r.id, "start");
-    for (const c of r.criteria) {
-      go("acceptance_criteria", c.id, "start");
-      deliver("acceptance_test", c.test);
-      for (const t of c.tasks) {
-        // The task_test is ready first, or the task may not be attempted.
-        deliver("task_test", t.test);
-        go("task", t.id, "start");
+  const walk = (l: Made): void => {
+    // A row this file joined is already underway; starting it again is not this file's move.
+    if (l.fresh) go(l.kind, l.id, "start");
+    for (const c of l.children) walk(c);
+    for (const r of l.requirements) {
+      go("requirement", r.id, "start");
+      for (const c of r.criteria) {
+        go("acceptance_criteria", c.id, "start");
+        deliver("acceptance_test", c.test);
+        for (const t of c.tasks) {
+          // The task_test is ready first, or the task may not be attempted.
+          deliver("task_test", t.test);
+          go("task", t.id, "start");
+        }
       }
     }
-  }
+  };
+  walk(made);
 }
 
 // ── printing ─────────────────────────────────────────────────────────────────────────────
@@ -383,6 +543,9 @@ interface Line {
   readonly children: readonly Line[];
 }
 
+/** The column each rung is named by. A release is its version; the rest are titles. */
+const NAMED: Record<Root, string> = { release: "version", epic: "title", story: "title" };
+
 /** What it made, read back off the ledger's rows: ids come back as a shape, not one at a time. */
 function shape(db: DatabaseSync, made: Made): Line {
   const of = (table: string, id: number, label: string, children: readonly Line[] = []): Line => {
@@ -392,53 +555,59 @@ function shape(db: DatabaseSync, made: Made): Line {
     return { label: row?.label ?? "", id, state: row?.state ?? null, children };
   };
 
-  return of(
-    "story",
-    made.story,
-    "title",
-    made.requirements.map((r) =>
-      of(
-        "requirement",
-        r.id,
-        "statement",
-        r.criteria.map((c) =>
-          of("acceptance_criteria", c.id, "statement", [
-            of(
-              "acceptance_test",
-              c.test,
-              "statement",
-              c.tasks.map((t) => of("task", t.id, "title", [of("task_test", t.test, "statement")])),
-            ),
-          ]),
+  const walk = (l: Made): Line =>
+    of(l.kind, l.id, NAMED[l.kind], [
+      ...l.children.map(walk),
+      ...l.requirements.map((r) =>
+        of(
+          "requirement",
+          r.id,
+          "statement",
+          r.criteria.map((c) =>
+            of("acceptance_criteria", c.id, "statement", [
+              of(
+                "acceptance_test",
+                c.test,
+                "statement",
+                c.tasks.map((t) => of("task", t.id, "title", [of("task_test", t.test, "statement")])),
+              ),
+            ]),
+          ),
         ),
       ),
-    ),
-  );
+    ]);
+
+  return walk(made);
 }
 
 /** The same shape, before anything exists. */
-function preview(p: Plan, epic: number): Line {
+function preview(top: Level, parent: number): Line {
   const line = (label: string, children: readonly Line[] = []): Line => ({ label, id: null, state: null, children });
   const artefact = (t: string | null): string => (t === null ? "no artefact" : t);
 
-  return line(
-    `${p.story}   under epic #${epic}`,
-    p.requirements.map((r) =>
-      line(
-        r.statement,
-        r.criteria.map((c) =>
-          line(c.statement, [
-            line(
-              `${c.statement}  [${artefact(c.test)}]`,
-              c.tasks.map((t) =>
-                line(`${t.title}  ${t.role}  ${t.scope.join(", ")}`, [line(`${t.title}  [${artefact(t.test)}]`)]),
+  const walk = (l: Level, root: boolean): Line =>
+    line(root ? `${l.name ?? ""}   under ${ABOVE[l.kind] ?? "project"} #${parent}` : (l.name ?? ""), [
+      ...l.children.map((c) => walk(c, false)),
+      ...l.requirements.map((r) =>
+        line(
+          r.statement,
+          r.criteria.map((c) =>
+            line(c.statement, [
+              line(
+                `${c.statement}  [${artefact(c.test)}]`,
+                c.tasks.map((t) =>
+                  line(`${t.title}  ${t.role}  ${t.scope.join(", ")}`, [line(`${t.title}  [${artefact(t.test)}]`)]),
+                ),
               ),
-            ),
-          ]),
+            ]),
+          ),
         ),
       ),
-    ),
-  );
+    ]);
+
+  // A root joined by id is printed as the row it is, with what this file would hang off it.
+  const root = walk(top, top.id === null);
+  return top.id === null ? root : { ...root, label: `${top.kind} #${top.id}   joined`, id: null };
 }
 
 function render(root: Line): string {

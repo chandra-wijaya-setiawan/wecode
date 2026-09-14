@@ -262,6 +262,293 @@ requirements:
     }
   });
 
+  it("an epic root creates the epic under the newest in-progress release, with its stories", () => {
+    project();
+    run(["release", "start", "1"]);
+    config();
+    out.length = 0;
+    const path = file(`epic: the cockpit is one list
+stories:
+  - story: the first story
+    requirements:
+      - statement: a rule
+        criteria:
+          - statement: a criteria
+            tasks:
+              - title: do the work
+  - story: the second story
+    requirements:
+      - statement: another rule
+        criteria:
+          - statement: another criteria
+`);
+    expect(run(["plan", path])).toBe(0);
+
+    // Epic 1 is the project's; this file made epic 2, under the release it named none of.
+    expect(count("epic")).toBe(2);
+    expect((db().prepare("SELECT release_id AS r FROM epic WHERE id = 2").get() as { r: number }).r).toBe(1);
+    expect(state("epic", 2)).toBe("in_progress");
+
+    expect(count("story")).toBe(2);
+    const stories = db().prepare("SELECT id, epic_id, title FROM story ORDER BY id").all() as unknown as {
+      id: number;
+      epic_id: number;
+      title: string;
+    }[];
+    expect(stories.map((s) => s.epic_id)).toEqual([2, 2]);
+    expect(stories.map((s) => s.title)).toEqual(["the first story", "the second story"]);
+    expect(state("story", 1)).toBe("in_progress");
+    expect(state("story", 2)).toBe("in_progress");
+    expect(count("requirement")).toBe(2);
+    expect(said()).toContain("the second story");
+  });
+
+  it("a release root creates the release under this project, with its epics and their stories", () => {
+    project();
+    config();
+    const path = file(`release: 0.0.2
+epics:
+  - epic: the next epic
+    stories:
+      - story: a story under it
+        requirements:
+          - statement: a rule
+            criteria:
+              - statement: a criteria
+`);
+    expect(run(["plan", path])).toBe(0);
+
+    const made = db().prepare("SELECT project_id AS p, version FROM release WHERE id = 2").get() as {
+      p: number;
+      version: string;
+    };
+    expect(made).toEqual({ p: 1, version: "0.0.2" });
+    expect(state("release", 2)).toBe("in_progress");
+    expect((db().prepare("SELECT release_id AS r FROM epic WHERE id = 2").get() as { r: number }).r).toBe(2);
+    expect(state("epic", 2)).toBe("in_progress");
+    expect((db().prepare("SELECT epic_id AS e FROM story WHERE id = 1").get() as { e: number }).e).toBe(2);
+    expect(state("story", 1)).toBe("in_progress");
+  });
+
+  it("a root given as a number joins that row, and does not start it again", () => {
+    project();
+    config();
+    run(["release", "start", "1"]);
+    out.length = 0;
+    const path = file(`epic: 1
+stories:
+  - story: a story hung off the epic that was already there
+    requirements:
+      - statement: a rule
+        criteria:
+          - statement: a criteria
+`);
+    expect(run(["plan", path])).toBe(0);
+
+    expect(count("epic")).toBe(1);
+    expect(state("epic", 1)).toBe("in_progress");
+    expect((db().prepare("SELECT epic_id AS e FROM story WHERE id = 1").get() as { e: number }).e).toBe(1);
+    expect(state("story", 1)).toBe("in_progress");
+  });
+
+  it("a story root given as a number hangs new requirements off the story that is there", () => {
+    project();
+    config();
+    run(["plan", file(GOOD)]);
+    out.length = 0;
+
+    const path = file(`story: 1
+requirements:
+  - statement: a rule that was thought of afterwards
+    criteria:
+      - statement: a criteria
+`);
+    expect(run(["plan", path])).toBe(0);
+    expect(count("story")).toBe(1);
+    expect(count("requirement")).toBe(2);
+    expect((db().prepare("SELECT story_id AS s FROM requirement WHERE id = 2").get() as { s: number }).s).toBe(1);
+    expect(state("requirement", 2)).toBe("in_progress");
+  });
+
+  it("--epic says which release a new epic belongs to", () => {
+    project();
+    config();
+    run(["release", "create", "--parent", "1", "0.0.2"]);
+    run(["epic", "create", "--parent", "2", "an epic in the later release"]);
+    out.length = 0;
+
+    const path = file(`epic: a sibling of that one
+stories:
+  - story: a story
+    requirements:
+      - statement: a rule
+        criteria:
+          - statement: a criteria
+`);
+    expect(run(["plan", path, "--epic", "2"])).toBe(0);
+    expect((db().prepare("SELECT release_id AS r FROM epic WHERE id = 3").get() as { r: number }).r).toBe(2);
+  });
+
+  it("refuses a file with no root, before creating anything", () => {
+    project();
+    config();
+    const path = file(`requirements:
+  - statement: a rule
+    criteria:
+      - statement: a criteria
+`);
+    expect(run(["plan", path])).toBe(1);
+    expect(complained()).toContain("the first key names the root");
+    expect(complained()).toContain("not requirements");
+    expect(count("requirement")).toBe(0);
+  });
+
+  it("refuses a file with more than one root", () => {
+    project();
+    config();
+    const path = file(`story: a story
+release: 0.0.2
+requirements:
+  - statement: a rule
+    criteria:
+      - statement: a criteria
+`);
+    expect(run(["plan", path])).toBe(1);
+    expect(complained()).toContain("more than one root — story and release");
+    expect(count("story")).toBe(0);
+  });
+
+  it("refuses a root whose parent cannot be found, naming it", () => {
+    project();
+    config();
+    const path = file(`epic: an epic with nowhere to go
+release: 9
+stories:
+  - story: a story
+    requirements:
+      - statement: a rule
+        criteria:
+          - statement: a criteria
+`);
+    expect(run(["plan", path])).toBe(1);
+    expect(complained()).toContain("no release #9");
+    expect(count("epic")).toBe(1);
+  });
+
+  it("refuses a new epic when the project has no in-progress release", () => {
+    project();
+    config();
+    const path = file(`epic: an epic with no release under way
+stories:
+  - story: a story
+    requirements:
+      - statement: a rule
+        criteria:
+          - statement: a criteria
+`);
+    expect(run(["plan", path])).toBe(1);
+    expect(complained()).toContain("has no in-progress release");
+    expect(count("epic")).toBe(1);
+  });
+
+  it("refuses a root that is joined and given a parent too", () => {
+    project();
+    config();
+    const path = file(`epic: 1
+release: 1
+stories:
+  - story: a story
+    requirements:
+      - statement: a rule
+        criteria:
+          - statement: a criteria
+`);
+    expect(run(["plan", path])).toBe(1);
+    expect(complained()).toContain("epic #1 already exists, so release must not be given too");
+    expect(count("story")).toBe(0);
+  });
+
+  it("refuses joining a row in another project", () => {
+    project();
+    config();
+    run(["project", "create", "--parent", "1", "other", "--path", join(repo, "elsewhere")]);
+    run(["release", "create", "--parent", "2", "0.0.1"]);
+    out.length = 0;
+
+    const path = file(`release: 2
+epics:
+  - epic: an epic in someone else's release
+    stories:
+      - story: a story
+        requirements:
+          - statement: a rule
+            criteria:
+              - statement: a criteria
+`);
+    expect(run(["plan", path])).toBe(1);
+    expect(complained()).toContain("release #2 belongs to project #2 other");
+    expect(count("epic")).toBe(1);
+  });
+
+  it("refuses an id below the root, where only a sentence says what is being made", () => {
+    project();
+    config();
+    run(["release", "start", "1"]);
+    out.length = 0;
+    const path = file(`epic: a new epic
+stories:
+  - story: 1
+    requirements:
+      - statement: a rule
+        criteria:
+          - statement: a criteria
+`);
+    expect(run(["plan", path])).toBe(1);
+    expect(complained()).toContain("only the root joins an existing row by id");
+    expect(count("epic")).toBe(1);
+  });
+
+  it("refuses a release whose version the ledger will not take, and leaves nothing behind", () => {
+    project();
+    config();
+    const path = file(`release: the one after this one
+epics:
+  - epic: an epic
+    stories:
+      - story: a story
+        requirements:
+          - statement: a rule
+            criteria:
+              - statement: a criteria
+`);
+    expect(run(["plan", path])).toBe(1);
+    expect(complained()).toContain("version must be major.minor.patch");
+    expect(count("release")).toBe(1);
+    expect(count("epic")).toBe(1);
+    expect(count("story")).toBe(0);
+  });
+
+  it("--dry-run prints a release root's whole tree and creates nothing", () => {
+    project();
+    config();
+    const path = file(`release: 0.0.2
+epics:
+  - epic: the next epic
+    stories:
+      - story: a story under it
+        requirements:
+          - statement: a rule
+            criteria:
+              - statement: a criteria
+`);
+    expect(run(["plan", path, "--dry-run"])).toBe(0);
+    expect(said()).toContain("0.0.2   under project #1");
+    expect(said()).toContain("the next epic");
+    expect(said()).toContain("a story under it");
+    expect(said()).toContain("nothing created");
+    expect(count("release")).toBe(1);
+  });
+
   it("is in the manual", () => {
     expect(run(["--help"])).toBe(0);
     expect(said()).toContain("wecode plan <file.yaml>");
