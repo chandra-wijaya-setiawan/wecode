@@ -5,7 +5,7 @@
 # Rearranging, renaming or resizing the board is an edit to this file. A new filter is not.
 
 page:
-  order: [projects, running, needs_human, stale, queued, failed, roadmap, delivered]
+  order: [projects, running, needs_human, stale, queued, failed, open, delivered]
 
 views:
   projects:
@@ -38,9 +38,9 @@ views:
     filter: failed
     rows: 5
     empty: nothing has given up
-  roadmap:
-    title: Roadmap
-    filter: roadmap
+  open:
+    title: Open
+    filter: open
     rows: 8
     empty: no epics or stories open
   delivered:
