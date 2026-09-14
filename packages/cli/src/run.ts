@@ -510,19 +510,60 @@ function gitConfig(key: string): string {
   }
 }
 
-/** `wecode show <entity> <id>` — one record, and what hangs off it. */
+/** Which table each entity is, what names one, and the row it hangs off. The one place
+ *  the shape of the tree is written down in this client — `where`, `show` and the missing-id
+ *  answer all read it rather than each carrying their own copy. */
+const ENTITIES: Readonly<Record<string, { label: string; parent?: { table: string; fk: string } }>> = {
+  workspace: { label: "name" },
+  project: { label: "name", parent: { table: "workspace", fk: "workspace_id" } },
+  release: { label: "version", parent: { table: "project", fk: "project_id" } },
+  epic: { label: "title", parent: { table: "release", fk: "release_id" } },
+  story: { label: "title", parent: { table: "epic", fk: "epic_id" } },
+  requirement: { label: "statement", parent: { table: "story", fk: "story_id" } },
+  acceptance_criteria: { label: "statement", parent: { table: "requirement", fk: "requirement_id" } },
+  acceptance_test: { label: "statement", parent: { table: "acceptance_criteria", fk: "parent_id" } },
+  task: { label: "title", parent: { table: "acceptance_test", fk: "acceptance_test_id" } },
+  task_test: { label: "statement", parent: { table: "task", fk: "parent_id" } },
+  assignment: { label: "slug" },
+  role: { label: "name" },
+  worker: { label: "name" },
+};
+
+/** `wecode show <entity> <id>` — one record, whatever state it is in, and where it lives.
+ *
+ *  A record is shown in every state, dropped and done included: somebody reading an id out of
+ *  old notes is asking what became of it, and a refusal answers that with silence. When the id
+ *  is not there at all, the ids that are there are the answer — the epic did not vanish, it was
+ *  rebuilt under another number, and only a list of the live ones says so. */
 function show(args: readonly string[]): number {
   const [entity, raw] = args;
   const id = Number(raw);
   if (entity === undefined || !Number.isInteger(id)) return fail("wecode show <entity> <id>");
+  if (ENTITIES[entity] === undefined) {
+    return fail(`no entity called ${entity}. There is ${Object.keys(ENTITIES).join(", ")}`);
+  }
   const conn = db();
   const row = conn.prepare(`SELECT * FROM ${entity} WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
-  if (row === undefined) return fail(`no ${entity} #${id}`);
+  if (row === undefined) return fail(instead(conn, entity, id));
   for (const [k, v] of Object.entries(row)) {
     if (v === null || v === "") continue;
     process.stdout.write(`${k.padEnd(18)} ${String(v)}\n`);
   }
+  const owner = projectOf(entity, id);
+  if (owner !== null) process.stdout.write(`${"project".padEnd(18)} #${owner.id} ${owner.name}\n`);
   return 0;
+}
+
+/** What to say about an id that is not there: the ids of that entity that are. */
+function instead(conn: ReturnType<typeof db>, entity: string, id: number): string {
+  const label = ENTITIES[entity]?.label ?? "slug";
+  const rows = conn
+    .prepare(`SELECT id, ${label} AS label FROM ${entity} ORDER BY id`)
+    .all() as unknown as { id: number; label: string }[];
+  if (rows.length === 0) return `no ${entity} #${id}, and no ${entity} at all yet.`;
+  const shown = rows.slice(0, 20).map((r) => `  #${r.id}  ${String(r.label)}`);
+  const more = rows.length > shown.length ? [`  … and ${rows.length - shown.length} more`] : [];
+  return [`no ${entity} #${id}. These ${entity} ids exist:`, ...shown, ...more].join("\n");
 }
 
 /** Every command but init and onboard needs a database. A missing one is the commonest
@@ -601,8 +642,11 @@ function verb(entity: string, rest: readonly string[]): number {
   const [name, ...args] = rest;
   if (name === undefined) return fail(`wecode ${entity} <verb> …`);
 
-  if (name === "create") return create(entity, args);
-  if (name === "scope") return scope(entity, args);
+  // parseArgs would call --help an unknown option. It is the one place a newcomer looks
+  // for create's flags, so answer it here, before the flags are parsed at all.
+  const asked = args.some((a) => a === "--help" || a === "-h");
+  if (name === "create") return asked ? createHelp(entity) : create(entity, args);
+  if (name === "scope") return asked ? scopeHelp() : scope(entity, args);
 
   if (!isStateful(entity)) return fail(`${entity} has no states; its only verb is create`);
   const id = Number(args[0]);
@@ -740,46 +784,36 @@ function project(): ReturnType<typeof readProjectConfig> {
   return readProjectConfig(resolve(process.cwd(), "config/project.yaml"));
 }
 
-/** The project a row belongs to, by walking up. Null when the entity has no project. */
+/** The project a row belongs to, by walking the tree up one link at a time. Null for the
+ *  entities that hang off no project at all — a worker, a role, the workspace itself. */
 function projectOf(entity: string, id: number): { id: number; name: string; repo: string } | null {
-  const up: Readonly<Record<string, string>> = {
-    release: "SELECT p.id, p.name, p.repo FROM release x JOIN project p ON p.id = x.project_id WHERE x.id = ?",
-    epic: "SELECT p.id, p.name, p.repo FROM epic x JOIN release r ON r.id = x.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    story:
-      "SELECT p.id, p.name, p.repo FROM story x JOIN epic e ON e.id = x.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    requirement:
-      "SELECT p.id, p.name, p.repo FROM requirement x JOIN story s ON s.id = x.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    acceptance_criteria:
-      "SELECT p.id, p.name, p.repo FROM acceptance_criteria x JOIN requirement q ON q.id = x.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    acceptance_test:
-      "SELECT p.id, p.name, p.repo FROM acceptance_test x JOIN acceptance_criteria c ON c.id = x.parent_id JOIN requirement q ON q.id = c.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    task: "SELECT p.id, p.name, p.repo FROM task x JOIN acceptance_test a ON a.id = x.acceptance_test_id JOIN acceptance_criteria c ON c.id = a.parent_id JOIN requirement q ON q.id = c.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    project: "SELECT p.id, p.name, p.repo FROM project p WHERE p.id = ?",
-  };
-  const sql = up[entity];
-  if (sql === undefined) return null;
-  try {
-    return (db().prepare(sql).get(id) as { id: number; name: string; repo: string } | undefined) ?? null;
-  } catch {
-    return null;
+  const conn = db();
+  let here = entity;
+  let at = id;
+  // The chain is nine deep at most; the bound stops a cycle in bad data spinning forever.
+  for (let step = 0; step <= Object.keys(ENTITIES).length; step += 1) {
+    if (here === "project") {
+      return (
+        (conn.prepare("SELECT id, name, repo FROM project WHERE id = ?").get(at) as
+          | { id: number; name: string; repo: string }
+          | undefined) ?? null
+      );
+    }
+    const up = ENTITIES[here]?.parent;
+    if (up === undefined) return null;
+    const row = conn.prepare(`SELECT ${up.fk} AS pid FROM ${here} WHERE id = ?`).get(at) as
+      | { pid: number }
+      | undefined;
+    if (row === undefined) return null;
+    here = up.table;
+    at = row.pid;
   }
+  return null;
 }
-
-/** The parent entity a child of this kind hangs off. */
-const PARENT_OF: Readonly<Record<string, string>> = {
-  release: "project",
-  epic: "release",
-  story: "epic",
-  requirement: "story",
-  acceptance_criteria: "requirement",
-  acceptance_test: "acceptance_criteria",
-  task: "acceptance_test",
-  task_test: "task",
-};
 
 /** Refuse a parent whose project is not the one this repository is. */
 function crossesProject(entity: string, parent: number): string | null {
-  const parentEntity = PARENT_OF[entity];
+  const parentEntity = ENTITIES[entity]?.parent?.table;
   if (parentEntity === undefined || parentEntity === "project") return null;
   return elsewhere(parentEntity, parent);
 }
@@ -805,23 +839,13 @@ function elsewhere(entity: string, id: number): string | null {
 
 /** The parent this row hangs off, named. */
 function where(entity: string, id: number): string {
-  const parents: Readonly<Record<string, { table: string; fk: string; label: string }>> = {
-    project: { table: "workspace", fk: "workspace_id", label: "name" },
-    release: { table: "project", fk: "project_id", label: "name" },
-    epic: { table: "release", fk: "release_id", label: "version" },
-    story: { table: "epic", fk: "epic_id", label: "title" },
-    requirement: { table: "story", fk: "story_id", label: "title" },
-    acceptance_criteria: { table: "requirement", fk: "requirement_id", label: "statement" },
-    acceptance_test: { table: "acceptance_criteria", fk: "parent_id", label: "statement" },
-    task: { table: "acceptance_test", fk: "acceptance_test_id", label: "statement" },
-    task_test: { table: "task", fk: "parent_id", label: "title" },
-  };
-  const up = parents[entity];
-  if (up === undefined) return "";
+  const up = ENTITIES[entity]?.parent;
+  const column = up === undefined ? undefined : ENTITIES[up.table]?.label;
+  if (up === undefined || column === undefined) return "";
   try {
     const row = db()
       .prepare(
-        `SELECT p.id AS id, p.${up.label} AS label FROM ${entity} c JOIN ${up.table} p ON p.id = c.${up.fk} WHERE c.id = ?`,
+        `SELECT p.id AS id, p.${column} AS label FROM ${entity} c JOIN ${up.table} p ON p.id = c.${up.fk} WHERE c.id = ?`,
       )
       .get(id) as { id: number; label: string } | undefined;
     if (row === undefined) return "";
@@ -895,6 +919,69 @@ function usage(): number {
       "  a task needs a scope, a role and a task_test that is ready before it can start",
       "  two tasks whose write scopes overlap will not run at the same time",
       "  a failing test is the answer — make another task, do not edit the code by hand",
+      "",
+    ].join("\n"),
+  );
+  return 0;
+}
+
+/** Which flags each entity's create reads, and what one call looks like. Kept beside the
+ *  switch in create() — the two must agree, and nothing else can check that they do. */
+const CREATE_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  workspace: ["path"],
+  project: ["parent", "path"],
+  release: ["parent"],
+  epic: ["parent"],
+  story: ["parent"],
+  requirement: ["parent"],
+  acceptance_criteria: ["parent"],
+  acceptance_test: ["parent", "kind", "artefact"],
+  task_test: ["parent", "kind", "artefact"],
+  task: ["parent", "role"],
+  worker: ["role", "kind"],
+};
+
+const FLAG_MEANS: Readonly<Record<string, string>> = {
+  parent: "<id>     the record it hangs off — required, and ids are global",
+  path: "<dir>      where the repository is (default: the current directory)",
+  kind: "<kind>     acceptance_test / task_test: how it is run; worker: agent or human",
+  artefact: "<cmd>  the command that proves it (default: this project's test command)",
+  role: "<name>     which role does the work",
+};
+
+const CREATE_EXAMPLE: Readonly<Record<string, string>> = {
+  workspace: 'wecode workspace create "acme" --path .',
+  project: 'wecode project create --parent 1 "storefront" --path .',
+  acceptance_test: 'wecode acceptance_test create --parent 1 "mail arrives" --artefact "bash mail.sh"',
+  task_test: 'wecode task_test create --parent 1 "mailer called" --artefact "vitest run"',
+  task: 'wecode task create --parent 1 "send the mail" --role engineer',
+  worker: "wecode worker create ada --role engineer --kind agent",
+};
+
+function createHelp(entity: string): number {
+  const flags = CREATE_FLAGS[entity];
+  if (flags === undefined) return fail(`no such entity: ${entity}`);
+
+  const example = CREATE_EXAMPLE[entity] ?? `wecode ${entity} create --parent 1 "<text>"`;
+  const lines = [`wecode ${entity} create [flags] "<text>"`, "", "  the text is everything that is not a flag", ""];
+  for (const f of flags) lines.push(`  --${f} ${FLAG_MEANS[f]}`);
+  process.stdout.write(`${lines.join("\n")}\n\n  ${example}\n\n`);
+  return 0;
+}
+
+function scopeHelp(): number {
+  process.stdout.write(
+    [
+      "wecode task scope <id> [flags]",
+      "",
+      "  which files that task may change, and which tools its agent may use.",
+      "  two tasks whose write scopes overlap will not run at the same time.",
+      "",
+      "  --write <globs>  comma-separated (default: this project's source and test paths)",
+      "  --tools <names>  comma-separated (default: bash,read,edit,write)",
+      "",
+      '  wecode task scope 1 --write "src/**,tests/**" --tools bash,read',
+      "",
       "",
     ].join("\n"),
   );

@@ -112,6 +112,56 @@ describe("help is what an agent reads first", () => {
     expect(out).toContain("automatic");
   });
 
+  it("answers create --help with that entity's own flags and an example", () => {
+    expect(run(["task", "create", "--help"])).toBe(0);
+    const out = said();
+    expect(out).toContain("wecode task create [flags]");
+    expect(out).toContain("--parent");
+    expect(out).toContain("--role");
+    expect(out).toContain('wecode task create --parent 1 "send the mail" --role engineer');
+    expect(err.join("")).toBe("");
+  });
+
+  it("accepts -h, and does not create anything while answering", () => {
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    out.length = 0;
+    expect(run(["workspace", "create", "-h"])).toBe(0);
+    expect(said()).toContain("--path");
+    out.length = 0;
+    run(["workspaces"]);
+    expect(said()).not.toContain("-h");
+  });
+
+  it("names only the flags the entity in hand actually takes", () => {
+    expect(run(["story", "create", "--help"])).toBe(0);
+    const out = said();
+    expect(out).toContain("--parent");
+    expect(out).not.toContain("--artefact");
+    expect(out).not.toContain("--role");
+  });
+
+  it("offers --artefact and --kind on the tests, which is where they are read", () => {
+    expect(run(["acceptance_test", "create", "--help"])).toBe(0);
+    expect(said()).toContain("--artefact");
+    expect(said()).toContain("--kind");
+  });
+
+  it("says which entity it cannot make, rather than printing empty flags", () => {
+    expect(run(["nonsense", "create", "--help"])).toBe(1);
+    expect(err.join("")).toContain("no such entity: nonsense");
+  });
+
+  it("answers scope --help with --write and --tools and the rule that bites", () => {
+    expect(run(["task", "scope", "--help"])).toBe(0);
+    const out = said();
+    expect(out).toContain("wecode task scope <id>");
+    expect(out).toContain("--write");
+    expect(out).toContain("--tools");
+    expect(out).toContain("overlap");
+    expect(err.join("")).toBe("");
+  });
+
   it("falls back to the manual for a word that is not an entity", () => {
     expect(run(["worker", "--help"])).toBe(0);
     expect(said()).toContain("THE SHAPE OF THE WORK");
@@ -218,6 +268,74 @@ describe("a parent in another project", () => {
     expect(run(["story", "create", "--parent", "1", "wrong tree"])).toBe(1);
     expect(err.join("")).toContain("belongs to project #1");
     expect(err.join("")).toContain("but you are in #2");
+  });
+});
+
+describe("show answers a stale id", () => {
+  const shaped = (): void => {
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    run(["project", "create", "--parent", "1", "storefront", "--path", process.cwd()]);
+    run(["release", "create", "--parent", "1", "1.0.0"]);
+    run(["epic", "create", "--parent", "1", "recovery"]);
+    run(["story", "create", "--parent", "1", "password reset"]);
+  };
+
+  it("prints the record whatever its state, and names its project", () => {
+    shaped();
+    run(["story", "drop", "1"]);
+    out.length = 0;
+
+    expect(run(["show", "story", "1"])).toBe(0);
+    expect(said()).toContain("password reset");
+    expect(said()).toContain("dropped");
+    expect(said()).toContain("project            #1 storefront");
+  });
+
+  it("names the project of a record deep in the tree", () => {
+    shaped();
+    run(["requirement", "create", "--parent", "1", "one change per link"]);
+    out.length = 0;
+
+    expect(run(["show", "requirement", "1"])).toBe(0);
+    expect(said()).toContain("project            #1 storefront");
+  });
+
+  it("says which ids of that entity do exist, rather than refusing bare", () => {
+    shaped();
+    // the epic somebody wrote down was rebuilt under another number
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const db = new DatabaseSync(process.env["WECODE_DB"] as string);
+    db.prepare("DELETE FROM story").run();
+    db.prepare("UPDATE epic SET id = 7 WHERE id = 1").run();
+    db.close();
+
+    expect(run(["show", "epic", "1"])).toBe(1);
+    const why = err.join("");
+    expect(why).toContain("no epic #1");
+    expect(why).toContain("#7");
+    expect(why).toContain("recovery");
+  });
+
+  it("says the entity is empty rather than listing nothing", () => {
+    shaped();
+    expect(run(["show", "task", "3"])).toBe(1);
+    expect(err.join("")).toContain("no task at all yet");
+  });
+
+  it("names the entities there are when the word is not one", () => {
+    shaped();
+    expect(run(["show", "epick", "1"])).toBe(1);
+    expect(err.join("")).toContain("no entity called epick");
+    expect(err.join("")).toContain("acceptance_criteria");
+  });
+
+  it("shows a record that hangs off no project without inventing one", () => {
+    shaped();
+    out.length = 0;
+    expect(run(["show", "workspace", "1"])).toBe(0);
+    expect(said()).toContain("acme");
+    expect(said()).not.toContain("project  ");
   });
 });
 
