@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Engine, Maker } from "../src/index.js";
+import { CreateError, Engine, Maker } from "../src/index.js";
 import { freshDb, stateOf } from "./helpers.js";
 
 describe("rows start where their machine says", () => {
@@ -53,6 +53,60 @@ describe("rows start where their machine says", () => {
     const t = make.task(at, "do the thing");
     const r = new Engine(db).apply("task", t, "start", "chief");
     expect(!r.ok && r.why).toContain("wecode task scope");
+  });
+});
+
+describe("a slug that is already taken says who holds it", () => {
+  const tree = (make: Maker): number => {
+    const p = make.project(make.workspace("acme", "/acme"), "storefront", "/r");
+    const c = make.criteria(make.requirement(make.story(make.epic(make.release(p, "1.0.0"), "e"), "s"), "r"), "c");
+    return make.acceptanceTest(c, "a", "script", "bash x.sh");
+  };
+  // Titles long enough that the slug is truncated: this is how two different titles that
+  // only start alike end up as one slug.
+  const first = "rewrite the mailer so a reset link authenticates exactly one change";
+  const second = "rewrite the mailer so a reset link authenticates one change only";
+
+  it("names the task holding the slug, and says a dropped task still holds it", () => {
+    const db = freshDb();
+    const make = new Maker(db);
+    const at = tree(make);
+    const held = make.task(at, first);
+    expect(new Engine(db).apply("task", held, "drop", "chief").ok).toBe(true);
+
+    expect(() => make.task(at, second)).toThrow(CreateError);
+    let why = "";
+    try {
+      make.task(at, second);
+    } catch (err) {
+      why = (err as Error).message;
+    }
+    expect(why).toContain("task:");
+    expect(why).toContain(JSON.stringify("rewrite-the-mailer-so-a-reset-link-authenticates"));
+    expect(why).toContain(`#${held}`);
+    expect(why).toContain("dropped");
+    expect(why).toContain("A dropped row still holds its slug.");
+    expect(why).toMatch(/different title/);
+  });
+
+  it("refuses a colliding slug under the same parent", () => {
+    const db = freshDb();
+    const make = new Maker(db);
+    const task = make.task(tree(make), "send the reset mail");
+    const held = make.taskTest(task, first, "script", "vitest run a");
+    expect(() => make.taskTest(task, second, "script", "vitest run b")).toThrow(
+      new RegExp(`task_test: slug .* is already taken by task_test #${held}`),
+    );
+  });
+
+  it("allows the same slug under a different parent", () => {
+    const db = freshDb();
+    const make = new Maker(db);
+    const at = tree(make);
+    const one = make.task(at, "send the reset mail");
+    const two = make.task(at, "send the welcome mail");
+    make.taskTest(one, first, "script", "vitest run a");
+    expect(() => make.taskTest(two, second, "script", "vitest run b")).not.toThrow();
   });
 });
 
