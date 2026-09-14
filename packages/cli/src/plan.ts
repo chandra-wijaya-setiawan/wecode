@@ -485,8 +485,6 @@ interface MadeRequirement {
 interface Made {
   readonly kind: Root;
   readonly id: number;
-  /** Whether this file wrote the row, or joined one that was already there. */
-  readonly fresh: boolean;
   readonly children: readonly Made[];
   readonly requirements: readonly MadeRequirement[];
 }
@@ -518,7 +516,7 @@ function create(db: DatabaseSync, top: Level, parent: number): Made {
       });
       return { id: requirement, criteria };
     });
-    return { kind: l.kind, id, fresh: l.id === null, children: l.children.map((c) => walk(c, id)), requirements };
+    return { kind: l.kind, id, children: l.children.map((c) => walk(c, id)), requirements };
   };
 
   return walk(top, parent);
@@ -528,27 +526,33 @@ function create(db: DatabaseSync, top: Level, parent: number): Made {
  *  that needs six `start` commands afterwards is the same ceremony moved. */
 function begin(db: DatabaseSync, made: Made): void {
   const engine = new Engine(db);
-  const go = (entity: Root | "requirement" | "acceptance_criteria" | "task", id: number, verb: string): void => {
-    engine.apply(entity, id, verb, "operator");
+  /** Starts a row still sitting in planned, and leaves one genuinely underway alone. The row
+   *  a file joined by id may be either: joining #107 says where this work hangs, not that
+   *  anyone ever started it, and a requirement running under a planned story can never be
+   *  delivered because the story it would deliver through has not begun. */
+  const go = (entity: Root | "requirement" | "acceptance_criteria" | "task", id: number): void => {
+    const row = db.prepare(`SELECT state FROM ${entity} WHERE id = ?`).get(id) as { state: string } | undefined;
+    if (row?.state === "planned") engine.apply(entity, id, "start", "operator");
   };
   const deliver = (entity: "acceptance_test" | "task_test", id: number): void => {
     // Refused when the artefact is empty, which is the guard doing its job, not a failure.
     engine.apply(entity, id, "deliver", "operator");
   };
 
+  // Ancestors first: a child started under a parent still in planned is the bug this order
+  // rules out, whether the parent was written by this file or joined by id.
   const walk = (l: Made): void => {
-    // A row this file joined is already underway; starting it again is not this file's move.
-    if (l.fresh) go(l.kind, l.id, "start");
+    go(l.kind, l.id);
     for (const c of l.children) walk(c);
     for (const r of l.requirements) {
-      go("requirement", r.id, "start");
+      go("requirement", r.id);
       for (const c of r.criteria) {
-        go("acceptance_criteria", c.id, "start");
+        go("acceptance_criteria", c.id);
         deliver("acceptance_test", c.test);
         for (const t of c.tasks) {
           // The task_test is ready first, or the task may not be attempted.
           deliver("task_test", t.test);
-          go("task", t.id, "start");
+          go("task", t.id);
         }
       }
     }
