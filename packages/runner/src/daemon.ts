@@ -1,13 +1,14 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
-import { clearRefusal, Engine, ensureChore, now, recordRefusal } from "@wecode/core";
+import { clearRefusal, Engine, ensureChore, now, recordRefusal, type Violation } from "@wecode/core";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { allocate, candidates as readyCandidates, type Candidate, type Pass } from "./allocator.js";
 import type { BudgetConfig } from "./budget.js";
 import { Foreman, type TickReport } from "./foreman.js";
 import type { WorkerAdapter } from "./ports.js";
+import { Doctor, type Invariant } from "./doctor.js";
 import { Examiner, type Refused, type ScriptReport } from "./examiner.js";
 import { Trees } from "./git.js";
 
@@ -31,6 +32,9 @@ export interface Tick {
   /** Acceptance tests this tick ran at their story's base: red there, or green and so
    *  unable to prove anything. */
   readonly redAtBase: RedAtBase;
+  /** What the invariant set found this tick. Recorded as well as returned, so a view reads
+   *  the table rather than running the pass again. Empty is the healthy answer. */
+  readonly doctor: readonly Violation[];
 }
 
 /** An exhausted task, and the story left waiting on it. Named, because the cost is the
@@ -55,6 +59,10 @@ export interface RunnerOptions {
   readonly integrationBranch?: string;
   /** Only for tests: pretend every project lives here. */
   readonly repoRoot?: string;
+  /** The invariant set the tick's doctor runs. Defaults to core's. A caller substitutes
+   *  one only to prove the boundary holds — that a check which throws costs its own
+   *  result and nothing else. */
+  readonly invariants?: readonly Invariant[];
 }
 
 /** The whole engine, one tick at a time: allocate, run, judge.
@@ -66,6 +74,7 @@ export class Runner {
   private readonly foreman: Foreman;
   private readonly examiner: Examiner;
   private readonly engine: Engine;
+  private readonly doctor: Doctor;
   /** One per repository. A workspace holds many projects, and each has its own branches. */
   private readonly treesByRepo = new Map<string, Trees>();
 
@@ -76,6 +85,7 @@ export class Runner {
     this.foreman = new Foreman(db, opts.adapters, opts.deadlineSeconds ?? 3600);
     this.examiner = new Examiner(db);
     this.engine = new Engine(db);
+    this.doctor = new Doctor(db, opts.invariants);
     // A merge is not derivable from the record: a done task with a commit stays done and
     // committed forever, so without this landDoneTasks re-merges it on every tick and every
     // log line carries every task that ever landed.
@@ -110,7 +120,18 @@ export class Runner {
     // After enforcement, so a task that ran out of attempts on this very tick is already
     // named rather than named a minute later.
     const drift = this.exhaustedTasks();
+    // Last, and reading only: the pass describes the record the tick has finished leaving
+    // behind. Its own failure is not the tick's — Doctor.check throws for nothing, and the
+    // guard here is the belt to that pair of braces.
+    let doctor: readonly Violation[] = [];
+    try {
+      doctor = this.doctor.check();
+    } catch {
+      // A tick that did its work and could not say whether the record drifted is still a
+      // tick that did its work.
+    }
     return {
+      doctor,
       allocated,
       foreman,
       committed: settled.committed,
