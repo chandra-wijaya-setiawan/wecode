@@ -2,9 +2,7 @@
 max_open: 10
 
 order:
-  # Off until task 148 lands: with it on, allocate() re-orders by attempts while
-  # allocateOne prepares by id, the two disagree, and nothing is dispatched.
-  fresh_first: false
+  fresh_first: true
   oldest_first: true
 
 collision:
