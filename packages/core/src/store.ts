@@ -82,6 +82,18 @@ const underTest = (): boolean =>
 const isLive = (path: string): boolean =>
   path === LIVE_HOME || path.startsWith(LIVE_HOME + sep);
 
+/** How long a writer waits for another writer's lock before giving up.
+ *
+ *  Without this SQLite returns SQLITE_BUSY the instant a lock is held, and the two writers
+ *  here are the runner's tick and whatever cli command the operator just ran: both take
+ *  milliseconds, and neither has any reason to fail because the other was mid-write. Five
+ *  seconds is far longer than any transaction this ledger holds — the longest is `plan`
+ *  writing a whole story tree — so ordinary contention never surfaces at all. It is also
+ *  short enough that a genuine deadlock, or a process that took a write lock and wandered
+ *  off, still reports `database is locked` while a person is watching rather than hanging
+ *  the tick forever. */
+const BUSY_TIMEOUT_MS = 5000;
+
 export interface OpenOptions {
   /** Upgrade an older database to this build's schema. Defaults to true. Pass false to be
    *  told — SchemaBehindError — instead of upgraded, which is how the doctor and any caller
@@ -144,6 +156,7 @@ export function open(path?: string, options: OpenOptions = {}): DatabaseSync {
 
   const db = new DatabaseSync(target);
   db.exec("PRAGMA foreign_keys = ON");
+  db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
 
   const found = version(db) ?? 0;
 
@@ -184,15 +197,33 @@ export function now(): string {
   return new Date().toISOString();
 }
 
-/** Everything in one transaction, or nothing. */
+/** How deep in nested transact() calls each database is. Only the outermost one opens and
+ *  closes a real transaction; the rest are savepoints inside it. */
+const depth = new WeakMap<DatabaseSync, number>();
+
+/** Everything in one transaction, or nothing.
+ *
+ *  Nestable, because atomicity is a property of the whole operation and not of its innermost
+ *  step. `wecode plan` creates a tree and then starts every row in it, and every one of those
+ *  starts is an Engine.apply that transacts in its own right: without nesting, either the
+ *  starting happens outside the creation's transaction — which is the half-started story #171
+ *  left behind when the second half died — or the inner BEGIN refuses. An inner body that
+ *  throws rolls back to its savepoint and rethrows, so the outer one still rolls the lot
+ *  back unless it chooses to swallow it. */
 export function transact<T>(db: DatabaseSync, body: () => T): T {
-  db.exec("BEGIN IMMEDIATE");
+  const level = depth.get(db) ?? 0;
+  const name = `wecode_${level}`;
+  db.exec(level === 0 ? "BEGIN IMMEDIATE" : `SAVEPOINT ${name}`);
+  depth.set(db, level + 1);
   try {
     const out = body();
-    db.exec("COMMIT");
+    db.exec(level === 0 ? "COMMIT" : `RELEASE ${name}`);
     return out;
   } catch (err) {
-    db.exec("ROLLBACK");
+    db.exec(level === 0 ? "ROLLBACK" : `ROLLBACK TO ${name}`);
+    if (level > 0) db.exec(`RELEASE ${name}`);
     throw err;
+  } finally {
+    depth.set(db, level);
   }
 }

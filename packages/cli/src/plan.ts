@@ -67,15 +67,21 @@ export function plan(args: readonly string[]): number {
     return 0;
   }
 
+  // Creation and starting are one transaction, not two. A plan that died between them left
+  // story #171 created and unstarted, a tree nobody would ever run and a person had to
+  // finish by hand; a plan that dies anywhere now leaves nothing at all.
   let made: Made;
   try {
-    made = transact(db, () => create(db, shaped.top as Level, parent));
+    made = transact(db, () => {
+      const rows = create(db, shaped.top as Level, parent);
+      begin(db, rows);
+      return rows;
+    });
   } catch (err) {
     // A row the ledger itself refuses — a version that is not major.minor.patch. The
     // transaction is already rolled back, so nothing is behind us.
     return fail(`${file} is not a plan yet:\n  ${(err as Error).message}`);
   }
-  begin(db, made);
   process.stdout.write(render(shape(db, made)));
   return 0;
 }
