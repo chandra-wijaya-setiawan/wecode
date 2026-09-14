@@ -16,6 +16,7 @@ export * from "./edit.js";
 export * from "./stacks.js";
 export * from "./home.js";
 export * from "./tree.js";
+export * from "./lessons.js";
 export * from "./lease.js";
 export * from "./bulk.js";
 export * from "./invariants.js";

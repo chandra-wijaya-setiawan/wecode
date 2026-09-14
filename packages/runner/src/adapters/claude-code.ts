@@ -111,12 +111,17 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   private prompt(work: Work): string {
+    const lessons = work.lessons ?? [];
     return [
       work.instruction,
       "",
+      ...(lessons.length > 0
+        ? ["What earlier attempts on this repository learned:", ...lessons.map((l) => `- ${l}`), ""]
+        : []),
       `You may change only: ${work.scope.write.join(", ") || "(nothing)"}.`,
       "Write the tests that prove this work, and run them.",
       "If you need a decision from a person, say so and stop rather than guessing.",
+      ASK,
       ...this.before(work),
     ].join("\n");
   }
@@ -165,7 +170,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       cwd: work.worktree,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const session: Session = { child, id: work.session, spent: zero(), ended: null };
+    const session: Session = { child, id: work.session, spent: zero(), ended: null, last: "" };
     this.live.set(work.id, session);
 
     let rest = "";
@@ -178,6 +183,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         const event = parse(line);
         if (event === null) continue;
         if (typeof event["session_id"] === "string") session.id = event["session_id"];
+        const text = textOf(event);
+        if (text !== null) session.last = text;
         const usage = event["usage"];
         if (usage !== null && typeof usage === "object") {
           const u = usage as Record<string, unknown>;
@@ -198,14 +205,22 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     });
 
     child.on("close", (code) => {
+      const lesson = lessonIn(session.last);
       session.ended =
         code === 0
-          ? { phase: "succeeded", session: session.id ?? "", spent: session.spent, commit: null }
+          ? {
+              phase: "succeeded",
+              session: session.id ?? "",
+              spent: session.spent,
+              commit: null,
+              ...(lesson === null ? {} : { lesson }),
+            }
           : {
               phase: "failed",
               session: session.id,
               spent: session.spent,
               reason: code === null ? "lost" : "other",
+              ...(lesson === null ? {} : { lesson }),
             };
     });
 
@@ -218,9 +233,45 @@ interface Session {
   id: string | null;
   spent: Budget;
   ended: Observation | null;
+  /** The most recent thing the session said, so the last one is still here at close. */
+  last: string;
 }
 
 const zero = (): Budget => ({ tokens: 0, seconds: 0 });
+
+/** The asking half of a lesson. One line, because a lesson that needs a paragraph is a
+ *  design document — see docs/design/17. */
+const ASK =
+  "If you learned something a future attempt on this repository should know, end your " +
+  "final message with a single line beginning LESSON:";
+
+/** The reading half. The last `LESSON:` line of the final message, or nothing: an agent
+ *  with nothing to say says nothing, and that must not be recorded as a lesson. */
+function lessonIn(message: string): string | null {
+  let found: string | null = null;
+  for (const line of message.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("LESSON:")) continue;
+    const body = trimmed.slice("LESSON:".length).trim();
+    if (body !== "") found = body;
+  }
+  return found;
+}
+
+/** What the session said, out of whichever event shape carried it. A `result` event is the
+ *  final message; an `assistant` event is one on the way to it. */
+function textOf(event: Record<string, unknown>): string | null {
+  if (typeof event["result"] === "string") return event["result"];
+  const message = event["message"];
+  if (message === null || typeof message !== "object") return null;
+  const content = (message as Record<string, unknown>)["content"];
+  if (!Array.isArray(content)) return null;
+  const parts = content
+    .filter((b): b is Record<string, unknown> => b !== null && typeof b === "object")
+    .filter((b) => b["type"] === "text" && typeof b["text"] === "string")
+    .map((b) => b["text"] as string);
+  return parts.length === 0 ? null : parts.join("\n");
+}
 
 const plural = (n: number): string => (n === 1 ? "one has" : `${n} have`);
 

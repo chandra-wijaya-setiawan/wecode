@@ -30,6 +30,7 @@ class Fake implements WorkerAdapter {
   }
   async poll(w: Work): Promise<Observation> {
     this.seen.push(`poll:${w.id}`);
+    this.work.push(w);
     return this.next();
   }
   async resume(w: Work): Promise<Observation> {
@@ -38,6 +39,7 @@ class Fake implements WorkerAdapter {
   }
   async answer(w: Work, a: string): Promise<Observation> {
     this.seen.push(`answer:${w.id}:${a}`);
+    this.work.push(w);
     return this.next();
   }
   async kill(w: Work): Promise<void> {
@@ -51,11 +53,27 @@ let db: DatabaseSync;
 let make: Maker;
 let task: number;
 let worker: number;
+let workspace: number;
+let project: number;
 
-const assign = (worktree = "/tmp/wecode-no-such-worktree"): number =>
+/** A whole tree down to one task, so a test can prove a lesson stays in its own project. */
+const treeUnder = (p: number): number => {
+  const at = make.acceptanceTest(
+    make.criteria(make.requirement(make.story(make.epic(make.release(p, "1.0.0"), "e"), "s"), "r"), "c"),
+    "proof",
+    "script",
+    "bash x.sh",
+  );
+  // A task slug is unique across the workspace, so the project it is under has to be in it.
+  return make.task(at, `send the mail ${p}`, { role: "engineer", scope: { write: ["src/**"], tools: [] } });
+};
+
+const assign = (worktree = "/tmp/wecode-no-such-worktree"): number => assignFor(task, worktree);
+
+const assignFor = (objective: number, worktree = "/tmp/wecode-no-such-worktree"): number =>
   make.assignment({
     objective_type: "task",
-    objective_id: task,
+    objective_id: objective,
     worker_id: worker,
     scope: { write: ["src/**"], tools: ["bash"] },
     budget: { tokens: 100, seconds: 10 },
@@ -71,15 +89,9 @@ const phaseOf = (id: number): string =>
 beforeEach(() => {
   db = open(join(tmp("wecode-foreman-"), "wecode.db"));
   make = new Maker(db);
-  const ws = make.workspace("acme", "/acme");
-  const p = make.project(ws, "s", "/r");
-  const rel = make.release(p, "1.0.0");
-  const e = make.epic(rel, "e");
-  const s = make.story(e, "s");
-  const req = make.requirement(s, "r");
-  const c = make.criteria(req, "c");
-  const at = make.acceptanceTest(c, "proof", "script", "bash x.sh");
-  task = make.task(at, "send the mail", { role: "engineer", scope: { write: ["src/**"], tools: [] } });
+  workspace = make.workspace("acme", "/acme");
+  project = make.project(workspace, "s", "/r");
+  task = treeUnder(project);
   worker = make.worker("claude-1", "engineer", "agent");
 });
 
@@ -311,6 +323,9 @@ describe("the prompt a retry is given", () => {
     history,
   });
 
+  // The baseline gained a line when the lesson story landed: every attempt is asked for one,
+  // first or not. What this test is still about is the absence of a history section — a first
+  // attempt is told nothing about a past it does not have.
   it("is exactly today's prompt on a first attempt", () => {
     expect(promptOf(work(null))).toBe(
       [
@@ -319,8 +334,11 @@ describe("the prompt a retry is given", () => {
         "You may change only: src/**.",
         "Write the tests that prove this work, and run them.",
         "If you need a decision from a person, say so and stop rather than guessing.",
+        "If you learned something a future attempt on this repository should know, end your " +
+          "final message with a single line beginning LESSON:",
       ].join("\n"),
     );
+    expect(promptOf(work(null))).not.toContain("## What happened before");
   });
 
   it("names the commit already on the branch", () => {
@@ -465,5 +483,103 @@ describe("a session that keeps running", () => {
     expect(first.started.sort()).toEqual([a, b].sort());
     expect(phaseOf(a)).toBe("running");
     expect(phaseOf(b)).toBe("running");
+  });
+});
+
+describe("a lesson", () => {
+  const lessons = (p: number): string[] =>
+    (
+      db
+        .prepare("SELECT text FROM lesson WHERE project_id = ? ORDER BY id")
+        .all(p) as unknown as { text: string }[]
+    ).map((r) => r.text);
+
+  /** Runs one whole attempt that ends with the given observation. */
+  const attempt = async (seen: Observation, id = assign()): Promise<Fake> => {
+    const fake = new Fake([seen]);
+    await new Foreman(db, { agent: fake }).tick();
+    return fake;
+  };
+
+  it("is recorded against the assignment's project when an attempt succeeds", async () => {
+    const id = assign();
+    await attempt(
+      { phase: "succeeded", session: "s", spent: spent(), commit: "abc", lesson: "pnpm -r build first" },
+      id,
+    );
+    expect(lessons(project)).toEqual(["pnpm -r build first"]);
+    const row = db.prepare("SELECT assignment_id FROM lesson").get() as { assignment_id: number };
+    expect(row.assignment_id).toBe(id); // traceable to the attempt that learned it
+  });
+
+  it("is recorded when the attempt failed, because that is the half worth keeping", async () => {
+    await attempt({ phase: "failed", session: "s", spent: spent(), reason: "other", lesson: "the lockfile is frozen" });
+    expect(lessons(project)).toEqual(["the lockfile is frozen"]);
+  });
+
+  it("is not recorded when the attempt offered none", async () => {
+    await attempt({ phase: "succeeded", session: "s", spent: spent(), commit: "abc" });
+    expect(lessons(project)).toEqual([]);
+  });
+
+  it("is reached by every kind of objective, not only a task", async () => {
+    const at = db.prepare("SELECT acceptance_test_id AS id FROM task WHERE id = ?").get(task) as { id: number };
+    const id = make.assignment({
+      objective_type: "acceptance_test",
+      objective_id: at.id,
+      worker_id: worker,
+      scope: { write: ["src/**"], tools: ["bash"] },
+      budget: { tokens: 100, seconds: 10 },
+      worktree: "/tmp/wt",
+    });
+    await attempt({ phase: "succeeded", session: "s", spent: spent(), commit: null, lesson: "tests need a build" }, id);
+    expect(lessons(project)).toEqual(["tests need a build"]);
+  });
+});
+
+describe("the lessons in a brief", () => {
+  const learn = async (text: string): Promise<void> => {
+    assign();
+    const fake = new Fake([{ phase: "succeeded", session: "s", spent: spent(), commit: null, lesson: text }]);
+    await new Foreman(db, { agent: fake }).tick();
+  };
+
+  it("are absent for a project that has none", async () => {
+    const fake = new Fake([{ phase: "running", session: "s", spent: spent() }]);
+    assign();
+    await new Foreman(db, { agent: fake }).tick();
+    expect(fake.work[0]?.lessons).toBeUndefined();
+  });
+
+  it("are the ten newest, newest first", async () => {
+    for (let n = 1; n <= 12; n += 1) await learn(`lesson ${n}`);
+
+    const fake = new Fake([{ phase: "running", session: "s", spent: spent() }]);
+    assign();
+    await new Foreman(db, { agent: fake }).tick();
+    expect(fake.work[0]?.lessons).toEqual([
+      "lesson 12",
+      "lesson 11",
+      "lesson 10",
+      "lesson 9",
+      "lesson 8",
+      "lesson 7",
+      "lesson 6",
+      "lesson 5",
+      "lesson 4",
+      "lesson 3",
+    ]);
+  });
+
+  it("do not cross from another project", async () => {
+    await learn("only acme knows this");
+
+    const other = make.project(workspace, "other", "/other");
+    const id = assignFor(treeUnder(other));
+    const fake = new Fake([{ phase: "running", session: "s", spent: spent() }]);
+    await new Foreman(db, { agent: fake }).tick();
+
+    const brief = fake.work.find((w) => w.id === id);
+    expect(brief?.lessons).toBeUndefined();
   });
 });

@@ -278,6 +278,120 @@ describe("a parent in another project", () => {
   });
 });
 
+describe("lessons", () => {
+  const conn = (): import("node:sqlite").DatabaseSync =>
+    new (require("node:sqlite") as typeof import("node:sqlite")).DatabaseSync(
+      process.env["WECODE_DB"] as string,
+    );
+
+  /** A project whose repo is where the test is standing, so `wecode lessons` finds it. */
+  const project = (): void => {
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    run(["project", "create", "--parent", "1", "p", "--path", process.cwd()]);
+  };
+
+  const learn = (text: string, assignment: number | null = null, at = "2026-09-14T00:00:00.000Z"): void => {
+    const db = conn();
+    db.prepare(
+      "INSERT INTO lesson (project_id, text, assignment_id, created_at) VALUES (1, ?, ?, ?)",
+    ).run(text, assignment, at);
+    db.close();
+  };
+
+  const anAssignment = (): void => {
+    const db = conn();
+    db.prepare(
+      `INSERT INTO worker (slug,name,role,kind,created_at,updated_at) VALUES ('w','w','engineer','agent','t','t')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO assignment (slug,objective_type,objective_id,worker_id,scope,budget,worktree,phase,spent,created_at,updated_at)
+       VALUES ('send-mail-1','task',1,1,'{}','{}','/tmp','running','{}','t','t')`,
+    ).run();
+    db.close();
+  };
+
+  it("lists them newest first, with the assignment that learned it and how old it is", () => {
+    project();
+    anAssignment();
+    const hoursAgo = (n: number): string => new Date(Date.now() - n * 3_600_000).toISOString();
+    learn("a fresh worktree needs pnpm -r build", 1, hoursAgo(5));
+    learn("the mail host rejects TLS 1.1", 1, hoursAgo(1));
+
+    out.length = 0;
+    expect(run(["lessons"])).toBe(0);
+    const said_ = said();
+    expect(said_).toContain("the mail host rejects TLS 1.1");
+    expect(said_).toContain("a fresh worktree needs pnpm -r build");
+    expect(said_.indexOf("TLS 1.1")).toBeLessThan(said_.indexOf("pnpm -r build"));
+    expect(said_).toContain("send-mail-1 #1");
+    expect(said_).toContain("1h ago");
+    expect(said_).toContain("5h ago");
+  });
+
+  it("says the lesson was written by hand when no attempt is behind it", () => {
+    project();
+    learn("the staging host is slow on Mondays");
+
+    out.length = 0;
+    expect(run(["lessons"])).toBe(0);
+    expect(said()).toContain("by hand");
+  });
+
+  it("says there are none rather than printing nothing", () => {
+    project();
+    expect(run(["lessons"])).toBe(0);
+    expect(said()).toContain("no lessons here yet");
+  });
+
+  it("shows another project's when asked by id", () => {
+    project();
+    run(["project", "create", "--parent", "1", "other", "--path", "/elsewhere"]);
+    const db = conn();
+    db.prepare("INSERT INTO lesson (project_id, text, created_at) VALUES (2, 'theirs', 't')").run();
+    db.close();
+    learn("mine");
+
+    out.length = 0;
+    expect(run(["lessons", "--project", "2"])).toBe(0);
+    expect(said()).toContain("theirs");
+    expect(said()).not.toContain("mine");
+  });
+
+  it("asks for a project when you are standing outside every one", () => {
+    run(["init"]);
+    expect(run(["lessons"])).toBe(1);
+    expect(err.join("")).toContain("no project here");
+  });
+
+  it("drops one by id and leaves the rest", () => {
+    project();
+    learn("keep this");
+    learn("this one is wrong");
+
+    out.length = 0;
+    expect(run(["lesson", "drop", "2"])).toBe(0);
+    expect(said()).toContain("lesson #2 dropped");
+
+    out.length = 0;
+    run(["lessons"]);
+    expect(said()).toContain("keep this");
+    expect(said()).not.toContain("this one is wrong");
+  });
+
+  it("says so when there is no such lesson to drop", () => {
+    project();
+    expect(run(["lesson", "drop", "404"])).toBe(1);
+    expect(err.join("")).toContain("no lesson #404");
+  });
+
+  it("names the one verb a lesson has", () => {
+    project();
+    expect(run(["lesson", "keep", "1"])).toBe(1);
+    expect(err.join("")).toContain("wecode lesson drop <id>");
+  });
+});
+
 describe("show answers a stale id", () => {
   const shaped = (): void => {
     run(["init"]);
