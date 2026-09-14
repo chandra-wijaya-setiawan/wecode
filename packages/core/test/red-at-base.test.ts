@@ -1,14 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { board, Engine } from "../src/index.js";
-import { freshDb, seed, stateOf } from "./helpers.js";
-
-/** Record that somebody watched the test fail at a base. There is deliberately no editor
- *  for this in core yet, and a guard must never derive it, so the test writes the record
- *  the same way the runner that observed the red run would. */
-const recordRed = (db: DatabaseSync, id: number, sha: string, at = "2026-09-14T00:00:00.000Z"): void => {
-  db.prepare("UPDATE acceptance_test SET red_at_base_sha = ?, red_at_base_at = ? WHERE id = ?").run(sha, at, id);
-};
+import { freshDb, recordRed, seed, stateOf } from "./helpers.js";
 
 const redOf = (db: DatabaseSync, id: number) =>
   db.prepare("SELECT red_at_base_sha, red_at_base_at FROM acceptance_test WHERE id = ?").get(id) as {

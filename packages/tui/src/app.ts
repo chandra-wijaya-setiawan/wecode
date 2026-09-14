@@ -40,6 +40,7 @@ const ENTITY: Readonly<Record<keyof Board, StatefulEntity | null>> = {
   queued: "task",
   failed: "task",
   stale: "task",
+  unproven: "acceptance_test",
   // Two tables in one box; board.ts tags which in the detail.
   roadmap: null,
   delivered: "story",

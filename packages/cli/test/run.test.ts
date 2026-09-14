@@ -3,7 +3,13 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { open } from "@wecode/core";
 import { run } from "../src/run.js";
+import { recordRed } from "../../core/test/helpers.js";
+
+/** The cli has no verb for the red record yet, so a fixture that wants to pass an
+ *  acceptance_test writes it into the same database the cli is driving. */
+const watchedItFail = (id: number): void => recordRed(open(process.env["WECODE_DB"] as string), id);
 
 let out: string[];
 let err: string[];
@@ -51,6 +57,7 @@ describe("the cli", () => {
 
     out.length = 0;
     run(["acceptance_test", "deliver", "1"]);
+    watchedItFail(1);
     run(["acceptance_test", "pass", "1"]);
     expect(said()).toContain("epic #1  in_progress → delivered  (cascade)");
   });
