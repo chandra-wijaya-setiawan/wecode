@@ -20,6 +20,8 @@ import {
   leaseAgeMs,
   leaseIsStale,
   now,
+  A_RESTART_IS_OWED,
+  checkRunner,
   readLease,
   type Lease,
   SCHEMA_VERSION,
@@ -135,19 +137,27 @@ function workersByRole(
  *  only thing that distinguishes a runner that has crashed from one that has nothing to do
  *  is whether anything was waiting for it. A quiet log is not a hung runner, and a red row
  *  every quiet evening is a row nobody reads by Friday. */
+
 /** What the holder is running, appended to whatever else its row says.
  *
  *  Read from the lease, like everything else in this box: the holder measured it against a
- *  repository this host may not even have. A build that cannot say and a build that is
- *  current both say `build <sha>` and nothing more — the row is quiet until there is
- *  something to go and do, and the thing to do is never automatic. */
+ *  repository this host may not even have. Whether that is drift is `runner_build_is_current`'s
+ *  to say and not this file's, so the row asks the invariant and prints what it answers — a
+ *  cockpit that disagreed with the doctor about a stale runner would be worse than either.
+ *  A build that cannot say and a build that is current both read `build <sha>` and nothing
+ *  more; and nothing here restarts anything, because the thing to do is never automatic. */
 function buildOf(lease: Lease): { readonly say: string; readonly owed: boolean } {
   if (lease.buildSha === undefined) return { say: "", owed: false };
   const sha = `build ${lease.buildSha.slice(0, 12)}`;
+  const drift = checkRunner({
+    holder: lease.holder,
+    buildSha: lease.buildSha,
+    ...(lease.buildBehind === undefined ? {} : { behind: lease.buildBehind }),
+  });
   const behind = lease.buildBehind ?? 0;
-  return behind > 0
-    ? { say: `${sha} · ${behind} behind the base — restart owed`, owed: true }
-    : { say: sha, owed: false };
+  return drift.length === 0
+    ? { say: sha, owed: false }
+    : { say: `${sha} · ${behind} behind the base — ${A_RESTART_IS_OWED}`, owed: true };
 }
 
 const withBuild = (detail: string, build: { readonly say: string }): string =>

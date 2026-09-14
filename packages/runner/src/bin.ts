@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
+  A_RESTART_IS_OWED,
   buildBehind,
   buildSha,
   currentDatabase,
@@ -101,7 +102,7 @@ const measure = (): void => recordBuildDrift(db, me, buildBehind(built));
 const describeBuild = (): string => {
   if (built === null) return "  build unknown\n";
   const behind = buildBehind(built);
-  const drift = behind === null || behind === 0 ? "" : `  ${behind} behind the base — a restart is owed`;
+  const drift = behind === null || behind === 0 ? "" : `  ${behind} behind the base — ${A_RESTART_IS_OWED}`;
   return `  build ${built.slice(0, 12)}${drift}\n`;
 };
 

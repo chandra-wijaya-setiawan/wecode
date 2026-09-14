@@ -62,9 +62,6 @@ export interface WorkerRow {
 export interface Snapshot {
   readonly nodes: readonly RecordNode[];
   readonly workers: readonly WorkerRow[];
-  /** The runner of record, when one holds the workspace. Omitted by a caller asking only
-   *  about entities, and then not checked. */
-  readonly runner?: RunnerBuild;
   /** The version the record says it is at, or 0 for a file with no version row at all.
    *  Omitted by a caller that is asking only about entities, and then not checked. */
   readonly schema_version?: number;
@@ -263,9 +260,8 @@ export const A_RESTART_IS_OWED = "a restart is owed";
  *
  *  Quiet about a build that cannot say and about a holder that has not measured: this
  *  invariant accuses a runner of being old, and it may only do that on a number. */
-export function runnerBuildIsCurrent(s: Snapshot): readonly Violation[] {
-  const r = s.runner;
-  if (r === undefined || r.behind === undefined || r.behind <= 0) return [];
+export function runnerBuildIsCurrent(r: RunnerBuild | null): readonly Violation[] {
+  if (r === null || r.behind === undefined || r.behind <= 0) return [];
   const built = r.buildSha === undefined ? "an unnamed commit" : r.buildSha.slice(0, 12);
   return [
     {
@@ -289,8 +285,22 @@ export const INVARIANTS: readonly { readonly name: string; readonly check: (s: S
   { name: "ready_task_has_a_ready_task_test", check: readyTaskHasAReadyTaskTest },
   { name: "failing_criteria_has_an_open_task", check: failingCriteriaHasAnOpenTask },
   { name: "schema_version_is_understood", check: schemaVersionIsUnderstood },
-  { name: "runner_build_is_current", check: runnerBuildIsCurrent },
 ];
+
+/** The checks about the process rather than about the record. Kept apart from `INVARIANTS`
+ *  on purpose: that set is a pure function of a `Snapshot` of rows, and both doctors run it
+ *  over a record they have just read and then heal what it names. Nothing here is healable
+ *  — the only remedy is a person restarting a process, and this code may never do that —
+ *  and the subject is not in the snapshot at all. */
+export const RUNNER_INVARIANTS: readonly {
+  readonly name: string;
+  readonly check: (r: RunnerBuild | null) => readonly Violation[];
+}[] = [{ name: "runner_build_is_current", check: runnerBuildIsCurrent }];
+
+/** One pass over the runner of record. Null when nobody holds the workspace, and then
+ *  there is nothing to say. */
+export const checkRunner = (r: RunnerBuild | null): readonly Violation[] =>
+  RUNNER_INVARIANTS.flatMap((i) => i.check(r));
 
 /** One pass. Reports everything it finds and changes nothing. */
 export function checkRecord(s: Snapshot): readonly Violation[] {

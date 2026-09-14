@@ -15,14 +15,14 @@ import {
   A_RESTART_IS_OWED,
   buildBehind,
   buildSha,
-  checkRecord,
-  INVARIANTS,
+  checkRunner,
   readLease,
   recordBuildDrift,
   renewLease,
   runnerBuildIsCurrent,
+  RUNNER_INVARIANTS,
   takeLease,
-  type Snapshot,
+  type RunnerBuild,
 } from "../src/index.js";
 import { freshDb } from "./helpers.js";
 import { tmp } from "./tmpdir.js";
@@ -37,11 +37,7 @@ beforeEach(() => {
   db = freshDb();
 });
 
-const snapshot = (runner?: Snapshot["runner"]): Snapshot => ({
-  nodes: [],
-  workers: [],
-  ...(runner === undefined ? {} : { runner }),
-});
+const running = (r: Partial<RunnerBuild> = {}): RunnerBuild => ({ holder: "host/1", ...r });
 
 describe("the lease says what the holder is running", () => {
   it("carries the commit the holder was built from, beside the holder and the heartbeat", () => {
@@ -123,16 +119,16 @@ describe("the build is read from the build and not from the working tree", () =>
 
 describe("the runner's build is an ancestor of the base", () => {
   it("is quiet about a current build", () => {
-    expect(runnerBuildIsCurrent(snapshot({ holder: "host/1", buildSha: BUILT, behind: 0 }))).toEqual([]);
+    expect(runnerBuildIsCurrent(running({ buildSha: BUILT, behind: 0 }))).toEqual([]);
   });
 
   it("is quiet about a holder that has not measured, and about no holder at all", () => {
-    expect(runnerBuildIsCurrent(snapshot({ holder: "host/1", buildSha: BUILT }))).toEqual([]);
-    expect(runnerBuildIsCurrent(snapshot())).toEqual([]);
+    expect(runnerBuildIsCurrent(running({ buildSha: BUILT }))).toEqual([]);
+    expect(runnerBuildIsCurrent(null)).toEqual([]);
   });
 
   it("reports a build behind the base as drift, with the count and the restart owed", () => {
-    const found = runnerBuildIsCurrent(snapshot({ holder: "host/1", buildSha: BUILT, behind: 7 }));
+    const found = runnerBuildIsCurrent(running({ buildSha: BUILT, behind: 7 }));
     expect(found).toHaveLength(1);
     expect(found[0]?.invariant).toBe("runner_build_is_current");
     expect(found[0]?.entity).toBe("runner");
@@ -143,14 +139,15 @@ describe("the runner's build is an ancestor of the base", () => {
   });
 
   it("counts one commit as a commit", () => {
-    const found = runnerBuildIsCurrent(snapshot({ holder: "host/1", buildSha: BUILT, behind: 1 }));
+    const found = runnerBuildIsCurrent(running({ buildSha: BUILT, behind: 1 }));
     expect(found[0]?.detail).toContain("1 commit behind the base");
   });
 
-  it("is one of the invariants a pass runs, so nobody has to ask for it", () => {
-    expect(INVARIANTS.map((i) => i.name)).toContain("runner_build_is_current");
-    const found = checkRecord(snapshot({ holder: "host/1", buildSha: BUILT, behind: 4 }));
+  it("is one of the runner invariants a pass runs, so nobody has to ask for it", () => {
+    expect(RUNNER_INVARIANTS.map((i) => i.name)).toContain("runner_build_is_current");
+    const found = checkRunner(running({ buildSha: BUILT, behind: 4 }));
     expect(found.map((v) => v.invariant)).toContain("runner_build_is_current");
+    expect(checkRunner(null)).toEqual([]);
   });
 
   it("judges the lease the runner actually wrote", () => {
@@ -158,7 +155,7 @@ describe("the runner's build is an ancestor of the base", () => {
     recordBuildDrift(db, "host/1", 2);
     const lease = readLease(db);
     const found = runnerBuildIsCurrent(
-      snapshot({
+      running({
         holder: lease?.holder ?? "",
         ...(lease?.buildSha === undefined ? {} : { buildSha: lease.buildSha }),
         ...(lease?.buildBehind === undefined ? {} : { behind: lease.buildBehind }),
