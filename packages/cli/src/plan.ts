@@ -309,7 +309,29 @@ function criterion(
   const tasks = list(m["tasks"], `${where}: tasks`, say)
     .map((t, i) => task(t, `${where}, task ${i + 1}`, config, roles, say))
     .filter((t) => t !== null);
-  return statement === null ? null : { statement, test, tasks };
+  if (statement === null) return null;
+
+  // A criteria that names no test of its own has nobody writing one. The task that writes it
+  // is the acceptance-tester's, not the engineer's — the two must not be the same pair of hands.
+  const authoring = m["test"] === undefined ? authoringTask(statement, config, roles) : null;
+  return { statement, test, tasks: authoring === null ? tasks : [...tasks, authoring] };
+}
+
+const AUTHORS = "acceptance-tester";
+
+/** The task that writes the missing acceptance test. Its brief is the criteria statement and
+ *  nothing else, and a test that passes before the feature exists is not the test. */
+function authoringTask(statement: string, config: ProjectConfig | null, roles: RoleConfig | null): Task | null {
+  // The scope is the role's, so without the role there is no scope to give, and no task.
+  const def = roles?.roles[AUTHORS];
+  if (def === undefined) return null;
+  return {
+    title: `write the acceptance test for: ${statement} — from the criteria statement alone, and check it fails before the feature exists`,
+    scope: [...def.scope.write],
+    tools: [...def.scope.tools],
+    test: config?.test ?? null,
+    role: AUTHORS,
+  };
 }
 
 function task(

@@ -29,5 +29,18 @@ export function seed(db: DatabaseSync) {
   return { ws, project, release, epic, story, requirement, criteria, acceptance, task, taskTest };
 }
 
+/** Record that somebody watched an acceptance_test fail at a base, the way the runner that
+ *  observed the red run would. `test_has_been_red` reads this record and only this record,
+ *  so a fixture that means to pass a test has to write it — one helper, shared by every
+ *  package's fixtures, rather than a copy of this UPDATE in each of them. */
+export const recordRed = (
+  db: DatabaseSync,
+  id: number,
+  sha = "base0000",
+  at = "2026-09-14T00:00:00.000Z",
+): void => {
+  db.prepare("UPDATE acceptance_test SET red_at_base_sha = ?, red_at_base_at = ? WHERE id = ?").run(sha, at, id);
+};
+
 export const stateOf = (db: DatabaseSync, table: string, id: number): string =>
   (db.prepare(`SELECT state FROM ${table} WHERE id = ?`).get(id) as { state: string }).state;
