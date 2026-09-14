@@ -15,6 +15,7 @@ export interface Board {
   readonly needs_human: readonly Row[];
   readonly queued: readonly Row[];
   readonly failed: readonly Row[];
+  readonly dropped: readonly Row[];
   readonly unproven: readonly Row[];
   readonly roadmap: readonly Row[];
   readonly delivered: readonly Row[];
@@ -149,21 +150,29 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
                AND a.phase IN ('pending','running','waiting'))
         ORDER BY t.id`,
     ),
-    // Stopped work, in the two ways work stops — and they are not the same thing. A dropped
-    // task was somebody's decision and wants nothing from anyone; an exhausted one is
-    // waiting for a person to retry it or drop it, and used to read identically. A failed
-    // task with attempts left is neither: the next pass will pick it up.
+    // Work that stopped because its attempts ran out, or because a pass is still owed to
+    // it. Abandoned work is not here: dropped was somebody's decision and wants nothing
+    // from anyone, an exhausted task is waiting for a person to retry it or drop it, and
+    // one box for both made a triage of ten rows say nothing about which was which.
     failed: rows(
       `SELECT t.id AS id, t.title AS what, t.state AS state,
               CASE
-                WHEN t.state = 'dropped' THEN 'dropped by decision'
                 WHEN t.attempts >= t.max_retry
                   THEN 'out of attempts · ' || t.attempts || ' of ' || t.max_retry
                        || ' · retry it with a reason, or drop it'
                 ELSE 'attempts ' || t.attempts || '/' || t.max_retry
               END AS detail
          FROM task t
-        WHERE t.state IN ('failed', 'dropped') AND ${only(ofTask("t.id"))}
+        WHERE t.state = 'failed' AND ${only(ofTask("t.id"))}
+        ORDER BY t.id`,
+    ),
+    // Put down on purpose. Its own filter, under its own name, so nothing reading `failed`
+    // has to carry the reason to tell the two apart.
+    dropped: rows(
+      `SELECT t.id AS id, t.title AS what, t.state AS state,
+              'dropped by decision' AS detail
+         FROM task t
+        WHERE t.state = 'dropped' AND ${only(ofTask("t.id"))}
         ORDER BY t.id`,
     ),
     // Ready to run, but nobody has watched it fail — so passing it would prove nothing.
