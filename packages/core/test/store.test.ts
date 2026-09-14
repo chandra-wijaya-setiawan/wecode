@@ -1,10 +1,9 @@
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { open, SCHEMA_VERSION, StoreError } from "../src/index.js";
+import { tmp } from "./tmpdir.js";
 
-const fresh = () => join(mkdtempSync(join(tmpdir(), "wecode-")), "wecode.db");
+const fresh = () => join(tmp(), "wecode.db");
 
 describe("the store", () => {
   it("creates the schema on a new file", () => {

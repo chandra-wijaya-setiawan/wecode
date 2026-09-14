@@ -7,6 +7,14 @@ import { Engine, now } from "@wecode/core";
 
 const exec = promisify(execFile);
 
+/** A verdict the engine would not accept, in the engine's own words. The script's exit
+ *  code is not the last word: a guard can refuse the transition it implies, and a refusal
+ *  that is dropped on the floor reads as a pass that never happened. */
+export interface Refused {
+  readonly id: number;
+  readonly why: string;
+}
+
 export interface ScriptReport {
   readonly passed: readonly number[];
   readonly failed: readonly number[];
@@ -14,13 +22,19 @@ export interface ScriptReport {
   readonly skipped: readonly number[];
   /** Tests whose script is not in this tree. Not a verdict: they stay as they were. */
   readonly unrunnable?: readonly number[];
+  /** Tests whose script said one thing and the engine refused it. Never a pass. */
+  readonly refused?: readonly Refused[];
 }
 
-const nothing: ScriptReport = { passed: [], failed: [], skipped: [], unrunnable: [] };
+const nothing: ScriptReport = { passed: [], failed: [], skipped: [], unrunnable: [], refused: [] };
 
 /** Written where the board reads a run's output, so a missing script never reads as a
  *  failure with an empty reason. */
 export const NOT_IN_TREE = "unrunnable: its script is not in this tree";
+
+/** Written where the board reads a run's output, ahead of what the script printed, so a
+ *  transition the engine refused is read as a refusal rather than as a silent nothing. */
+export const REFUSED = "refused";
 
 const INTERPRETERS = new Set(["bash", "sh", "zsh", "node", "python", "python3", "tsx", "deno"]);
 
@@ -127,6 +141,7 @@ export class Scripts {
     const failed: number[] = [];
     const skipped: number[] = [];
     const unrunnable: number[] = [];
+    const refused: Refused[] = [];
     const tip = await this.tip(cwd);
 
     for (const row of rows) {
@@ -159,11 +174,20 @@ export class Scripts {
           )
           .run(entity, row.id, print, at);
       }
-      this.engine.apply(entity, row.id, out.ok ? "pass" : "fail", "runner");
+      const verdict = this.engine.apply(entity, row.id, out.ok ? "pass" : "fail", "runner");
+      if (!verdict.ok) {
+        // The engine's words, not ours: it is the thing that knows why, and a paraphrase
+        // here is one more copy of the rules to keep in agreement with them.
+        refused.push({ id: row.id, why: verdict.why });
+        this.db
+          .prepare(`UPDATE ${entity} SET last_output = ?, updated_at = ? WHERE id = ?`)
+          .run(`${REFUSED}: ${verdict.why}\n${out.output.slice(-8000)}`, now(), row.id);
+        continue;
+      }
       (out.ok ? passed : failed).push(row.id);
     }
 
-    return { passed, failed, skipped, unrunnable };
+    return { passed, failed, skipped, unrunnable, refused };
   }
 
   /** True when this test already has a verdict reached against this exact fingerprint.

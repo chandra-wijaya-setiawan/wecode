@@ -49,6 +49,7 @@ const ENTITY: Readonly<Record<keyof Board, StatefulEntity | null>> = {
   // Two tables in one box; board.ts tags which in the detail.
   roadmap: null,
   delivered: "story",
+  unmergeable: "story",
 };
 
 /** What a terminal sends for the esc key, by code point rather than as a literal control

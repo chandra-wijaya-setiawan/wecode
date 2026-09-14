@@ -1,11 +1,11 @@
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { Maker, open, setScriptPath, type TestScript } from "../src/index.js";
 import { freshDb, seed } from "./helpers.js";
+import { tmp } from "./tmpdir.js";
 
 const MIGRATIONS = fileURLToPath(new URL("../sql/migrations", import.meta.url));
 
@@ -17,7 +17,7 @@ const scriptPathOf = (db: DatabaseSync, entity: "acceptance_test" | "task_test",
 /** A database as it stood before this column existed: every migration up to 004, run by
  *  hand, with the version recorded the way the store records it. */
 function dbAtVersion4(): string {
-  const path = join(mkdtempSync(join(tmpdir(), "wecode-v4-")), "wecode.db");
+  const path = join(tmp("wecode-v4-"), "wecode.db");
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys = ON");
   const files = readdirSync(MIGRATIONS)
