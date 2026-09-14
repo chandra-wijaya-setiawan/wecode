@@ -1,7 +1,21 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
-import { clearRefusal, Engine, ensureChore, now, recordRefusal, type Violation } from "@wecode/core";
+import {
+  applyChore,
+  choreById,
+  CHORE_KIND_DEFS,
+  clearRefusal,
+  Engine,
+  ensureChore,
+  Maker,
+  now,
+  recordRefusal,
+  type Budget,
+  type Chore,
+  type Scope,
+  type Violation,
+} from "@wecode/core";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { allocate, candidates as readyCandidates, type Candidate, type Pass } from "./allocator.js";
@@ -25,6 +39,9 @@ export interface Tick {
   /** Chores wecode owes itself, as of this tick. Every open one, not only the new ones:
    *  the number is the backlog, and a backlog that shrank is worth seeing. */
   readonly chores: readonly number[];
+  /** What the system worker did with them: dispatched this tick, proved done, or failed
+   *  with the reason the check was not proved. */
+  readonly performed: ChorePass;
   /** Tasks that have used every attempt while the story that needs them is still open. */
   readonly drift: readonly Drift[];
   /** Completion transitions that fired because their guard had become true. */
@@ -47,6 +64,20 @@ export interface Drift {
   readonly why: string;
 }
 
+/** One tick's chore work. `failed` carries the reason, because a chore that could not prove
+ *  its check leaves a story unmergeable and the reason is the only thing a person can act
+ *  on. */
+export interface ChorePass {
+  readonly dispatched: readonly number[];
+  readonly done: readonly number[];
+  readonly failed: readonly { readonly id: number; readonly why: string }[];
+}
+
+/** A chore's brief is the foreman's; its budget is the operator's. The default mirrors
+ *  `defaults.budget` in config/roles.yaml, which is where the number belongs — bin.ts has
+ *  the file loaded and passes it. */
+const CHORE_BUDGET: Budget = { tokens: 250000, seconds: 3600 };
+
 export interface RedAtBase {
   readonly proven: readonly number[];
   readonly unproven: readonly number[];
@@ -63,6 +94,8 @@ export interface RunnerOptions {
    *  one only to prove the boundary holds — that a check which throws costs its own
    *  result and nothing else. */
   readonly invariants?: readonly Invariant[];
+  /** The budget a chore's attempt is given. Defaults to config/roles.yaml's default. */
+  readonly choreBudget?: Budget;
 }
 
 /** The whole engine, one tick at a time: allocate, run, judge.
@@ -82,7 +115,10 @@ export class Runner {
     private readonly db: DatabaseSync,
     private readonly opts: RunnerOptions,
   ) {
-    this.foreman = new Foreman(db, opts.adapters, opts.deadlineSeconds ?? 3600);
+    this.foreman = new Foreman(db, opts.adapters, opts.deadlineSeconds ?? 3600, {
+      integrationBranch: opts.integrationBranch ?? null,
+      repoRoot: opts.repoRoot,
+    });
     this.examiner = new Examiner(db);
     this.engine = new Engine(db);
     this.doctor = new Doctor(db, opts.invariants);
@@ -117,6 +153,9 @@ export class Runner {
     // Last, and after settle(): a story becomes delivered in settle(), and the condition
     // this reads is about a story that already is.
     const chores = await this.raiseMergeChores();
+    // Raised first, then performed: a chore created on this tick is dispatched on it, and a
+    // chore whose attempt has ended is judged before the tick says what is still owed.
+    const performed = await this.performChores();
     // After enforcement, so a task that ran out of attempts on this very tick is already
     // named rather than named a minute later.
     const drift = this.exhaustedTasks();
@@ -137,7 +176,8 @@ export class Runner {
       committed: settled.committed,
       merged,
       exhausted,
-      chores,
+      performed,
+      chores: chores.filter((id) => !performed.done.includes(id)),
       drift,
       redAtBase,
       settled: settled2.map((c) => `${c.entity} #${c.id} → ${c.to}`),
@@ -563,6 +603,193 @@ export class Runner {
       if (chore.state !== "done") open.push(chore.id);
     }
     return open;
+  }
+
+  /** docs/design/18. The other half of a chore: judge the attempt that has ended, then hand
+   *  the next one out.
+   *
+   *  Judging first is what makes the slot free again within the tick, and what stops an
+   *  agent's word being the record: a chore is done because the runner proved the check,
+   *  never because the session exited zero. */
+  private async performChores(): Promise<ChorePass> {
+    const done: number[] = [];
+    const failed: { id: number; why: string }[] = [];
+    const dispatched: number[] = [];
+
+    for (const row of this.endedChoreAttempts()) {
+      const chore = choreById(this.db, row.chore);
+      // Only an attempt of a chore still in hand is judged. A chore already done or already
+      // failed has a verdict, and the ended assignment beside it is only history.
+      if (chore === null || chore.state !== "running") continue;
+      const proved = await this.proveChore(chore);
+      if (proved.ok) {
+        if (applyChore(this.db, chore.id, "finish", "runner").ok) done.push(chore.id);
+      } else if (applyChore(this.db, chore.id, "fail", "runner").ok) {
+        failed.push({ id: chore.id, why: proved.why });
+      }
+    }
+
+    for (const row of this.dispatchableChores()) {
+      const chore = choreById(this.db, row.id);
+      if (chore === null) continue;
+      const id = await this.dispatchChore(chore);
+      if (id !== null) dispatched.push(chore.id);
+    }
+    return { dispatched, done, failed };
+  }
+
+  private endedChoreAttempts(): { id: number; chore: number; worktree: string }[] {
+    return this.db
+      .prepare(
+        `SELECT id, objective_id AS chore, worktree FROM assignment
+          WHERE objective_type = 'chore' AND phase IN ('succeeded','failed') ORDER BY id`,
+      )
+      .all() as unknown as { id: number; chore: number; worktree: string }[];
+  }
+
+  private dispatchableChores(): { id: number }[] {
+    return this.db
+      .prepare("SELECT id FROM chore WHERE state IN ('planned','ready') ORDER BY id")
+      .all() as unknown as { id: number }[];
+  }
+
+  /** The attempt: a system worker, in a tree at the chore's target branch, with the role's
+   *  own scope off the record.
+   *
+   *  Every refusal here is silent and level-triggered — no worker free, no slot, no role on
+   *  the record — because none of them is the chore's fault and all of them heal on a later
+   *  tick. The chore is left where it was and stays on the board: a `planned` chore is only
+   *  started once there is somewhere for it to go, so "created, shown, and taken by nobody"
+   *  still reads as planned rather than as ready forever. */
+  private async dispatchChore(chore: Chore): Promise<number | null> {
+    const def = CHORE_KIND_DEFS[chore.kind];
+    if (def === undefined) return null;
+    const target = this.storyTargetOf(chore);
+    if (target === null) return null;
+    const scope = this.scopeOfRole(def.role);
+    if (scope === null) return null;
+    if (this.openAssignments() >= this.opts.budget.max_open) return null;
+    const worker = this.freeWorker(def.role);
+    if (worker === null) return null;
+
+    try {
+      const trees = this.treesFor(target.repo);
+      const branch = `story/${target.slug}`;
+      // The one thing a chore may never be given: a tree on the base branch. A merge made
+      // there is a landing, and landing is the operator's verb.
+      if (branch === (await trees.integrationBranch())) return null;
+      const tree = await trees.storyTree(target.slug, join(this.worktreeRoot(target.repo), `story-${target.slug}`));
+      // The approval guard lives in `start`, so a kind that needs one refuses here and
+      // nothing is created for it.
+      if (chore.state === "planned" && !applyChore(this.db, chore.id, "start", "runner").ok) return null;
+      const id = new Maker(this.db).assignment({
+        objective_type: "chore" as "task",
+        objective_id: chore.id,
+        worker_id: worker,
+        scope,
+        budget: this.opts.choreBudget ?? CHORE_BUDGET,
+        worktree: tree,
+      });
+      if (!applyChore(this.db, chore.id, "begin", `worker-${worker}`).ok) return null;
+      return id;
+    } catch {
+      // no branch, or no tree to be had: there is nothing to merge in yet
+      return null;
+    }
+  }
+
+  /** The check, proved by this machine. For `merge`: the base is an ancestor of the branch —
+   *  which is the merge having been made, not an agent's report of it — and the suite the
+   *  story carries is still green. */
+  private async proveChore(chore: Chore): Promise<{ ok: true } | { ok: false; why: string }> {
+    if (chore.kind !== "merge") return { ok: false, why: `nothing here knows how to prove a ${chore.kind} chore` };
+    const target = this.storyTargetOf(chore);
+    if (target === null) return { ok: false, why: "its target story is not on the record" };
+
+    const branch = `story/${target.slug}`;
+    try {
+      const base = await this.treesFor(target.repo).integrationBranch();
+      if (!(await this.contains(target.repo, branch, base))) {
+        return { ok: false, why: `${base} is not an ancestor of ${branch}: the merge was not made` };
+      }
+      const red = await this.suiteRed(target);
+      if (red !== null) return { ok: false, why: `${branch} contains ${base}, but the suite is red: ${red}` };
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, why: (err as Error).message };
+    }
+  }
+
+  /** `git merge-base --is-ancestor`: the merge, read off the graph rather than off a report. */
+  private async contains(repo: string, branch: string, base: string): Promise<boolean> {
+    return await exec("git", ["merge-base", "--is-ancestor", base, branch], { cwd: repo })
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  /** The first of the story's scripts that fails in the merged tree, or null when they all
+   *  pass. Run, not recorded: a verdict belongs to the test's own pass, and this is only the
+   *  chore's check asking whether the merge broke anything. */
+  private async suiteRed(target: { slug: string; repo: string; story: number }): Promise<string | null> {
+    const rows = this.db
+      .prepare(
+        `SELECT a.artefact AS artefact
+           FROM acceptance_test a
+           JOIN acceptance_criteria c ON c.id = a.parent_id
+           JOIN requirement r ON r.id = c.requirement_id
+          WHERE r.story_id = ? AND a.kind = 'script' AND a.artefact IS NOT NULL AND a.state <> 'dropped'
+          ORDER BY a.id`,
+      )
+      .all(target.story) as unknown as { artefact: string }[];
+    if (rows.length === 0) return null;
+
+    const tree = await this.treesFor(target.repo).storyTree(
+      target.slug,
+      join(this.worktreeRoot(target.repo), `story-${target.slug}`),
+    );
+    for (const row of rows) {
+      const green = await exec("bash", ["-lc", row.artefact], {
+        cwd: tree,
+        timeout: 10 * 60 * 1000,
+        maxBuffer: 4 * 1024 * 1024,
+      })
+        .then(() => true)
+        .catch(() => false);
+      if (!green) return row.artefact;
+    }
+    return null;
+  }
+
+  private storyTargetOf(chore: Chore): { story: number; slug: string; repo: string } | null {
+    if (chore.target_type !== "story") return null;
+    const row = this.db
+      .prepare(
+        `SELECT s.id AS story, s.slug AS slug, p.repo AS repo
+           FROM story s
+           JOIN epic e ON e.id = s.epic_id
+           JOIN release rel ON rel.id = e.release_id
+           JOIN project p ON p.id = rel.project_id
+          WHERE s.id = ?`,
+      )
+      .get(chore.target_id) as { story: number; slug: string; repo: string } | undefined;
+    if (row === undefined) return null;
+    return { ...row, repo: this.opts.repoRoot ?? row.repo };
+  }
+
+  /** The role's scope, off the record. Never a literal here: docs/design/18 declares what
+   *  `system` may write in config/roles.yaml, and a copy in this file is a second definition
+   *  that nothing checks against the first. */
+  private scopeOfRole(role: string): Scope | null {
+    const row = this.db.prepare("SELECT scope FROM role WHERE name = ?").get(role) as { scope: string } | undefined;
+    if (row === undefined) return null;
+    return JSON.parse(row.scope) as Scope;
+  }
+
+  private openAssignments(): number {
+    const row = this.db
+      .prepare("SELECT count(*) AS n FROM assignment WHERE phase IN ('pending','running','waiting')")
+      .get() as { n: number };
+    return row.n;
   }
 
   /** Would this branch merge into the base, without touching either?
