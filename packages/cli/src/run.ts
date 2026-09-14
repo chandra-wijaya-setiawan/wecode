@@ -25,6 +25,7 @@ import {
   type WorkerKind,
   writeProjectConfig,
 } from "@wecode/core";
+import { plan } from "./plan.js";
 
 const DB = (): string => currentDatabase();
 
@@ -55,6 +56,7 @@ function dispatch(argv: readonly string[]): number {
   if (head === "show") return show(rest);
   if (head === "land") return land(rest);
   if (head === "onboard") return onboard(rest);
+  if (head === "plan") return plan(rest);
   if (head === "workspaces") return workspaces();
   if (head === "tree") return showTree(rest);
   if (head === "watch") return watch(rest);
@@ -801,6 +803,7 @@ function usage(): number {
       "MAKING WORK",
       '  wecode <entity> create --parent <id> "<text>" [--artefact "<cmd>"] [--role <name>]',
       '  wecode task scope <id> --write "a.ts,b.ts"  which files that task may change',
+      "  wecode plan <file.yaml> [--epic <id>]      a whole story as one document (--dry-run to look)",
       "  wecode worker create <name> --role engineer --kind agent",
       "",
       "MOVING WORK",
