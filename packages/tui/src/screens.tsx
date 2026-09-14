@@ -8,25 +8,40 @@ import type { ReactNode } from "react";
 import { Box, Text } from "ink";
 import { boxKeys, type App, type Screen } from "./app.js";
 import { clip, columnWidths, List, type Column, type Row } from "./list.js";
+import { Outline, OUTLINE } from "./outline.js";
 
 /** Every column, on every screen. views.yaml declares title, filter, rows and empty but no
  *  columns, so there is nothing per-box to honour here: a box and its full-height page
  *  differ only in which rows they keep. */
-const COLUMNS: readonly Column[] = ["#", "what", "state", "detail"];
+export const COLUMNS: readonly Column[] = ["#", "what", "state", "detail"];
 
 /** The keys each screen answers, in the order a reader scans them. App.key handles j k g G
- *  enter esc q r v a; esc is the one key a screen can lack, because the dashboard is the
- *  bottom of the stack and has nothing to pop. Everything else is on every screen. */
-const KEYS: readonly (readonly [string, string])[] = [
+ *  + - enter esc q r v a; esc and +/- are the two a screen can lack, because the dashboard
+ *  has nothing to pop and only the outline folds. Everything else is on every screen.
+ *
+ *  A function rather than a constant: the outline names its own key, and this module and
+ *  that one each draw part of the other, so the list cannot be built at import time. */
+const KEYS = (): readonly (readonly [string, string])[] => [
   ["j/k", "move"],
   ["g/G", "top/end"],
+  ["+/-", "fold"],
   ["enter", "open"],
   ["esc", "back"],
   ["v", "box"],
+  [`v ${OUTLINE.key}`, "outline"],
   ["a", "act"],
   ["r", "refresh"],
   ["q", "quit"],
 ];
+
+
+/** Whether a key does anything on this screen. Only these two are ever dropped: the rest
+ *  are on every bar, because a key the bar omits is a screen with no way in. */
+const answered = (key: string, kind: Screen["kind"]): boolean => {
+  if (key === "esc") return kind !== "dashboard";
+  if (key === "+/-") return kind === "outline";
+  return true;
+};
 
 /** A border costs a column each side. */
 const BORDER = 2;
@@ -42,7 +57,7 @@ interface PanelProps {
 /** A bordered box whose title sits in its top border, carrying the count and the letter
  *  `v` opens it by. The title is drawn absolutely one row above the content, which is the
  *  border row — Ink has no title of its own, and this is the whole of the arithmetic. */
-function Panel({ title, letter, width, height, children }: PanelProps) {
+export function Panel({ title, letter, width, height, children }: PanelProps) {
   const named = letter === undefined ? "" : ` [${letter}]`;
   const label = clip(` ${title}${named} `, Math.max(width - 4, 0));
   return (
@@ -243,7 +258,7 @@ export function KeyBar({
   readonly screen: Screen;
   readonly width: number;
 }) {
-  const keys = KEYS.filter(([k]) => k !== "esc" || screen.kind !== "dashboard");
+  const keys = KEYS().filter(([k]) => answered(k, screen.kind));
   return (
     <Text wrap="truncate">{clip(keys.map(([k, what]) => `${k} ${what}`).join("  "), width)}</Text>
   );
@@ -265,6 +280,8 @@ export function Cockpit({ app, width, height }: ScreenProps) {
           <Dashboard app={app} width={width} height={body} />
         ) : screen.kind === "box" ? (
           <BoxPage app={app} screen={screen} width={width} height={body} />
+        ) : screen.kind === "outline" ? (
+          <Outline app={app} width={width} height={body} />
         ) : (
           <Node app={app} screen={screen} width={width} height={body} />
         )}

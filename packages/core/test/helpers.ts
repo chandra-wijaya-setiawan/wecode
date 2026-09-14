@@ -1,10 +1,9 @@
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { open } from "../src/index.js";
+import { tmp } from "./tmpdir.js";
 
-export const freshDb = (): DatabaseSync => open(join(mkdtempSync(join(tmpdir(), "wecode-")), "wecode.db"));
+export const freshDb = (): DatabaseSync => open(join(tmp(), "wecode.db"));
 
 const T = "2026-09-13T00:00:00.000Z";
 

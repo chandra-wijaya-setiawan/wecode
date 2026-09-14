@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Engine, Maker, open } from "@wecode/core";
 import { DEFAULT_BUDGET, Runner, type WorkerAdapter } from "../src/index.js";
+import { tmp } from "../../core/test/tmpdir.js";
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -78,7 +78,7 @@ const runner = (): Runner =>
   });
 
 beforeEach(() => {
-  repo = mkdtempSync(join(tmpdir(), "wecode-red-at-base-"));
+  repo = tmp("wecode-red-at-base-");
   git(repo, "init", "-q", "-b", "main");
   git(repo, "config", "user.name", "t");
   git(repo, "config", "user.email", "t@localhost");
@@ -86,7 +86,7 @@ beforeEach(() => {
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", "seed");
 
-  counter = join(mkdtempSync(join(tmpdir(), "wecode-counter-")), "runs");
+  counter = join(tmp("wecode-counter-"), "runs");
   writeFileSync(counter, "");
 
   db = open(join(repo, "wecode.db"));
