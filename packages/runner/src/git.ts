@@ -15,6 +15,23 @@ const real = (path: string): string => {
 
 export class GitError extends Error {}
 
+/** What a landing did. Field report: `land` printed "story/x landed" whether the base
+ *  gained a commit or git said "Already up to date", so a story read unlanded on the next
+ *  sweep and nobody could tell the two apart. There is no third outcome: either the base
+ *  moved and there is a sha to show, or nothing happened and there is a reason. */
+export type Landing =
+  | { readonly kind: "merged"; readonly sha: string }
+  | { readonly kind: "nothing"; readonly why: "no-branch" | "already-ancestor" };
+
+/** One vocabulary for the outcome, so the cli and the runner cannot describe the same
+ *  landing differently. */
+export function landingReport(branch: string, base: string, landing: Landing): string {
+  if (landing.kind === "merged") return `${branch} landed on ${base}: ${landing.sha.slice(0, 12)}`;
+  return landing.why === "no-branch"
+    ? `nothing to land: there is no ${branch}`
+    : `nothing to land: ${branch} is already in ${base}`;
+}
+
 /** What cleanup did, and what it refused to do. The refusals are the half that matters:
  *  they are what the board reports instead of a deletion. */
 export interface LandingCleanup {
@@ -278,6 +295,15 @@ export class Trees {
    *  land never retargets silently. It names the tree it was called in, names the tree it
    *  should be run in, and merges nothing. */
   async landStory(storySlug: string, from: string): Promise<string> {
+    const landing = await this.land(storySlug, from);
+    if (landing.kind === "merged") return landing.sha;
+    throw new GitError(
+      `land story/${storySlug} did nothing: ${landingReport(`story/${storySlug}`, await this.integrationBranch(), landing)}`,
+    );
+  }
+
+  /** The same merge, reporting what it found instead of a sha it cannot always have. */
+  async land(storySlug: string, from: string): Promise<Landing> {
     const branch = `story/${storySlug}`;
     const base = await this.integrationBranch();
     const here = real(await git(from, ["rev-parse", "--show-toplevel"]).catch(() => from));
@@ -301,6 +327,11 @@ export class Trees {
           `Run it in ${baseTree.path}, the checkout that holds ${base}.`,
       );
     }
+    if (!(await this.has(branch))) return { kind: "nothing", why: "no-branch" };
+    // Asked before the merge, because git answers "Already up to date" and exit 0 for it —
+    // indistinguishable, afterwards, from a merge that happened.
+    if (await this.isAncestor(here, branch, "HEAD")) return { kind: "nothing", why: "already-ancestor" };
+    const before = await git(here, ["rev-parse", "HEAD"]);
     await git(here, [
       "-c",
       "user.name=wecode",
@@ -313,7 +344,8 @@ export class Trees {
       `land ${branch}`,
       branch,
     ]);
-    return await git(here, ["rev-parse", "HEAD"]);
+    const sha = await git(here, ["rev-parse", "HEAD"]);
+    return sha === before ? { kind: "nothing", why: "already-ancestor" } : { kind: "merged", sha };
   }
 
   /** Guarded by the task's tests passing. Runs in the story tree, so nothing an agent can
