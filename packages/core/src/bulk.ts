@@ -1,13 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { Engine, type Change } from "./apply.js";
-import type { MachineSet } from "./types.js";
-
-export interface Refusal {
-  readonly id: number;
-  /** The engine's own words. Nothing here is rephrased: a bulk action that summarised the
-   *  refusal would be a second copy of the rules, and the two would drift. */
-  readonly why: string;
-}
+import type { MachineSet, Refusal } from "./types.js";
 
 export type BulkOutcome =
   | { readonly ok: true; readonly changes: readonly Change[] }
