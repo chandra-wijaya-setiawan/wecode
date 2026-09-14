@@ -58,6 +58,9 @@ export interface Tick {
   /** Stories whose tree is behind the base and could not be brought up to it. Nothing in
    *  them was judged this tick. */
   readonly behind: readonly Behind[];
+  /** Stories left alone this tick because a `refresh` chore for them is still open. Nothing
+   *  in them was judged, and the reason is here rather than nowhere. */
+  readonly waiting: readonly Waiting[];
   /** What the invariant set found this tick. Recorded as well as returned, so a view reads
    *  the table rather than running the pass again. Empty is the healthy answer. */
   readonly doctor: readonly Violation[];
@@ -84,6 +87,25 @@ export interface Behind {
   readonly story: number;
   readonly why: string;
 }
+
+/** A story whose judgement is owed to a repair wecode has already asked for, and which
+ *  repair that is.
+ *
+ *  Live proof, 15 Sep: chore 4, kind `refresh`, target story 165, was running when
+ *  acceptance_test 166 was judged at 21:14 and went red on the same stale-tree loadViews
+ *  error; the chore then finished, the branch gained the base, and the test passed at 21:17
+ *  untouched. The red verdict was noise from a race against a repair the tick itself had
+ *  raised — so while that repair is open the story is not judged, and the operator reads
+ *  "waiting on its refresh" instead of a failure that was never about the code. */
+export interface Waiting {
+  readonly story: number;
+  readonly why: string;
+}
+
+/** A `refresh` chore in these states is one nobody has discharged yet: raised and unstarted,
+ *  queued, or with a worker in the tree right now. `done` and `failed` are both settled —
+ *  the repair has had its pass, and the story is judged as it stands. */
+const REFRESH_OPEN = ["planned", "ready", "running"];
 
 /** One tick's chore work. `failed` carries the reason, because a chore that could not prove
  *  its check leaves a story unmergeable and the reason is the only thing a person can act
@@ -189,7 +211,7 @@ export class Runner {
     const exhausted = this.enforceRetryLimit();
     // Last, and after settle(): a story becomes delivered in settle(), and the condition
     // this reads is about a story that already is.
-    const chores = await this.raiseStoryChores(acceptance.behind);
+    const chores = await this.raiseStoryChores(acceptance.behind, acceptance.waiting);
     // Raised first, then performed: a chore created on this tick is dispatched on it, and a
     // chore whose attempt has ended is judged before the tick says what is still owed.
     const performed = await this.performChores();
@@ -218,6 +240,7 @@ export class Runner {
       drift,
       redAtBase,
       behind: acceptance.behind,
+      waiting: acceptance.waiting,
       settled: settled2.map((c) => `${c.entity} #${c.id} → ${c.to}`),
       scripts: {
         passed: [...settled.scripts.passed, ...acceptance.scripts.passed],
@@ -564,8 +587,13 @@ export class Runner {
   }
 
   /** Acceptance tests, in the story tree, once the story's tasks are finished — and never
-   *  before that tree has what the base has. */
-  private async proveStories(): Promise<{ readonly scripts: ScriptReport; readonly behind: readonly Behind[] }> {
+   *  before that tree has what the base has, nor while the repair that gives it the base is
+   *  still open. See `Waiting`. */
+  private async proveStories(): Promise<{
+    readonly scripts: ScriptReport;
+    readonly behind: readonly Behind[];
+    readonly waiting: readonly Waiting[];
+  }> {
     const stories = this.db
       .prepare(
         `SELECT DISTINCT s.id AS id, s.slug AS slug, p.repo AS repo
@@ -585,7 +613,21 @@ export class Runner {
     const skipped: number[] = [];
     const refused: Refused[] = [];
     const behind: Behind[] = [];
+    const waiting: Waiting[] = [];
     for (const story of stories) {
+      // Before the tree is touched at all: a worker may be in it on the very repair this
+      // would race, and its own merge would then be judged as the story's code.
+      const repair = choreFor(this.db, "refresh", "story", story.id);
+      if (repair !== null && REFRESH_OPEN.includes(repair.state)) {
+        const why = `waiting on its refresh: chore #${repair.id} is ${repair.state}`;
+        // Both lists, and they answer different questions. `waiting` is why this story was
+        // not judged; `behind` is that nothing under it was judged, which is what the tick
+        // already reports and stays true here. The chore pass is handed `waiting` and reads
+        // it first, so this row never feeds the raise-or-close rule.
+        waiting.push({ story: story.id, why });
+        behind.push({ story: story.id, why });
+        continue;
+      }
       try {
         const repo = this.opts.repoRoot ?? story.repo;
         const tree = await this.treesFor(repo).storyTree(story.slug, join(this.worktreeRoot(repo), `story-${story.slug}`));
@@ -605,7 +647,7 @@ export class Runner {
         // a story with no branch yet has nothing to prove
       }
     }
-    return { scripts: { passed, failed, skipped, refused }, behind };
+    return { scripts: { passed, failed, skipped, refused }, behind, waiting };
   }
 
   /** docs/design/18 `refresh`: the base has moved and a story tree in flight is behind it.
@@ -703,7 +745,7 @@ export class Runner {
    *  follows it: true again re-raises a chore that had settled, false closes one that had
    *  not. Neither is a timer and neither is a guess — this reads the branch against the base
    *  before it says either. */
-  private async raiseStoryChores(behind: readonly Behind[]): Promise<number[]> {
+  private async raiseStoryChores(behind: readonly Behind[], waiting: readonly Waiting[] = []): Promise<number[]> {
     const stories = this.db
       .prepare(
         `SELECT s.id AS id, s.slug AS slug, s.state AS state, rel.project_id AS project, p.repo AS repo
@@ -724,7 +766,7 @@ export class Runner {
         .catch(() => null);
       if (base === null) continue;
       const branch = `story/${story.slug}`;
-      open.push(...this.followRefresh(story, repo, branch, base, behind));
+      open.push(...this.followRefresh(story, repo, branch, base, behind, waiting));
       if (story.state !== "delivered") continue;
       if (await this.mergesCleanly(repo, base, branch)) {
         // The other half of the same rule. The conflict is gone, so an open chore for it is
@@ -766,9 +808,13 @@ export class Runner {
     branch: string,
     base: string,
     behind: readonly Behind[],
+    waiting: readonly Waiting[],
   ): number[] {
     const stale = behind.find((b) => b.story === story.id);
     const chore = choreFor(this.db, "refresh", "story", story.id);
+    // The literal case of "did not look at": the story was skipped because this very chore
+    // is open. Closing it here would say the tree took the base, which nothing checked.
+    if (waiting.some((w) => w.story === story.id)) return chore === null || chore.state === "done" ? [] : [chore.id];
     if (stale === undefined) {
       // The world moved: the tree took the base, so what was owed is not owed any more.
       // `running` is left alone — a worker is in the tree on it, and the verdict is that
