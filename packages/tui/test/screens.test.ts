@@ -1,9 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
+import { spawn, type ChildProcess, execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadMachines, open } from "@wecode/core";
 import { App } from "../src/app.js";
 import { draw } from "../src/screens.js";
-import { loadViews } from "../src/views.js";
+import { loadViews, ViewError } from "../src/views.js";
 
 const views = loadViews();
 const machines = loadMachines();
@@ -196,5 +201,156 @@ describe("the key bar", () => {
 
   it("is clipped to the width like every other line", () => {
     expect((lines(20, 10).at(-1) as string).length).toBeLessThanOrEqual(20);
+  });
+});
+
+/** views.yaml is what the screens are built out of, so what it refuses is part of what a
+ *  screen is. These moved here when render.ts went. */
+describe("views", () => {
+  it("loads every box the page orders", () => {
+    expect(views.map((v) => v.name)).toEqual([
+      "projects",
+      "running",
+      "needs_human",
+      "stale",
+      "queued",
+      "failed",
+      "roadmap",
+      "delivered",
+    ]);
+  });
+
+  it("refuses a filter the code does not know", () => {
+    const p = join(mkdtempSync(join(tmpdir(), "wecode-views-")), "views.yaml");
+    writeFileSync(p, "page:\n  order: [a]\nviews:\n  a:\n    filter: nonsense\n");
+    expect(() => loadViews(p)).toThrow(ViewError);
+  });
+
+  it("refuses a box the page orders but nothing declares", () => {
+    const p = join(mkdtempSync(join(tmpdir(), "wecode-views-")), "views.yaml");
+    writeFileSync(p, "page:\n  order: [ghost]\nviews:\n  a:\n    filter: running\n");
+    expect(() => loadViews(p)).toThrow(/ghost/);
+  });
+});
+
+/** bin.ts, driven as a process. Everything here is about the terminal rather than the
+ *  frame: the keys reaching App, the frame coming back, and the terminal being left usable
+ *  however the process ends. stdin is a pipe, so raw mode itself is not observable — what
+ *  is observable is that a keystroke is acted on and the cursor comes back. */
+describe("the terminal", () => {
+  const root = fileURLToPath(new URL("../../..", import.meta.url));
+  const bin = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
+  const SHOW = "\u001b[?25h";
+  const HIDE = "\u001b[?25l";
+
+  let path: string;
+  let child: ChildProcess | null = null;
+  let out = "";
+
+  beforeAll(() => {
+    execFileSync("npx", ["tsc", "-b"], { cwd: root, stdio: "pipe" });
+  }, 180_000);
+
+  beforeEach(() => {
+    path = join(mkdtempSync(join(tmpdir(), "wecode-tui-")), "wecode.db");
+    const file = open(path);
+    seed(file);
+    file.close();
+    out = "";
+    child = null;
+  });
+
+  const start = (): ChildProcess => {
+    const c = spawn(process.execPath, [bin, "--db", path], { stdio: ["pipe", "pipe", "pipe"] });
+    c.stdout?.setEncoding("utf8");
+    c.stdout?.on("data", (chunk: string) => {
+      out += chunk;
+    });
+    child = c;
+    return c;
+  };
+
+  const until = async (want: string, ms = 8000): Promise<void> => {
+    const started = Date.now();
+    while (!out.includes(want)) {
+      if (Date.now() - started > ms) throw new Error(`never saw ${JSON.stringify(want)} in:\n${out}`);
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  };
+
+  const exited = (c: ChildProcess): Promise<number> =>
+    new Promise((res) => c.on("exit", (code) => res(code ?? -1)));
+
+  it("draws the cockpit on start, cursor hidden", async () => {
+    start();
+    await until("q quit");
+    expect(out).toContain(HIDE);
+    expect(out).toContain("Projects (1)");
+    expect(out).toContain("storefront");
+    expect(out).toContain("workspace ");
+  });
+
+  it("feeds every keystroke to the app and redraws after each one", async () => {
+    const c = start();
+    await until("q quit");
+    c.stdin?.write("v");
+    await until("box?");
+    c.stdin?.write("p");
+    // The box screen: one filter, and esc on the bar because there is now something to pop.
+    await until("esc back");
+    expect(out).not.toContain("no box on");
+  });
+
+  it("redraws on a timer, without a keystroke", async () => {
+    start();
+    await until("Projects (1)");
+    const file = open(path);
+    file
+      .prepare("INSERT INTO project (slug,workspace_id,name,repo,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
+      .run("second", 1, "second", "/repo", "in_progress", T, T);
+    file.close();
+    await until("Projects (2)");
+  }, 20_000);
+
+  it("leaves the terminal clean on q", async () => {
+    const c = start();
+    await until("q quit");
+    c.stdin?.write("q");
+    expect(await exited(c)).toBe(0);
+    expect(out.endsWith(SHOW + "\u001b[2J\u001b[H")).toBe(true);
+  });
+
+  it("leaves the terminal clean on ctrl-c", async () => {
+    const c = start();
+    await until("q quit");
+    c.stdin?.write("\u0003");
+    expect(await exited(c)).toBe(0);
+    expect(out).toContain(SHOW);
+  });
+
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    it(`leaves the terminal clean on ${sig}`, async () => {
+      const c = start();
+      await until("q quit");
+      c.kill(sig);
+      expect(await exited(c)).toBe(0);
+      expect(out).toContain(SHOW);
+    });
+  }
+
+  it("refuses to start on a database that does not exist rather than making one", async () => {
+    const missing = join(mkdtempSync(join(tmpdir(), "wecode-tui-")), "nothing.db");
+    const c = spawn(process.execPath, [bin, "--db", missing], { stdio: ["pipe", "pipe", "pipe"] });
+    let err = "";
+    c.stderr?.on("data", (chunk: Buffer) => {
+      err += chunk.toString();
+    });
+    child = c;
+    expect(await exited(c)).toBe(1);
+    expect(err).toContain("no wecode workspace at");
+  });
+
+  afterEach(() => {
+    child?.kill("SIGKILL");
   });
 });
