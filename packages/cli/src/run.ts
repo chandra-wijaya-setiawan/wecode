@@ -10,6 +10,7 @@ import {
   currentDatabase,
   databaseOf,
   listWorkspaces,
+  loadRoles,
   tree,
   type Node,
   loadMachines,
@@ -25,6 +26,7 @@ import {
   type WorkerKind,
   writeProjectConfig,
 } from "@wecode/core";
+import { plan } from "./plan.js";
 
 const DB = (): string => currentDatabase();
 
@@ -49,14 +51,17 @@ function dispatch(argv: readonly string[]): number {
     const what = rest[0] ?? "";
     return isStateful(what) ? entityHelp(what) : usage();
   }
-  if (head === "board") return showBoard();
+  if (head === "board") return showBoard(rest);
   if (head === "init") return init();
   if (head === "answer") return answer(rest);
   if (head === "show") return show(rest);
   if (head === "land") return land(rest);
   if (head === "onboard") return onboard(rest);
+  if (head === "plan") return plan(rest);
   if (head === "workspaces") return workspaces();
   if (head === "tree") return showTree(rest);
+  if (head === "watch") return watch(rest);
+  if (head === "wait") return wait(rest);
   return verb(head, rest);
 }
 
@@ -105,6 +110,124 @@ function answer(args: readonly string[]): number {
     .run(text, who, new Date().toISOString(), id);
   process.stdout.write(`assignment #${id} answered by ${who}\n`);
   return 0;
+}
+
+/** `wecode watch [--project N] [--json]` — one line per state change, forever.
+ *
+ *  Read off the ledger, which is append-only, so this is a query with a cursor rather than
+ *  an event bus. An orchestrator that wants to be told instead of asking runs this in the
+ *  background and reads lines. */
+function watch(args: readonly string[]): number {
+  const { values } = parseArgs({
+    args: [...args],
+    options: {
+      project: { type: "string" },
+      json: { type: "boolean" },
+      since: { type: "string" },
+      once: { type: "boolean" },
+    },
+  });
+  const conn = db();
+  const project = values.project === undefined ? null : Number(values.project);
+
+  let cursor =
+    values.since === undefined
+      ? ((conn.prepare("SELECT coalesce(max(id), 0) AS n FROM ledger").get() as { n: number }).n)
+      : Number(values.since);
+
+  const tick = (): void => {
+    const rows = conn
+      .prepare("SELECT id, entity, entity_id, verb, from_state, to_state, actor, at FROM ledger WHERE id > ? ORDER BY id")
+      .all(cursor) as unknown as {
+      id: number;
+      entity: string;
+      entity_id: number;
+      verb: string;
+      from_state: string;
+      to_state: string;
+      actor: string;
+      at: string;
+    }[];
+
+    for (const r of rows) {
+      cursor = r.id;
+      if (project !== null && projectOf(r.entity, r.entity_id)?.id !== project) continue;
+      process.stdout.write(
+        values.json === true
+          ? `${JSON.stringify(r)}\n`
+          : `${r.at}  ${r.entity} #${r.entity_id}  ${r.from_state} → ${r.to_state}  ${r.verb} by ${r.actor}\n`,
+      );
+    }
+  };
+
+  tick();
+  if (values.once === true) return 0;
+
+  const timer = setInterval(tick, 1000);
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => {
+      clearInterval(timer);
+      process.exit(0);
+    });
+  }
+  return 0;
+}
+
+/** `wecode wait <entity> <id> [--timeout <seconds>]` — block until it settles, then exit.
+ *
+ *  The exit code is the answer: 0 if it reached a state the work wanted, 1 if it did not.
+ *  A harness that can run a command in the background gets a notification for free — the
+ *  command finishing *is* the notification. */
+function wait(args: readonly string[]): number {
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { timeout: { type: "string" }, quiet: { type: "boolean" } },
+  });
+  const [entity, raw] = positionals;
+  const id = Number(raw);
+  if (entity === undefined || !Number.isInteger(id)) return fail("wecode wait <entity> <id>");
+  if (!isStateful(entity)) return fail(`${entity} has no states to wait on`);
+
+  const good: Readonly<Record<string, readonly string[]>> = {
+    project: ["dropped"],
+    release: ["released"],
+    epic: ["delivered"],
+    story: ["delivered"],
+    requirement: ["met"],
+    acceptance_criteria: ["accepted"],
+    acceptance_test: ["passed"],
+    task_test: ["passed"],
+    task: ["done"],
+    assignment: ["succeeded"],
+  };
+  const machine = loadMachines()[entity];
+  const settled = new Set([...machine.terminal, ...(good[entity] ?? [])]);
+
+  const conn = db();
+  const col = entity === "assignment" ? "phase" : "state";
+  const deadline = values.timeout === undefined ? null : Date.now() + Number(values.timeout) * 1000;
+
+  const look = (): string | null =>
+    (conn.prepare(`SELECT ${col} AS s FROM ${entity} WHERE id = ?`).get(id) as { s: string } | undefined)?.s ?? null;
+
+  if (look() === null) return fail(`no ${entity} #${id}`);
+
+  // Blocking on purpose, and synchronously: the command exists to not return until the
+  // answer is known, and run() is not async. Atomics.wait is the one sleep that parks the
+  // thread rather than the event loop.
+  const park = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    const state = look();
+    if (state !== null && settled.has(state)) {
+      if (values.quiet !== true) process.stdout.write(`${entity} #${id} ${state}\n`);
+      return (good[entity] ?? []).includes(state) ? 0 : 1;
+    }
+    if (deadline !== null && Date.now() > deadline) {
+      return fail(`${entity} #${id} is still ${state ?? "gone"} after ${values.timeout}s`) + 1;
+    }
+    Atomics.wait(park, 0, 0, 1000);
+  }
 }
 
 /** `wecode tree [project]` — the whole shape, project to task_test. */
@@ -210,7 +333,6 @@ function onboard(args: readonly string[]): number {
   const learned = already ?? writeProjectConfig(projectFile, stack);
 
   write(join(config, "roles.yaml"), rolesFor(learned));
-  write(join(config, "budget.yaml"), BUDGET);
   ignore(resolve(root, ".gitignore"), ".wecode/");
 
   // The workspace is named once, and the repository remembers which one it joined.
@@ -231,6 +353,9 @@ function onboard(args: readonly string[]): number {
 
   const path = databaseOf(wsName);
   mkdirSync(dirname(path), { recursive: true });
+  // The budget is the workspace's: attention is one person's and does not divide by how
+  // many repositories they have.
+  write(join(workspaceDir(wsName), "budget.yaml"), BUDGET);
   const conn = open(path);
   const make = new Maker(conn);
 
@@ -238,9 +363,16 @@ function onboard(args: readonly string[]): number {
     (conn.prepare("SELECT id FROM workspace WHERE name = ?").get(wsName) as { id: number } | undefined)?.id ??
     make.workspace(wsName, workspaceDir(wsName));
 
+  // Roles without workers is a board nothing can be dispatched from: the runner refuses
+  // every candidate with "no worker free for role engineer", and nowhere does it say a
+  // worker is a thing you make. So onboarding makes one per agent role, named after it.
+  const hired = hire(conn, make, join(config, "roles.yaml"));
+
   const existing = conn.prepare("SELECT id FROM project WHERE repo = ?").get(root) as { id: number } | undefined;
   if (existing !== undefined) {
-    process.stdout.write(`project #${existing.id} is already onboarded here\n`);
+    process.stdout.write(
+      `project #${existing.id} is already onboarded here\n${workerLines(hired).join("\n")}${hired.length > 0 ? "\n" : ""}`,
+    );
     return 0;
   }
 
@@ -258,6 +390,7 @@ function onboard(args: readonly string[]): number {
       "",
       `workspace   ${wsName}  (${path})`,
       `project #${project}  release #${release}`,
+      ...workerLines(hired),
       "",
       "next: wecode epic create --parent " + String(release) + ' "<what this release is for>"',
       "",
@@ -267,6 +400,32 @@ function onboard(args: readonly string[]): number {
   );
   return 0;
 }
+
+interface Hired {
+  readonly id: number;
+  readonly role: string;
+  readonly fresh: boolean;
+}
+
+/** One agent worker per agent role, named after the role. A role that already has a worker
+ *  keeps it: onboarding twice must not double the workforce. Human roles are people, and
+ *  wecode does not get to hire those. */
+function hire(conn: ReturnType<typeof open>, make: Maker, rolesFile: string): Hired[] {
+  const hired: Hired[] = [];
+  for (const role of Object.values(loadRoles(rolesFile).roles)) {
+    if (role.worker_kind !== "agent") continue;
+    const had = conn.prepare("SELECT id FROM worker WHERE role = ?").get(role.name) as { id: number } | undefined;
+    hired.push(
+      had === undefined
+        ? { id: make.worker(role.name, role.name, "agent"), role: role.name, fresh: true }
+        : { id: had.id, role: role.name, fresh: false },
+    );
+  }
+  return hired;
+}
+
+const workerLines = (hired: readonly Hired[]): string[] =>
+  hired.map((h) => `worker #${h.id}  ${h.role}${h.fresh ? "" : "  (already there)"}`);
 
 /** Roles whose scopes are paths this repository has, rather than paths wecode assumed. */
 function rolesFor(c: { source: readonly string[]; tests: readonly string[] }): string {
@@ -380,11 +539,43 @@ function db() {
 
 class Missing extends Error {}
 
-function showBoard(): number {
-  const b = board(db());
+/** The project this repository is, or null when you are standing outside all of them. */
+function hereProject(): { id: number; name: string } | null {
+  return (
+    (db().prepare("SELECT id, name FROM project WHERE repo = ?").get(resolve(process.cwd())) as
+      | { id: number; name: string }
+      | undefined) ?? null
+  );
+}
+
+/** `wecode board [--all] [--project N]` — by default, only the project you are standing in.
+ *
+ *  A board of every project in the workspace cannot answer "what is left here", which is
+ *  the question somebody in a repository is asking. `--all` is the workspace-wide view. */
+function showBoard(args: readonly string[]): number {
+  const { values } = parseArgs({
+    args: [...args],
+    options: { all: { type: "boolean" }, project: { type: "string" } },
+  });
+
+  // Outside every project's repo there is no "here" to narrow to, so the board is the
+  // workspace's — which is what it always was.
+  const asked = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
+  const chosen = values.all === true ? null : asked;
+  if (chosen !== null && !Number.isInteger(chosen)) return fail("wecode board --project <id>");
+
+  const b = board(db(), chosen);
+  const mine = b.projects.find((p) => p.id === chosen);
+  if (chosen !== null && mine === undefined) return fail(`no project #${chosen}`);
+  process.stdout.write(
+    mine === undefined
+      ? `\nall ${b.projects.length} projects in this workspace\n`
+      : `\n#${mine.id} ${mine.what} · wecode board --all for the whole workspace\n`,
+  );
   const groups: [string, readonly { id: number; what: string; state: string; detail: string }[]][] = [
     ["RUNNING", b.running],
     ["NEEDS YOU", b.needs_human],
+    ["STALE", b.stale],
     ["QUEUE", b.queued],
     ["FAILED", b.failed],
     ["ROADMAP", b.roadmap],
@@ -438,6 +629,11 @@ function scope(entity: string, args: readonly string[]): number {
   const id = Number(positionals[0]);
   if (!Number.isInteger(id)) return fail('wecode task scope <id> --write "src/**" --tools bash');
 
+  // The same guard create has. Ids are global, and this one writes: scoping another
+  // project's task is silent, and was.
+  const wrong = elsewhere("task", id);
+  if (wrong !== null) return fail(wrong);
+
   const list = (v: string | undefined): string[] =>
     v === undefined || v === "" ? [] : v.split(",").map((s) => s.trim()).filter((s) => s !== "");
 
@@ -465,11 +661,20 @@ function create(entity: string, args: readonly string[]): number {
       artefact: { type: "string" },
       role: { type: "string" },
       path: { type: "string" },
+      project: { type: "string" },
     },
   });
 
   const text = positionals.join(" ");
   const parent = Number(values["parent"]);
+
+  // Ids are global. A parent in another project's tree is how a story ends up built in the
+  // wrong repository — the agents run wherever the task's project points, which is correct
+  // and was not what anybody meant.
+  if (Number.isInteger(parent) && values["project"] === undefined) {
+    const wrong = crossesProject(entity, parent);
+    if (wrong !== null) return fail(wrong);
+  }
   const make = new Maker(db());
   const needsParent = (): number => {
     if (!Number.isInteger(parent)) throw new Error(`wecode ${entity} create --parent <id> "<text>"`);
@@ -515,7 +720,9 @@ function create(entity: string, args: readonly string[]): number {
       default:
         return fail(`no such entity: ${entity}`);
     }
-    process.stdout.write(`${entity} #${id}\n`);
+    // Say what it joined. --parent takes any number, and ids are global: attaching to
+    // another project's tree is silent otherwise, and was.
+    process.stdout.write(`${entity} #${id}${where(entity, id)}\n`);
     return 0;
   } catch (err) {
     return fail((err as Error).message);
@@ -531,6 +738,98 @@ function artefactOr(given: string | undefined): string | null {
 
 function project(): ReturnType<typeof readProjectConfig> {
   return readProjectConfig(resolve(process.cwd(), "config/project.yaml"));
+}
+
+/** The project a row belongs to, by walking up. Null when the entity has no project. */
+function projectOf(entity: string, id: number): { id: number; name: string; repo: string } | null {
+  const up: Readonly<Record<string, string>> = {
+    release: "SELECT p.id, p.name, p.repo FROM release x JOIN project p ON p.id = x.project_id WHERE x.id = ?",
+    epic: "SELECT p.id, p.name, p.repo FROM epic x JOIN release r ON r.id = x.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    story:
+      "SELECT p.id, p.name, p.repo FROM story x JOIN epic e ON e.id = x.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    requirement:
+      "SELECT p.id, p.name, p.repo FROM requirement x JOIN story s ON s.id = x.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    acceptance_criteria:
+      "SELECT p.id, p.name, p.repo FROM acceptance_criteria x JOIN requirement q ON q.id = x.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    acceptance_test:
+      "SELECT p.id, p.name, p.repo FROM acceptance_test x JOIN acceptance_criteria c ON c.id = x.parent_id JOIN requirement q ON q.id = c.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    task: "SELECT p.id, p.name, p.repo FROM task x JOIN acceptance_test a ON a.id = x.acceptance_test_id JOIN acceptance_criteria c ON c.id = a.parent_id JOIN requirement q ON q.id = c.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
+    project: "SELECT p.id, p.name, p.repo FROM project p WHERE p.id = ?",
+  };
+  const sql = up[entity];
+  if (sql === undefined) return null;
+  try {
+    return (db().prepare(sql).get(id) as { id: number; name: string; repo: string } | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The parent entity a child of this kind hangs off. */
+const PARENT_OF: Readonly<Record<string, string>> = {
+  release: "project",
+  epic: "release",
+  story: "epic",
+  requirement: "story",
+  acceptance_criteria: "requirement",
+  acceptance_test: "acceptance_criteria",
+  task: "acceptance_test",
+  task_test: "task",
+};
+
+/** Refuse a parent whose project is not the one this repository is. */
+function crossesProject(entity: string, parent: number): string | null {
+  const parentEntity = PARENT_OF[entity];
+  if (parentEntity === undefined || parentEntity === "project") return null;
+  return elsewhere(parentEntity, parent);
+}
+
+/** Null when this row is in the project you are standing in, a complaint when it is not. */
+function elsewhere(entity: string, id: number): string | null {
+  const theirs = projectOf(entity, id);
+  if (theirs === null) return null;
+
+  const here = resolve(process.cwd());
+  const mine = db().prepare("SELECT id, name FROM project WHERE repo = ?").get(here) as
+    | { id: number; name: string }
+    | undefined;
+  if (mine === undefined || mine.id === theirs.id) return null;
+
+  return (
+    `${entity} #${id} belongs to project #${theirs.id} ${theirs.name} (${theirs.repo}),\n` +
+    `but you are in #${mine.id} ${mine.name}.\n` +
+    `  wecode tree ${mine.id}          to find the right one\n` +
+    `  --project ${theirs.id}          if you meant it`
+  );
+}
+
+/** The parent this row hangs off, named. */
+function where(entity: string, id: number): string {
+  const parents: Readonly<Record<string, { table: string; fk: string; label: string }>> = {
+    project: { table: "workspace", fk: "workspace_id", label: "name" },
+    release: { table: "project", fk: "project_id", label: "name" },
+    epic: { table: "release", fk: "release_id", label: "version" },
+    story: { table: "epic", fk: "epic_id", label: "title" },
+    requirement: { table: "story", fk: "story_id", label: "title" },
+    acceptance_criteria: { table: "requirement", fk: "requirement_id", label: "statement" },
+    acceptance_test: { table: "acceptance_criteria", fk: "parent_id", label: "statement" },
+    task: { table: "acceptance_test", fk: "acceptance_test_id", label: "statement" },
+    task_test: { table: "task", fk: "parent_id", label: "title" },
+  };
+  const up = parents[entity];
+  if (up === undefined) return "";
+  try {
+    const row = db()
+      .prepare(
+        `SELECT p.id AS id, p.${up.label} AS label FROM ${entity} c JOIN ${up.table} p ON p.id = c.${up.fk} WHERE c.id = ?`,
+      )
+      .get(id) as { id: number; label: string } | undefined;
+    if (row === undefined) return "";
+    const label = row.label.length > 44 ? `${row.label.slice(0, 43)}…` : row.label;
+    return `   under ${up.table} #${row.id}  ${label}`;
+  } catch {
+    return "";
+  }
 }
 
 function kindOf(v: string | undefined): TestKind {
@@ -564,12 +863,13 @@ function usage(): number {
       "START HERE",
       "  wecode onboard [name] [--workspace <ws>]   learn this repo, join a workspace, write config",
       "  wecode init                                an empty workspace, before you have a repo",
-      "  wecode board                               what is running, waiting, queued, failed",
+      "  wecode board [--all]                       what is running, waiting, queued, failed",
       "  wecode workspaces                          which workspaces exist, and which is current",
       "",
       "MAKING WORK",
       '  wecode <entity> create --parent <id> "<text>" [--artefact "<cmd>"] [--role <name>]',
       '  wecode task scope <id> --write "a.ts,b.ts"  which files that task may change',
+      "  wecode plan <file.yaml> [--epic <id>]      a whole story as one document (--dry-run to look)",
       "  wecode worker create <name> --role engineer --kind agent",
       "",
       "MOVING WORK",
@@ -580,6 +880,8 @@ function usage(): number {
       "LOOKING",
       "  wecode show <entity> <id>                  one record",
       "  wecode tree [project]                      the whole shape, project to task_test",
+      "  wecode watch [--project N] [--json]        one line per state change, forever (--once to drain)",
+      "  wecode wait <entity> <id>                  block until it settles; the exit code is the answer",
       "  wecode <entity> --help                     that entity's states and verbs",
       "",
       "RUNNING",

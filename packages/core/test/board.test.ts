@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { board, Engine, Maker, openAssignments } from "../src/index.js";
+import { board, Engine, Maker, openAssignments, recordRefusal } from "../src/index.js";
 import { freshDb, seed } from "./helpers.js";
 
 describe("the board", () => {
@@ -61,5 +61,36 @@ describe("the board", () => {
     engine.apply("assignment", a, "start", "runner");
     engine.apply("assignment", a, "fail", "runner");
     expect(openAssignments(db)).toBe(0);
+  });
+});
+
+describe("staleness comes from what the allocator recorded", () => {
+  it("shows a task only once the same reason has survived a few passes", () => {
+    const db = freshDb();
+    const tree = seed(db);
+    new Engine(db).apply("task", tree.task, "start", "chief");
+
+    recordRefusal(db, "its write scope overlaps an assignment already open", tree.task);
+    recordRefusal(db, "its write scope overlaps an assignment already open", tree.task);
+    expect(board(db).stale).toEqual([]);
+
+    recordRefusal(db, "its write scope overlaps an assignment already open", tree.task);
+    const stale = board(db).stale;
+    expect(stale).toHaveLength(1);
+    expect(stale[0]?.detail).toContain("overlaps");
+    expect(stale[0]?.detail).toContain("3 passes");
+  });
+
+  it("starts the clock again when the reason changes", () => {
+    const db = freshDb();
+    const tree = seed(db);
+    new Engine(db).apply("task", tree.task, "start", "chief");
+
+    for (let i = 0; i < 3; i++) recordRefusal(db, "no worker free for role engineer", tree.task);
+    recordRefusal(db, "waiting for a slot", tree.task);
+
+    expect(board(db).stale).toEqual([]);
+    const row = db.prepare("SELECT passes FROM refusal WHERE task_id = ?").get(tree.task) as { passes: number };
+    expect(row.passes).toBe(1);
   });
 });

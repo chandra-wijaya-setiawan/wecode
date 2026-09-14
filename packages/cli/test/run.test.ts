@@ -1,4 +1,5 @@
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -126,11 +127,138 @@ describe("first contact", () => {
   });
 });
 
+describe("onboarding hires the workers the runner needs", () => {
+  let repo: string;
+  let was: string;
+
+  const git = (...args: string[]): void => {
+    execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  };
+
+  const workers = (): { id: number; name: string; role: string; kind: string }[] => {
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const db = new DatabaseSync(join(process.env["WECODE_HOME"] as string, "workspaces", "default", "wecode.db"));
+    const rows = db.prepare("SELECT id, name, role, kind FROM worker ORDER BY id").all();
+    db.close();
+    return rows as { id: number; name: string; role: string; kind: string }[];
+  };
+
+  beforeEach(() => {
+    was = process.cwd();
+    process.env["WECODE_HOME"] = mkdtempSync(join(tmpdir(), "wecode-home-"));
+    repo = mkdtempSync(join(tmpdir(), "wecode-repo-"));
+    writeFileSync(join(repo, "pnpm-lock.yaml"), "lockfileVersion: 9\n");
+    process.chdir(repo);
+    git("init", "-q");
+    git("config", "user.name", "A Person");
+    git("config", "user.email", "person@example.com");
+    git("add", "-A");
+    git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "seed");
+  });
+
+  afterEach(() => {
+    process.chdir(was);
+    delete process.env["WECODE_HOME"];
+  });
+
+  it("creates one agent worker per role, named after the role, and says so", () => {
+    expect(run(["onboard", "thing"])).toBe(0);
+
+    expect(workers()).toEqual([
+      { id: 1, name: "engineer", role: "engineer", kind: "agent" },
+      { id: 2, name: "acceptance-tester", role: "acceptance-tester", kind: "agent" },
+    ]);
+    expect(said()).toContain("worker #1  engineer");
+    expect(said()).toContain("worker #2  acceptance-tester");
+  });
+
+  it("does not hire a second worker for a role that already has one", () => {
+    expect(run(["onboard", "thing"])).toBe(0);
+    out.length = 0;
+
+    expect(run(["onboard", "thing"])).toBe(0);
+    expect(workers().map((w) => w.role)).toEqual(["engineer", "acceptance-tester"]);
+    expect(said()).toContain("already onboarded here");
+    expect(said()).toContain("worker #1  engineer  (already there)");
+  });
+});
+
 describe("workspaces", () => {
   it("says there are none rather than inventing one", () => {
     process.env["WECODE_HOME"] = "/tmp/wecode-empty-home";
     expect(run(["workspaces"])).toBe(1);
     expect(err.join("")).toContain("no workspaces yet");
     delete process.env["WECODE_HOME"];
+  });
+});
+
+describe("a parent in another project", () => {
+  it("is refused, and names both projects", () => {
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    run(["project", "create", "--parent", "1", "one", "--path", process.cwd()]);
+    run(["release", "create", "--parent", "1", "0.0.1"]);
+    run(["epic", "create", "--parent", "1", "an epic of project one"]);
+    run(["project", "create", "--parent", "1", "two", "--path", "/somewhere/else"]);
+
+    out.length = 0;
+    err.length = 0;
+    // cwd is project one's repo, so an epic of project one is fine…
+    expect(run(["story", "create", "--parent", "1", "fine"])).toBe(0);
+
+    // …and pretending to be elsewhere is not.
+    const db = process.env["WECODE_DB"] as string;
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const conn = new DatabaseSync(db);
+    conn.prepare("UPDATE project SET repo = '/not/here' WHERE id = 1").run();
+    conn.prepare("UPDATE project SET repo = ? WHERE id = 2").run(process.cwd());
+    conn.close();
+
+    err.length = 0;
+    expect(run(["story", "create", "--parent", "1", "wrong tree"])).toBe(1);
+    expect(err.join("")).toContain("belongs to project #1");
+    expect(err.join("")).toContain("but you are in #2");
+  });
+});
+
+describe("telling the orchestrator, rather than being asked", () => {
+  const tree = (): void => {
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    run(["project", "create", "--parent", "1", "p", "--path", process.cwd()]);
+    run(["release", "create", "--parent", "1", "0.0.1"]);
+    run(["epic", "create", "--parent", "1", "e"]);
+    run(["story", "create", "--parent", "1", "s"]);
+  };
+
+  it("wait returns 0 when the thing reached what the work wanted", () => {
+    tree();
+    run(["story", "start", "1"]);
+    const db = new (require("node:sqlite") as typeof import("node:sqlite")).DatabaseSync(
+      process.env["WECODE_DB"] as string,
+    );
+    db.prepare("UPDATE story SET state = 'delivered' WHERE id = 1").run();
+    db.close();
+
+    out.length = 0;
+    expect(run(["wait", "story", "1"])).toBe(0);
+    expect(said()).toContain("story #1 delivered");
+  });
+
+  it("wait returns 1 when it settled the other way", () => {
+    tree();
+    run(["story", "drop", "1"]);
+    expect(run(["wait", "story", "1"])).toBe(1);
+  });
+
+  it("watch prints one line per transition, oldest first", () => {
+    tree();
+    run(["story", "start", "1"]);
+    out.length = 0;
+    // --since 0 replays, and with no interval left running the first pass is all of it
+    const code = run(["watch", "--since", "0", "--once"]);
+    expect(code).toBe(0);
+    expect(said()).toContain("story #1  planned → in_progress");
+    expect(said()).toContain("start by operator");
   });
 });
