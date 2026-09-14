@@ -13,11 +13,13 @@ import {
   type StatefulEntity,
 } from "@wecode/core";
 import type { Row } from "./list.js";
+import { foldedTo, nodeKey, outlineRows, OUTLINE } from "./outline.js";
 import type { View } from "./views.js";
 
 export type Screen =
   | { readonly kind: "dashboard" }
   | { readonly kind: "box"; readonly view: View }
+  | { readonly kind: "outline" }
   | { readonly kind: "node"; readonly entity: StatefulEntity; readonly id: number };
 
 /** A screen and where the cursor was on it, so esc comes back to the row you left. */
@@ -31,6 +33,9 @@ interface Frame {
 interface Item {
   readonly row: Row;
   readonly entity: StatefulEntity | null;
+  /** The tree node a row came from, on the outline. Elsewhere a row is a board row and
+   *  there is no node behind it. */
+  readonly node?: Node;
 }
 
 const ENTITY: Readonly<Record<keyof Board, StatefulEntity | null>> = {
@@ -87,6 +92,9 @@ export class App {
   private items: Item[] = [];
   private forest: readonly Node[] = [];
   private snapshot: Board | null = null;
+  /** Which outline nodes are open. It belongs to the screen and outlives nothing else:
+   *  folding is not a descent, so it must not cost an esc to undo. */
+  private expanded: ReadonlySet<string> = new Set();
   /** What the last key armed: v waits for a box's letter, a waits for a verb's. */
   private armed: null | "view" | "verb" = null;
 
@@ -163,6 +171,8 @@ export class App {
       case "G": this.cursor = this.items.length - 1; return;
       case "q": this.quit = true; return;
       case "r": this.refresh(); this.status = "refreshed"; return;
+      case "+": return this.fold(true);
+      case "-": return this.fold(false);
       case "v": return this.armView();
       case "a": return this.armVerb();
       default: this.status = `${k} does nothing here`;
@@ -180,10 +190,43 @@ export class App {
 
   private armView(): void {
     this.armed = "view";
-    this.status = `box? ${[...this.keys].map(([k, v]) => `${k} ${v.title}`).join("  ")}`;
+    const boxes = [...this.keys].map(([k, v]) => `${k} ${v.title}`);
+    this.status = `box? ${[...boxes, `${OUTLINE.key} ${OUTLINE.title}`].join("  ")}`;
+  }
+
+  /** The outline opens folded to the level its config names. Reopening refolds it: `v t`
+   *  is how you ask for the overview, and an overview that remembered last time's
+   *  expansions would not be one. */
+  private openOutline(): void {
+    this.expanded = foldedTo(this.forest, OUTLINE.depth);
+    this.push({ kind: "outline" });
+    this.status = OUTLINE.title;
+  }
+
+  /** Open or close the node under the cursor by one level. The rows are rebuilt rather
+   *  than a screen pushed, so the cursor stays where it was and esc still means back. */
+  private fold(open: boolean): void {
+    if (this.screen.kind !== "outline") {
+      this.status = `${open ? "+" : "-"} folds the outline — v ${OUTLINE.key}`;
+      return;
+    }
+    const node = this.current()?.node;
+    if (node === undefined) return;
+    if (open && node.children.length === 0) {
+      this.status = `${node.label} has nothing under it`;
+      return;
+    }
+    const keys = new Set(this.expanded);
+    if (open) keys.add(nodeKey(node));
+    else keys.delete(nodeKey(node));
+    this.expanded = keys;
+    this.items = this.itemsOf(this.screen);
+    this.cursor = this.cursor;
+    this.status = "";
   }
 
   private openBox(k: string): void {
+    if (k === OUTLINE.key) return this.openOutline();
     const view = this.keys.get(k);
     if (view === undefined) {
       this.status = `no box on ${k}`;
@@ -256,6 +299,12 @@ export class App {
   }
 
   private itemsOf(screen: Screen): Item[] {
+    if (screen.kind === "outline") {
+      // The head of the queue box is the next task the allocator will take, and the board
+      // is where that order is decided. The outline only marks the row it names.
+      const now = this.snapshot ?? board(this.db);
+      return outlineRows(this.forest, this.expanded, now.queued[0]?.id ?? null);
+    }
     if (screen.kind === "node") {
       const node = this.find(screen.entity, screen.id);
       return (node?.children ?? []).map((c) => ({
