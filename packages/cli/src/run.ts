@@ -601,8 +601,11 @@ function verb(entity: string, rest: readonly string[]): number {
   const [name, ...args] = rest;
   if (name === undefined) return fail(`wecode ${entity} <verb> …`);
 
-  if (name === "create") return create(entity, args);
-  if (name === "scope") return scope(entity, args);
+  // parseArgs would call --help an unknown option. It is the one place a newcomer looks
+  // for create's flags, so answer it here, before the flags are parsed at all.
+  const asked = args.some((a) => a === "--help" || a === "-h");
+  if (name === "create") return asked ? createHelp(entity) : create(entity, args);
+  if (name === "scope") return asked ? scopeHelp() : scope(entity, args);
 
   if (!isStateful(entity)) return fail(`${entity} has no states; its only verb is create`);
   const id = Number(args[0]);
@@ -895,6 +898,69 @@ function usage(): number {
       "  a task needs a scope, a role and a task_test that is ready before it can start",
       "  two tasks whose write scopes overlap will not run at the same time",
       "  a failing test is the answer — make another task, do not edit the code by hand",
+      "",
+    ].join("\n"),
+  );
+  return 0;
+}
+
+/** Which flags each entity's create reads, and what one call looks like. Kept beside the
+ *  switch in create() — the two must agree, and nothing else can check that they do. */
+const CREATE_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  workspace: ["path"],
+  project: ["parent", "path"],
+  release: ["parent"],
+  epic: ["parent"],
+  story: ["parent"],
+  requirement: ["parent"],
+  acceptance_criteria: ["parent"],
+  acceptance_test: ["parent", "kind", "artefact"],
+  task_test: ["parent", "kind", "artefact"],
+  task: ["parent", "role"],
+  worker: ["role", "kind"],
+};
+
+const FLAG_MEANS: Readonly<Record<string, string>> = {
+  parent: "<id>     the record it hangs off — required, and ids are global",
+  path: "<dir>      where the repository is (default: the current directory)",
+  kind: "<kind>     acceptance_test / task_test: how it is run; worker: agent or human",
+  artefact: "<cmd>  the command that proves it (default: this project's test command)",
+  role: "<name>     which role does the work",
+};
+
+const CREATE_EXAMPLE: Readonly<Record<string, string>> = {
+  workspace: 'wecode workspace create "acme" --path .',
+  project: 'wecode project create --parent 1 "storefront" --path .',
+  acceptance_test: 'wecode acceptance_test create --parent 1 "mail arrives" --artefact "bash mail.sh"',
+  task_test: 'wecode task_test create --parent 1 "mailer called" --artefact "vitest run"',
+  task: 'wecode task create --parent 1 "send the mail" --role engineer',
+  worker: "wecode worker create ada --role engineer --kind agent",
+};
+
+function createHelp(entity: string): number {
+  const flags = CREATE_FLAGS[entity];
+  if (flags === undefined) return fail(`no such entity: ${entity}`);
+
+  const example = CREATE_EXAMPLE[entity] ?? `wecode ${entity} create --parent 1 "<text>"`;
+  const lines = [`wecode ${entity} create [flags] "<text>"`, "", "  the text is everything that is not a flag", ""];
+  for (const f of flags) lines.push(`  --${f} ${FLAG_MEANS[f]}`);
+  process.stdout.write(`${lines.join("\n")}\n\n  ${example}\n\n`);
+  return 0;
+}
+
+function scopeHelp(): number {
+  process.stdout.write(
+    [
+      "wecode task scope <id> [flags]",
+      "",
+      "  which files that task may change, and which tools its agent may use.",
+      "  two tasks whose write scopes overlap will not run at the same time.",
+      "",
+      "  --write <globs>  comma-separated (default: this project's source and test paths)",
+      "  --tools <names>  comma-separated (default: bash,read,edit,write)",
+      "",
+      '  wecode task scope 1 --write "src/**,tests/**" --tools bash,read',
+      "",
       "",
     ].join("\n"),
   );
