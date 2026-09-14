@@ -5,6 +5,18 @@ const exec = promisify(execFile);
 
 export class GitError extends Error {}
 
+/** What cleanup did, and what it refused to do. The refusals are the half that matters:
+ *  they are what the board reports instead of a deletion. */
+export interface LandingCleanup {
+  readonly removed: readonly string[];
+  readonly left: readonly { readonly what: string; readonly why: string }[];
+}
+
+interface Checkout {
+  readonly path: string;
+  readonly branch: string | null;
+}
+
 async function git(cwd: string, args: readonly string[]): Promise<string> {
   try {
     const { stdout } = await exec("git", [...args], { cwd, maxBuffer: 8 * 1024 * 1024 });
@@ -109,11 +121,86 @@ export class Trees {
   }
 
   private async isWorktree(path: string): Promise<boolean> {
+    return (await this.checkouts()).some((c) => c.path === path);
+  }
+
+  private async checkouts(): Promise<Checkout[]> {
+    const list = await git(this.repo, ["worktree", "list", "--porcelain"]).catch(() => "");
+    const out: Checkout[] = [];
+    for (const block of list.split("\n\n")) {
+      const path = /^worktree (.+)$/m.exec(block)?.[1];
+      if (path === undefined) continue;
+      out.push({ path, branch: /^branch refs\/heads\/(.+)$/m.exec(block)?.[1] ?? null });
+    }
+    return out;
+  }
+
+  /** Uncommitted files nobody has seen. Untracked counts: an agent that wrote a file and
+   *  never staged it left work here, and a removed tree takes it with it. */
+  private async isDirty(path: string): Promise<boolean> {
     try {
-      const list = await git(this.repo, ["worktree", "list", "--porcelain"]);
-      return list.split("\n").some((l) => l === `worktree ${path}`);
+      return (await git(path, ["status", "--porcelain"])) !== "";
     } catch {
-      return false;
+      return true;
+    }
+  }
+
+  /** docs/design/14. Landing — "Cleanup, at the one moment it is safe". Called where
+   *  `landed_sha` is set and nowhere else: before the merge the branch is the only copy of
+   *  the work. Anything dirty is left standing and named, never deleted. */
+  async cleanupLanded(
+    storySlug: string,
+    storyTreePath: string,
+    taskSlugs: readonly string[],
+  ): Promise<LandingCleanup> {
+    const removed: string[] = [];
+    const left: { what: string; why: string }[] = [];
+    await git(this.repo, ["worktree", "prune"]).catch(() => "");
+
+    const storyBranch = `story/${storySlug}`;
+    const held = await this.releaseIfClean(storyTreePath, removed, left);
+    if (held) left.push({ what: storyBranch, why: `its tree is still standing at ${storyTreePath}` });
+    else await this.deleteBranch(storyBranch, removed, left);
+
+    for (const slug of taskSlugs) {
+      const branch = `task/${slug}`;
+      const tree = (await this.checkouts()).find((c) => c.branch === branch);
+      if (tree !== undefined && (await this.releaseIfClean(tree.path, removed, left))) {
+        left.push({ what: branch, why: `its tree is still standing at ${tree.path}` });
+        continue;
+      }
+      await this.deleteBranch(branch, removed, left);
+    }
+    return { removed, left };
+  }
+
+  /** True when the tree was kept. */
+  private async releaseIfClean(
+    path: string,
+    removed: string[],
+    left: { what: string; why: string }[],
+  ): Promise<boolean> {
+    if (!(await this.isWorktree(path))) return false;
+    if (await this.isDirty(path)) {
+      left.push({ what: path, why: "uncommitted files nobody has seen" });
+      return true;
+    }
+    await git(this.repo, ["worktree", "remove", path]);
+    removed.push(path);
+    return false;
+  }
+
+  private async deleteBranch(
+    name: string,
+    removed: string[],
+    left: { what: string; why: string }[],
+  ): Promise<void> {
+    if (!(await this.has(name))) return;
+    try {
+      await git(this.repo, ["branch", "-D", name]);
+      removed.push(name);
+    } catch (err) {
+      left.push({ what: name, why: (err as Error).message });
     }
   }
 
