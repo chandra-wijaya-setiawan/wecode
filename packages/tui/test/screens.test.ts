@@ -2,14 +2,14 @@ import { inverted, plain } from "./force-color.js";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { spawn, type ChildProcess, execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
 import { loadMachines, open } from "@wecode/core";
 import { App } from "../src/app.js";
+import { tmp } from "../../core/test/tmpdir.js";
 import { Cockpit } from "../src/screens.js";
 import { loadViews, ViewError } from "../src/views.js";
 import { seed, T, ins } from "./seed.js";
@@ -269,13 +269,13 @@ describe("views", () => {
   });
 
   it("refuses a filter the code does not know", () => {
-    const p = join(mkdtempSync(join(tmpdir(), "wecode-views-")), "views.yaml");
+    const p = join(tmp("wecode-views-"), "views.yaml");
     writeFileSync(p, "page:\n  order: [a]\nviews:\n  a:\n    filter: nonsense\n");
     expect(() => loadViews(p)).toThrow(ViewError);
   });
 
   it("refuses a box the page orders but nothing declares", () => {
-    const p = join(mkdtempSync(join(tmpdir(), "wecode-views-")), "views.yaml");
+    const p = join(tmp("wecode-views-"), "views.yaml");
     writeFileSync(p, "page:\n  order: [ghost]\nviews:\n  a:\n    filter: running\n");
     expect(() => loadViews(p)).toThrow(/ghost/);
   });
@@ -300,7 +300,7 @@ describe("the terminal", () => {
   }, 180_000);
 
   beforeEach(() => {
-    path = join(mkdtempSync(join(tmpdir(), "wecode-tui-")), "wecode.db");
+    path = join(tmp("wecode-tui-"), "wecode.db");
     const file = open(path);
     seed(file);
     file.close();
@@ -395,7 +395,7 @@ describe("the terminal", () => {
   }
 
   it("refuses to start on a database that does not exist rather than making one", async () => {
-    const missing = join(mkdtempSync(join(tmpdir(), "wecode-tui-")), "nothing.db");
+    const missing = join(tmp("wecode-tui-"), "nothing.db");
     const c = spawn(process.execPath, [bin, "--db", missing], { stdio: ["pipe", "pipe", "pipe"] });
     let err = "";
     c.stderr?.on("data", (chunk: Buffer) => {

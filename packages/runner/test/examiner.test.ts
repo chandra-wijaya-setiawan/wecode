@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Engine, Maker, open } from "@wecode/core";
-import { Scripts } from "../src/index.js";
+import { Examiner } from "../src/index.js";
 import { recordRed } from "../../core/test/helpers.js";
+import { tmp } from "../../core/test/tmpdir.js";
 
 let db: DatabaseSync;
 let make: Maker;
@@ -19,7 +19,7 @@ const stateOf = (table: string, id: number): string =>
   (db.prepare(`SELECT state FROM ${table} WHERE id = ?`).get(id) as { state: string }).state;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "wecode-scripts-"));
+  dir = tmp("wecode-examiner-");
   db = open(join(dir, "wecode.db"));
   make = new Maker(db);
   engine = new Engine(db);
@@ -53,14 +53,14 @@ describe("a task_test proves one attempt, in that attempt's tree", () => {
     const { task, taskTest } = readyTask("test -f hello.ts");
     writeFileSync(join(dir, "hello.ts"), "x\n");
 
-    const r = await new Scripts(db).runTaskTests(task, dir);
+    const r = await new Examiner(db).runTaskTests(task, dir);
     expect(r.passed).toContain(taskTest);
     expect(stateOf("task", task)).toBe("done");
   });
 
   it("fails in a tree where the work is not, and keeps what it printed", async () => {
     const { task, taskTest } = readyTask("test -f nowhere.ts");
-    const r = await new Scripts(db).runTaskTests(task, dir);
+    const r = await new Examiner(db).runTaskTests(task, dir);
     expect(r.failed).toContain(taskTest);
     expect(stateOf("task", task)).toBe("ready");
     const row = db.prepare("SELECT last_output FROM task_test WHERE id = ?").get(taskTest) as {
@@ -71,11 +71,11 @@ describe("a task_test proves one attempt, in that attempt's tree", () => {
 
   it("runs a test that failed before, so a retry can settle it", async () => {
     const { task, taskTest } = readyTask("test -f later.ts");
-    await new Scripts(db).runTaskTests(task, dir);
+    await new Examiner(db).runTaskTests(task, dir);
     expect(stateOf("task_test", taskTest)).toBe("failed");
 
     writeFileSync(join(dir, "later.ts"), "x\n");
-    await new Scripts(db).runTaskTests(task, dir);
+    await new Examiner(db).runTaskTests(task, dir);
     expect(stateOf("task_test", taskTest)).toBe("passed");
   });
 });
@@ -92,7 +92,7 @@ describe("a verdict stands until the thing it was reached against moves", () => 
   const runs = (): number => readFileSync(log, "utf8").trim().split("\n").filter(Boolean).length;
 
   beforeEach(() => {
-    tree = mkdtempSync(join(tmpdir(), "wecode-tree-"));
+    tree = tmp("wecode-tree-");
     log = join(dir, "runs.log");
     writeFileSync(log, "");
     artefact = `echo ran >> ${log}; exit 1`;
@@ -106,13 +106,13 @@ describe("a verdict stands until the thing it was reached against moves", () => 
 
   it("does not run a failed test again on an unchanged tree", async () => {
     const { task, taskTest } = readyTask(artefact);
-    const scripts = new Scripts(db);
+    const examiner = new Examiner(db);
 
-    const first = await scripts.runTaskTests(task, tree, { attempt: 1 });
+    const first = await examiner.runTaskTests(task, tree, { attempt: 1 });
     expect(first.failed).toContain(taskTest);
     expect(runs()).toBe(1);
 
-    const second = await scripts.runTaskTests(task, tree, { attempt: 1 });
+    const second = await examiner.runTaskTests(task, tree, { attempt: 1 });
     expect(second.skipped).toContain(taskTest);
     expect(second.failed).toEqual([]);
     expect(runs()).toBe(1);
@@ -121,17 +121,17 @@ describe("a verdict stands until the thing it was reached against moves", () => 
 
   it("runs it again once the tree has a new commit", async () => {
     const { task, taskTest } = readyTask(artefact);
-    const scripts = new Scripts(db);
+    const examiner = new Examiner(db);
 
-    await scripts.runTaskTests(task, tree, { attempt: 1 });
-    await scripts.runTaskTests(task, tree, { attempt: 1 });
+    await examiner.runTaskTests(task, tree, { attempt: 1 });
+    await examiner.runTaskTests(task, tree, { attempt: 1 });
     expect(runs()).toBe(1);
 
     writeFileSync(join(tree, "fix.ts"), "x\n");
     git(tree, "add", "-A");
     git(tree, "commit", "-q", "-m", "fix");
 
-    const third = await scripts.runTaskTests(task, tree, { attempt: 1 });
+    const third = await examiner.runTaskTests(task, tree, { attempt: 1 });
     expect(third.failed).toContain(taskTest);
     expect(third.skipped).toEqual([]);
     expect(runs()).toBe(2);
@@ -139,10 +139,10 @@ describe("a verdict stands until the thing it was reached against moves", () => 
 
   it("runs it again for a new attempt, which a fresh tree at the same tip would hide", async () => {
     const { task, taskTest } = readyTask(artefact);
-    const scripts = new Scripts(db);
+    const examiner = new Examiner(db);
 
-    await scripts.runTaskTests(task, tree, { attempt: 1 });
-    const retry = await scripts.runTaskTests(task, tree, { attempt: 2 });
+    await examiner.runTaskTests(task, tree, { attempt: 1 });
+    const retry = await examiner.runTaskTests(task, tree, { attempt: 2 });
 
     expect(retry.failed).toContain(taskTest);
     expect(runs()).toBe(2);
@@ -150,12 +150,12 @@ describe("a verdict stands until the thing it was reached against moves", () => 
 
   it("runs it again when the artefact itself is rewritten", async () => {
     const { task, taskTest } = readyTask(artefact);
-    const scripts = new Scripts(db);
+    const examiner = new Examiner(db);
 
-    await scripts.runTaskTests(task, tree, { attempt: 1 });
+    await examiner.runTaskTests(task, tree, { attempt: 1 });
     db.prepare("UPDATE task_test SET artefact = ? WHERE id = ?").run(`echo ran >> ${log}; true`, taskTest);
 
-    const after = await scripts.runTaskTests(task, tree, { attempt: 1 });
+    const after = await examiner.runTaskTests(task, tree, { attempt: 1 });
     expect(after.passed).toContain(taskTest);
     expect(runs()).toBe(2);
   });
@@ -164,15 +164,15 @@ describe("a verdict stands until the thing it was reached against moves", () => 
 describe("an acceptance_test proves a criteria, once its tasks are finished", () => {
   it("does not run while a task is unfinished", async () => {
     const { acceptance } = readyTask("test -f missing.ts", "true");
-    const r = await new Scripts(db).runAcceptanceTests(story, dir);
+    const r = await new Examiner(db).runAcceptanceTests(story, dir);
     expect(r.passed).not.toContain(acceptance);
     expect(stateOf("acceptance_test", acceptance)).toBe("ready");
   });
 
   it("runs once they are, and delivers the story", async () => {
     const { task, acceptance } = readyTask("true", "true");
-    await new Scripts(db).runTaskTests(task, dir);
-    await new Scripts(db).runAcceptanceTests(story, dir);
+    await new Examiner(db).runTaskTests(task, dir);
+    await new Examiner(db).runAcceptanceTests(story, dir);
     expect(stateOf("acceptance_test", acceptance)).toBe("passed");
     expect(stateOf("story", story)).toBe("delivered");
   });

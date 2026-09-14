@@ -63,3 +63,10 @@ export interface TestScript {
 
 export const WORKER_KINDS = ["agent", "human"] as const;
 export type WorkerKind = (typeof WORKER_KINDS)[number];
+
+/** Why one row was refused, in the refuser's own words. One definition: the allocator
+ *  passing a candidate over and a bulk action declining an id are the same fact. */
+export interface Refusal {
+  readonly id: number;
+  readonly why: string;
+}

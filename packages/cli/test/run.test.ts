@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { open } from "@wecode/core";
 import { run } from "../src/run.js";
 import { recordRed } from "../../core/test/helpers.js";
+import { tmp } from "../../core/test/tmpdir.js";
 
 /** The cli has no verb for the red record yet, so a fixture that wants to pass an
  *  acceptance_test writes it into the same database the cli is driving. */
@@ -15,7 +15,7 @@ let out: string[];
 let err: string[];
 
 beforeEach(() => {
-  process.env["WECODE_DB"] = join(mkdtempSync(join(tmpdir(), "wecode-cli-")), "wecode.db");
+  process.env["WECODE_DB"] = join(tmp("wecode-cli-"), "wecode.db");
   out = [];
   err = [];
   vi.spyOn(process.stdout, "write").mockImplementation((s) => (out.push(String(s)), true));
@@ -202,8 +202,8 @@ describe("onboarding hires the workers the runner needs", () => {
 
   beforeEach(() => {
     was = process.cwd();
-    process.env["WECODE_HOME"] = mkdtempSync(join(tmpdir(), "wecode-home-"));
-    repo = mkdtempSync(join(tmpdir(), "wecode-repo-"));
+    process.env["WECODE_HOME"] = tmp("wecode-home-");
+    repo = tmp("wecode-repo-");
     writeFileSync(join(repo, "pnpm-lock.yaml"), "lockfileVersion: 9\n");
     process.chdir(repo);
     git("init", "-q");
@@ -360,7 +360,7 @@ describe("landing a story that will not merge", () => {
 
   beforeEach(() => {
     was = process.cwd();
-    repo = mkdtempSync(join(tmpdir(), "wecode-land-"));
+    repo = tmp("wecode-land-");
     process.chdir(repo);
     git("init", "-q", "-b", "master");
     git("config", "user.name", "A Person");

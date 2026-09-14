@@ -13,6 +13,22 @@ roles:
       write: ["packages/*/src/**", "packages/*/test/**", "packages/*/config/**", "src/**", "tests/**"]
       tools: ["bash", "read", "edit", "write"]
 
+  # docs/design/18. The role a chore runs under, and the only one that may write anywhere:
+  # a merge conflict is wherever the conflict is, so a scope that names files would refuse
+  # the work it exists to do. That authority is exactly why a chore is a separate noun and
+  # not a flag on a task — a task must never hold it.
+  #
+  # The two standing invariants above still bind it. `never_touch` and `never_run` are a
+  # ceiling above the ceiling, not a scope, so `**` does not reach them.
+  #
+  # No worker holds this role yet. Until a system worker exists, a merge chore is created,
+  # shown, and taken by nobody.
+  system:
+    worker_kind: agent
+    scope:
+      write: ["**"]
+      tools: ["bash", "read", "edit", "write"]
+
   acceptance-tester:
     worker_kind: agent
     scope:
