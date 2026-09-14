@@ -78,6 +78,22 @@ const choreRefusals = (db: DatabaseSync): string =>
         UNION ALL
        `;
 
+/** What the task stands refused permission to write, as a clause to hang off a detail.
+ *
+ *  Beside the other refusals rather than in a box of its own: a task is refused a pass by
+ *  the allocator and refused a write by the harness, and the operator reading "why is this
+ *  not moving" wants both in the same sentence. Empty when there is nothing recorded — an
+ *  aggregate over no rows is NULL, so `coalesce` at the call site makes it nothing at all.
+ *
+ *  `scope_refusal` arrives with migration 011, and a database older than it has nothing to
+ *  say here rather than an error to raise. */
+const refusedWrite = (db: DatabaseSync, task: string): string =>
+  !hasTable(db, "scope_refusal")
+    ? "NULL"
+    : `(SELECT ' · refused a write to ' || group_concat(j.value, ', ')
+          FROM scope_refusal sr, json_each(sr.paths) j
+         WHERE sr.task_id = ${task})`;
+
 /** No project asked for is every project: the predicate is true for every row. */
 const only = (project: string): string => `(:project IS NULL OR ${project} = :project)`;
 
@@ -85,6 +101,7 @@ const only = (project: string): string => `(:project IS NULL OR ${project} = :pr
  *  how you get back out again, so it always shows the whole workspace. */
 export function board(db: DatabaseSync, project: number | null = null): Board {
   const rows = (sql: string): Row[] => db.prepare(sql).all({ project }) as unknown as Row[];
+  const denied = `coalesce(${refusedWrite(db, "t.id")}, '')`;
   return {
     // What exists, with how much of it is finished. Without this a board with nothing in
     // flight is indistinguishable from a board with no project at all.
@@ -109,7 +126,8 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
     stale: rows(
       `SELECT t.id AS id, t.title AS what, 'ready' AS state,
               f.why || ' · ' || f.passes || ' passes · '
-                   || cast((julianday('now') - julianday(f.since)) * 1440 AS int) || 'm' AS detail
+                   || cast((julianday('now') - julianday(f.since)) * 1440 AS int) || 'm'
+                   || ${denied} AS detail
          FROM task t JOIN refusal f ON f.task_id = t.id
         WHERE t.state = 'ready'
           AND f.passes >= 3
@@ -168,7 +186,7 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
     // The detail is why it is not running: the last pass's refusal, or its role.
     queued: rows(
       `SELECT t.id AS id, t.title AS what, t.state AS state,
-              coalesce(f.why, t.role) AS detail
+              coalesce(f.why, t.role) || ${denied} AS detail
          FROM task t LEFT JOIN refusal f ON f.task_id = t.id
         WHERE t.state = 'ready'
           AND ${only(ofTask("t.id"))}
@@ -187,8 +205,8 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
               CASE
                 WHEN t.attempts >= t.max_retry
                   THEN 'out of attempts · ' || t.attempts || ' of ' || t.max_retry
-                       || ' · retry it with a reason, or drop it'
-                ELSE 'attempts ' || t.attempts || '/' || t.max_retry
+                       || ${denied} || ' · retry it with a reason, or drop it'
+                ELSE 'attempts ' || t.attempts || '/' || t.max_retry || ${denied}
               END AS detail
          FROM task t
         WHERE t.state = 'failed' AND ${only(ofTask("t.id"))}
