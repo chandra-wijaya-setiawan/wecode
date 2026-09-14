@@ -7,6 +7,8 @@ import {
   CHORE_KIND_DEFS,
   clearChoreRefusal,
   clearRefusal,
+  choreFor,
+  closeChore,
   Engine,
   ensureChore,
   loadRoles,
@@ -581,9 +583,12 @@ export class Runner {
    *  board, with a target and a check, and takeable by a worker.
    *
    *  This runs every tick and creates nothing on the second one: `ensureChore` is keyed on
-   *  (kind, target), which is the condition itself. Nothing here decides the chore is over
-   *  either — a merge that has since become possible is still the system worker's to make,
-   *  because the merge is what the check proves. */
+   *  (kind, target), which is the condition itself.
+   *
+   *  Level-triggered in both directions. The condition is re-read every tick and the chore
+   *  follows it: true again re-raises a chore that had settled, false closes one that had
+   *  not. Neither is a timer and neither is a guess — this reads the branch against the base
+   *  before it says either. */
   private async raiseMergeChores(): Promise<number[]> {
     const stories = this.db
       .prepare(
@@ -603,7 +608,22 @@ export class Runner {
         .integrationBranch()
         .catch(() => null);
       if (base === null) continue;
-      if (await this.mergesCleanly(repo, base, `story/${story.slug}`)) continue;
+      const branch = `story/${story.slug}`;
+      if (await this.mergesCleanly(repo, base, branch)) {
+        // The other half of the same rule. The conflict is gone, so an open chore for it is
+        // a stale claim, and the row should say the world moved rather than sit in `failed`
+        // being refused every tick.
+        //
+        // Unless the merge itself has been made — then the world did not move, a chore's
+        // attempt did, and the chore's own check is what judges it. `merge` proves two
+        // things and only one of them is the conflict; a story whose branch swallowed the
+        // base and went red is drift to keep on the board, not a chore to close.
+        const stale = choreFor(this.db, "merge", "story", story.id);
+        if (stale !== null && !(await this.contains(repo, branch, base))) {
+          closeChore(this.db, stale.id, `${branch} no longer conflicts with ${base}`, "runner");
+        }
+        continue;
+      }
 
       const chore = ensureChore(this.db, {
         project_id: story.project,
