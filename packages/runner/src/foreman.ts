@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
-import { Engine, now, type Budget } from "@wecode/core";
+import { Engine, now, recordScopeRefusal, type Budget } from "@wecode/core";
+import { hasWriteDenials } from "./adapters/denials.js";
 import { Trees } from "./git.js";
 import type { History, Observation, TestFailure, WorkerAdapter, Work } from "./ports.js";
 
@@ -92,12 +93,29 @@ export class Foreman {
         void err;
       }
 
+      this.recordDenials(adapter, row);
+
       const moved = this.record(row.id, seen);
       if (seen.phase === "failed") failed.push(row.id);
       else if (moved) advanced.push(row.id);
     }
 
     return { started, advanced, failed };
+  }
+
+  /** What the harness refused this attempt permission to write, carried to the record.
+   *
+   *  Every tick, not only at the end: the attempt may be killed, lost or timed out, and a
+   *  refusal read only on a clean finish is a refusal read on exactly the passes that did
+   *  not need it. Against the task, because the scope is the task's and so is the decision
+   *  to widen it — an objective that is not a task has no such record to keep.
+   *
+   *  Recorded, never acted on. Widening a scope is the operator's verb; this is only so the
+   *  board can say what was asked for instead of 'out of attempts'. */
+  private recordDenials(adapter: WorkerAdapter, row: OpenRow): void {
+    if (row.objective_type !== "task" || !hasWriteDenials(adapter)) return;
+    const paths = adapter.takeRefusedWrites(row.id);
+    if (paths.length > 0) recordScopeRefusal(this.db, row.objective_id, paths);
   }
 
   /** A lost attempt that still has somewhere to go back to. The session id and the worktree
