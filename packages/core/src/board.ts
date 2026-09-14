@@ -15,7 +15,6 @@ export interface Board {
   readonly needs_human: readonly Row[];
   readonly queued: readonly Row[];
   readonly failed: readonly Row[];
-  readonly unproven: readonly Row[];
   readonly roadmap: readonly Row[];
   readonly delivered: readonly Row[];
 }
@@ -146,18 +145,6 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
          FROM task t
         WHERE t.state = 'failed' AND ${only(ofTask("t.id"))}
         ORDER BY t.id`,
-    ),
-    // Ready to run, but nobody has watched it fail — so passing it would prove nothing.
-    // A group rather than a state: red is an observation, and the test is otherwise a
-    // perfectly ordinary ready test. These are what `test_has_been_red` will refuse.
-    unproven: rows(
-      `SELECT a.id AS id, a.statement AS what, a.state AS state,
-              'no red run recorded' AS detail
-         FROM acceptance_test a
-        WHERE a.state = 'ready'
-          AND a.red_at_base_sha IS NULL
-          AND ${only(ofTest("a.id"))}
-        ORDER BY a.id`,
     ),
     delivered: rows(
       `SELECT s.id AS id, s.title AS what, s.state AS state, 'story' AS detail FROM story s

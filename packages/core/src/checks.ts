@@ -1,4 +1,3 @@
-import type { DatabaseSync } from "node:sqlite";
 import { ALLOW, refuse, type Guard, type GuardName, type GuardRegistry } from "./guards.js";
 import type { Repo } from "./repo.js";
 import type { StatefulEntity } from "./types.js";
@@ -23,14 +22,6 @@ function allChildrenIn(repo: Repo, settled: readonly string[], noChildrenIsEnoug
   };
 }
 
-/** The database behind a repository.
- *
- *  A guard that reads a column Repo exposes no accessor for still has to read it from the
- *  record, and the registry is built from a Repo alone. Reaching through it is narrower
- *  than widening every caller's signature; the point being preserved is that a guard's
- *  only input is the stored row. */
-const dbOf = (repo: Repo): DatabaseSync => (repo as unknown as { db: DatabaseSync }).db;
-
 /** The guards, wired to a repository.
  *
  *  The cascade guards read children and nothing else, which is what makes the chain from a
@@ -53,26 +44,6 @@ export function guards(repo: Repo): Readonly<Record<GuardName, Guard>> {
       const artefact = repo.artefactOf(entity as "acceptance_test" | "task_test", id);
       return artefact === null || artefact.trim() === ""
         ? refuse("it has no artefact — there is nothing to run or to follow")
-        : ALLOW;
-    },
-
-    /** A test nobody has seen fail cannot pass: it may assert what the code already did.
-     *
-     *  This reads the record and only the record. It does not run the test, stat a file or
-     *  look at a clock — a guard is evaluated wherever a verb is applied, which is often
-     *  nowhere near a worktree, so anything derived from the tree would be a guess. Red is
-     *  recorded by whoever watched it happen; this only insists that somebody did. */
-    test_has_been_red: ({ entity, id }) => {
-      if (entity !== "acceptance_test") return refuse(`${entity} records no red run at its base`);
-      const row = dbOf(repo)
-        .prepare("SELECT slug, statement, red_at_base_sha FROM acceptance_test WHERE id = ?")
-        .get(id) as { slug: string; statement: string; red_at_base_sha: string | null } | undefined;
-      if (row === undefined) return refuse(`no acceptance_test #${id}`);
-      return row.red_at_base_sha === null
-        ? refuse(
-            `acceptance_test ${row.slug} #${id} ("${row.statement}") has never been seen to fail — ` +
-              "record the base it was red at before passing it",
-          )
         : ALLOW;
     },
 

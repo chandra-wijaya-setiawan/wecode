@@ -53,13 +53,5 @@ export type AskKind = (typeof ASK_KINDS)[number];
 export const TEST_KINDS = ["script", "judged"] as const;
 export type TestKind = (typeof TEST_KINDS)[number];
 
-/** Where a test's script is meant to live. Spec, written once: it may name a file that does
- *  not exist yet, and it is never a reading of the filesystem — no companion flag says
- *  whether the file is there, because that answer changes with every branch. Null means the
- *  test does not say, which is every judged test and every row written before the column. */
-export interface TestScript {
-  readonly script_path: string | null;
-}
-
 export const WORKER_KINDS = ["agent", "human"] as const;
 export type WorkerKind = (typeof WORKER_KINDS)[number];

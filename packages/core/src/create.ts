@@ -124,20 +124,13 @@ export class Maker {
     });
   }
 
-  acceptanceTest(
-    parent_id: number,
-    statement: string,
-    kind: TestKind,
-    artefact: string | null = null,
-    script_path: string | null = null,
-  ): number {
+  acceptanceTest(parent_id: number, statement: string, kind: TestKind, artefact: string | null = null): number {
     return insert(this.db, "acceptance_test", {
       ...this.stamp("acceptance_test", slugify(statement)),
       parent_id,
       statement,
       kind,
       artefact,
-      script_path,
     });
   }
 
@@ -157,20 +150,13 @@ export class Maker {
     });
   }
 
-  taskTest(
-    parent_id: number,
-    statement: string,
-    kind: TestKind,
-    artefact: string | null = null,
-    script_path: string | null = null,
-  ): number {
+  taskTest(parent_id: number, statement: string, kind: TestKind, artefact: string | null = null): number {
     return insert(this.db, "task_test", {
       ...this.stamp("task_test", slugify(statement)),
       parent_id,
       statement,
       kind,
       artefact,
-      script_path,
     });
   }
 
