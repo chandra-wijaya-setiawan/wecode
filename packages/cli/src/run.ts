@@ -481,6 +481,7 @@ function land(args: readonly string[]): number {
   }
 
   const branch = `story/${story.slug}`;
+  const base = headBranch();
 
   // The landing commit is the operator's, so it needs the operator's identity. wecode signs
   // an agent's attempt; it does not sign a person's merge.
@@ -493,6 +494,7 @@ function land(args: readonly string[]): number {
     );
   }
 
+  let sha: string;
   try {
     // Tracked changes only. An untracked file does not affect a merge, and git refuses on
     // its own if one would be overwritten — refusing here as well blocked a landing over
@@ -501,6 +503,17 @@ function land(args: readonly string[]): number {
     if (dirty !== "") {
       return fail(`your working tree has changes. Commit or stash them first:\n${dirty}`);
     }
+    // A delivered story whose branch is gone has nothing to merge, and calling that a
+    // landing is the reported defect. It is a failure, not a quiet success: the work is
+    // somewhere else, or nowhere.
+    if (!hasRef(branch)) return fail(nothingToLand(branch, base, "no-branch"));
+    // git answers "Already up to date" and exit 0 for a branch the base already holds, and
+    // that was indistinguishable, afterwards, from a merge that happened.
+    if (isAncestor(branch, "HEAD")) {
+      process.stdout.write(`${nothingToLand(branch, base, "already-ancestor")}\n`);
+      return 0;
+    }
+    const before = headSha();
     try {
       execFileSync("git", ["merge", "--no-ff", "-m", `land ${branch}`, branch], {
         encoding: "utf8",
@@ -521,12 +534,96 @@ function land(args: readonly string[]): number {
           `  the story needs a merge chore: rebase or merge your branch into ${branch}, redeliver, then land again.`,
       );
     }
+    sha = headSha();
+    if (sha === before) {
+      process.stdout.write(`${nothingToLand(branch, base, "already-ancestor")}\n`);
+      return 0;
+    }
   } catch (err) {
     return fail(`git: ${(err as Error).message}`);
   }
 
-  process.stdout.write(`${branch} landed\n`);
+  recordLanding(conn, id, branch, sha);
+  process.stdout.write(`${branch} landed on ${base}: ${sha.slice(0, 12)}\n`);
   return 0;
+}
+
+/** Why nothing happened. Same two reasons, and the same words, as the runner's own
+ *  `landingReport`: an operator reading one and a log line from the other must not have to
+ *  work out whether they mean the same thing. */
+function nothingToLand(branch: string, base: string, why: "no-branch" | "already-ancestor"): string {
+  return why === "no-branch"
+    ? `nothing to land: there is no ${branch}`
+    : `nothing to land: ${branch} is already in ${base}`;
+}
+
+/** The branch the operator is standing on, or the sha when they are detached. */
+function headBranch(): string {
+  const named = gitSay(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  return named === "" ? headSha().slice(0, 12) : named;
+}
+
+const headSha = (): string => gitSay(["rev-parse", "HEAD"]);
+
+const hasRef = (ref: string): boolean => gitSay(["rev-parse", "--verify", "--quiet", ref]) !== "";
+
+/** True when the base already holds every commit on `ref`. */
+function isAncestor(ref: string, of: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", ref, of], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function gitSay(args: readonly string[]): string {
+  try {
+    return execFileSync("git", [...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return "";
+  }
+}
+
+/** The landing, where a query can see it. The doctor's first invariant reads `landed_branch`
+ *  through the story's tasks, and it reported stories unlanded that were sitting in the base
+ *  because this path merged and recorded nothing. Written here, on the path that actually
+ *  merges, and nowhere else. */
+function recordLanding(
+  conn: ReturnType<typeof db>,
+  storyId: number,
+  branch: string,
+  sha: string,
+): void {
+  // The runner owns this table and creates it on its first merge; a repository landed by
+  // hand may never have run a tick.
+  conn.exec(
+    `CREATE TABLE IF NOT EXISTS landed_branch (
+       task_id   INTEGER PRIMARY KEY,
+       branch    TEXT NOT NULL,
+       sha       TEXT NOT NULL,
+       merged_at TEXT NOT NULL
+     )`,
+  );
+  const tasks = conn
+    .prepare(
+      `SELECT t.id AS id FROM task t
+         JOIN acceptance_test a ON a.id = t.acceptance_test_id
+         JOIN acceptance_criteria c ON c.id = a.parent_id
+         JOIN requirement q ON q.id = c.requirement_id
+        WHERE q.story_id = ?`,
+    )
+    .all(storyId) as unknown as { id: number }[];
+  const at = new Date().toISOString();
+  for (const t of tasks) {
+    conn
+      .prepare(
+        `INSERT INTO landed_branch (task_id, branch, sha, merged_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT (task_id) DO UPDATE SET branch = excluded.branch, sha = excluded.sha,
+                                               merged_at = excluded.merged_at`,
+      )
+      .run(t.id, branch, sha, at);
+  }
 }
 
 /** The paths git left with conflict markers, read before the merge is undone. */
