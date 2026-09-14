@@ -261,9 +261,15 @@ describe("views", () => {
       "stale",
       "queued",
       "failed",
-      "roadmap",
+      "open",
       "delivered",
     ]);
+  });
+
+  /** The rename has to reach the whitelist too: a box named `open` whose filter the code
+   *  does not know is a refusal to start, so this is what loadViews accepting it proves. */
+  it("resolves the open box to the open filter", () => {
+    expect(views.find((v) => v.name === "open")?.filter).toBe("open");
   });
 
   it("refuses a filter the code does not know", () => {
