@@ -31,6 +31,13 @@ function allChildrenIn(repo: Repo, settled: readonly string[], noChildrenIsEnoug
  *  only input is the stored row. */
 const dbOf = (repo: Repo): DatabaseSync => (repo as unknown as { db: DatabaseSync }).db;
 
+/** Whether a test names something to run. One definition, because two guards ask it and a
+ *  copy that drifted would let one of them through. */
+const hasArtefact = (repo: Repo, entity: string, id: number): boolean => {
+  const artefact = repo.artefactOf(entity as "acceptance_test" | "task_test", id);
+  return artefact !== null && artefact.trim() !== "";
+};
+
 /** The guards, wired to a repository.
  *
  *  The cascade guards read children and nothing else, which is what makes the chain from a
@@ -49,12 +56,24 @@ export function guards(repo: Repo): Readonly<Record<GuardName, Guard>> {
     every_task_test_settled: allChildrenIn(repo, ["passed", "dropped"]),
 
     /** A test whose artefact is missing is unrunnable, and silently so. */
-    artefact_resolves: ({ entity, id }) => {
-      const artefact = repo.artefactOf(entity as "acceptance_test" | "task_test", id);
-      return artefact === null || artefact.trim() === ""
-        ? refuse("it has no artefact — there is nothing to run or to follow")
-        : ALLOW;
-    },
+    artefact_resolves: ({ entity, id }) =>
+      hasArtefact(repo, entity, id) ? ALLOW : refuse("it has no artefact — there is nothing to run or to follow"),
+
+    /** A failed test asks to be judged again.
+     *
+     *  `failed` used to be where a test stopped: the only ways out were `pass`, which
+     *  `test_has_been_red` guards, and `drop`. A test that failed because its tree had no
+     *  node_modules was therefore finished, and so was its story — four of them sat there.
+     *
+     *  What `reprove` clears is the verdict itself: `failed` *is* the recorded verdict, and
+     *  returning the test to `ready` says only that nothing is proved of it yet. It asserts
+     *  no outcome — a re-proved test still has to be run, and an acceptance_test still has
+     *  to be seen red at its base, before `pass` will have it (docs/design/19: healing may
+     *  re-run a test, it may never mark one passed). So this guard asks only whether there
+     *  is anything to run again. A test with no artefact would go back to `ready` and stay
+     *  there, unrunnable, which is the dead end again under a better-looking state. */
+    test_may_be_reproved: ({ entity, id }) =>
+      hasArtefact(repo, entity, id) ? ALLOW : refuse("it has no artefact — there is nothing to run again"),
 
     /** A test nobody has seen fail cannot pass: it may assert what the code already did.
      *
