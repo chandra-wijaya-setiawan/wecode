@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
 import { Engine, now } from "@wecode/core";
@@ -10,9 +12,32 @@ export interface ScriptReport {
   readonly failed: readonly number[];
   /** Tests whose verdict already stands against this exact tree. */
   readonly skipped: readonly number[];
+  /** Tests whose script is not in this tree. Not a verdict: they stay as they were. */
+  readonly unrunnable?: readonly number[];
 }
 
-const nothing: ScriptReport = { passed: [], failed: [], skipped: [] };
+const nothing: ScriptReport = { passed: [], failed: [], skipped: [], unrunnable: [] };
+
+/** Written where the board reads a run's output, so a missing script never reads as a
+ *  failure with an empty reason. */
+export const NOT_IN_TREE = "unrunnable: its script is not in this tree";
+
+const INTERPRETERS = new Set(["bash", "sh", "zsh", "node", "python", "python3", "tsx", "deno"]);
+
+/** The script file an artefact invokes, when it invokes one. `./scripts/x.sh --all` and
+ *  `bash scripts/x.sh` both carry one; `test -f hello.ts` and `pnpm vitest` do not — they
+ *  name no file whose absence would make the test unrunnable rather than failed. */
+export function scriptPathOf(artefact: string): string | null {
+  const words = artefact.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return null;
+  // `bash -lc 'x'` and friends carry a program, not a path: only a bare argument counts.
+  const head = words[0]!.replace(/^.*\//, "");
+  const candidate = INTERPRETERS.has(head) ? words.slice(1).find((w) => !w.startsWith("-")) : words[0];
+  if (candidate === undefined || candidate.startsWith("-")) return null;
+  if (/[;&|><$`(){}*?"']/.test(candidate)) return null;
+  const looksLikeAPath = candidate.includes("/") || /\.(sh|bash|ts|js|mjs|cjs|py)$/.test(candidate);
+  return looksLikeAPath ? candidate : null;
+}
 
 /** What a verdict was reached against. A test that already passed or failed is only worth
  *  running again when one of these has moved. */
@@ -101,9 +126,21 @@ export class Scripts {
     const passed: number[] = [];
     const failed: number[] = [];
     const skipped: number[] = [];
+    const unrunnable: number[] = [];
     const tip = await this.tip(cwd);
 
     for (const row of rows) {
+      const script = scriptPathOf(row.artefact);
+      if (script !== null && !existsSync(isAbsolute(script) ? script : resolve(cwd, script))) {
+        // No script, no evidence. A verdict here would say the code is broken when all that
+        // is missing is the test itself, so the test is left exactly as it stands.
+        const at = now();
+        this.db
+          .prepare(`UPDATE ${entity} SET last_output = ?, updated_at = ? WHERE id = ?`)
+          .run(`${NOT_IN_TREE}: ${script}`, at, row.id);
+        unrunnable.push(row.id);
+        continue;
+      }
       const print = tip === null ? null : `${tip}|${against.attempt ?? ""}|${row.artefact}`;
       if (this.stands(entity, row, print)) {
         skipped.push(row.id);
@@ -126,7 +163,7 @@ export class Scripts {
       (out.ok ? passed : failed).push(row.id);
     }
 
-    return { passed, failed, skipped };
+    return { passed, failed, skipped, unrunnable };
   }
 
   /** True when this test already has a verdict reached against this exact fingerprint.
