@@ -11,6 +11,8 @@ import {
   databaseOf,
   listWorkspaces,
   loadRoles,
+  lessons,
+  dropLesson,
   tree,
   type Node,
   loadMachines,
@@ -62,6 +64,8 @@ function dispatch(argv: readonly string[]): number {
   if (head === "tree") return showTree(rest);
   if (head === "watch") return watch(rest);
   if (head === "wait") return wait(rest);
+  if (head === "lessons") return showLessons(rest);
+  if (head === "lesson") return lesson(rest);
   return verb(head, rest);
 }
 
@@ -596,6 +600,60 @@ function showBoard(args: readonly string[]): number {
   return 0;
 }
 
+/** `wecode lessons [--project N]` — what earlier attempts on this repository learned.
+ *
+ *  Each line carries the assignment that learned it and how old it is, because those are
+ *  what a suspicious lesson is judged on: a lesson is a note about a world that changes. */
+function showLessons(args: readonly string[]): number {
+  const { values } = parseArgs({ args: [...args], options: { project: { type: "string" } } });
+  const chosen = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
+  if (chosen === null) {
+    return fail("no project here. wecode lessons --project <id>");
+  }
+  if (!Number.isInteger(chosen)) return fail("wecode lessons --project <id>");
+
+  const conn = db();
+  const found = lessons(conn, chosen);
+  if (found.length === 0) {
+    process.stdout.write("no lessons here yet\n");
+    return 0;
+  }
+  for (const l of found) {
+    const from = l.assignment_id === null ? "by hand" : assignmentName(conn, l.assignment_id);
+    process.stdout.write(`  #${String(l.id).padStart(3)}  ${l.text}\n`);
+    process.stdout.write(`        ${grey(`${from} · ${age(l.created_at)}`)}\n`);
+  }
+  return 0;
+}
+
+/** The assignment a lesson came from, so a suspicious one can be traced back to the attempt
+ *  that wrote it. The foreign key is what makes the row certain to be there. */
+function assignmentName(conn: ReturnType<typeof open>, id: number): string {
+  const row = conn.prepare("SELECT slug FROM assignment WHERE id = ?").get(id) as
+    | { slug: string }
+    | undefined;
+  return row === undefined ? `assignment #${id}` : `${row.slug} #${id}`;
+}
+
+function age(at: string): string {
+  const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(at)) / 60_000));
+  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)}h ago`;
+  return `${Math.floor(minutes / (60 * 24))}d ago`;
+}
+
+/** `wecode lesson drop <id>` — the operator's call, like everything else that is a
+ *  judgement. A wrong lesson is worse than none, so this is one command with no ceremony. */
+function lesson(args: readonly string[]): number {
+  const [name, raw] = args;
+  if (name !== "drop") return fail("wecode lesson drop <id>");
+  const id = Number(raw);
+  if (!Number.isInteger(id)) return fail("wecode lesson drop <id>");
+  if (!dropLesson(db(), id)) return fail(`no lesson #${id}`);
+  process.stdout.write(`lesson #${id} dropped\n`);
+  return 0;
+}
+
 /** `wecode <entity> <verb> [id|args]` — the surface in docs/design/06. */
 function verb(entity: string, rest: readonly string[]): number {
   const [name, ...args] = rest;
@@ -883,6 +941,8 @@ function usage(): number {
       "  wecode watch [--project N] [--json]        one line per state change, forever (--once to drain)",
       "  wecode wait <entity> <id>                  block until it settles; the exit code is the answer",
       "  wecode <entity> --help                     that entity's states and verbs",
+      "  wecode lessons [--project N]               what earlier attempts here learned",
+      "  wecode lesson drop <id>                    a wrong lesson is worse than none",
       "",
       "RUNNING",
       "  wecode-runner --once                       one tick: allocate, run an agent, prove, land",
