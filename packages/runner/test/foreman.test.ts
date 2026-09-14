@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -23,6 +23,10 @@ class Fake implements WorkerAdapter {
     this.seen.push(`poll:${w.id}`);
     return this.next();
   }
+  async resume(w: Work): Promise<Observation> {
+    this.seen.push(`resume:${w.id}:${w.session ?? ""}`);
+    return this.next();
+  }
   async answer(w: Work, a: string): Promise<Observation> {
     this.seen.push(`answer:${w.id}:${a}`);
     return this.next();
@@ -39,15 +43,18 @@ let make: Maker;
 let task: number;
 let worker: number;
 
-const assign = (): number =>
+const assign = (worktree = "/tmp/wecode-no-such-worktree"): number =>
   make.assignment({
     objective_type: "task",
     objective_id: task,
     worker_id: worker,
     scope: { write: ["src/**"], tools: ["bash"] },
     budget: { tokens: 100, seconds: 10 },
-    worktree: "/tmp/wt",
+    worktree,
   });
+
+/** A worktree that is really on disk, so `resume` is reachable. */
+const worktreeDir = (): string => mkdtempSync(join(tmpdir(), "wecode-wt-"));
 
 const phaseOf = (id: number): string =>
   (db.prepare("SELECT phase FROM assignment WHERE id = ?").get(id) as { phase: string }).phase;
@@ -142,6 +149,7 @@ describe("the foreman", () => {
       kind: "agent",
       start: () => Promise.reject(new Error("no such binary")),
       poll: () => Promise.reject(new Error("no")),
+      resume: () => Promise.reject(new Error("no")),
       answer: () => Promise.reject(new Error("no")),
       kill: () => Promise.resolve(),
     };
@@ -190,6 +198,97 @@ describe("a session that finishes in one call", () => {
   });
 });
 
+/** 14 Sep: a restart left two assignments open. The deadline was judged before the poll, so
+ *  both were called timeouts and begun again from nothing — though both rows held a session
+ *  id and both worktrees were still there. */
+describe("an assignment the adapter has never heard of", () => {
+  it("is lost rather than timed out, whatever the deadline says", async () => {
+    const id = assign(worktreeDir());
+    const fake = new Fake([
+      { phase: "running", session: "sess-1", spent: spent() },
+      { phase: "failed", session: "sess-1", spent: spent(), reason: "lost" },
+      { phase: "running", session: "sess-1", spent: spent() },
+    ]);
+    // Zero deadline: every open row is overdue, which is exactly the restart's shape.
+    const foreman = new Foreman(db, { agent: fake }, 0);
+    await foreman.tick();
+    await foreman.tick();
+
+    expect(fake.seen).toContain(`resume:${id}:sess-1`);
+    expect(fake.seen).not.toContain(`kill:${id}`);
+    expect(phaseOf(id)).toBe("running");
+    const row = db.prepare("SELECT reason FROM assignment WHERE id = ?").get(id) as { reason: string | null };
+    expect(row.reason).toBeNull();
+  });
+
+  it("is resumed, not restarted: no second attempt is counted", async () => {
+    assign(worktreeDir());
+    const fake = new Fake([
+      { phase: "running", session: "sess-1", spent: spent() },
+      { phase: "failed", session: "sess-1", spent: spent(), reason: "lost" },
+      { phase: "succeeded", session: "sess-1", spent: spent(), commit: "abc" },
+    ]);
+    const foreman = new Foreman(db, { agent: fake });
+    await foreman.tick();
+    await foreman.tick();
+
+    expect(fake.seen.filter((s) => s.startsWith("start:"))).toHaveLength(1);
+    const t = db.prepare("SELECT attempts FROM task WHERE id = ?").get(task) as { attempts: number };
+    expect(t.attempts).toBe(1);
+  });
+
+  it("fails when the harness cannot reattach and says so", async () => {
+    const id = assign(worktreeDir());
+    const fake = new Fake([
+      { phase: "running", session: "sess-1", spent: spent() },
+      { phase: "failed", session: "sess-1", spent: spent(), reason: "lost" },
+      // A harness with no --resume: asked anyway, it answers lost.
+      { phase: "failed", session: "sess-1", spent: spent(), reason: "lost" },
+    ]);
+    const foreman = new Foreman(db, { agent: fake });
+    await foreman.tick();
+    const r = await foreman.tick();
+
+    expect(fake.seen).toContain(`resume:${id}:sess-1`);
+    expect(r.failed).toEqual([id]);
+    expect(phaseOf(id)).toBe("failed");
+    const row = db.prepare("SELECT reason FROM assignment WHERE id = ?").get(id) as { reason: string };
+    expect(row.reason).toBe("lost");
+  });
+
+  it("is not offered for resume once its worktree has gone", async () => {
+    const wt = worktreeDir();
+    const id = assign(wt);
+    const fake = new Fake([
+      { phase: "running", session: "sess-1", spent: spent() },
+      { phase: "failed", session: "sess-1", spent: spent(), reason: "lost" },
+    ]);
+    const foreman = new Foreman(db, { agent: fake });
+    await foreman.tick();
+    rmSync(wt, { recursive: true, force: true });
+    await foreman.tick();
+
+    expect(fake.seen.some((s) => s.startsWith("resume:"))).toBe(false);
+    expect(phaseOf(id)).toBe("failed");
+    const row = db.prepare("SELECT reason FROM assignment WHERE id = ?").get(id) as { reason: string };
+    expect(row.reason).toBe("lost");
+  });
+
+  it("is not offered for resume when no session was ever recorded", async () => {
+    const id = assign(worktreeDir());
+    const fake = new Fake([
+      { phase: "running", session: "", spent: spent() },
+      { phase: "failed", session: null, spent: spent(), reason: "lost" },
+    ]);
+    const foreman = new Foreman(db, { agent: fake });
+    await foreman.tick();
+    await foreman.tick();
+
+    expect(fake.seen.some((s) => s.startsWith("resume:"))).toBe(false);
+    expect(phaseOf(id)).toBe("failed");
+  });
+});
+
 describe("a session that keeps running", () => {
   it("does not hold the tick: a second assignment starts on the next one", async () => {
     /** Starts, reports running, and never finishes — a real agent mid-task. */
@@ -197,6 +296,7 @@ describe("a session that keeps running", () => {
       kind: "agent",
       start: async () => ({ phase: "running", session: "s", spent: spent() }),
       poll: async () => ({ phase: "running", session: "s", spent: spent() }),
+      resume: async () => ({ phase: "running", session: "s", spent: spent() }),
       answer: async () => ({ phase: "running", session: "s", spent: spent() }),
       kill: async () => {},
     };

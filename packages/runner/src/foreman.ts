@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import { Engine, now, type Budget } from "@wecode/core";
 import type { Observation, WorkerAdapter, Work } from "./ports.js";
@@ -64,11 +65,15 @@ export class Foreman {
           if (!this.engine.apply("assignment", row.id, "answer", "operator").ok) continue;
           seen = await adapter.answer(work, row.answer);
         } else {
-          if (this.overdue(row)) {
+          // Poll first, judge the deadline after. An assignment the adapter has never heard
+          // of — the runner restarted under it — is lost, not overdue, and the difference
+          // matters: a restart backdates nothing, so every open row looks overdue at once.
+          // Judging first reported two live sessions as timeouts and began them again.
+          seen = await adapter.poll(work);
+          if (isLost(seen)) seen = await this.recover(adapter, work);
+          else if (this.overdue(row)) {
             await adapter.kill(work);
             seen = { phase: "failed", session: row.session, spent: zero(), reason: "timeout" };
-          } else {
-            seen = await adapter.poll(work);
           }
         }
       } catch (err) {
@@ -82,6 +87,21 @@ export class Foreman {
     }
 
     return { started, advanced, failed };
+  }
+
+  /** A lost attempt that still has somewhere to go back to. The session id and the worktree
+   *  are the two halves of an attempt's continuity: with both, the work so far is still on
+   *  disk and the harness can be asked to reattach. With either missing there is nothing to
+   *  resume, and lost is the honest answer. */
+  private async recover(adapter: WorkerAdapter, work: Work): Promise<Observation> {
+    const lost = (): Observation => ({ phase: "failed", session: work.session, spent: zero(), reason: "lost" });
+    if (work.session === null || work.session === "") return lost();
+    if (!existsSync(work.worktree)) return lost();
+    try {
+      return await adapter.resume(work);
+    } catch {
+      return lost();
+    }
   }
 
   private phaseOf(id: number): string {
@@ -201,3 +221,5 @@ export class Foreman {
 }
 
 const zero = (): Budget => ({ tokens: 0, seconds: 0 });
+
+const isLost = (seen: Observation): boolean => seen.phase === "failed" && seen.reason === "lost";

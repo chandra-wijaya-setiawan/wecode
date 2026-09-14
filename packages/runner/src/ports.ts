@@ -35,6 +35,12 @@ export interface WorkerAdapter {
   readonly kind: string;
   start(work: Work): Promise<Observation>;
   poll(work: Work): Promise<Observation>;
+  /** Pick up a session this adapter has lost track of — a restart, usually. `work.session`
+   *  is the session to resume and its worktree still exists; the foreman has checked both.
+   *
+   *  A harness that cannot reattach to a session says so by returning failed/lost. That is
+   *  an answer, not an error: the foreman then fails the attempt as it would have anyway. */
+  resume(work: Work): Promise<Observation>;
   answer(work: Work, answer: string): Promise<Observation>;
   kill(work: Work): Promise<void>;
 }
