@@ -1,11 +1,20 @@
 import { existsSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import { Engine, now, type Budget } from "@wecode/core";
+import { Trees } from "./git.js";
 import type { Observation, WorkerAdapter, Work } from "./ports.js";
+
+/** Where the assignments being watched live, when the foreman has to ask git something the
+ *  record does not hold — the name of the base branch a merge chore's brief has to say. */
+export interface ForemanOptions {
+  readonly integrationBranch?: string | null;
+  /** Only for tests: pretend every project lives here. */
+  readonly repoRoot?: string | undefined;
+}
 
 interface OpenRow {
   id: number;
-  objective_type: "task" | "acceptance_test" | "task_test";
+  objective_type: "task" | "acceptance_test" | "task_test" | "chore";
   objective_id: number;
   scope: string;
   budget: string;
@@ -32,6 +41,7 @@ export class Foreman {
     private readonly db: DatabaseSync,
     private readonly adapters: Readonly<Record<string, WorkerAdapter>>,
     private readonly deadlineSeconds = 3600,
+    private readonly opts: ForemanOptions = {},
   ) {
     this.engine = new Engine(db);
   }
@@ -51,7 +61,7 @@ export class Foreman {
         continue;
       }
 
-      const work = this.workOf(row);
+      const work = await this.workOf(row);
       let seen: Observation;
       try {
         if (row.phase === "pending") {
@@ -129,12 +139,15 @@ export class Foreman {
     return kind === undefined ? null : (this.adapters[kind.kind] ?? null);
   }
 
-  private workOf(row: OpenRow): Work {
+  private async workOf(row: OpenRow): Promise<Work> {
     return {
       id: row.id,
-      objective_type: row.objective_type,
+      // A chore is an objective like a task is, and the column has always been free text:
+      // `Work["objective_type"]` is core's list of the ones a *test* can hang off, which a
+      // chore deliberately does not.
+      objective_type: row.objective_type as Work["objective_type"],
       objective_id: row.objective_id,
-      instruction: this.instructionFor(row),
+      instruction: await this.instructionFor(row),
       scope: JSON.parse(row.scope) as Work["scope"],
       budget: JSON.parse(row.budget) as Budget,
       worktree: row.worktree,
@@ -142,13 +155,56 @@ export class Foreman {
     };
   }
 
-  private instructionFor(row: OpenRow): string {
+  private async instructionFor(row: OpenRow): Promise<string> {
+    if (row.objective_type === "chore") return await this.briefFor(row.objective_id);
     const table = row.objective_type;
     const col = table === "task" ? "title" : "statement";
     const r = this.db.prepare(`SELECT ${col} AS text FROM ${table} WHERE id = ?`).get(row.objective_id) as
       | { text: string }
       | undefined;
     return r?.text ?? "";
+  }
+
+  /** A chore's brief: what the work is for, and what its check is.
+   *
+   *  A task's instruction is its title, because the acceptance_test says what it is for. A
+   *  chore has no test, so the brief has to carry both — and it says the check in words the
+   *  worker can act on, rather than the one line the record stores it as. */
+  private async briefFor(id: number): Promise<string> {
+    const row = this.db
+      .prepare(
+        `SELECT c.kind AS kind, c."check" AS "check", c.target_type AS target_type,
+                coalesce(s.slug, p.name, c.target_id) AS target, p.repo AS repo
+           FROM chore c
+           JOIN project p ON p.id = c.project_id
+           LEFT JOIN story s ON s.id = c.target_id AND c.target_type = 'story'
+          WHERE c.id = ?`,
+      )
+      .get(id) as { kind: string; check: string; target_type: string; target: string; repo: string } | undefined;
+    if (row === undefined) return "";
+
+    const what = `${row.kind} ${row.target_type} ${row.target}`;
+    if (row.kind !== "merge") return `${what}. The check: ${row.check}.`;
+
+    const branch = `story/${row.target}`;
+    const base = await this.baseOf(row.repo);
+    return [
+      `This is a merge chore for ${branch}.`,
+      `What it is for: ${branch} was delivered and will not merge into ${base}, so the merge` +
+        ` has to be made by hand — a conflict is wherever the conflict is.`,
+      `Merge ${base} into ${branch} in this tree, resolve every conflict, and commit the result` +
+        ` on the branch.`,
+      `The check: ${base} merges cleanly into ${branch} and the suite still passes.` +
+        ` The record carries it as "${row.check}".`,
+      `Do not commit on ${base}, and do not land anything: landing is the operator's verb.`,
+    ].join("\n");
+  }
+
+  /** The base branch, asked of the repository — a brief that says "the base branch" instead
+   *  of naming it leaves the worker to guess between main and master. */
+  private async baseOf(repo: string): Promise<string> {
+    const root = this.opts.repoRoot ?? repo;
+    return await new Trees(root, this.opts.integrationBranch ?? null).integrationBranch().catch(() => "the base branch");
   }
 
   private overdue(row: OpenRow): boolean {
