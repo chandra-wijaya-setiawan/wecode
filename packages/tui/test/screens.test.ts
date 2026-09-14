@@ -72,8 +72,10 @@ describe("the frame", () => {
 
   it("is laid out, not printed: every box on it is bordered", () => {
     const out = lines();
-    expect(out.filter((l) => l.startsWith("┌")).length).toBe(views.length);
-    expect(out.filter((l) => l.startsWith("└")).length).toBe(views.length);
+    // Every box of work, plus the services box above them — it is drawn the same way.
+    const boxes = views.length + 1;
+    expect(out.filter((l) => l.startsWith("┌")).length).toBe(boxes);
+    expect(out.filter((l) => l.startsWith("└")).length).toBe(boxes);
     for (const line of out.filter((l) => l.startsWith("│"))) {
       expect(line.endsWith("│")).toBe(true);
     }
