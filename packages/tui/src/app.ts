@@ -44,6 +44,7 @@ const ENTITY: Readonly<Record<keyof Board, StatefulEntity | null>> = {
   needs_human: "assignment",
   queued: "task",
   failed: "task",
+  dropped: "task",
   stale: "task",
   unproven: "acceptance_test",
   // Two tables in one box; board.ts tags which in the detail.
