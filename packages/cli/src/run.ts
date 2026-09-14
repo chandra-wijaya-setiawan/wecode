@@ -27,6 +27,7 @@ import {
   writeProjectConfig,
 } from "@wecode/core";
 import { plan } from "./plan.js";
+import { doctor } from "./doctor.js";
 
 const DB = (): string => currentDatabase();
 
@@ -52,6 +53,7 @@ function dispatch(argv: readonly string[]): number {
     return isStateful(what) ? entityHelp(what) : usage();
   }
   if (head === "board") return showBoard(rest);
+  if (head === "doctor") return doctor(rest);
   if (head === "init") return init();
   if (head === "answer") return answer(rest);
   if (head === "show") return show(rest);
@@ -988,6 +990,7 @@ function usage(): number {
       "  wecode watch [--project N] [--json]        one line per state change, forever (--once to drain)",
       "  wecode wait <entity> <id>                  block until it settles; the exit code is the answer",
       "  wecode <entity> --help                     that entity's states and verbs",
+      "  wecode doctor                              one pass of the invariants; non-zero if any is broken",
       "",
       "RUNNING",
       "  wecode-runner --once                       one tick: allocate, run an agent, prove, land",
