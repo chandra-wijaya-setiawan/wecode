@@ -94,6 +94,73 @@ export function rollup(node: Node): string {
   return [`${under} under`, ...states].join(" · ");
 }
 
+/** How far down the tree goes, counted in levels of children below the roots. */
+export function treeDepth(forest: readonly Node[]): number {
+  let deepest = 0;
+  const walk = (nodes: readonly Node[], depth: number): void => {
+    for (const n of nodes) {
+      if (depth > deepest) deepest = depth;
+      walk(n.children, depth + 1);
+    }
+  };
+  walk(forest, 0);
+  return deepest;
+}
+
+/** Every key above `depth`, so the outline stands open exactly that far and no further.
+ *  Depth 0 is the roots alone; depth 1 is the roots with their children under them.
+ *
+ *  This is `foldedTo` counted rather than named. The config folds to an entity because a
+ *  person says "show me the stories"; the keys move by number because from a story the
+ *  next thing you want is one level more, whatever that level happens to be called. */
+export function foldedToDepth(forest: readonly Node[], depth: number): ReadonlySet<string> {
+  const keys = new Set<string>();
+  const walk = (nodes: readonly Node[], at: number): void => {
+    if (at >= depth) return;
+    for (const n of nodes) {
+      // A childless row has nothing to open, and a key on it would make two outlines that
+      // draw the same rows compare unequal.
+      if (n.children.length === 0) continue;
+      keys.add(nodeKey(n));
+      walk(n.children, at + 1);
+    }
+  };
+  walk(forest, 0);
+  return keys;
+}
+
+/** The depth the outline currently stands open to: the deepest row it is drawing.
+ *
+ *  It is read back off the rows rather than held as a number beside them, because the fold
+ *  keys open single nodes too. A number kept alongside would disagree with the screen the
+ *  first time someone opened one project by hand, and then a depth keystroke would jump
+ *  somewhere nobody asked for. */
+export function openDepth(forest: readonly Node[], expanded: ReadonlySet<string>): number {
+  let deepest = 0;
+  const walk = (nodes: readonly Node[], depth: number): void => {
+    for (const n of nodes) {
+      if (depth > deepest) deepest = depth;
+      if (expanded.has(nodeKey(n))) walk(n.children, depth + 1);
+    }
+  };
+  walk(forest, 0);
+  return deepest;
+}
+
+/** One depth further in, or one further out — the whole outline at once, which is the
+ *  point: a tree read a node at a time is a tree nobody finishes reading.
+ *
+ *  Both ends are walls, not wraps. Pressing in at the bottom leaves the screen alone; a
+ *  fold key that silently jumped back to the roots would lose the reader's place. */
+export function atDepth(
+  forest: readonly Node[],
+  expanded: ReadonlySet<string>,
+  by: number,
+): ReadonlySet<string> {
+  const want = openDepth(forest, expanded) + by;
+  return foldedToDepth(forest, Math.min(Math.max(want, 0), treeDepth(forest)));
+}
+
 /** A line of the outline: the row as drawn, what it is a row of, and the node behind it so
  *  the fold keys do not have to walk the tree again to find what the cursor is on. */
 export interface OutlineLine {
