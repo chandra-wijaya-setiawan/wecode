@@ -1,10 +1,9 @@
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Engine, Maker, open, openAssignments, type Scope } from "@wecode/core";
 import { allocate, collides, DEFAULT_BUDGET, type Candidate } from "../src/index.js";
+import { tmp } from "../../core/test/tmpdir.js";
 
 let db: DatabaseSync;
 let make: Maker;
@@ -38,7 +37,7 @@ function readyTask(title: string, scope: Scope): number {
 }
 
 beforeEach(() => {
-  db = open(join(mkdtempSync(join(tmpdir(), "wecode-alloc-")), "wecode.db"));
+  db = open(join(tmp("wecode-alloc-"), "wecode.db"));
   make = new Maker(db);
   engine = new Engine(db);
   const ws = make.workspace("acme", "/acme");

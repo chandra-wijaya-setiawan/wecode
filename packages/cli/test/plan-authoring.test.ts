@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { open } from "@wecode/core";
 import { run } from "../src/run.js";
+import { tmp } from "../../core/test/tmpdir.js";
 
 let out: string[];
 let err: string[];
@@ -36,7 +36,7 @@ roles:
 `;
 
 beforeEach(() => {
-  repo = mkdtempSync(join(tmpdir(), "wecode-plan-authoring-"));
+  repo = tmp("wecode-plan-authoring-");
   mkdirSync(join(repo, "config"));
   process.env["WECODE_DB"] = join(repo, "wecode.db");
   out = [];
