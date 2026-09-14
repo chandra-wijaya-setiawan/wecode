@@ -18,7 +18,16 @@ export interface Board {
   readonly unproven: readonly Row[];
   readonly roadmap: readonly Row[];
   readonly delivered: readonly Row[];
+  readonly unmergeable: readonly Row[];
 }
+
+/** Whether a branch merges is a fact about the repository, so the runner owns both the
+ *  observation and the table it lands in — `land_conflict (story_id, branch, reason, at)`,
+ *  created beside the record the way `landed_branch` and `red_at_base` are. A workspace
+ *  that has never run a lander has no such table, and that is not an error: it is a board
+ *  with nothing recorded against it. */
+const hasTable = (db: DatabaseSync, name: string): boolean =>
+  db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
 
 /** The project a row belongs to, as an expression over the id of its row. Every group but
  *  `projects` hangs somewhere under a project, and the walk up is the only way to know
@@ -164,6 +173,19 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
         WHERE s.state = 'delivered' AND ${only(ofStory("s.id"))}
         ORDER BY s.updated_at DESC LIMIT 20`,
     ),
+    // Delivered, and the last thing that tried to land it could not. A filter rather than
+    // a state: the story is delivered, and stays delivered — what is wrong is between its
+    // branch and master, and only the thing holding a repository can see it. Stories 138
+    // and 139 sat for a day because the only record of it was prose in a chat.
+    unmergeable: hasTable(db, "land_conflict")
+      ? rows(
+          `SELECT s.id AS id, s.title AS what, s.state AS state,
+                  c.branch || ' · ' || c.reason AS detail
+             FROM story s JOIN land_conflict c ON c.story_id = s.id
+            WHERE s.state = 'delivered' AND ${only(ofStory("s.id"))}
+            ORDER BY s.id`,
+        )
+      : [],
     // A story carries how far it has got: tasks done out of tasks that exist.
     roadmap: rows(
       `SELECT x.id AS id, x.title AS what, x.state AS state, 'epic' AS detail FROM epic x
