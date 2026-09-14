@@ -1,4 +1,8 @@
 packages:
   - "packages/*"
+
+# vitest pulls esbuild, whose install script pnpm refuses to run unless it is told to.
+# Without this a fresh worktree cannot install at all: --frozen-lockfile turns the warning
+# into ERR_PNPM_IGNORED_BUILDS, and every acceptance test fails before it runs.
 allowBuilds:
-  esbuild: set this to true or false
+  esbuild: true
