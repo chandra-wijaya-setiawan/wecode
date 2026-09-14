@@ -34,8 +34,8 @@ export class SchemaAheadError extends StoreError {
   }
 }
 
-/** The database is older than this build and nobody asked to upgrade it. Migrating is a
- *  decision — a test run makes it by passing { migrate: true }, never by opening. */
+/** The database is older than this build and the caller said not to upgrade it. Migrating is
+ *  a decision: { migrate: false } is how a caller asks to be told rather than upgraded. */
 export class SchemaBehindError extends StoreError {
   constructor(
     readonly found: number,
@@ -63,8 +63,9 @@ const isLive = (path: string): boolean =>
   path === LIVE_HOME || path.startsWith(LIVE_HOME + sep);
 
 export interface OpenOptions {
-  /** Upgrade an older database to this build's schema. Outside a test run this defaults to
-   *  true, which is what a CLI command does; inside one it must be asked for. */
+  /** Upgrade an older database to this build's schema. Defaults to true. Pass false to be
+   *  told — SchemaBehindError — instead of upgraded, which is how the doctor and any caller
+   *  that must not write to a database it is only inspecting opens one. */
   readonly migrate?: boolean;
   /** Stop at this version rather than the newest. How a test builds a database that is
    *  honestly older than the build, instead of one with its version lied down. */
@@ -131,10 +132,10 @@ export function open(path?: string, options: OpenOptions = {}): DatabaseSync {
     throw new SchemaAheadError(found, SCHEMA_VERSION);
   }
 
-  // A file with no schema at all is this call's to create; an older one is only upgraded by
-  // a decision, which outside a test run the command has already made by opening.
+  // A file with no schema at all is this call's to create; an older one is upgraded unless
+  // the caller said to be told instead.
   const wanted = options.to ?? SCHEMA_VERSION;
-  const mayMigrate = options.migrate ?? (found === 0 || !underTest());
+  const mayMigrate = options.migrate ?? true;
   if (found < wanted && !mayMigrate) {
     db.close();
     throw new SchemaBehindError(found, SCHEMA_VERSION);

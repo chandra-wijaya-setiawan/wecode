@@ -72,6 +72,19 @@ describe("a temporary database still migrates normally", () => {
     expect(db.prepare("SELECT count(*) AS n FROM story").get()).toEqual({ n: 0 });
     db.close();
   });
+
+  it("brings an older one forward, keeping the rows that were already in it", () => {
+    const path = fresh();
+    const old = open(path, { to: SCHEMA_VERSION - 1 });
+    old.prepare("INSERT INTO workspace (slug,name,path,created_at,updated_at) VALUES (?,?,?,?,?)")
+      .run("acme", "acme", "/acme", "2026-09-14T00:00:00.000Z", "2026-09-14T00:00:00.000Z");
+    old.close();
+
+    const db = open(path);
+    expect(db.prepare("SELECT slug FROM workspace").get()).toEqual({ slug: "acme" });
+    db.close();
+    expect(diagnose(path).state).toBe("current");
+  });
 });
 
 describe("migrating is a decision, not a side effect", () => {
@@ -84,16 +97,34 @@ describe("migrating is a decision, not a side effect", () => {
     return path;
   };
 
-  it("will not silently upgrade an older database during a test run", () => {
+  it("reports an older database rather than upgrading it, when asked not to upgrade", () => {
     const path = older();
-    expect(() => open(path)).toThrow(SchemaBehindError);
+    expect(() => open(path, { migrate: false })).toThrow(SchemaBehindError);
     expect(diagnose(path).found).toBe(SCHEMA_VERSION - 1);
+  });
+
+  it("carries both numbers, so the doctor can name the upgrade to run", () => {
+    let thrown: unknown;
+    try {
+      open(older(), { migrate: false });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toMatchObject({ found: SCHEMA_VERSION - 1, understood: SCHEMA_VERSION });
   });
 
   it("upgrades it when the caller decides to", () => {
     const path = older();
     open(path, { migrate: true }).close();
     expect(diagnose(path).state).toBe("current");
+  });
+
+  it("reports it as behind before anyone opens it, so the decision can be made first", () => {
+    expect(diagnose(older())).toMatchObject({
+      state: "behind",
+      found: SCHEMA_VERSION - 1,
+      understood: SCHEMA_VERSION,
+    });
   });
 });
 
