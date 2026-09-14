@@ -20,7 +20,7 @@ export class ChoreError extends Error {}
  *  This table and CHORE_MACHINE below belong in packages/core/config/machines.yaml with
  *  every other machine. They are literals here only because loadMachines() rejects any
  *  top-level key that is not in STATEFUL, and types.ts is outside this task's scope. */
-export const CHORE_KINDS = ["merge", "sweep"] as const;
+export const CHORE_KINDS = ["merge", "refresh", "sweep"] as const;
 export type ChoreKind = (typeof CHORE_KINDS)[number];
 
 export interface ChoreKindDef {
@@ -37,10 +37,13 @@ export interface ChoreKindDef {
 
 /** `merge` needs no approval: wecode has already tried the deterministic merge and it
  *  failed, so the chore is the retry, and asking would only add a person to a queue.
+ *  `refresh` is the same shape the other way round — the base has moved and a story tree
+ *  in flight is behind it, wecode has already tried the merge, and the chore is the retry.
  *  `sweep` rewrites work that is already on the record, which is not wecode's to decide
  *  alone — and neither is `heal`, when it arrives. */
 export const CHORE_KIND_DEFS: Readonly<Record<ChoreKind, ChoreKindDef>> = {
   merge: { role: "system", needs_approval: false, max_retry: 3 },
+  refresh: { role: "system", needs_approval: false, max_retry: 3 },
   sweep: { role: "system", needs_approval: true, max_retry: 3 },
 };
 
