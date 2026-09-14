@@ -51,6 +51,33 @@ const ofAssignment = (alias: string): string =>
       WHEN 'task_test' THEN ${ofTask(`(SELECT tt.parent_id FROM task_test tt WHERE tt.id = ${alias}.objective_id)`)}
     END)`;
 
+/** A chore the last pass could not dispatch, said beside the tasks it could not start.
+ *
+ *  Same table, same shape, same wording as a task's: the operator asking "why has nothing
+ *  moved" does not care which id space the answer is in, and three merge chores sitting in
+ *  `planned` for half an hour with no reason on the board is the whole complaint. A chore
+ *  carries its project_id, so the walk up that every other group does is not needed here.
+ *
+ *  No `passes >= 3` here, unlike a task's: a task that is merely queued says its reason in
+ *  `queued`, and a chore has no such box, so the first pass that refuses it is the first
+ *  chance anyone has to read why.
+ *
+ *  `chore_refusal` arrives with the chore migration; a workspace older than it has no such
+ *  table, and that is a board with nothing recorded against it rather than an error. */
+const choreRefusals = (db: DatabaseSync): string =>
+  !hasTable(db, "chore_refusal")
+    ? ""
+    : `SELECT c.id AS id,
+              c.kind || ' ' || c.target_type || ' #' || c.target_id AS what,
+              c.state AS state,
+              f.why || ' · ' || f.passes || ' passes · '
+                   || cast((julianday('now') - julianday(f.since)) * 1440 AS int) || 'm' AS detail
+         FROM chore c JOIN chore_refusal f ON f.chore_id = c.id
+        WHERE c.state NOT IN ('done','running')
+          AND ${only("c.project_id")}
+        UNION ALL
+       `;
+
 /** No project asked for is every project: the predicate is true for every row. */
 const only = (project: string): string => `(:project IS NULL OR ${project} = :project)`;
 
@@ -101,6 +128,7 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
           AND ${only(ofAssignment("a"))}
           AND (julianday('now') - julianday(a.updated_at)) * 1440 > 15
         UNION ALL
+       ${choreRefusals(db)}
        SELECT s.id AS id, s.title AS what, s.state AS state, 'no work under it' AS detail
          FROM story s
         WHERE s.state = 'in_progress'
