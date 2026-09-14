@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Trees } from "../src/index.js";
@@ -48,13 +48,15 @@ describe("landing from inside the story's worktree", () => {
 
   it("leaves the base without the story's commit", async () => {
     const before = run(repo, "rev-parse", "main");
-    await trees.landStory("password-reset", storyTree).catch(() => undefined);
+    // The reported defect is not just a missing merge: git said "Already up to date" and
+    // land returned a sha, so the operator was told it landed. It must throw instead.
+    await expect(trees.landStory("password-reset", storyTree)).rejects.toThrow();
     expect(run(repo, "rev-parse", "main")).toBe(before);
     expect(run(repo, "log", "--oneline", "main")).not.toContain("delivered");
   });
 
   it("does not silently retarget the merge into the base checkout", async () => {
-    await trees.landStory("password-reset", storyTree).catch(() => undefined);
+    await expect(trees.landStory("password-reset", storyTree)).rejects.toThrow();
     // The story tree's own HEAD is untouched too: nothing was merged anywhere.
     expect(run(storyTree, "rev-parse", "HEAD")).toBe(run(repo, "rev-parse", "story/password-reset"));
     expect(run(repo, "status", "--porcelain")).toBe("");
@@ -64,6 +66,36 @@ describe("landing from inside the story's worktree", () => {
     const sha = await trees.landStory("password-reset", repo);
     expect(run(repo, "rev-parse", "main")).toBe(sha);
     expect(run(repo, "log", "--oneline", "main")).toContain("delivered");
+  });
+
+  it("refuses from a subdirectory of the story's worktree", async () => {
+    mkdirSync(join(storyTree, "packages", "core"), { recursive: true });
+    const before = run(repo, "rev-parse", "main");
+    const err = await trees
+      .landStory("password-reset", join(storyTree, "packages", "core"))
+      .catch((e: Error) => e);
+    expect((err as Error).message).toContain(storyTree);
+    expect((err as Error).message).toContain(repo);
+    expect(run(repo, "rev-parse", "main")).toBe(before);
+  });
+
+  it("refuses from a detached tree at the story tip, the shape an attempt is cut into", async () => {
+    const detached = await trees.cut("story/password-reset", tmp("wecode-land-detached-"));
+    const before = run(repo, "rev-parse", "main");
+    const err = await trees.landStory("password-reset", detached).catch((e: Error) => e);
+    expect((err as Error).message).toContain(detached);
+    expect((err as Error).message).toContain(repo);
+    expect(run(repo, "rev-parse", "main")).toBe(before);
+    expect(run(detached, "rev-parse", "HEAD")).toBe(run(repo, "rev-parse", "story/password-reset"));
+  });
+
+  it("refuses when no checkout holds the base at all", async () => {
+    run(repo, "checkout", "-q", "-b", "parked");
+    const before = run(repo, "rev-parse", "main");
+    const err = await trees.landStory("password-reset", storyTree).catch((e: Error) => e);
+    expect((err as Error).message).toContain("main");
+    expect((err as Error).message).toContain(storyTree);
+    expect(run(repo, "rev-parse", "main")).toBe(before);
   });
 
   it("names the branch a third tree holds instead of the base", async () => {
