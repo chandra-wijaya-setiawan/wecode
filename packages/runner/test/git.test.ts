@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -67,6 +67,81 @@ describe("a worktree per attempt", () => {
     await trees.cut(branch, path);
     expect(await trees.commitAttempt(path, branch, "empty")).toBeNull();
     await trees.release(path);
+  });
+});
+
+describe("an attempt only ever commits in a detached worktree it cut", () => {
+  it("refuses to commit in the repository root, naming it", async () => {
+    const branch = await trees.taskBranch("s", "t");
+    writeFileSync(join(repo, "smuggled.ts"), "not yours to commit\n");
+
+    await expect(trees.commitAttempt(repo, branch, "in the root")).rejects.toThrow(
+      new RegExp(`${repo}.*repository root`),
+    );
+    expect(run(repo, "status", "--porcelain")).toBe("?? smuggled.ts");
+    expect(run(repo, "rev-parse", branch)).toBe(run(repo, "rev-parse", "main"));
+  });
+
+  it("refuses a subdirectory of the repository root too", async () => {
+    const branch = await trees.taskBranch("s", "t");
+    mkdirSync(join(repo, "packages"));
+    await expect(trees.commitAttempt(join(repo, "packages"), branch, "deeper")).rejects.toThrow(
+      /repository root/,
+    );
+  });
+
+  it("commits in a detached worktree", async () => {
+    const branch = await trees.taskBranch("s", "t");
+    const path = join(repo, "..", `wt-detached-${Date.now()}`);
+    await trees.cut(branch, path);
+    expect(run(path, "rev-parse", "--symbolic-full-name", "HEAD")).toBe("HEAD");
+    writeFileSync(join(path, "mail.ts"), "export const send = () => {};\n");
+
+    const sha = await trees.commitAttempt(path, branch, "send-mail: attempt");
+
+    expect(sha).not.toBeNull();
+    expect(run(repo, "rev-parse", branch)).toBe(sha);
+    await trees.release(path);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("refuses a worktree with a branch checked out, naming the branch", async () => {
+    const branch = await trees.taskBranch("s", "t");
+    const attached = join(repo, "..", `wt-attached-${Date.now()}`);
+    run(repo, "worktree", "add", "-q", attached, branch);
+    writeFileSync(join(attached, "mail.ts"), "x\n");
+
+    await expect(trees.commitAttempt(attached, branch, "attached")).rejects.toThrow(
+      new RegExp(`${attached}.*task/t is checked out, not detached`),
+    );
+    expect(run(repo, "rev-parse", branch)).toBe(run(repo, "rev-parse", "main"));
+  });
+
+  it("refuses to release the repository root or an attached worktree", async () => {
+    const branch = await trees.taskBranch("s", "t");
+    const attached = join(repo, "..", `wt-rel-${Date.now()}`);
+    run(repo, "worktree", "add", "-q", attached, branch);
+
+    await expect(trees.release(repo)).rejects.toThrow(/repository root/);
+    await expect(trees.release(attached)).rejects.toThrow(/not detached/);
+    expect(existsSync(join(repo, "README.md"))).toBe(true);
+    expect(existsSync(attached)).toBe(true);
+  });
+
+  it("refuses to merge into the base checkout", async () => {
+    const branch = await trees.taskBranch("s", "t");
+    const path = join(repo, "..", `wt-merge-${Date.now()}`);
+    await trees.cut(branch, path);
+    writeFileSync(join(path, "mail.ts"), "x\n");
+    await trees.commitAttempt(path, branch, "attempt");
+    await trees.release(path);
+
+    await expect(trees.mergeTaskIntoStory(branch, "s", repo)).rejects.toThrow(
+      new RegExp(`${repo}.*repository root`),
+    );
+    expect(run(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
+    expect(run(repo, "rev-parse", "main")).not.toBe(run(repo, "rev-parse", branch));
+    expect(run(repo, "ls-tree", "--name-only", "story/s")).not.toContain("mail.ts");
   });
 });
 
