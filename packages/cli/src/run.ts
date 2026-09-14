@@ -19,6 +19,8 @@ import {
   workspaceDir,
   writePointer,
   readProjectConfig,
+  setArtefact,
+  setScriptPath,
   setTaskScope,
   STATEFUL,
   type StatefulEntity,
@@ -685,6 +687,7 @@ function verb(entity: string, rest: readonly string[]): number {
   const asked = args.some((a) => a === "--help" || a === "-h");
   if (name === "create") return asked ? createHelp(entity) : create(entity, args);
   if (name === "scope") return asked ? scopeHelp() : scope(entity, args);
+  if (name === "artefact") return asked ? artefactHelp() : artefact(entity, args);
   if (name === "retry" && entity === "task") return retry(args);
 
   if (!isStateful(entity)) return fail(`${entity} has no states; its only verb is create`);
@@ -774,6 +777,70 @@ function scope(entity: string, args: readonly string[]): number {
   } catch (err) {
     return fail((err as Error).message);
   }
+}
+
+/** `wecode acceptance_test artefact <id> --set "bash test/mail.sh" [--script-path test/mail.sh]`
+ *
+ *  Without this the only cure for a wrongly typed artefact was to drop the test, which
+ *  cascades its parent to a settled state and cannot be undone. */
+function artefact(entity: string, args: readonly string[]): number {
+  if (entity !== "acceptance_test" && entity !== "task_test") {
+    return fail("only an acceptance_test or a task_test carries an artefact");
+  }
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { set: { type: "string" }, "script-path": { type: "string" } },
+  });
+  const id = Number(positionals[0]);
+  const how = `wecode ${entity} artefact <id> --set "<cmd>" [--script-path <path>]`;
+  if (!Number.isInteger(id)) return fail(how);
+
+  // The same guard scope has: ids are global, and this one writes.
+  const wrong = elsewhere(entity, id);
+  if (wrong !== null) return fail(wrong);
+
+  const path = values["script-path"];
+  if (values.set === undefined && path === undefined) return fail(how);
+
+  try {
+    if (values.set !== undefined) {
+      setArtefact(db(), entity, id, values.set);
+      process.stdout.write(`${entity} #${id} artefact ${values.set}\n`);
+    }
+    if (path !== undefined) {
+      // An empty --script-path clears it: the path is spec, and a test may stop having one.
+      setScriptPath(db(), entity, id, path.trim() === "" ? null : path);
+      process.stdout.write(
+        path.trim() === ""
+          ? `${entity} #${id} script path cleared\n`
+          : `${entity} #${id} script path ${path}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+}
+
+function artefactHelp(): number {
+  process.stdout.write(
+    [
+      "wecode <acceptance_test|task_test> artefact <id> [flags]",
+      "",
+      "  the command that proves the test, and where its script is meant to live.",
+      "  changing the command clears any recorded red-at-base run: that run proved",
+      "  something about the old command.",
+      "",
+      "  --set <cmd>          the command — refused when it is empty",
+      "  --script-path <path> where the script lives (empty to clear it)",
+      "",
+      '  wecode acceptance_test artefact 1 --set "bash test/mail.sh" --script-path test/mail.sh',
+      "",
+      "",
+    ].join("\n"),
+  );
+  return 0;
 }
 
 function create(entity: string, args: readonly string[]): number {
@@ -974,6 +1041,7 @@ function usage(): number {
       "MAKING WORK",
       '  wecode <entity> create --parent <id> "<text>" [--artefact "<cmd>"] [--role <name>]',
       '  wecode task scope <id> --write "a.ts,b.ts"  which files that task may change',
+      '  wecode <test> artefact <id> --set "<cmd>"   fix the command a test is proved by',
       "  wecode plan <file.yaml> [--epic <id>]      a whole story as one document (--dry-run to look)",
       "  wecode worker create <name> --role engineer --kind agent",
       "",
