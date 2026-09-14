@@ -3,12 +3,13 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Budget } from "@wecode/core";
 import type { Observation, WorkerAdapter, Work } from "../ports.js";
+import { denialsIn, type WriteDenials } from "./denials.js";
 
 /** Claude Code, as a worker.
  *
  *  Everything harness-specific is here: the flags a scope becomes, the shape of what it
  *  prints, how a session is resumed. Nothing above this file learns which harness ran. */
-export class ClaudeCodeAdapter implements WorkerAdapter {
+export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
   readonly kind = "agent";
 
   constructor(
@@ -26,6 +27,19 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    *  a tick that waited for the agent could never start a second one, and the attention
    *  budget was unreachable. */
   private readonly live = new Map<number, Session>();
+
+  /** Writes the permission gate refused, per assignment, waiting to be carried to the
+   *  record. Kept outside `live` on purpose: a session that ends is dropped from `live` by
+   *  the poll that reads it, and the refusal that burned the attempt must outlive it — it
+   *  is the one thing the next reader of the board needs. */
+  private readonly denied = new Map<number, Set<string>>();
+
+  takeRefusedWrites(assignment: number): readonly string[] {
+    const paths = this.denied.get(assignment);
+    if (paths === undefined) return [];
+    this.denied.delete(assignment);
+    return [...paths];
+  }
 
   async start(work: Work): Promise<Observation> {
     return this.spawn(work, [
@@ -174,6 +188,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     this.live.set(work.id, session);
 
     let rest = "";
+    // Correlates a denied tool_result back to the tool_use that named the path, so it
+    // spans the whole stream rather than one chunk of it.
+    const asked = new Map<string, string>();
     child.stdout?.on("data", (chunk: Buffer) => {
       appendFileSync(log, chunk);
       rest += chunk.toString();
@@ -183,6 +200,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         const event = parse(line);
         if (event === null) continue;
         if (typeof event["session_id"] === "string") session.id = event["session_id"];
+        for (const path of denialsIn(event, asked, work.worktree)) {
+          const paths = this.denied.get(work.id) ?? new Set<string>();
+          paths.add(path);
+          this.denied.set(work.id, paths);
+        }
         const text = textOf(event);
         if (text !== null) session.last = text;
         const usage = event["usage"];
