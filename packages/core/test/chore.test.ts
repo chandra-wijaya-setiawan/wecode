@@ -173,7 +173,9 @@ describe("the chore machine", () => {
 
     const refused = applyChore(db, id, "finish", "runner");
 
-    expect(!refused.ok && refused.why).toBe("finish is not legal from planned. Legal here: start");
+    // `close` is legal here too: a chore nobody has attempted is still one whose condition
+    // may have gone, and the runner says so rather than leaving a stale claim.
+    expect(!refused.ok && refused.why).toBe("finish is not legal from planned. Legal here: start, close");
   });
 
   it("every move is on the ledger, so nothing changed state unobserved", () => {

@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import { Engine, now, type Budget } from "@wecode/core";
 import { Trees } from "./git.js";
-import type { Observation, WorkerAdapter, Work } from "./ports.js";
+import type { History, Observation, TestFailure, WorkerAdapter, Work } from "./ports.js";
 
 /** Where the assignments being watched live, when the foreman has to ask git something the
  *  record does not hold — the name of the base branch a merge chore's brief has to say. */
@@ -157,6 +157,7 @@ export class Foreman {
       // A project with nothing to teach hands over no field at all: an empty list still
       // renders a heading, and a heading nothing follows is how the brief gets skimmed.
       ...(lessons.length > 0 ? { lessons } : {}),
+      history: this.historyFor(row),
     };
   }
 
@@ -184,6 +185,47 @@ export class Foreman {
     this.db
       .prepare("INSERT INTO lesson (project_id, assignment_id, text, created_at) VALUES (?, ?, ?, ?)")
       .run(project.project, id, text, now());
+  }
+
+  /** What the last attempt at this task left on the branch.
+   *
+   *  Null unless this is a retry: a first attempt must be told exactly what it is told
+   *  today. A retry is told what git already holds, because that is the only thing that
+   *  crosses between two sessions that share no memory. */
+  private historyFor(row: OpenRow): History | null {
+    if (row.objective_type !== "task") return null;
+    const t = this.db.prepare("SELECT attempts FROM task WHERE id = ?").get(row.objective_id) as
+      | { attempts: number }
+      | undefined;
+    const attempts = t?.attempts ?? 0;
+    if (attempts < 1) return null;
+
+    const prev = this.db
+      .prepare(
+        `SELECT reason, commit_sha FROM assignment
+          WHERE objective_type = 'task' AND objective_id = ? AND id <> ?
+          ORDER BY id DESC LIMIT 1`,
+      )
+      .get(row.objective_id, row.id) as { reason: string | null; commit_sha: string | null } | undefined;
+
+    return {
+      attempts,
+      reason: (prev?.reason ?? null) as History["reason"],
+      commit: prev?.commit_sha ?? null,
+      failures: this.failuresFor(row.objective_id),
+    };
+  }
+
+  /** Every task_test that is failing, reduced to the last thing it actually said. A test
+   *  with nothing to say is still worth naming: the statement is the requirement. */
+  private failuresFor(task_id: number): TestFailure[] {
+    const rows = this.db
+      .prepare(
+        `SELECT statement, last_output FROM task_test
+          WHERE parent_id = ? AND state = 'failed' ORDER BY id`,
+      )
+      .all(task_id) as unknown as { statement: string; last_output: string | null }[];
+    return rows.map((r) => ({ statement: r.statement, line: lastLine(r.last_output) }));
   }
 
   private async instructionFor(row: OpenRow): Promise<string> {
@@ -348,5 +390,17 @@ const PROJECT_OF = `SELECT CASE a.objective_type
     WHEN 'task_test' THEN (${upFromTest(testOfTask(taskOfTaskTest("a.objective_id")))})
   END
   FROM assignment a WHERE a.id = ?`;
+
+/** The last line that said anything. Runners end in blank lines and trailing newlines, and
+ *  the sentence that matters is the one before them. */
+function lastLine(output: string | null): string {
+  if (output === null) return "";
+  const lines = output.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]?.trim() ?? "";
+    if (line !== "") return line;
+  }
+  return "";
+}
 
 const isLost = (seen: Observation): boolean => seen.phase === "failed" && seen.reason === "lost";

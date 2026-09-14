@@ -29,6 +29,10 @@ export interface ChoreKindDef {
   readonly role: string;
   /** Whether a person must say go before it may leave `planned`. */
   readonly needs_approval: boolean;
+  /** How many attempts this kind gets before a chore that keeps failing its check stops
+   *  being raised again. A task's ceiling is a column because a person may raise one task's
+   *  and not another's; a chore's belongs to the kind, because nobody creates a chore. */
+  readonly max_retry: number;
 }
 
 /** `merge` needs no approval: wecode has already tried the deterministic merge and it
@@ -36,8 +40,8 @@ export interface ChoreKindDef {
  *  `sweep` rewrites work that is already on the record, which is not wecode's to decide
  *  alone — and neither is `heal`, when it arrives. */
 export const CHORE_KIND_DEFS: Readonly<Record<ChoreKind, ChoreKindDef>> = {
-  merge: { role: "system", needs_approval: false },
-  sweep: { role: "system", needs_approval: true },
+  merge: { role: "system", needs_approval: false, max_retry: 3 },
+  sweep: { role: "system", needs_approval: true, max_retry: 3 },
 };
 
 /** What a chore is about. A chore always serves a project; `project` is a target only when
@@ -47,9 +51,14 @@ export type ChoreTarget = (typeof CHORE_TARGETS)[number];
 
 /** planned → ready → running → done, and failed beside it.
  *
- *  `failed` is not terminal: a merge that could not be made today can be made once the
- *  branch it fought with has moved. `done` is, because the condition that created the
- *  chore is gone by then, and the unique key means nothing will create it again. */
+ *  Neither `failed` nor `done` is a memo about the past. A chore's state is a claim about
+ *  the world now, and the world moves both ways: a merge that could not be made today can
+ *  be made once the branch it fought with has moved, and a story whose branch merged
+ *  cleanly can fall behind the base the moment the story beside it lands. So `reprove`
+ *  comes back from `done` as well as from `failed`, and `close` goes to `done` from every
+ *  state nobody is working in. `done` stays terminal in the machine's sense — no attempt
+ *  may be begun there, and nothing is owed — but it is not beyond wecode re-reading the
+ *  condition and saying otherwise. */
 export const CHORE_MACHINE: Machine = {
   states: ["planned", "ready", "running", "done", "failed"],
   initial: "planned",
@@ -60,8 +69,22 @@ export const CHORE_MACHINE: Machine = {
     { verb: "finish", from: ["running"], to: "done" },
     { verb: "fail", from: ["running"], to: "failed" },
     { verb: "retry", from: ["failed"], to: "ready" },
+    { verb: "reprove", from: ["failed", "done"], to: "planned" },
+    { verb: "close", from: ["planned", "ready", "failed"], to: "done" },
   ],
 };
+
+/** The edge back. `retry` is a person's — it puts a failed chore straight in the queue.
+ *  `reprove` is wecode's: it returns the chore to `planned`, where a raised chore starts,
+ *  so a kind that waits for approval waits for it again rather than inheriting the go that
+ *  was given to the attempt that failed. */
+export const REPROVE = "reprove";
+
+/** The edge out, and wecode's alone: the condition the chore was raised for is no longer
+ *  true, so the chore is over whether or not anybody ever performed it. `running` is left
+ *  out on purpose — a worker is in a tree on it, and `finish` or `fail` is that attempt's
+ *  to say. */
+export const CLOSE = "close";
 
 export interface Chore {
   readonly id: number;
@@ -96,9 +119,18 @@ const slugOf = (s: ChoreSpec): string => `${s.kind}-${s.target_type}-${s.target_
  *  tick, and the condition stays true until the chore is done. Returning the chore that is
  *  already there — rather than throwing, or inserting a second — is what makes "a story
  *  that will not merge" one row instead of one row a tick. */
-export function ensureChore(db: DatabaseSync, spec: ChoreSpec): Chore {
+export function ensureChore(db: DatabaseSync, spec: ChoreSpec, by = "runner"): Chore {
   const found = choreFor(db, spec.kind, spec.target_type, spec.target_id);
-  if (found !== null) return found;
+  if (found !== null) {
+    // The one place a settled chore stops being a dead end. Being here at all is the caller
+    // saying the condition is true — that is what `ensureChore` means — so the chore goes
+    // back to `planned` and is raised again. `done` as much as `failed`: a chore that was
+    // discharged and whose condition has come back is the same chore with a second pass,
+    // not a memo about the merge that worked in March. Never on a timer, and never quietly:
+    // the reraise is a ledger row, and the attempts behind it stay on the record.
+    if (found.state === "failed" || found.state === "done") reraiseChore(db, found.id, by);
+    return choreById(db, found.id) ?? found;
+  }
 
   const at = now();
   db.prepare(
@@ -179,6 +211,88 @@ export function applyChore(db: DatabaseSync, id: number, verb: string, actor: st
   return { ok: true, from, to: transition.to };
 }
 
+export interface ChoreAttempts {
+  /** How many times a worker has begun this chore. */
+  readonly attempts: number;
+  /** The kind's ceiling. */
+  readonly max_retry: number;
+}
+
+/** How many attempts a chore has had, read from the ledger rather than from a column.
+ *
+ *  A task counts its attempts in `task.attempts` because a person may reset it. Nobody
+ *  resets a chore — wecode raises it and wecode judges it — so the count that matters is
+ *  the one already written down: one `begin` row per attempt, in the order they happened. */
+export function choreAttempts(db: DatabaseSync, id: number): ChoreAttempts | null {
+  const chore = choreById(db, id);
+  if (chore === null) return null;
+  const row = db
+    .prepare("SELECT count(*) AS n FROM ledger WHERE entity = 'chore' AND entity_id = ? AND verb = 'begin'")
+    .get(id) as { n: number };
+  return { attempts: row.n, max_retry: CHORE_KIND_DEFS[chore.kind].max_retry };
+}
+
+/** Put a settled chore back to `planned`, because the condition that made it is true again.
+ *
+ *  The caller's presence is the proof: `ensureChore` is only reached from a runner that has
+ *  just re-read the condition. So this refuses on everything else — `planned`, `ready` and
+ *  `running` have nothing to come back from, because they never left — and one that has
+ *  used its attempts is drift for the doctor to name rather than a loop to keep turning.
+ *
+ *  The attempts stay: a reraised chore is on its second pass, and the board says so. That
+ *  is the point of reraising rather than deleting the row and letting `ensureChore` insert
+ *  a fresh one, which would lose every attempt and read as if this were the first time. */
+export function reraiseChore(db: DatabaseSync, id: number, by = "runner"): ChoreOutcome {
+  const chore = choreById(db, id);
+  if (chore === null) return { ok: false, why: `no chore #${id}` };
+  if (chore.state !== "failed" && chore.state !== "done") {
+    return { ok: false, why: `a ${chore.state} chore is not waiting to be raised again` };
+  }
+
+  const tries = choreAttempts(db, id);
+  if (tries !== null && tries.attempts >= tries.max_retry) {
+    return { ok: false, why: outOfAttempts(tries) };
+  }
+  const out = applyChore(db, id, REPROVE, by);
+  // Whatever was last said about why this chore was not being handed out is about a world
+  // that has moved on. The reason it is back is the ledger row this just wrote.
+  if (out.ok) clearChoreRefusal(db, id);
+  return out;
+}
+
+/** Close a chore whose condition no longer holds.
+ *
+ *  The mirror of `reraiseChore`, and one rule with it: a chore's state is a claim about the
+ *  world now. When the branch that would not merge merges, nothing is owed, and leaving the
+ *  row in `failed` is a stale claim that the board keeps showing and the allocator keeps
+ *  refusing. So the runner says so with a verb, and with the reason it read.
+ *
+ *  `max_retry` does not bear on this. Attempts bound how often wecode hands a chore out
+ *  again; they say nothing about whether the work is still owed, and a chore out of
+ *  attempts whose condition has gone is exactly the one most worth closing.
+ *
+ *  The reason is kept where a chore's other free text about itself is kept — `chore_refusal`,
+ *  one row per chore — so `choreRefusal(db, id)` reads why a closed chore was closed. */
+export function closeChore(db: DatabaseSync, id: number, why: string, by = "runner"): ChoreOutcome {
+  const chore = choreById(db, id);
+  if (chore === null) return { ok: false, why: `no chore #${id}` };
+
+  const out = applyChore(db, id, CLOSE, by);
+  if (out.ok) recordChoreRefusal(db, why, id);
+  return out;
+}
+
+const outOfAttempts = (t: ChoreAttempts): string => `out of attempts · ${t.attempts} of ${t.max_retry}`;
+
+/** What the board says of a chore that has been round once. A first attempt says only its
+ *  check — the count is noise until there is something to count. */
+const attemptDetail = (t: ChoreAttempts, check: string): string =>
+  t.attempts === 0
+    ? check
+    : t.attempts >= t.max_retry
+      ? `${outOfAttempts(t)} · ${check}`
+      : `attempt ${t.attempts + 1} of ${t.max_retry} · ${check}`;
+
 /** Everything not done, in the board's shape. A chore that is waiting for approval says so
  *  where the reason a task is not running is said: in the detail. */
 export function openChores(db: DatabaseSync, project: number | null = null): readonly Row[] {
@@ -189,7 +303,9 @@ export function openChores(db: DatabaseSync, project: number | null = null): rea
               c.state AS state,
               c."check" AS "check",
               c.kind AS kind,
-              c.approved_at AS approved_at
+              c.approved_at AS approved_at,
+              (SELECT count(*) FROM ledger l
+                WHERE l.entity = 'chore' AND l.entity_id = c.id AND l.verb = 'begin') AS attempts
          FROM chore c
          LEFT JOIN story s ON s.id = c.target_id AND c.target_type = 'story'
          LEFT JOIN project p ON p.id = c.target_id AND c.target_type = 'project'
@@ -204,6 +320,7 @@ export function openChores(db: DatabaseSync, project: number | null = null): rea
       check: string;
       kind: ChoreKind;
       approved_at: string | null;
+      attempts: number;
     }[];
 
   return rows.map((r) => ({
@@ -213,7 +330,7 @@ export function openChores(db: DatabaseSync, project: number | null = null): rea
     detail:
       r.state === "planned" && CHORE_KIND_DEFS[r.kind].needs_approval && r.approved_at === null
         ? WAITING_FOR_APPROVAL
-        : r.check,
+        : attemptDetail({ attempts: r.attempts, max_retry: CHORE_KIND_DEFS[r.kind].max_retry }, r.check),
   }));
 }
 
@@ -269,7 +386,9 @@ export function choreCandidates(
   const rows = db
     .prepare(
       `SELECT c.id AS id, c.kind AS kind, c.target_type AS target_type, c.target_id AS target_id,
-              c.state AS state, c.approved_at AS approved_at
+              c.state AS state, c.approved_at AS approved_at,
+              (SELECT count(*) FROM ledger l
+                WHERE l.entity = 'chore' AND l.entity_id = c.id AND l.verb = 'begin') AS attempts
          FROM chore c
         WHERE c.state NOT IN ('done','running')
           AND NOT EXISTS (
@@ -285,11 +404,19 @@ export function choreCandidates(
     target_id: number;
     state: string;
     approved_at: string | null;
+    attempts: number;
   }[];
 
   const candidates: Candidate[] = [];
   const refused: Refusal[] = [];
   for (const r of rows) {
+    const tries = { attempts: r.attempts, max_retry: CHORE_KIND_DEFS[r.kind].max_retry };
+    // A chore that has failed its check as often as its kind allows is not handed out
+    // again. It stays on the board saying so, which is the doctor's to name.
+    if (tries.attempts >= tries.max_retry) {
+      refused.push({ id: r.id, why: outOfAttempts(tries) });
+      continue;
+    }
     if (CHORE_KIND_DEFS[r.kind].needs_approval && r.approved_at === null) {
       refused.push({ id: r.id, why: WAITING_FOR_APPROVAL });
       continue;
@@ -303,7 +430,7 @@ export function choreCandidates(
       role: CHORE_KIND_DEFS[r.kind].role,
       scope: role.scope,
       budget: role.budget,
-      attempts: 0,
+      attempts: r.attempts,
     });
   }
   return { candidates, refused };

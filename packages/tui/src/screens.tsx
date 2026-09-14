@@ -9,6 +9,11 @@ import { Box, Text } from "ink";
 import { boxKeys, type App, type Screen } from "./app.js";
 import { clip, columnWidths, List, type Column, type Row } from "./list.js";
 import { Outline, OUTLINE } from "./outline.js";
+import { loadServices, Services, SERVICE_ROWS } from "./services.js";
+
+/** Read once. The box's words are configuration, but re-parsing a file on every frame
+ *  would put a disk read on the refresh tick. */
+const SERVICES = loadServices();
 
 /** Every column, on every screen. views.yaml declares title, filter, rows and empty but no
  *  columns, so there is nothing per-box to honour here: a box and its full-height page
@@ -126,7 +131,13 @@ interface ScreenProps {
   readonly height: number;
 }
 
-/** Every box in config order, each trimmed to the height it declares. */
+/** What is holding the workspace up, then every box in config order, each trimmed to the
+ *  height it declares.
+ *
+ *  The services box is first because a dead runner or a schema this build cannot read is
+ *  the reason every box under it is wrong, and reading the board before that is reading a
+ *  board that may have stopped moving an hour ago. It is not in `page.order`: it is not a
+ *  filter over the board, it holds no rows the cursor can reach, and `v` does not open it. */
 export function Dashboard({ app, width }: ScreenProps) {
   const rows = app.lines();
   const widths = columnWidths(boardRows(app), COLUMNS);
@@ -134,6 +145,9 @@ export function Dashboard({ app, width }: ScreenProps) {
   const inner = width - BORDER;
   return (
     <>
+      <Panel title={SERVICES.title} width={width} height={SERVICE_ROWS + BORDER}>
+        <Services app={app} width={inner} config={SERVICES} />
+      </Panel>
       {boxes(app, rows).map((box) => {
         // The cursor runs over every box's rows at once; only the box holding it draws one.
         const local = app.cursor - box.at;
