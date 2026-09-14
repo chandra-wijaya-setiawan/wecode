@@ -10,6 +10,7 @@ import {
   currentDatabase,
   databaseOf,
   listWorkspaces,
+  loadRoles,
   tree,
   type Node,
   loadMachines,
@@ -362,9 +363,16 @@ function onboard(args: readonly string[]): number {
     (conn.prepare("SELECT id FROM workspace WHERE name = ?").get(wsName) as { id: number } | undefined)?.id ??
     make.workspace(wsName, workspaceDir(wsName));
 
+  // Roles without workers is a board nothing can be dispatched from: the runner refuses
+  // every candidate with "no worker free for role engineer", and nowhere does it say a
+  // worker is a thing you make. So onboarding makes one per agent role, named after it.
+  const hired = hire(conn, make, join(config, "roles.yaml"));
+
   const existing = conn.prepare("SELECT id FROM project WHERE repo = ?").get(root) as { id: number } | undefined;
   if (existing !== undefined) {
-    process.stdout.write(`project #${existing.id} is already onboarded here\n`);
+    process.stdout.write(
+      `project #${existing.id} is already onboarded here\n${workerLines(hired).join("\n")}${hired.length > 0 ? "\n" : ""}`,
+    );
     return 0;
   }
 
@@ -382,6 +390,7 @@ function onboard(args: readonly string[]): number {
       "",
       `workspace   ${wsName}  (${path})`,
       `project #${project}  release #${release}`,
+      ...workerLines(hired),
       "",
       "next: wecode epic create --parent " + String(release) + ' "<what this release is for>"',
       "",
@@ -391,6 +400,32 @@ function onboard(args: readonly string[]): number {
   );
   return 0;
 }
+
+interface Hired {
+  readonly id: number;
+  readonly role: string;
+  readonly fresh: boolean;
+}
+
+/** One agent worker per agent role, named after the role. A role that already has a worker
+ *  keeps it: onboarding twice must not double the workforce. Human roles are people, and
+ *  wecode does not get to hire those. */
+function hire(conn: ReturnType<typeof open>, make: Maker, rolesFile: string): Hired[] {
+  const hired: Hired[] = [];
+  for (const role of Object.values(loadRoles(rolesFile).roles)) {
+    if (role.worker_kind !== "agent") continue;
+    const had = conn.prepare("SELECT id FROM worker WHERE role = ?").get(role.name) as { id: number } | undefined;
+    hired.push(
+      had === undefined
+        ? { id: make.worker(role.name, role.name, "agent"), role: role.name, fresh: true }
+        : { id: had.id, role: role.name, fresh: false },
+    );
+  }
+  return hired;
+}
+
+const workerLines = (hired: readonly Hired[]): string[] =>
+  hired.map((h) => `worker #${h.id}  ${h.role}${h.fresh ? "" : "  (already there)"}`);
 
 /** Roles whose scopes are paths this repository has, rather than paths wecode assumed. */
 function rolesFor(c: { source: readonly string[]; tests: readonly string[] }): string {
