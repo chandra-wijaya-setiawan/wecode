@@ -1,8 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
 import { board as groups, type Board, type Row } from "./board.js";
+import type { Budget, Scope } from "./entities.js";
 import { isTerminal, transitionFor } from "./machines.js";
+import type { Candidate } from "./order.js";
+import type { RoleConfig } from "./roles.js";
 import { now, transact } from "./store.js";
-import type { Machine } from "./types.js";
+import type { Machine, Refusal } from "./types.js";
 
 /** docs/design/18. Work wecode needs done, created deterministically by wecode and
  *  performed by a system worker. It is not a task because it proves no acceptance_test:
@@ -209,7 +212,7 @@ export function openChores(db: DatabaseSync, project: number | null = null): rea
     state: r.state,
     detail:
       r.state === "planned" && CHORE_KIND_DEFS[r.kind].needs_approval && r.approved_at === null
-        ? "waiting for approval"
+        ? WAITING_FOR_APPROVAL
         : r.check,
   }));
 }
@@ -226,4 +229,113 @@ export interface ChoreBoard extends Board {
 
 export function board(db: DatabaseSync, project: number | null = null): ChoreBoard {
   return { ...groups(db, project), chores: openChores(db, project) };
+}
+
+/** The one wording for a chore nobody has said go to. The board shows it as a chore's
+ *  detail and the allocator refuses with it, so both say the same thing. */
+export const WAITING_FOR_APPROVAL = "waiting for approval";
+
+/** A chore's role is its kind's role, and its scope and budget are that role's — a chore
+ *  narrows nothing, because the files a merge conflict is in are wherever the conflict is.
+ *  config/roles.yaml is the one definition of both, so this reads it rather than holding a
+ *  copy — the caller hands in the loaded config. */
+export function choreRole(kind: ChoreKind, roles: RoleConfig): { scope: Scope; budget: Budget } | null {
+  const def = roles.roles[CHORE_KIND_DEFS[kind].role];
+  return def === undefined ? null : { scope: def.scope, budget: def.budget };
+}
+
+/** Chores the allocator could choose, in id order.
+ *
+ *  A chore is a candidate when nothing is attempting it and it is neither `done` — the
+ *  condition that made it is gone — nor `running` — somebody is on it. `planned` is
+ *  included on purpose: that is where a chore wecode raised sits, and leaving it out is
+ *  exactly the bug where three merge chores wait for ever for a state nobody sets.
+ *
+ *  A kind that needs approval and has none is not a candidate, and says so in the board's
+ *  words rather than vanishing.
+ *
+ *  `roles` is what makes chores considered at all, and asking for it is deliberate rather
+ *  than a convenience: a caller that cannot say where a chore's scope comes from is a
+ *  caller that has not been taught chores, and handing it one would have it create a
+ *  `task` assignment pointing at a chore id. With no roles the answer is empty — not one
+ *  guessed scope, and not a refusal about a chore nobody asked about.
+ */
+export function choreCandidates(
+  db: DatabaseSync,
+  roles?: RoleConfig,
+): { readonly candidates: readonly Candidate[]; readonly refused: readonly Refusal[] } {
+  if (roles === undefined) return { candidates: [], refused: [] };
+
+  const rows = db
+    .prepare(
+      `SELECT c.id AS id, c.kind AS kind, c.target_type AS target_type, c.target_id AS target_id,
+              c.state AS state, c.approved_at AS approved_at
+         FROM chore c
+        WHERE c.state NOT IN ('done','running')
+          AND NOT EXISTS (
+            SELECT 1 FROM assignment a
+             WHERE a.objective_type = 'chore' AND a.objective_id = c.id
+               AND a.phase IN ('pending','running','waiting'))
+        ORDER BY c.id`,
+    )
+    .all() as unknown as {
+    id: number;
+    kind: ChoreKind;
+    target_type: ChoreTarget;
+    target_id: number;
+    state: string;
+    approved_at: string | null;
+  }[];
+
+  const candidates: Candidate[] = [];
+  const refused: Refusal[] = [];
+  for (const r of rows) {
+    if (CHORE_KIND_DEFS[r.kind].needs_approval && r.approved_at === null) {
+      refused.push({ id: r.id, why: WAITING_FOR_APPROVAL });
+      continue;
+    }
+    const role = choreRole(r.kind, roles);
+    if (role === null) continue;
+    candidates.push({
+      id: r.id,
+      objective_type: "chore",
+      title: `${r.kind} ${r.target_type} #${r.target_id}`,
+      role: CHORE_KIND_DEFS[r.kind].role,
+      scope: role.scope,
+      budget: role.budget,
+      attempts: 0,
+    });
+  }
+  return { candidates, refused };
+}
+
+/** Why this chore was passed over on the last pass, kept the way a task's refusal is kept:
+ *  one row, replaced each pass, and the same reason keeps its `since`. */
+export function recordChoreRefusal(db: DatabaseSync, why: string, choreId: number): void {
+  const at = now();
+  db.prepare(
+    `INSERT INTO chore_refusal (chore_id, why, at, since, passes) VALUES (?, ?, ?, ?, 1)
+     ON CONFLICT (chore_id) DO UPDATE SET
+       why    = excluded.why,
+       at     = excluded.at,
+       since  = CASE WHEN chore_refusal.why = excluded.why THEN chore_refusal.since ELSE excluded.since END,
+       passes = CASE WHEN chore_refusal.why = excluded.why THEN chore_refusal.passes + 1 ELSE 1 END`,
+  ).run(choreId, why, at, at);
+}
+
+export function clearChoreRefusal(db: DatabaseSync, choreId: number): void {
+  db.prepare("DELETE FROM chore_refusal WHERE chore_id = ?").run(choreId);
+}
+
+export interface ChoreRefusal extends Refusal {
+  readonly at: string;
+  readonly since: string;
+  readonly passes: number;
+}
+
+export function choreRefusal(db: DatabaseSync, choreId: number): ChoreRefusal | null {
+  const row = db
+    .prepare(`SELECT chore_id AS id, why, at, since, passes FROM chore_refusal WHERE chore_id = ?`)
+    .get(choreId) as ChoreRefusal | undefined;
+  return row ?? null;
 }
