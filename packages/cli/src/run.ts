@@ -493,13 +493,51 @@ function land(args: readonly string[]): number {
     if (dirty !== "") {
       return fail(`your working tree has changes. Commit or stash them first:\n${dirty}`);
     }
-    execFileSync("git", ["merge", "--no-ff", "-m", `land ${branch}`, branch], { stdio: "inherit" });
+    try {
+      execFileSync("git", ["merge", "--no-ff", "-m", `land ${branch}`, branch], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      // A half-finished merge is the hazard: left in the tree, the next thing to commit —
+      // an agent, a hook, a person in a hurry — commits the conflict markers onto master.
+      // So the tree goes back exactly as it was found, and the conflict becomes a chore.
+      const conflicted = unmerged();
+      abortMerge();
+      const why = conflicted.length > 0
+        ? `${branch} conflicts with your branch in:\n${conflicted.map((f) => `  ${f}`).join("\n")}`
+        : `${branch} would not merge:\n${((err as { stderr?: string }).stderr ?? (err as Error).message).trim()}`;
+      return fail(
+        `${why}\n` +
+          "  the merge was aborted, so your tree is as you left it and the story has not landed.\n" +
+          `  the story needs a merge chore: rebase or merge your branch into ${branch}, redeliver, then land again.`,
+      );
+    }
   } catch (err) {
     return fail(`git: ${(err as Error).message}`);
   }
 
   process.stdout.write(`${branch} landed\n`);
   return 0;
+}
+
+/** The paths git left with conflict markers, read before the merge is undone. */
+function unmerged(): string[] {
+  try {
+    const out = execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], { encoding: "utf8" });
+    return out.split("\n").filter((l) => l !== "");
+  } catch {
+    return [];
+  }
+}
+
+/** Best effort: if the merge never started there is nothing to abort, and saying so helps nobody. */
+function abortMerge(): void {
+  try {
+    execFileSync("git", ["merge", "--abort"], { stdio: "ignore" });
+  } catch {
+    /* no merge in progress */
+  }
 }
 
 function gitConfig(key: string): string {
