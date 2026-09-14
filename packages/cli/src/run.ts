@@ -561,6 +561,11 @@ function scope(entity: string, args: readonly string[]): number {
   const id = Number(positionals[0]);
   if (!Number.isInteger(id)) return fail('wecode task scope <id> --write "src/**" --tools bash');
 
+  // The same guard create has. Ids are global, and this one writes: scoping another
+  // project's task is silent, and was.
+  const wrong = elsewhere("task", id);
+  if (wrong !== null) return fail(wrong);
+
   const list = (v: string | undefined): string[] =>
     v === undefined || v === "" ? [] : v.split(",").map((s) => s.trim()).filter((s) => s !== "");
 
@@ -708,8 +713,12 @@ const PARENT_OF: Readonly<Record<string, string>> = {
 function crossesProject(entity: string, parent: number): string | null {
   const parentEntity = PARENT_OF[entity];
   if (parentEntity === undefined || parentEntity === "project") return null;
+  return elsewhere(parentEntity, parent);
+}
 
-  const theirs = projectOf(parentEntity, parent);
+/** Null when this row is in the project you are standing in, a complaint when it is not. */
+function elsewhere(entity: string, id: number): string | null {
+  const theirs = projectOf(entity, id);
   if (theirs === null) return null;
 
   const here = resolve(process.cwd());
@@ -719,9 +728,9 @@ function crossesProject(entity: string, parent: number): string | null {
   if (mine === undefined || mine.id === theirs.id) return null;
 
   return (
-    `${parentEntity} #${parent} belongs to project #${theirs.id} ${theirs.name} (${theirs.repo}),\n` +
+    `${entity} #${id} belongs to project #${theirs.id} ${theirs.name} (${theirs.repo}),\n` +
     `but you are in #${mine.id} ${mine.name}.\n` +
-    `  wecode tree ${mine.id}          to find the right parent\n` +
+    `  wecode tree ${mine.id}          to find the right one\n` +
     `  --project ${theirs.id}          if you meant it`
   );
 }
