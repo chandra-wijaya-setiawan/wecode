@@ -9,12 +9,14 @@ import {
   clearRefusal,
   Engine,
   ensureChore,
+  loadRoles,
   Maker,
   now,
   recordChoreRefusal,
   recordRefusal,
   type Budget,
   type Chore,
+  type RoleConfig,
   type Scope,
   type Violation,
 } from "@wecode/core";
@@ -80,6 +82,10 @@ export interface ChorePass {
  *  the file loaded and passes it. */
 const CHORE_BUDGET: Budget = { tokens: 250000, seconds: 3600 };
 
+/** Where a project declares its roles, relative to its repository. Named once, because the
+ *  refusals quote it and a quoted path that is not the path read is a lie. */
+const ROLES_FILE = "config/roles.yaml";
+
 export interface RedAtBase {
   readonly proven: readonly number[];
   readonly unproven: readonly number[];
@@ -112,6 +118,9 @@ export class Runner {
   private readonly doctor: Doctor;
   /** One per repository. A workspace holds many projects, and each has its own branches. */
   private readonly treesByRepo = new Map<string, Trees>();
+  /** config/roles.yaml as read this tick, keyed by its path, good or bad. Cleared at the
+   *  top of every tick: an edit to the file is in force on the next one. */
+  private rolesByRepo = new Map<string, { ok: true; config: RoleConfig } | { ok: false; why: string }>();
 
   constructor(
     private readonly db: DatabaseSync,
@@ -141,6 +150,7 @@ export class Runner {
    *  attempt wrote in, before that tree is released, and an acceptance_test in the story
    *  tree, after the tasks it depends on have merged. */
   async tick(): Promise<Tick> {
+    this.rolesByRepo.clear();
     // First, because the point of it is that it happens before the work does.
     const redAtBase = await this.proveRedAtBase();
     const allocated = await this.allocateOne();
@@ -673,8 +683,8 @@ export class Runner {
     if (def === undefined) return this.refuseChore(chore, `no kind on the record for a ${chore.kind} chore`);
     const target = this.storyTargetOf(chore);
     if (target === null) return this.refuseChore(chore, "the story it targets is gone");
-    const scope = this.scopeOfRole(def.role);
-    if (scope === null) return this.refuseChore(chore, `no scope for role ${def.role} in config/roles.yaml`);
+    const scope = this.scopeOfRole(target.repo, def.role);
+    if (!scope.ok) return this.refuseChore(chore, scope.why);
     const open = this.openAssignments();
     const max = this.opts.budget.max_open;
     if (open >= max) return this.refuseChore(chore, `${max - open} of ${max} slots are open`);
@@ -700,7 +710,7 @@ export class Runner {
         objective_type: "chore" as "task",
         objective_id: chore.id,
         worker_id: worker,
-        scope,
+        scope: scope.scope,
         budget: this.opts.choreBudget ?? CHORE_BUDGET,
         worktree: tree,
       });
@@ -801,13 +811,36 @@ export class Runner {
     return { ...row, repo: this.opts.repoRoot ?? row.repo };
   }
 
-  /** The role's scope, off the record. Never a literal here: docs/design/18 declares what
-   *  `system` may write in config/roles.yaml, and a copy in this file is a second definition
-   *  that nothing checks against the first. */
-  private scopeOfRole(role: string): Scope | null {
-    const row = this.db.prepare("SELECT scope FROM role WHERE name = ?").get(role) as { scope: string } | undefined;
-    if (row === undefined) return null;
-    return JSON.parse(row.scope) as Scope;
+  /** The role's scope, out of the file that declares it. Never a literal here: docs/design/18
+   *  declares what `system` may write in config/roles.yaml, and a copy in this file is a
+   *  second definition that nothing checks against the first.
+   *
+   *  Read from the project's own config, not from a table: nothing fills `role`, so a
+   *  lookup there refused every chore in every workspace while the file said `write: **`.
+   *  The two refusals are kept apart because the operator's next move differs — a role
+   *  absent from the file is a line to add, an unreadable file is a file to fix. */
+  private scopeOfRole(repo: string, role: string): { ok: true; scope: Scope } | { ok: false; why: string } {
+    const loaded = this.rolesOf(repo);
+    if (!loaded.ok) return loaded;
+    const def = loaded.config.roles[role];
+    if (def === undefined) return { ok: false, why: `no role ${role} in ${ROLES_FILE}` };
+    return { ok: true, scope: def.scope };
+  }
+
+  /** One read per repository per tick. A tick dispatches every planned chore, and six of
+   *  them targeting one project is one read of the file, not six. */
+  private rolesOf(repo: string): { ok: true; config: RoleConfig } | { ok: false; why: string } {
+    const path = join(repo, ROLES_FILE);
+    const cached = this.rolesByRepo.get(path);
+    if (cached !== undefined) return cached;
+    let read: { ok: true; config: RoleConfig } | { ok: false; why: string };
+    try {
+      read = { ok: true, config: loadRoles(path) };
+    } catch (err) {
+      read = { ok: false, why: `cannot read ${ROLES_FILE}: ${(err as Error).message}` };
+    }
+    this.rolesByRepo.set(path, read);
+    return read;
   }
 
   private openAssignments(): number {
