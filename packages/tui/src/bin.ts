@@ -1,9 +1,20 @@
 #!/usr/bin/env node
+/** The cockpit, wired to a terminal. Everything decided lives in App, everything drawn in
+ *  screens.ts; this file only owns the terminal — raw keys in, a frame out, and a terminal
+ *  left the way it was found however the process ends. */
 import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { board, currentDatabase, databaseOf, currentWorkspace, listWorkspaces, open } from "@wecode/core";
-import { clear, render } from "./render.js";
+import { currentDatabase, databaseOf, currentWorkspace, listWorkspaces, open } from "@wecode/core";
+import { App } from "./app.js";
+import { draw } from "./screens.js";
 import { loadViews } from "./views.js";
+
+const CSI = "\u001b[";
+const HOME = `${CSI}2J${CSI}H`;
+const HIDE = `${CSI}?25l`;
+const SHOW = `${CSI}?25h`;
+/** Work moves without a keystroke, so the frame cannot only be redrawn by one. */
+const TICK = 2000;
 
 process.removeAllListeners("warning");
 process.on("warning", (w) => {
@@ -31,36 +42,50 @@ if (!existsSync(dbPath)) {
 }
 
 const db = open(dbPath);
-const wsName = values.workspace ?? currentWorkspace();
-const views = loadViews();
+const app = new App(db, loadViews());
+// The frame has one line for a message and no other place to say where you are, so the
+// workspace is the first thing it says and the first key replaces it.
+app.status = `workspace ${values.workspace ?? currentWorkspace()}`;
 
-const draw = (): void => {
+const frame = (): void => {
   const width = process.stdout.columns ?? 100;
-  process.stdout.write(clear + render(board(db), views, width, `workspace ${wsName}`));
-  process.stdout.write("\u001b[2m  q quit  r refresh\u001b[0m\n");
+  const height = process.stdout.rows ?? 24;
+  process.stdout.write(HOME + draw(app, width, height));
 };
 
-draw();
-const timer = setInterval(draw, 2000);
-
-if (process.stdin.isTTY) {
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
-  process.stdin.on("data", (key: Buffer) => {
-    const k = key.toString();
-    if (k === "q" || k === "\u0003") {
-      clearInterval(timer);
-      process.stdout.write("\u001b[?25h\n");
-      process.exit(0);
-    }
-    if (k === "r") draw();
-  });
-}
-
-for (const sig of ["SIGINT", "SIGTERM"] as const) {
-  process.on(sig, () => {
+let closed = false;
+/** The one way out. A terminal left in raw mode with no cursor is a shell the operator has
+ *  to kill, so every exit — a key, a signal, an error — comes through here. */
+const leave = (code: number): void => {
+  if (!closed) {
+    closed = true;
     clearInterval(timer);
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    process.stdin.pause();
+    process.stdout.write(`${SHOW}${HOME}`);
     db.close();
-    process.exit(0);
-  });
-}
+  }
+  process.exit(code);
+};
+
+process.stdout.write(HIDE);
+frame();
+
+const timer = setInterval(() => {
+  app.refresh();
+  frame();
+}, TICK);
+
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+process.stdin.resume();
+process.stdin.on("data", (chunk: Buffer) => {
+  // A paste, or an arrow key, arrives as one chunk of several characters. Each is a key.
+  for (const k of chunk.toString()) {
+    if (k === "\u0003") return leave(0);
+    app.key(k);
+    if (app.quit) return leave(0);
+  }
+  frame();
+});
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => leave(0));
