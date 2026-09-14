@@ -21,11 +21,23 @@ export interface Tick {
   readonly merged: readonly number[];
   /** Tasks that ran out of attempts on this tick. */
   readonly exhausted: readonly number[];
+  /** Tasks that have used every attempt while the story that needs them is still open. */
+  readonly drift: readonly Drift[];
   /** Completion transitions that fired because their guard had become true. */
   readonly settled: readonly string[];
   /** Acceptance tests this tick ran at their story's base: red there, or green and so
    *  unable to prove anything. */
   readonly redAtBase: RedAtBase;
+}
+
+/** An exhausted task, and the story left waiting on it. Named, because the cost is the
+ *  story: three tasks at 3 of 3 held two stories open for a day and the only thing that
+ *  moved them was a person noticing. */
+export interface Drift {
+  readonly task: number;
+  readonly slug: string;
+  readonly story: string;
+  readonly why: string;
 }
 
 export interface RedAtBase {
@@ -89,12 +101,16 @@ export class Runner {
     // that just ran settles here, rather than waiting for an event that already happened.
     const settled2 = this.engine.settle();
     const exhausted = this.enforceRetryLimit();
+    // After enforcement, so a task that ran out of attempts on this very tick is already
+    // named rather than named a minute later.
+    const drift = this.exhaustedTasks();
     return {
       allocated,
       foreman,
       committed: settled.committed,
       merged,
       exhausted,
+      drift,
       redAtBase,
       settled: settled2.map((c) => `${c.entity} #${c.id} → ${c.to}`),
       scripts: {
@@ -270,8 +286,55 @@ export class Runner {
     return { committed, scripts: { passed, failed, skipped, refused } };
   }
 
+  /** Every task that has used its attempts while its story is still open.
+   *
+   *  Reported, never acted on: `retry` is an operator's verb, because the machine cannot
+   *  know whether a task failed three times for a reason a fourth attempt would fix. So
+   *  this is the doctor's read — one line per drift, naming the story that is waiting —
+   *  and `wecode task retry <id> --reason` is the only thing that clears it.
+   *
+   *  A dropped task is not here: abandoning one is a decision, and a decision is not
+   *  drift. */
+  private exhaustedTasks(): Drift[] {
+    const rows = this.db
+      .prepare(
+        `SELECT t.id AS task, t.slug AS slug, t.attempts AS attempts, t.max_retry AS max_retry,
+                s.slug AS story, s.state AS story_state
+           FROM task t
+           JOIN acceptance_test a ON a.id = t.acceptance_test_id
+           JOIN acceptance_criteria c ON c.id = a.parent_id
+           JOIN requirement r ON r.id = c.requirement_id
+           JOIN story s ON s.id = r.story_id
+          WHERE t.state NOT IN ('done', 'dropped')
+            AND t.attempts >= t.max_retry
+            AND s.state NOT IN ('delivered', 'dropped')
+          ORDER BY t.id`,
+      )
+      .all() as unknown as {
+      task: number;
+      slug: string;
+      attempts: number;
+      max_retry: number;
+      story: string;
+      story_state: string;
+    }[];
+
+    return rows.map((row) => ({
+      task: row.task,
+      slug: row.slug,
+      story: row.story,
+      why:
+        `${row.attempts} of ${row.max_retry} attempts used, and story ${row.story} is still ` +
+        `${row.story_state} — wecode task retry ${row.task} --reason "…", or drop it`,
+    }));
+  }
+
   /** A task that has used its attempts stops, and says so. Without this the allocator
-   *  retries a broken task forever — a crash loop with the machine holding the stopwatch. */
+   *  retries a broken task forever — a crash loop with the machine holding the stopwatch.
+   *
+   *  It only ever stops one. The runner has no path back the other way: nothing here
+   *  applies `retry`, because bringing an exhausted task back is a judgement about why it
+   *  failed, and the machine has not got one. */
   private enforceRetryLimit(): number[] {
     const rows = this.db
       .prepare(`SELECT id FROM task WHERE state = 'ready' AND attempts >= max_retry`)
