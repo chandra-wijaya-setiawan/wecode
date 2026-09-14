@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { open } from "@wecode/core";
 import { run } from "../src/run.js";
-import { seed } from "../../core/test/helpers.js";
+import { recordRed, seed } from "../../core/test/helpers.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
 let out: string[];
@@ -16,6 +16,9 @@ beforeEach(() => {
   process.env["WECODE_DB"] = path;
   db = open(path);
   ids = seed(db);
+  // The seed leaves its acceptance_test ready with nobody having watched it fail, which is
+  // itself an invariant. Record the red run so each test below breaks only its own sentence.
+  recordRed(db, ids.acceptance);
   out = [];
   err = [];
   vi.spyOn(process.stdout, "write").mockImplementation((s) => (out.push(String(s)), true));
@@ -57,7 +60,7 @@ describe("wecode doctor", () => {
     setState("story", ids.story, "delivered");
 
     expect(run(["doctor"])).not.toBe(0);
-    expect(said()).toContain("delivered_story_has_a_landed_marker");
+    expect(said()).toContain("delivered_story_has_landed");
     expect(said()).toContain(`story #${ids.story}`);
     expect(said()).toContain("reset");
   });
@@ -89,25 +92,24 @@ describe("wecode doctor", () => {
     expect(text).toContain("failing_criteria_has_an_open_task");
     expect(text).toContain(`acceptance_criteria #${ids.criteria}`);
 
-    expect(text).toContain("all_children_dropped_is_not_a_success");
+    expect(text).toContain("all_children_dropped_is_not_success");
     expect(text).toContain(`requirement #${ids.requirement}`);
 
-    expect(text).toContain("in_progress_story_has_work");
+    expect(text).toContain("story_in_progress_has_a_requirement");
     expect(text).toContain(`story #${empty}`);
-    // The story that does have a task under it is not accused of being empty.
+    // The story that does have a requirement under it is not accused of being empty.
     expect(text).not.toContain(`story #${ids.story}`);
 
     // Grouped: each invariant is named once, with its entities beneath it.
-    expect(text.match(/in_progress_story_has_work/g)).toHaveLength(1);
+    expect(text.match(/story_in_progress_has_a_requirement/g)).toHaveLength(1);
     expect(text).toContain("3 entities breaking 3 invariants");
   });
 
-  it("names a ready task whose role has no worker", () => {
+  it("names the role of a ready task when nobody fills it", () => {
     setState("task", ids.task, "ready");
 
     expect(run(["doctor"])).not.toBe(0);
-    expect(said()).toContain("ready_task_role_has_a_worker");
-    expect(said()).toContain(`task #${ids.task}`);
+    expect(said()).toContain("role_with_ready_work_has_a_worker");
     expect(said()).toContain("engineer");
   });
 
@@ -118,6 +120,25 @@ describe("wecode doctor", () => {
 
     expect(run(["doctor"])).toBe(0);
     expect(said()).toBe("");
+  });
+
+  it("names a ready acceptance_test nobody has watched fail", () => {
+    db.prepare("UPDATE acceptance_test SET red_at_base_sha = NULL WHERE id = ?").run(ids.acceptance);
+
+    expect(run(["doctor"])).not.toBe(0);
+    expect(said()).toContain("ready_acceptance_test_was_red_at_base");
+    expect(said()).toContain(`acceptance_test #${ids.acceptance}`);
+  });
+
+  it("names a ready task whose only task_test is still planned", () => {
+    setState("task", ids.task, "ready");
+    setState("task_test", ids.taskTest, "planned");
+    db.prepare("INSERT INTO worker (slug,name,role,kind,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+      .run("ada", "ada", "engineer", "agent", T, T);
+
+    expect(run(["doctor"])).not.toBe(0);
+    expect(said()).toContain("ready_task_has_a_ready_task_test");
+    expect(said()).toContain(`task #${ids.task}`);
   });
 
   it("reports a schema_version this build does not understand", () => {
