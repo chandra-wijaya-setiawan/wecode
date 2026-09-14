@@ -95,11 +95,12 @@ describe("a tick, end to end", () => {
   });
 
   it("lands the task on its story branch once its tests pass", async () => {
-    await runner().tick();
-    const second = await runner().tick();
+    // The tick that proves the task also lands it: settleEnded runs the task_tests before
+    // landDoneTasks reads the record.
+    const first = await runner().tick();
 
     expect((db.prepare("SELECT state FROM task WHERE id = ?").get(task) as { state: string }).state).toBe("done");
-    expect(second.merged).toContain(task);
+    expect(first.merged).toContain(task);
     expect(git(repo, "ls-tree", "--name-only", "story/password-reset")).toContain("mail.ts");
   });
 
@@ -108,6 +109,25 @@ describe("a tick, end to end", () => {
     await runner().tick();
     expect(git(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
     expect(existsSync(join(repo, "mail.ts"))).toBe(false);
+  });
+});
+
+describe("a task branch lands once", () => {
+  it("does not merge a task that is already merged, tick after tick", async () => {
+    const first = await runner().tick();
+    expect(first.merged).toContain(task);
+
+    const story = "story/password-reset";
+    const tip = git(repo, "rev-parse", story);
+
+    const second = await runner().tick();
+    const third = await runner().tick();
+
+    expect(second.merged).toEqual([]);
+    expect(third.merged).toEqual([]);
+    // and the branch stands where the one merge left it
+    expect(git(repo, "rev-parse", story)).toBe(tip);
+    expect(git(repo, "rev-list", "--count", `--grep=merge task/send-the-mail`, story)).toBe("1");
   });
 });
 
