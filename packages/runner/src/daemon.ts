@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { clearRefusal, Engine, recordRefusal } from "@wecode/core";
+import { promisify } from "node:util";
+import { clearRefusal, Engine, ensureChore, recordRefusal } from "@wecode/core";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { allocate, candidates as readyCandidates, type Candidate, type Pass } from "./allocator.js";
@@ -9,6 +11,8 @@ import type { WorkerAdapter } from "./ports.js";
 import { Scripts, type ScriptReport } from "./scripts.js";
 import { Trees } from "./git.js";
 
+const exec = promisify(execFile);
+
 export interface Tick {
   readonly allocated: Pass;
   readonly foreman: TickReport;
@@ -17,6 +21,9 @@ export interface Tick {
   readonly merged: readonly number[];
   /** Tasks that ran out of attempts on this tick. */
   readonly exhausted: readonly number[];
+  /** Chores wecode owes itself, as of this tick. Every open one, not only the new ones:
+   *  the number is the backlog, and a backlog that shrank is worth seeing. */
+  readonly chores: readonly number[];
   /** Completion transitions that fired because their guard had become true. */
   readonly settled: readonly string[];
 }
@@ -64,12 +71,16 @@ export class Runner {
     // that just ran settles here, rather than waiting for an event that already happened.
     const settled2 = this.engine.settle();
     const exhausted = this.enforceRetryLimit();
+    // Last, and after settle(): a story becomes delivered in settle(), and the condition
+    // this reads is about a story that already is.
+    const chores = await this.raiseMergeChores();
     return {
       allocated,
       foreman,
       committed: settled.committed,
       merged,
       exhausted,
+      chores,
       settled: settled2.map((c) => `${c.entity} #${c.id} → ${c.to}`),
       scripts: {
         passed: [...settled.scripts.passed, ...acceptance.passed],
@@ -282,6 +293,70 @@ export class Runner {
       }
     }
     return { passed, failed };
+  }
+
+  /** docs/design/18. A story is delivered and its branch will not merge into the base.
+   *
+   *  Until now that was a sentence in a report: the merge in `landDoneTasks` swallowed the
+   *  conflict, and a delivered story that could not be landed looked exactly like one that
+   *  had been. Four of them sat that way for a day. A chore is the record of it — on the
+   *  board, with a target and a check, and takeable by a worker.
+   *
+   *  This runs every tick and creates nothing on the second one: `ensureChore` is keyed on
+   *  (kind, target), which is the condition itself. Nothing here decides the chore is over
+   *  either — a merge that has since become possible is still the system worker's to make,
+   *  because the merge is what the check proves. */
+  private async raiseMergeChores(): Promise<number[]> {
+    const stories = this.db
+      .prepare(
+        `SELECT s.id AS id, s.slug AS slug, rel.project_id AS project, p.repo AS repo
+           FROM story s
+           JOIN epic e ON e.id = s.epic_id
+           JOIN release rel ON rel.id = e.release_id
+           JOIN project p ON p.id = rel.project_id
+          WHERE s.state = 'delivered'`,
+      )
+      .all() as unknown as { id: number; slug: string; project: number; repo: string }[];
+
+    const open: number[] = [];
+    for (const story of stories) {
+      const repo = this.opts.repoRoot ?? story.repo;
+      const base = await this.treesFor(repo)
+        .integrationBranch()
+        .catch(() => null);
+      if (base === null) continue;
+      if (await this.mergesCleanly(repo, base, `story/${story.slug}`)) continue;
+
+      const chore = ensureChore(this.db, {
+        project_id: story.project,
+        kind: "merge",
+        target_type: "story",
+        target_id: story.id,
+        check: "the branch merges cleanly",
+      });
+      if (chore.state !== "done") open.push(chore.id);
+    }
+    return open;
+  }
+
+  /** Would this branch merge into the base, without touching either?
+   *
+   *  `merge-tree --write-tree` answers it in the object store: no checkout, no index, and
+   *  nothing to clean up if the answer is no.
+   *
+   *  Both refs are checked first, because merge-tree exits 1 for a ref that is not there
+   *  as well as for a conflict. Read off the exit code alone, a story that never had a
+   *  branch gets a merge chore that no merge could ever discharge. */
+  private async mergesCleanly(repo: string, base: string, branch: string): Promise<boolean> {
+    for (const ref of [base, branch]) {
+      const there = await exec("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo })
+        .then(() => true)
+        .catch(() => false);
+      if (!there) return true;
+    }
+    return await exec("git", ["merge-tree", "--write-tree", base, branch], { cwd: repo })
+      .then(() => true)
+      .catch(() => false);
   }
 
   /** A task whose tests passed lands on its story branch. */
