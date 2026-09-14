@@ -510,19 +510,60 @@ function gitConfig(key: string): string {
   }
 }
 
-/** `wecode show <entity> <id>` — one record, and what hangs off it. */
+/** Which table each entity is, what names one, and the row it hangs off. The one place
+ *  the shape of the tree is written down in this client — `where`, `show` and the missing-id
+ *  answer all read it rather than each carrying their own copy. */
+const ENTITIES: Readonly<Record<string, { label: string; parent?: { table: string; fk: string } }>> = {
+  workspace: { label: "name" },
+  project: { label: "name", parent: { table: "workspace", fk: "workspace_id" } },
+  release: { label: "version", parent: { table: "project", fk: "project_id" } },
+  epic: { label: "title", parent: { table: "release", fk: "release_id" } },
+  story: { label: "title", parent: { table: "epic", fk: "epic_id" } },
+  requirement: { label: "statement", parent: { table: "story", fk: "story_id" } },
+  acceptance_criteria: { label: "statement", parent: { table: "requirement", fk: "requirement_id" } },
+  acceptance_test: { label: "statement", parent: { table: "acceptance_criteria", fk: "parent_id" } },
+  task: { label: "title", parent: { table: "acceptance_test", fk: "acceptance_test_id" } },
+  task_test: { label: "statement", parent: { table: "task", fk: "parent_id" } },
+  assignment: { label: "slug" },
+  role: { label: "name" },
+  worker: { label: "name" },
+};
+
+/** `wecode show <entity> <id>` — one record, whatever state it is in, and where it lives.
+ *
+ *  A record is shown in every state, dropped and done included: somebody reading an id out of
+ *  old notes is asking what became of it, and a refusal answers that with silence. When the id
+ *  is not there at all, the ids that are there are the answer — the epic did not vanish, it was
+ *  rebuilt under another number, and only a list of the live ones says so. */
 function show(args: readonly string[]): number {
   const [entity, raw] = args;
   const id = Number(raw);
   if (entity === undefined || !Number.isInteger(id)) return fail("wecode show <entity> <id>");
+  if (ENTITIES[entity] === undefined) {
+    return fail(`no entity called ${entity}. There is ${Object.keys(ENTITIES).join(", ")}`);
+  }
   const conn = db();
   const row = conn.prepare(`SELECT * FROM ${entity} WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
-  if (row === undefined) return fail(`no ${entity} #${id}`);
+  if (row === undefined) return fail(instead(conn, entity, id));
   for (const [k, v] of Object.entries(row)) {
     if (v === null || v === "") continue;
     process.stdout.write(`${k.padEnd(18)} ${String(v)}\n`);
   }
+  const owner = projectOf(entity, id);
+  if (owner !== null) process.stdout.write(`${"project".padEnd(18)} #${owner.id} ${owner.name}\n`);
   return 0;
+}
+
+/** What to say about an id that is not there: the ids of that entity that are. */
+function instead(conn: ReturnType<typeof db>, entity: string, id: number): string {
+  const label = ENTITIES[entity]?.label ?? "slug";
+  const rows = conn
+    .prepare(`SELECT id, ${label} AS label FROM ${entity} ORDER BY id`)
+    .all() as unknown as { id: number; label: string }[];
+  if (rows.length === 0) return `no ${entity} #${id}, and no ${entity} at all yet.`;
+  const shown = rows.slice(0, 20).map((r) => `  #${r.id}  ${String(r.label)}`);
+  const more = rows.length > shown.length ? [`  … and ${rows.length - shown.length} more`] : [];
+  return [`no ${entity} #${id}. These ${entity} ids exist:`, ...shown, ...more].join("\n");
 }
 
 /** Every command but init and onboard needs a database. A missing one is the commonest
@@ -740,46 +781,36 @@ function project(): ReturnType<typeof readProjectConfig> {
   return readProjectConfig(resolve(process.cwd(), "config/project.yaml"));
 }
 
-/** The project a row belongs to, by walking up. Null when the entity has no project. */
+/** The project a row belongs to, by walking the tree up one link at a time. Null for the
+ *  entities that hang off no project at all — a worker, a role, the workspace itself. */
 function projectOf(entity: string, id: number): { id: number; name: string; repo: string } | null {
-  const up: Readonly<Record<string, string>> = {
-    release: "SELECT p.id, p.name, p.repo FROM release x JOIN project p ON p.id = x.project_id WHERE x.id = ?",
-    epic: "SELECT p.id, p.name, p.repo FROM epic x JOIN release r ON r.id = x.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    story:
-      "SELECT p.id, p.name, p.repo FROM story x JOIN epic e ON e.id = x.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    requirement:
-      "SELECT p.id, p.name, p.repo FROM requirement x JOIN story s ON s.id = x.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    acceptance_criteria:
-      "SELECT p.id, p.name, p.repo FROM acceptance_criteria x JOIN requirement q ON q.id = x.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    acceptance_test:
-      "SELECT p.id, p.name, p.repo FROM acceptance_test x JOIN acceptance_criteria c ON c.id = x.parent_id JOIN requirement q ON q.id = c.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    task: "SELECT p.id, p.name, p.repo FROM task x JOIN acceptance_test a ON a.id = x.acceptance_test_id JOIN acceptance_criteria c ON c.id = a.parent_id JOIN requirement q ON q.id = c.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    project: "SELECT p.id, p.name, p.repo FROM project p WHERE p.id = ?",
-  };
-  const sql = up[entity];
-  if (sql === undefined) return null;
-  try {
-    return (db().prepare(sql).get(id) as { id: number; name: string; repo: string } | undefined) ?? null;
-  } catch {
-    return null;
+  const conn = db();
+  let here = entity;
+  let at = id;
+  // The chain is nine deep at most; the bound stops a cycle in bad data spinning forever.
+  for (let step = 0; step <= Object.keys(ENTITIES).length; step += 1) {
+    if (here === "project") {
+      return (
+        (conn.prepare("SELECT id, name, repo FROM project WHERE id = ?").get(at) as
+          | { id: number; name: string; repo: string }
+          | undefined) ?? null
+      );
+    }
+    const up = ENTITIES[here]?.parent;
+    if (up === undefined) return null;
+    const row = conn.prepare(`SELECT ${up.fk} AS pid FROM ${here} WHERE id = ?`).get(at) as
+      | { pid: number }
+      | undefined;
+    if (row === undefined) return null;
+    here = up.table;
+    at = row.pid;
   }
+  return null;
 }
-
-/** The parent entity a child of this kind hangs off. */
-const PARENT_OF: Readonly<Record<string, string>> = {
-  release: "project",
-  epic: "release",
-  story: "epic",
-  requirement: "story",
-  acceptance_criteria: "requirement",
-  acceptance_test: "acceptance_criteria",
-  task: "acceptance_test",
-  task_test: "task",
-};
 
 /** Refuse a parent whose project is not the one this repository is. */
 function crossesProject(entity: string, parent: number): string | null {
-  const parentEntity = PARENT_OF[entity];
+  const parentEntity = ENTITIES[entity]?.parent?.table;
   if (parentEntity === undefined || parentEntity === "project") return null;
   return elsewhere(parentEntity, parent);
 }
@@ -805,23 +836,13 @@ function elsewhere(entity: string, id: number): string | null {
 
 /** The parent this row hangs off, named. */
 function where(entity: string, id: number): string {
-  const parents: Readonly<Record<string, { table: string; fk: string; label: string }>> = {
-    project: { table: "workspace", fk: "workspace_id", label: "name" },
-    release: { table: "project", fk: "project_id", label: "name" },
-    epic: { table: "release", fk: "release_id", label: "version" },
-    story: { table: "epic", fk: "epic_id", label: "title" },
-    requirement: { table: "story", fk: "story_id", label: "title" },
-    acceptance_criteria: { table: "requirement", fk: "requirement_id", label: "statement" },
-    acceptance_test: { table: "acceptance_criteria", fk: "parent_id", label: "statement" },
-    task: { table: "acceptance_test", fk: "acceptance_test_id", label: "statement" },
-    task_test: { table: "task", fk: "parent_id", label: "title" },
-  };
-  const up = parents[entity];
-  if (up === undefined) return "";
+  const up = ENTITIES[entity]?.parent;
+  const column = up === undefined ? undefined : ENTITIES[up.table]?.label;
+  if (up === undefined || column === undefined) return "";
   try {
     const row = db()
       .prepare(
-        `SELECT p.id AS id, p.${up.label} AS label FROM ${entity} c JOIN ${up.table} p ON p.id = c.${up.fk} WHERE c.id = ?`,
+        `SELECT p.id AS id, p.${column} AS label FROM ${entity} c JOIN ${up.table} p ON p.id = c.${up.fk} WHERE c.id = ?`,
       )
       .get(id) as { id: number; label: string } | undefined;
     if (row === undefined) return "";
