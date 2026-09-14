@@ -50,7 +50,7 @@ function dispatch(argv: readonly string[]): number {
     const what = rest[0] ?? "";
     return isStateful(what) ? entityHelp(what) : usage();
   }
-  if (head === "board") return showBoard();
+  if (head === "board") return showBoard(rest);
   if (head === "init") return init();
   if (head === "answer") return answer(rest);
   if (head === "show") return show(rest);
@@ -504,8 +504,39 @@ function db() {
 
 class Missing extends Error {}
 
-function showBoard(): number {
-  const b = board(db());
+/** The project this repository is, or null when you are standing outside all of them. */
+function hereProject(): { id: number; name: string } | null {
+  return (
+    (db().prepare("SELECT id, name FROM project WHERE repo = ?").get(resolve(process.cwd())) as
+      | { id: number; name: string }
+      | undefined) ?? null
+  );
+}
+
+/** `wecode board [--all] [--project N]` — by default, only the project you are standing in.
+ *
+ *  A board of every project in the workspace cannot answer "what is left here", which is
+ *  the question somebody in a repository is asking. `--all` is the workspace-wide view. */
+function showBoard(args: readonly string[]): number {
+  const { values } = parseArgs({
+    args: [...args],
+    options: { all: { type: "boolean" }, project: { type: "string" } },
+  });
+
+  // Outside every project's repo there is no "here" to narrow to, so the board is the
+  // workspace's — which is what it always was.
+  const asked = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
+  const chosen = values.all === true ? null : asked;
+  if (chosen !== null && !Number.isInteger(chosen)) return fail("wecode board --project <id>");
+
+  const b = board(db(), chosen);
+  const mine = b.projects.find((p) => p.id === chosen);
+  if (chosen !== null && mine === undefined) return fail(`no project #${chosen}`);
+  process.stdout.write(
+    mine === undefined
+      ? `\nall ${b.projects.length} projects in this workspace\n`
+      : `\n#${mine.id} ${mine.what} · wecode board --all for the whole workspace\n`,
+  );
   const groups: [string, readonly { id: number; what: string; state: string; detail: string }[]][] = [
     ["RUNNING", b.running],
     ["NEEDS YOU", b.needs_human],
@@ -797,7 +828,7 @@ function usage(): number {
       "START HERE",
       "  wecode onboard [name] [--workspace <ws>]   learn this repo, join a workspace, write config",
       "  wecode init                                an empty workspace, before you have a repo",
-      "  wecode board                               what is running, waiting, queued, failed",
+      "  wecode board [--all]                       what is running, waiting, queued, failed",
       "  wecode workspaces                          which workspaces exist, and which is current",
       "",
       "MAKING WORK",
