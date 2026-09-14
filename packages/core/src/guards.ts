@@ -30,6 +30,8 @@ export const GUARD_NAMES = [
   "every_acceptance_test_settled",
   "every_task_test_settled",
   "artefact_resolves",
+  "test_may_be_reproved",
+  "test_has_been_red",
   "task_may_be_attempted",
   "max_retry_reached",
   "answer_is_permitted",
