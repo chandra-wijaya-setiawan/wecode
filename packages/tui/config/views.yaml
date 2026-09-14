@@ -7,6 +7,15 @@
 page:
   order: [projects, running, needs_human, stale, queued, failed, roadmap, delivered]
 
+# The outline is the same tree the boxes filter, drawn whole. It is not a view: it has no
+# filter, because it keeps every row there is and folds the ones you are not reading.
+outline:
+  title: Outline
+  key: t
+  # Folded to here when it opens: this level is shown, and what hangs under it is not.
+  depth: story
+  empty: no projects — wecode project create --parent <workspace> <name>
+
 views:
   projects:
     title: Projects

@@ -1,18 +1,20 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Trees } from "../src/index.js";
+import { tmp } from "../../core/test/tmpdir.js";
 
 let repo: string;
+let outside: string;
 let trees: Trees;
 
 const run = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
 beforeEach(() => {
-  repo = mkdtempSync(join(tmpdir(), "wecode-git-"));
+  repo = tmp("wecode-git-");
+  outside = tmp("wecode-git-outside-");
   run(repo, "init", "-q", "-b", "main");
   run(repo, "config", "user.name", "test");
   run(repo, "config", "user.email", "test@localhost");
@@ -41,7 +43,7 @@ describe("branches", () => {
 describe("a worktree per attempt", () => {
   it("cuts a fresh tree and releases it", async () => {
     const branch = await trees.taskBranch("s", "t");
-    const path = join(repo, "..", `wt-${Date.now()}`);
+    const path = join(outside, `wt-${Date.now()}`);
     await trees.cut(branch, path);
     expect(existsSync(join(path, "README.md"))).toBe(true);
     await trees.release(path);
@@ -50,7 +52,7 @@ describe("a worktree per attempt", () => {
 
   it("commits what the attempt wrote, onto the task branch", async () => {
     const branch = await trees.taskBranch("s", "t");
-    const path = join(repo, "..", `wt2-${Date.now()}`);
+    const path = join(outside, `wt2-${Date.now()}`);
     await trees.cut(branch, path);
     writeFileSync(join(path, "mail.ts"), "export const send = () => {};\n");
 
@@ -63,7 +65,7 @@ describe("a worktree per attempt", () => {
 
   it("commits nothing when the attempt wrote nothing", async () => {
     const branch = await trees.taskBranch("s", "t");
-    const path = join(repo, "..", `wt3-${Date.now()}`);
+    const path = join(outside, `wt3-${Date.now()}`);
     await trees.cut(branch, path);
     expect(await trees.commitAttempt(path, branch, "empty")).toBeNull();
     await trees.release(path);
@@ -92,7 +94,7 @@ describe("an attempt only ever commits in a detached worktree it cut", () => {
 
   it("commits in a detached worktree", async () => {
     const branch = await trees.taskBranch("s", "t");
-    const path = join(repo, "..", `wt-detached-${Date.now()}`);
+    const path = join(outside, `wt-detached-${Date.now()}`);
     await trees.cut(branch, path);
     expect(run(path, "rev-parse", "--symbolic-full-name", "HEAD")).toBe("HEAD");
     writeFileSync(join(path, "mail.ts"), "export const send = () => {};\n");
@@ -107,7 +109,7 @@ describe("an attempt only ever commits in a detached worktree it cut", () => {
 
   it("refuses a worktree with a branch checked out, naming the branch", async () => {
     const branch = await trees.taskBranch("s", "t");
-    const attached = join(repo, "..", `wt-attached-${Date.now()}`);
+    const attached = join(outside, `wt-attached-${Date.now()}`);
     run(repo, "worktree", "add", "-q", attached, branch);
     writeFileSync(join(attached, "mail.ts"), "x\n");
 
@@ -119,7 +121,7 @@ describe("an attempt only ever commits in a detached worktree it cut", () => {
 
   it("refuses to release the repository root or an attached worktree", async () => {
     const branch = await trees.taskBranch("s", "t");
-    const attached = join(repo, "..", `wt-rel-${Date.now()}`);
+    const attached = join(outside, `wt-rel-${Date.now()}`);
     run(repo, "worktree", "add", "-q", attached, branch);
 
     await expect(trees.release(repo)).rejects.toThrow(/repository root/);
@@ -130,7 +132,7 @@ describe("an attempt only ever commits in a detached worktree it cut", () => {
 
   it("refuses to merge into the base checkout", async () => {
     const branch = await trees.taskBranch("s", "t");
-    const path = join(repo, "..", `wt-merge-${Date.now()}`);
+    const path = join(outside, `wt-merge-${Date.now()}`);
     await trees.cut(branch, path);
     writeFileSync(join(path, "mail.ts"), "x\n");
     await trees.commitAttempt(path, branch, "attempt");
@@ -148,13 +150,13 @@ describe("an attempt only ever commits in a detached worktree it cut", () => {
 describe("merging", () => {
   it("lands a task branch on the story branch without touching the integration checkout", async () => {
     const branch = await trees.taskBranch("s", "t");
-    const path = join(repo, "..", `wt4-${Date.now()}`);
+    const path = join(outside, `wt4-${Date.now()}`);
     await trees.cut(branch, path);
     writeFileSync(join(path, "mail.ts"), "x\n");
     await trees.commitAttempt(path, branch, "attempt");
     await trees.release(path);
 
-    await trees.mergeTaskIntoStory(branch, "s", join(repo, "..", `story-${Date.now()}`));
+    await trees.mergeTaskIntoStory(branch, "s", join(outside, `story-${Date.now()}`));
     expect(run(repo, "ls-tree", "--name-only", "story/s")).toContain("mail.ts");
     expect(run(repo, "status", "--porcelain")).toBe("");
     expect(run(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
@@ -165,7 +167,7 @@ describe("cleanup once a story has landed", () => {
   const land = async (storyTree: string, ...taskSlugs: string[]) => {
     for (const slug of taskSlugs) {
       const branch = await trees.taskBranch("s", slug);
-      const path = join(repo, "..", `wt-${slug}-${Date.now()}`);
+      const path = join(outside, `wt-${slug}-${Date.now()}`);
       await trees.cut(branch, path);
       writeFileSync(join(path, `${slug}.ts`), "x\n");
       await trees.commitAttempt(path, branch, slug);
@@ -175,7 +177,7 @@ describe("cleanup once a story has landed", () => {
   };
 
   it("removes the story tree, the story branch and each task branch", async () => {
-    const storyTree = join(repo, "..", `story-clean-${Date.now()}`);
+    const storyTree = join(outside, `story-clean-${Date.now()}`);
     await land(storyTree, "send-mail", "expire-token");
 
     const report = await trees.cleanupLanded("s", storyTree, ["send-mail", "expire-token"]);
@@ -188,7 +190,7 @@ describe("cleanup once a story has landed", () => {
   });
 
   it("leaves a story tree holding uncommitted files, and its branch with it", async () => {
-    const storyTree = join(repo, "..", `story-dirty-${Date.now()}`);
+    const storyTree = join(outside, `story-dirty-${Date.now()}`);
     await land(storyTree, "send-mail");
     writeFileSync(join(storyTree, "half-done.ts"), "nobody has seen this\n");
 
@@ -204,7 +206,7 @@ describe("cleanup once a story has landed", () => {
   });
 
   it("counts an untracked file as unseen work", async () => {
-    const storyTree = join(repo, "..", `story-untracked-${Date.now()}`);
+    const storyTree = join(outside, `story-untracked-${Date.now()}`);
     await land(storyTree, "send-mail");
     writeFileSync(join(storyTree, "scratch.txt"), "notes\n");
 
@@ -214,9 +216,9 @@ describe("cleanup once a story has landed", () => {
   });
 
   it("leaves a task branch whose own tree is still dirty", async () => {
-    const storyTree = join(repo, "..", `story-taskdirty-${Date.now()}`);
+    const storyTree = join(outside, `story-taskdirty-${Date.now()}`);
     await land(storyTree, "send-mail");
-    const stray = join(repo, "..", `wt-stray-${Date.now()}`);
+    const stray = join(outside, `wt-stray-${Date.now()}`);
     run(repo, "worktree", "add", stray, "task/send-mail");
     writeFileSync(join(stray, "in-flight.ts"), "mid-edit\n");
 
@@ -232,9 +234,9 @@ describe("cleanup once a story has landed", () => {
   });
 
   it("releases a clean task tree before deleting its branch", async () => {
-    const storyTree = join(repo, "..", `story-taskclean-${Date.now()}`);
+    const storyTree = join(outside, `story-taskclean-${Date.now()}`);
     await land(storyTree, "send-mail");
-    const spare = join(repo, "..", `wt-spare-${Date.now()}`);
+    const spare = join(outside, `wt-spare-${Date.now()}`);
     run(repo, "worktree", "add", spare, "task/send-mail");
 
     const report = await trees.cleanupLanded("s", storyTree, ["send-mail"]);
@@ -245,7 +247,7 @@ describe("cleanup once a story has landed", () => {
   });
 
   it("is safe to run twice: the second pass has nothing left to do", async () => {
-    const storyTree = join(repo, "..", `story-twice-${Date.now()}`);
+    const storyTree = join(outside, `story-twice-${Date.now()}`);
     await land(storyTree, "send-mail");
     await trees.cleanupLanded("s", storyTree, ["send-mail"]);
 
@@ -256,7 +258,7 @@ describe("cleanup once a story has landed", () => {
 
 describe("the integration branch", () => {
   it("is whatever the repository's HEAD says, not an assumption", async () => {
-    const other = mkdtempSync(join(tmpdir(), "wecode-master-"));
+    const other = tmp("wecode-master-");
     run(other, "init", "-q", "-b", "master");
     run(other, "config", "user.name", "t");
     run(other, "config", "user.email", "t@localhost");

@@ -688,6 +688,7 @@ function verb(entity: string, rest: readonly string[]): number {
   if (name === "create") return asked ? createHelp(entity) : create(entity, args);
   if (name === "scope") return asked ? scopeHelp() : scope(entity, args);
   if (name === "artefact") return asked ? artefactHelp() : artefact(entity, args);
+  if (name === "retry" && entity === "task") return retry(args);
 
   if (!isStateful(entity)) return fail(`${entity} has no states; its only verb is create`);
   const id = Number(args[0]);
@@ -700,6 +701,48 @@ function verb(entity: string, rest: readonly string[]): number {
   for (const c of out.changes) {
     process.stdout.write(`${c.entity} #${c.id}  ${c.from} → ${c.to}${c.automatic ? "  (cascade)" : ""}\n`);
   }
+  return 0;
+}
+
+/** `wecode task retry <id> --reason "<text>"` — the way back from failed.
+ *
+ *  The reason is required, and attempts go back to zero: a retry with the counter left at
+ *  the limit fails the guard again on the next tick, which is how an exhausted task
+ *  dangles. The runner never comes down this path — it can push a task to failed and no
+ *  further, because a fourth attempt is a judgement about why the first three did not
+ *  work. The reason rides on the ledger's actor, which is the only column that survives
+ *  with the transition it explains. */
+function retry(args: readonly string[]): number {
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { reason: { type: "string" } },
+  });
+  const id = Number(positionals[0]);
+  const reason = (values.reason ?? "").trim();
+  if (!Number.isInteger(id) || reason === "") {
+    return fail('wecode task retry <id> --reason "<why a further attempt will go differently>"');
+  }
+
+  const wrong = elsewhere("task", id);
+  if (wrong !== null) return fail(wrong);
+
+  const conn = db();
+  const before = conn.prepare("SELECT attempts, max_retry FROM task WHERE id = ?").get(id) as
+    | { attempts: number; max_retry: number }
+    | undefined;
+  if (before === undefined) return fail(`no task #${id}`);
+
+  const who = process.env["WECODE_ACTOR"] ?? "operator";
+  const out = new Engine(conn).apply("task", id, "retry", `${who}: ${reason}`);
+  if (!out.ok) return fail(out.why);
+  // After the transition: a refused retry must not leave the counter reset behind it.
+  conn.prepare("UPDATE task SET attempts = 0, updated_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+
+  for (const c of out.changes) {
+    process.stdout.write(`${c.entity} #${c.id}  ${c.from} → ${c.to}${c.automatic ? "  (cascade)" : ""}\n`);
+  }
+  process.stdout.write(`attempts ${before.attempts} → 0 of ${before.max_retry}  ·  ${who}: ${reason}\n`);
   return 0;
 }
 

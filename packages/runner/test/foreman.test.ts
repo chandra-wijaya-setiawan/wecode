@@ -1,10 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Maker, open } from "@wecode/core";
 import { Foreman, type Observation, type WorkerAdapter, type Work } from "../src/index.js";
+import { tmp } from "../../core/test/tmpdir.js";
 
 /** An adapter that reports whatever the test queued, so the foreman can be exercised
  *  without a harness. */
@@ -54,13 +54,13 @@ const assign = (worktree = "/tmp/wecode-no-such-worktree"): number =>
   });
 
 /** A worktree that is really on disk, so `resume` is reachable. */
-const worktreeDir = (): string => mkdtempSync(join(tmpdir(), "wecode-wt-"));
+const worktreeDir = (): string => tmp("wecode-wt-");
 
 const phaseOf = (id: number): string =>
   (db.prepare("SELECT phase FROM assignment WHERE id = ?").get(id) as { phase: string }).phase;
 
 beforeEach(() => {
-  db = open(join(mkdtempSync(join(tmpdir(), "wecode-foreman-")), "wecode.db"));
+  db = open(join(tmp("wecode-foreman-"), "wecode.db"));
   make = new Maker(db);
   const ws = make.workspace("acme", "/acme");
   const p = make.project(ws, "s", "/r");

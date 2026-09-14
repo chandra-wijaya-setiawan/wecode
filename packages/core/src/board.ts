@@ -18,7 +18,16 @@ export interface Board {
   readonly unproven: readonly Row[];
   readonly roadmap: readonly Row[];
   readonly delivered: readonly Row[];
+  readonly unmergeable: readonly Row[];
 }
+
+/** Whether a branch merges is a fact about the repository, so the runner owns both the
+ *  observation and the table it lands in — `land_conflict (story_id, branch, reason, at)`,
+ *  created beside the record the way `landed_branch` and `red_at_base` are. A workspace
+ *  that has never run a lander has no such table, and that is not an error: it is a board
+ *  with nothing recorded against it. */
+const hasTable = (db: DatabaseSync, name: string): boolean =>
+  db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
 
 /** The project a row belongs to, as an expression over the id of its row. Every group but
  *  `projects` hangs somewhere under a project, and the walk up is the only way to know
@@ -140,11 +149,21 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
                AND a.phase IN ('pending','running','waiting'))
         ORDER BY t.id`,
     ),
+    // Stopped work, in the two ways work stops — and they are not the same thing. A dropped
+    // task was somebody's decision and wants nothing from anyone; an exhausted one is
+    // waiting for a person to retry it or drop it, and used to read identically. A failed
+    // task with attempts left is neither: the next pass will pick it up.
     failed: rows(
       `SELECT t.id AS id, t.title AS what, t.state AS state,
-              'attempts ' || t.attempts || '/' || t.max_retry AS detail
+              CASE
+                WHEN t.state = 'dropped' THEN 'dropped by decision'
+                WHEN t.attempts >= t.max_retry
+                  THEN 'out of attempts · ' || t.attempts || ' of ' || t.max_retry
+                       || ' · retry it with a reason, or drop it'
+                ELSE 'attempts ' || t.attempts || '/' || t.max_retry
+              END AS detail
          FROM task t
-        WHERE t.state = 'failed' AND ${only(ofTask("t.id"))}
+        WHERE t.state IN ('failed', 'dropped') AND ${only(ofTask("t.id"))}
         ORDER BY t.id`,
     ),
     // Ready to run, but nobody has watched it fail — so passing it would prove nothing.
@@ -164,6 +183,19 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
         WHERE s.state = 'delivered' AND ${only(ofStory("s.id"))}
         ORDER BY s.updated_at DESC LIMIT 20`,
     ),
+    // Delivered, and the last thing that tried to land it could not. A filter rather than
+    // a state: the story is delivered, and stays delivered — what is wrong is between its
+    // branch and master, and only the thing holding a repository can see it. Stories 138
+    // and 139 sat for a day because the only record of it was prose in a chat.
+    unmergeable: hasTable(db, "land_conflict")
+      ? rows(
+          `SELECT s.id AS id, s.title AS what, s.state AS state,
+                  c.branch || ' · ' || c.reason AS detail
+             FROM story s JOIN land_conflict c ON c.story_id = s.id
+            WHERE s.state = 'delivered' AND ${only(ofStory("s.id"))}
+            ORDER BY s.id`,
+        )
+      : [],
     // A story carries how far it has got: tasks done out of tasks that exist.
     roadmap: rows(
       `SELECT x.id AS id, x.title AS what, x.state AS state, 'epic' AS detail FROM epic x
