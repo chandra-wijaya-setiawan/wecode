@@ -2,13 +2,12 @@ import { writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { loadRoles, RoleConfigError, withinCeiling } from "../src/index.js";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tmp } from "./tmpdir.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/roles.yaml", import.meta.url));
 const write = (body: string): string => {
-  const p = join(mkdtempSync(join(tmpdir(), "wecode-roles-")), "roles.yaml");
+  const p = join(tmp("wecode-roles-"), "roles.yaml");
   writeFileSync(p, body);
   return p;
 };

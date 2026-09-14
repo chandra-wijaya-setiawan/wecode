@@ -2,7 +2,16 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { currentDatabase, open } from "@wecode/core";
+import {
+  currentDatabase,
+  heldMessage,
+  open,
+  readLease,
+  releaseLease,
+  renewLease,
+  runnerId,
+  takeLease,
+} from "@wecode/core";
 import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
 import { DEFAULT_BUDGET, loadBudget } from "./budget.js";
 import { loop, Runner, type Tick } from "./daemon.js";
@@ -62,18 +71,43 @@ const say = (t: Tick): void => {
   process.stdout.write(`${new Date().toISOString()}  ${parts.join("  ")}\n`);
 };
 
+const everyMs = Number(values.interval ?? 15) * 1000;
+
+// One runner per workspace. Two of them mark each other's sessions lost — each polls, finds
+// a session it has no memory of starting, and calls it lost — so the second must not start
+// at all rather than start and be careful.
+const me = runnerId();
+const taken = takeLease(db, me, everyMs);
+if (!taken.ok) {
+  process.stderr.write(`${heldMessage(taken.held, taken.ageMs)}\n`);
+  db.close();
+  process.exit(1);
+}
+
+const letGo = (): void => releaseLease(db, me);
+
 if (values.once === true) {
   say(await runner.tick());
+  letGo();
 } else {
   const stop = new AbortController();
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => stop.abort());
+    process.on(sig, () => (letGo(), stop.abort()));
   }
-  const everyMs = Number(values.interval ?? 15) * 1000;
   process.stdout.write(
-    `wecode-runner  ${dbPath}\n  budget ${budgetPath}  max_open ${budget.max_open}  every ${everyMs / 1000}s\n`,
+    `wecode-runner  ${dbPath}\n  budget ${budgetPath}  max_open ${budget.max_open}  every ${everyMs / 1000}s\n  lease ${me}\n`,
   );
-  await loop(runner, everyMs, stop.signal, say);
+  // Renewed on every tick, from the same loop that does the work: a runner that is wedged
+  // stops renewing, and the lease goes stale, which is the point of measuring it in ticks.
+  await loop(runner, everyMs, stop.signal, (t) => {
+    if (!stop.signal.aborted && !renewLease(db, me)) {
+      const holder = readLease(db)?.holder ?? "nobody";
+      process.stderr.write(`lost the runner lease to ${holder} — stopping\n`);
+      stop.abort();
+    }
+    say(t);
+  });
+  letGo();
 }
 
 db.close();
