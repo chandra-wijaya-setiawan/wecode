@@ -2,6 +2,7 @@
  *  part worth keeping: Ink lays the boxes out, but what a cell says once it will not fit,
  *  and which rows a height can show, are still decisions this file makes. */
 import { Box, Text } from "ink";
+import { STATEFUL } from "@wecode/core";
 
 export interface Row {
   readonly id: number;
@@ -10,7 +11,27 @@ export interface Row {
   readonly detail: string;
 }
 
-export type Column = "#" | "what" | "state" | "detail";
+/** The row contract: a code, a state, a description, in that order, on every screen. This
+ *  file is the only thing that decides it, so a screen cannot invent its own layout. */
+export const COLUMNS = ["code", "state", "description"] as const;
+
+/** The three, plus the names screens used to pass. The old names are still a type so that a
+ *  screen naming them compiles; naming any of them changes nothing that is drawn. */
+export type Column = (typeof COLUMNS)[number] | "#" | "what" | "detail";
+
+/** A detail that is only an entity's name is the row's kind, not anything to read. */
+const KINDS: ReadonlySet<string> = new Set<string>(STATEFUL);
+
+/** The row's short identity as a person would say it aloud. The kind is said only where the
+ *  screen does not already say it — a roadmap box and a node's children mix kinds, and the
+ *  board marks those rows by putting the kind in the detail. */
+export const code = (row: Row): string =>
+  KINDS.has(row.detail) ? `${row.detail.replace(/_/g, " ")} #${row.id}` : `#${row.id}`;
+
+/** What is left once the code and the state have taken theirs: the label, and the detail
+ *  where the code did not already spend it. */
+export const description = (row: Row): string =>
+  row.detail === "" || KINDS.has(row.detail) ? row.what : `${row.what} · ${row.detail}`;
 
 /** Two spaces between columns; a terminal has no rules to lean on. */
 const GAP = "  ";
@@ -30,8 +51,8 @@ export function stateColour(state: string): string {
   return PLAIN;
 }
 
-const cell = (row: Row, column: Column): string =>
-  column === "#" ? String(row.id) : row[column];
+const cell = (row: Row, column: (typeof COLUMNS)[number]): string =>
+  column === "code" ? code(row) : column === "state" ? row.state : description(row);
 
 /** Never wrap: a cell too wide for its slot loses its tail to an ellipsis. */
 export function clip(text: string, width: number): string {
@@ -44,9 +65,11 @@ const pad = (text: string, width: number): string => text.padEnd(width, " ");
 
 /** How wide each column has to be to hold every row given. Passed down from the screen so
  *  that every box on it shares one set of widths and the columns line up down the whole
- *  screen; a list given none sizes itself to the rows it can see. */
-export function columnWidths(rows: readonly Row[], columns: readonly Column[]): number[] {
-  return columns.map((c) => Math.max(...rows.map((r) => cell(r, c).length), 0));
+ *  screen; a list given none sizes itself to the rows it can see. A caller may still name
+ *  columns, and they are ignored: the set is this file's, so a screen cannot lay itself
+ *  out. The parameter is here only so callers that still pass one keep compiling. */
+export function columnWidths(rows: readonly Row[], _columns?: readonly Column[]): number[] {
+  return COLUMNS.map((c) => Math.max(...rows.map((r) => cell(r, c).length), 0));
 }
 
 /**
@@ -72,21 +95,21 @@ export interface Line {
 
 export function listLines(
   rows: readonly Row[],
-  columns: readonly Column[],
   height: number,
   cursor: number | null,
   width: number,
   widths?: readonly number[],
 ): Line[] {
-  if (height <= 0 || columns.length === 0) return [];
+  if (height <= 0) return [];
   const [first, last] = window(rows.length, height, cursor);
   const visible = rows.slice(first, last);
-  const sizes = widths ?? columnWidths(visible, columns);
+  const sizes = widths ?? columnWidths(visible);
 
   // Columns are padded to a shared width; the composed line is what the terminal cuts. A
-  // line, not a cell, is what has to fit.
+  // line, not a cell, is what has to fit, and the description is what the cut reaches first
+  // because it is last.
   const lines = visible.map((row, i) => ({
-    text: clip(columns.map((c, j) => pad(cell(row, c), sizes[j] ?? 0)).join(GAP).trimEnd(), width),
+    text: clip(COLUMNS.map((c, j) => pad(cell(row, c), sizes[j] ?? 0)).join(GAP).trimEnd(), width),
     state: row.state,
     cursor: cursor !== null && first + i === cursor,
   }));
@@ -100,7 +123,8 @@ export function listLines(
 
 export interface ListProps {
   readonly rows: readonly Row[];
-  readonly columns: readonly Column[];
+  /** Ignored, and accepted only so a screen that still names columns keeps compiling. */
+  readonly columns?: readonly Column[];
   readonly height: number;
   readonly cursor: number | null;
   readonly width: number;
@@ -109,10 +133,10 @@ export interface ListProps {
 
 /** The cursor row is inverted rather than marked with a character: a gutter costs a column
  *  on every line for one row's sake. */
-export function List({ rows, columns, height, cursor, width, widths }: ListProps) {
+export function List({ rows, height, cursor, width, widths }: ListProps) {
   return (
     <Box flexDirection="column">
-      {listLines(rows, columns, height, cursor, width, widths).map((line, i) => (
+      {listLines(rows, height, cursor, width, widths).map((line, i) => (
         <Text key={i} wrap="truncate" inverse={line.cursor} color={stateColour(line.state)}>
           {line.text}
         </Text>
