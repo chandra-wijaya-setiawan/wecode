@@ -86,6 +86,99 @@ describe("merging", () => {
   });
 });
 
+describe("cleanup once a story has landed", () => {
+  const land = async (storyTree: string, ...taskSlugs: string[]) => {
+    for (const slug of taskSlugs) {
+      const branch = await trees.taskBranch("s", slug);
+      const path = join(repo, "..", `wt-${slug}-${Date.now()}`);
+      await trees.cut(branch, path);
+      writeFileSync(join(path, `${slug}.ts`), "x\n");
+      await trees.commitAttempt(path, branch, slug);
+      await trees.release(path);
+      await trees.mergeTaskIntoStory(branch, "s", storyTree);
+    }
+  };
+
+  it("removes the story tree, the story branch and each task branch", async () => {
+    const storyTree = join(repo, "..", `story-clean-${Date.now()}`);
+    await land(storyTree, "send-mail", "expire-token");
+
+    const report = await trees.cleanupLanded("s", storyTree, ["send-mail", "expire-token"]);
+
+    expect(existsSync(storyTree)).toBe(false);
+    expect(report.left).toEqual([]);
+    expect(report.removed).toEqual([storyTree, "story/s", "task/send-mail", "task/expire-token"]);
+    expect(run(repo, "branch", "--list", "story/s")).toBe("");
+    expect(run(repo, "branch", "--list", "task/*")).toBe("");
+  });
+
+  it("leaves a story tree holding uncommitted files, and its branch with it", async () => {
+    const storyTree = join(repo, "..", `story-dirty-${Date.now()}`);
+    await land(storyTree, "send-mail");
+    writeFileSync(join(storyTree, "half-done.ts"), "nobody has seen this\n");
+
+    const report = await trees.cleanupLanded("s", storyTree, ["send-mail"]);
+
+    expect(existsSync(join(storyTree, "half-done.ts"))).toBe(true);
+    expect(report.left).toEqual([
+      { what: storyTree, why: "uncommitted files nobody has seen" },
+      { what: "story/s", why: `its tree is still standing at ${storyTree}` },
+    ]);
+    expect(run(repo, "branch", "--list", "story/s").trim()).toContain("story/s");
+    expect(report.removed).toEqual(["task/send-mail"]);
+  });
+
+  it("counts an untracked file as unseen work", async () => {
+    const storyTree = join(repo, "..", `story-untracked-${Date.now()}`);
+    await land(storyTree, "send-mail");
+    writeFileSync(join(storyTree, "scratch.txt"), "notes\n");
+
+    const report = await trees.cleanupLanded("s", storyTree, []);
+    expect(report.left[0]).toEqual({ what: storyTree, why: "uncommitted files nobody has seen" });
+    expect(existsSync(storyTree)).toBe(true);
+  });
+
+  it("leaves a task branch whose own tree is still dirty", async () => {
+    const storyTree = join(repo, "..", `story-taskdirty-${Date.now()}`);
+    await land(storyTree, "send-mail");
+    const stray = join(repo, "..", `wt-stray-${Date.now()}`);
+    run(repo, "worktree", "add", stray, "task/send-mail");
+    writeFileSync(join(stray, "in-flight.ts"), "mid-edit\n");
+
+    const report = await trees.cleanupLanded("s", storyTree, ["send-mail"]);
+
+    expect(existsSync(join(stray, "in-flight.ts"))).toBe(true);
+    expect(run(repo, "branch", "--list", "task/send-mail").trim()).toContain("task/send-mail");
+    expect(report.left).toEqual([
+      { what: stray, why: "uncommitted files nobody has seen" },
+      { what: "task/send-mail", why: `its tree is still standing at ${stray}` },
+    ]);
+    expect(report.removed).toContain(storyTree);
+  });
+
+  it("releases a clean task tree before deleting its branch", async () => {
+    const storyTree = join(repo, "..", `story-taskclean-${Date.now()}`);
+    await land(storyTree, "send-mail");
+    const spare = join(repo, "..", `wt-spare-${Date.now()}`);
+    run(repo, "worktree", "add", spare, "task/send-mail");
+
+    const report = await trees.cleanupLanded("s", storyTree, ["send-mail"]);
+
+    expect(existsSync(spare)).toBe(false);
+    expect(report.removed).toContain(spare);
+    expect(report.removed).toContain("task/send-mail");
+  });
+
+  it("is safe to run twice: the second pass has nothing left to do", async () => {
+    const storyTree = join(repo, "..", `story-twice-${Date.now()}`);
+    await land(storyTree, "send-mail");
+    await trees.cleanupLanded("s", storyTree, ["send-mail"]);
+
+    const again = await trees.cleanupLanded("s", storyTree, ["send-mail"]);
+    expect(again).toEqual({ removed: [], left: [] });
+  });
+});
+
 describe("the integration branch", () => {
   it("is whatever the repository's HEAD says, not an assumption", async () => {
     const other = mkdtempSync(join(tmpdir(), "wecode-master-"));
