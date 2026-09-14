@@ -7,6 +7,29 @@
 page:
   order: [projects, running, needs_human, stale, queued, failed, open, delivered]
 
+# The services box is not one of the views: it is not a filter over the board, `v` does not
+# open it, and its four rows are four different questions rather than one query's rows. What
+# it still shares with a view is that none of the words in it belong in a .tsx file.
+#
+# `doctor` is the one row with no service behind it. Its version is the release the doctor
+# is planned for — docs/design/19 — and when it ships, this is the line that changes.
+services:
+  title: Services
+  busy_phases: [pending, running, waiting]
+  doctor:
+    version: 0.0.2
+    state: not built
+    detail: healing and collection
+
+# The outline is the same tree the boxes filter, drawn whole. It is not a view: it has no
+# filter, because it keeps every row there is and folds the ones you are not reading.
+outline:
+  title: Outline
+  key: t
+  # Folded to here when it opens: this level is shown, and what hangs under it is not.
+  depth: story
+  empty: no projects — wecode project create --parent <workspace> <name>
+
 views:
   projects:
     title: Projects

@@ -12,9 +12,11 @@ import { App } from "../src/app.js";
 import { tmp } from "../../core/test/tmpdir.js";
 import { Cockpit } from "../src/screens.js";
 import { loadViews, ViewError } from "../src/views.js";
+import { loadServices } from "../src/services.js";
 import { seed, T, ins } from "./seed.js";
 
 const views = loadViews();
+const services = loadServices();
 const machines = loadMachines();
 
 let db: DatabaseSync;
@@ -78,7 +80,7 @@ describe("the frame", () => {
    *  by name, and the tops and bottoms are only checked to pair up. */
   it("is laid out, not printed: every box on it is bordered", () => {
     const out = lines();
-    for (const title of ["Services", ...views.map((v) => `${v.title} (`)]) {
+    for (const title of [services.title, ...views.map((v) => `${v.title} (`)]) {
       const at = titled(out, title);
       expect(at, `no box titled ${title}`).toBeGreaterThanOrEqual(0);
       expect(out[at]?.startsWith("┌"), `${title} has no top border`).toBe(true);

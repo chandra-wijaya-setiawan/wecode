@@ -11,6 +11,8 @@ import {
   databaseOf,
   listWorkspaces,
   loadRoles,
+  lessons,
+  dropLesson,
   tree,
   type Node,
   loadMachines,
@@ -19,6 +21,8 @@ import {
   workspaceDir,
   writePointer,
   readProjectConfig,
+  setArtefact,
+  setScriptPath,
   setTaskScope,
   STATEFUL,
   type StatefulEntity,
@@ -27,6 +31,7 @@ import {
   writeProjectConfig,
 } from "@wecode/core";
 import { plan } from "./plan.js";
+import { doctor } from "./doctor.js";
 
 const DB = (): string => currentDatabase();
 
@@ -52,6 +57,7 @@ function dispatch(argv: readonly string[]): number {
     return isStateful(what) ? entityHelp(what) : usage();
   }
   if (head === "board") return showBoard(rest);
+  if (head === "doctor") return doctor(rest);
   if (head === "init") return init();
   if (head === "answer") return answer(rest);
   if (head === "show") return show(rest);
@@ -62,6 +68,8 @@ function dispatch(argv: readonly string[]): number {
   if (head === "tree") return showTree(rest);
   if (head === "watch") return watch(rest);
   if (head === "wait") return wait(rest);
+  if (head === "lessons") return showLessons(rest);
+  if (head === "lesson") return lesson(rest);
   return verb(head, rest);
 }
 
@@ -675,6 +683,60 @@ function showBoard(args: readonly string[]): number {
   return 0;
 }
 
+/** `wecode lessons [--project N]` — what earlier attempts on this repository learned.
+ *
+ *  Each line carries the assignment that learned it and how old it is, because those are
+ *  what a suspicious lesson is judged on: a lesson is a note about a world that changes. */
+function showLessons(args: readonly string[]): number {
+  const { values } = parseArgs({ args: [...args], options: { project: { type: "string" } } });
+  const chosen = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
+  if (chosen === null) {
+    return fail("no project here. wecode lessons --project <id>");
+  }
+  if (!Number.isInteger(chosen)) return fail("wecode lessons --project <id>");
+
+  const conn = db();
+  const found = lessons(conn, chosen);
+  if (found.length === 0) {
+    process.stdout.write("no lessons here yet\n");
+    return 0;
+  }
+  for (const l of found) {
+    const from = l.assignment_id === null ? "by hand" : assignmentName(conn, l.assignment_id);
+    process.stdout.write(`  #${String(l.id).padStart(3)}  ${l.text}\n`);
+    process.stdout.write(`        ${grey(`${from} · ${age(l.created_at)}`)}\n`);
+  }
+  return 0;
+}
+
+/** The assignment a lesson came from, so a suspicious one can be traced back to the attempt
+ *  that wrote it. The foreign key is what makes the row certain to be there. */
+function assignmentName(conn: ReturnType<typeof open>, id: number): string {
+  const row = conn.prepare("SELECT slug FROM assignment WHERE id = ?").get(id) as
+    | { slug: string }
+    | undefined;
+  return row === undefined ? `assignment #${id}` : `${row.slug} #${id}`;
+}
+
+function age(at: string): string {
+  const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(at)) / 60_000));
+  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)}h ago`;
+  return `${Math.floor(minutes / (60 * 24))}d ago`;
+}
+
+/** `wecode lesson drop <id>` — the operator's call, like everything else that is a
+ *  judgement. A wrong lesson is worse than none, so this is one command with no ceremony. */
+function lesson(args: readonly string[]): number {
+  const [name, raw] = args;
+  if (name !== "drop") return fail("wecode lesson drop <id>");
+  const id = Number(raw);
+  if (!Number.isInteger(id)) return fail("wecode lesson drop <id>");
+  if (!dropLesson(db(), id)) return fail(`no lesson #${id}`);
+  process.stdout.write(`lesson #${id} dropped\n`);
+  return 0;
+}
+
 /** `wecode <entity> <verb> [id|args]` — the surface in docs/design/06. */
 function verb(entity: string, rest: readonly string[]): number {
   const [name, ...args] = rest;
@@ -685,6 +747,8 @@ function verb(entity: string, rest: readonly string[]): number {
   const asked = args.some((a) => a === "--help" || a === "-h");
   if (name === "create") return asked ? createHelp(entity) : create(entity, args);
   if (name === "scope") return asked ? scopeHelp() : scope(entity, args);
+  if (name === "artefact") return asked ? artefactHelp() : artefact(entity, args);
+  if (name === "retry" && entity === "task") return retry(args);
 
   if (!isStateful(entity)) return fail(`${entity} has no states; its only verb is create`);
   const id = Number(args[0]);
@@ -697,6 +761,48 @@ function verb(entity: string, rest: readonly string[]): number {
   for (const c of out.changes) {
     process.stdout.write(`${c.entity} #${c.id}  ${c.from} → ${c.to}${c.automatic ? "  (cascade)" : ""}\n`);
   }
+  return 0;
+}
+
+/** `wecode task retry <id> --reason "<text>"` — the way back from failed.
+ *
+ *  The reason is required, and attempts go back to zero: a retry with the counter left at
+ *  the limit fails the guard again on the next tick, which is how an exhausted task
+ *  dangles. The runner never comes down this path — it can push a task to failed and no
+ *  further, because a fourth attempt is a judgement about why the first three did not
+ *  work. The reason rides on the ledger's actor, which is the only column that survives
+ *  with the transition it explains. */
+function retry(args: readonly string[]): number {
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { reason: { type: "string" } },
+  });
+  const id = Number(positionals[0]);
+  const reason = (values.reason ?? "").trim();
+  if (!Number.isInteger(id) || reason === "") {
+    return fail('wecode task retry <id> --reason "<why a further attempt will go differently>"');
+  }
+
+  const wrong = elsewhere("task", id);
+  if (wrong !== null) return fail(wrong);
+
+  const conn = db();
+  const before = conn.prepare("SELECT attempts, max_retry FROM task WHERE id = ?").get(id) as
+    | { attempts: number; max_retry: number }
+    | undefined;
+  if (before === undefined) return fail(`no task #${id}`);
+
+  const who = process.env["WECODE_ACTOR"] ?? "operator";
+  const out = new Engine(conn).apply("task", id, "retry", `${who}: ${reason}`);
+  if (!out.ok) return fail(out.why);
+  // After the transition: a refused retry must not leave the counter reset behind it.
+  conn.prepare("UPDATE task SET attempts = 0, updated_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+
+  for (const c of out.changes) {
+    process.stdout.write(`${c.entity} #${c.id}  ${c.from} → ${c.to}${c.automatic ? "  (cascade)" : ""}\n`);
+  }
+  process.stdout.write(`attempts ${before.attempts} → 0 of ${before.max_retry}  ·  ${who}: ${reason}\n`);
   return 0;
 }
 
@@ -731,6 +837,70 @@ function scope(entity: string, args: readonly string[]): number {
   } catch (err) {
     return fail((err as Error).message);
   }
+}
+
+/** `wecode acceptance_test artefact <id> --set "bash test/mail.sh" [--script-path test/mail.sh]`
+ *
+ *  Without this the only cure for a wrongly typed artefact was to drop the test, which
+ *  cascades its parent to a settled state and cannot be undone. */
+function artefact(entity: string, args: readonly string[]): number {
+  if (entity !== "acceptance_test" && entity !== "task_test") {
+    return fail("only an acceptance_test or a task_test carries an artefact");
+  }
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { set: { type: "string" }, "script-path": { type: "string" } },
+  });
+  const id = Number(positionals[0]);
+  const how = `wecode ${entity} artefact <id> --set "<cmd>" [--script-path <path>]`;
+  if (!Number.isInteger(id)) return fail(how);
+
+  // The same guard scope has: ids are global, and this one writes.
+  const wrong = elsewhere(entity, id);
+  if (wrong !== null) return fail(wrong);
+
+  const path = values["script-path"];
+  if (values.set === undefined && path === undefined) return fail(how);
+
+  try {
+    if (values.set !== undefined) {
+      setArtefact(db(), entity, id, values.set);
+      process.stdout.write(`${entity} #${id} artefact ${values.set}\n`);
+    }
+    if (path !== undefined) {
+      // An empty --script-path clears it: the path is spec, and a test may stop having one.
+      setScriptPath(db(), entity, id, path.trim() === "" ? null : path);
+      process.stdout.write(
+        path.trim() === ""
+          ? `${entity} #${id} script path cleared\n`
+          : `${entity} #${id} script path ${path}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+}
+
+function artefactHelp(): number {
+  process.stdout.write(
+    [
+      "wecode <acceptance_test|task_test> artefact <id> [flags]",
+      "",
+      "  the command that proves the test, and where its script is meant to live.",
+      "  changing the command clears any recorded red-at-base run: that run proved",
+      "  something about the old command.",
+      "",
+      "  --set <cmd>          the command — refused when it is empty",
+      "  --script-path <path> where the script lives (empty to clear it)",
+      "",
+      '  wecode acceptance_test artefact 1 --set "bash test/mail.sh" --script-path test/mail.sh',
+      "",
+      "",
+    ].join("\n"),
+  );
+  return 0;
 }
 
 function create(entity: string, args: readonly string[]): number {
@@ -931,6 +1101,7 @@ function usage(): number {
       "MAKING WORK",
       '  wecode <entity> create --parent <id> "<text>" [--artefact "<cmd>"] [--role <name>]',
       '  wecode task scope <id> --write "a.ts,b.ts"  which files that task may change',
+      '  wecode <test> artefact <id> --set "<cmd>"   fix the command a test is proved by',
       "  wecode plan <file.yaml> [--epic <id>]      a whole story as one document (--dry-run to look)",
       "  wecode worker create <name> --role engineer --kind agent",
       "",
@@ -945,6 +1116,9 @@ function usage(): number {
       "  wecode watch [--project N] [--json]        one line per state change, forever (--once to drain)",
       "  wecode wait <entity> <id>                  block until it settles; the exit code is the answer",
       "  wecode <entity> --help                     that entity's states and verbs",
+      "  wecode lessons [--project N]               what earlier attempts here learned",
+      "  wecode lesson drop <id>                    a wrong lesson is worse than none",
+      "  wecode doctor                              one pass of the invariants; non-zero if any is broken",
       "",
       "RUNNING",
       "  wecode-runner --once                       one tick: allocate, run an agent, prove, land",

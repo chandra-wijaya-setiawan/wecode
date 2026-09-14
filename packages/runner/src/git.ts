@@ -89,14 +89,43 @@ export class Trees {
     return path;
   }
 
+  /** True when `ancestor` is reachable from `descendant`. */
+  private async isAncestor(path: string, ancestor: string, descendant: string): Promise<boolean> {
+    try {
+      await git(path, ["merge-base", "--is-ancestor", ancestor, descendant]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** The tree is cut `--detach`, so an attempt that commits for itself — a merge, a revert,
+   *  a rebase, or just an agent that ran `git commit` — moves HEAD and leaves the branch
+   *  where it was cut. Nothing else moves the ref, so that work becomes unreachable. Carried
+   *  forward here, before the working tree is committed on top of it. */
+  private async fastForwardToHead(path: string, branch: string): Promise<string | null> {
+    const head = await git(path, ["rev-parse", "HEAD"]);
+    const tip = await git(this.repo, ["rev-parse", `refs/heads/${branch}`]);
+    if (head === tip) return null;
+    if (!(await this.isAncestor(path, tip, head))) {
+      throw new GitError(
+        `commitAttempt refused ${path}: HEAD ${head} has diverged from ${branch} ${tip}; ` +
+          `no fast-forward can express it`,
+      );
+    }
+    await git(this.repo, ["update-ref", `refs/heads/${branch}`, head, tip]);
+    return head;
+  }
+
   /** Everything the attempt wrote, on its branch. A rejected attempt still commits: the
    *  next one must be able to see what is already there. */
   async commitAttempt(path: string, branch: string, message: string): Promise<string | null> {
     await this.refuseBaseCheckout(path, "commitAttempt");
     await this.refuseAttached(path, "commitAttempt");
+    const forwarded = await this.fastForwardToHead(path, branch);
     await git(path, ["add", "-A"]);
     const staged = await git(path, ["diff", "--cached", "--name-only"]);
-    if (staged === "") return null;
+    if (staged === "") return forwarded;
     await git(path, [
       "-c",
       "user.name=wecode",
@@ -239,6 +268,52 @@ export class Trees {
     } catch (err) {
       left.push({ what: name, why: (err as Error).message });
     }
+  }
+
+  /** docs/design/14. Field report 105. The merge that lands a story belongs in the checkout
+   *  that holds the base branch, and nowhere else. Run from the story's own worktree,
+   *  `git merge story/x` merges the branch into itself: git says "Already up to date", the
+   *  operator is told it landed, and the base never gained the commit. Any other tree is
+   *  worse — a wrong-tree merge is how a conflicted merge commit reached master once — so
+   *  land never retargets silently. It names the tree it was called in, names the tree it
+   *  should be run in, and merges nothing. */
+  async landStory(storySlug: string, from: string): Promise<string> {
+    const branch = `story/${storySlug}`;
+    const base = await this.integrationBranch();
+    const here = real(await git(from, ["rev-parse", "--show-toplevel"]).catch(() => from));
+    const trees = await this.checkouts();
+    const baseTree = trees.find((c) => c.branch === base);
+    if (baseTree === undefined) {
+      throw new GitError(
+        `land ${branch} refused in ${here}: no checkout has ${base} checked out, ` +
+          `so there is no tree the merge into ${base} could happen in`,
+      );
+    }
+    if (here !== real(baseTree.path)) {
+      const holds = trees.find((c) => real(c.path) === here)?.branch;
+      const what = holds === branch
+        ? `it is the ${branch} worktree, and merging ${branch} there merges it into itself`
+        : holds === null || holds === undefined
+          ? "it is not the tree that holds the base branch"
+          : `it holds ${holds}, not ${base}`;
+      throw new GitError(
+        `land ${branch} refused in ${here}: ${what}. ` +
+          `Run it in ${baseTree.path}, the checkout that holds ${base}.`,
+      );
+    }
+    await git(here, [
+      "-c",
+      "user.name=wecode",
+      "-c",
+      "user.email=wecode@localhost",
+      "merge",
+      "--no-ff",
+      "-q",
+      "-m",
+      `land ${branch}`,
+      branch,
+    ]);
+    return await git(here, ["rev-parse", "HEAD"]);
   }
 
   /** Guarded by the task's tests passing. Runs in the story tree, so nothing an agent can
