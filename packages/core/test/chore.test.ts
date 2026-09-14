@@ -1,3 +1,6 @@
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   applyChore,
@@ -9,9 +12,12 @@ import {
   choreById,
   choreFor,
   ensureChore,
+  open,
   openChores,
+  SCHEMA_VERSION,
 } from "../src/index.js";
 import { freshDb, seed, stateOf } from "./helpers.js";
+import { tmp } from "./tmpdir.js";
 
 const mergeSpec = (project: number, story: number) =>
   ({
@@ -227,5 +233,62 @@ describe("the board", () => {
 
     expect(openChores(db, project)).toHaveLength(1);
     expect(openChores(db, project + 999)).toEqual([]);
+  });
+});
+
+/** Every test above opens a database that has never existed before, and a new file runs
+ *  every migration whatever it is numbered. The workspaces people are working in did exist
+ *  before chores did, and those are the ones a mis-numbered migration silently skips — so
+ *  this group starts from a database that is honestly older than this build. */
+describe("the chore table reaches a database that predates it", () => {
+  const migrated = () => {
+    const path = join(tmp(), "wecode.db");
+    open(path, { to: SCHEMA_VERSION - 1 }).close();
+    return open(path);
+  };
+
+  it("is created by the upgrade, not only by a fresh file", () => {
+    const db = migrated();
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='chore'").get(),
+    ).toEqual({ name: "chore" });
+  });
+
+  it("carries the unique key ensureChore's ON CONFLICT relies on", () => {
+    const db = migrated();
+    const { project, story } = seed(db);
+    const first = ensureChore(db, mergeSpec(project, story));
+    expect(ensureChore(db, mergeSpec(project, story)).id).toBe(first.id);
+  });
+
+  it("carries the indexes the board's chore filter reads through", () => {
+    const db = migrated();
+    const names = (
+      db
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='chore'")
+        .all() as unknown as { name: string }[]
+    ).map((r) => r.name);
+    expect(names).toEqual(expect.arrayContaining(["chore_project", "chore_open", "chore_target"]));
+  });
+
+  it("and the board reads it, on a workspace opened the way the binary opens one", () => {
+    const db = migrated();
+    const { project, story } = seed(db);
+    ensureChore(db, mergeSpec(project, story));
+    expect(openChores(db, project)).toHaveLength(1);
+  });
+});
+
+describe("a migration owns its version number", () => {
+  /** Two files numbered alike is how the chore table went missing: the second never runs
+   *  against a database already at that version. The rule is a filename rule, so it is
+   *  read off the filenames. */
+  it("gives no two migrations the same one", () => {
+    const dir = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+    const versions = readdirSync(dir)
+      .filter((f) => f.endsWith(".sql"))
+      .map((f) => Number.parseInt(f, 10));
+    expect(versions).toEqual([...new Set(versions)]);
+    expect(Math.max(...versions)).toBe(SCHEMA_VERSION);
   });
 });
