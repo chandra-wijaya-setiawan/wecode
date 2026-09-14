@@ -1,4 +1,15 @@
-import { INVARIANTS, now, type RecordNode, type Snapshot, type Violation } from "@wecode/core";
+import {
+  INVARIANTS,
+  keepUnlanded,
+  now,
+  REACHED_INSIDE_ANOTHER_MERGE,
+  storyBranch,
+  type Ancestry,
+  type RecordNode,
+  type Snapshot,
+  type Violation,
+} from "@wecode/core";
+import { execFileSync } from "node:child_process";
 import type { DatabaseSync } from "node:sqlite";
 
 /** docs/design/19, the check, on the runner's tick.
@@ -85,6 +96,11 @@ export class Doctor {
     /** Defaults to core's set. A caller passes its own only to test the boundary itself:
      *  the point being proven is that one bad check cannot take the tick with it. */
     private readonly invariants: readonly Invariant[] = INVARIANTS,
+    /** How the ancestry question gets asked. The runner is the half that may read the
+     *  world, so `delivered_story_has_landed` is only ever reported here after git has
+     *  been asked whether the branch is in the base. */
+    private readonly git: Git = gitIn(repoOf(db)),
+    private readonly base = "HEAD",
   ) {
     db.exec(
       `CREATE TABLE IF NOT EXISTS doctor_violation (
@@ -120,13 +136,20 @@ export class Doctor {
     } catch (err) {
       return [broken("snapshot", err)];
     }
-    return this.invariants.flatMap((i) => {
+    const found = this.invariants.flatMap((i) => {
       try {
         return i.check(s);
       } catch (err) {
         return [broken(i.name, err)];
       }
     });
+    try {
+      return keepUnlanded(found, ancestryOf(this.git, this.base));
+    } catch (err) {
+      // git could not be asked. The worst case is what core already said, and a report
+      // that over-accuses is better than a tick that dies of a missing repository.
+      return [...found, broken("delivered_story_has_landed", err)];
+    }
   }
 
   /** Replaced, not appended: the answer to "what is wrong now" is this pass and only this
@@ -164,6 +187,31 @@ export class Doctor {
 /** git, read-only, as the heal is allowed to see it: argv in, stdout out. */
 export type Git = (args: readonly string[]) => string;
 
+/** The repository the record names, as `wecode land` sees it. */
+function repoOf(db: DatabaseSync): string {
+  const row = db.prepare("SELECT repo FROM project ORDER BY id").get() as { repo: string } | undefined;
+  return row?.repo ?? process.cwd();
+}
+
+const gitIn =
+  (cwd: string): Git =>
+  (args: readonly string[]): string =>
+    execFileSync("git", [...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+
+/** Is the branch in the base? Asked as `rev-list branch ^base` rather than as
+ *  `merge-base --is-ancestor`, because this git speaks in stdout and not in exit codes:
+ *  nothing on the branch that the base does not already have is what being in means.
+ *  A ref nobody can resolve is the story with no branch at all. */
+export const ancestryOf =
+  (git: Git, base: string) =>
+  (branch: string): Ancestry => {
+    try {
+      return git(["rev-list", "--count", branch, `^${base}`]).trim() === "0" ? "in" : "out";
+    } catch {
+      return "no-branch";
+    }
+  };
+
 /** A marker written, and the commit it was read from. */
 export interface Backfilled {
   readonly story: number;
@@ -178,8 +226,16 @@ export interface LeftAlone {
   readonly why: string;
 }
 
+/** A story that is in the base with no commit of its own to name. */
+export interface Reached {
+  readonly story: number;
+  readonly slug: string;
+}
+
 export interface HealReport {
   readonly written: readonly Backfilled[];
+  /** In the base inside another story's merge: no marker to write, and no drift either. */
+  readonly reached: readonly Reached[];
   readonly left: readonly LeftAlone[];
 }
 
@@ -195,19 +251,42 @@ export function healLandedMarkers(
   base = "HEAD",
 ): HealReport {
   const written: Backfilled[] = [];
+  const reached: Reached[] = [];
   const left: LeftAlone[] = [];
   for (const v of found) {
     if (v.invariant !== "delivered_story_has_landed" || v.id === null) continue;
     const shas = landCommits(git, base, v.slug);
     const why = refusal(shas.length, base, v.slug) ?? emptyStory(db, v.id);
-    if (why !== null) {
-      left.push({ story: v.id, slug: v.slug, why });
+    if (why === null) {
+      writeMarker(db, v.id, v.slug, shas[0] as string);
+      written.push({ story: v.id, slug: v.slug, sha: shas[0] as string });
       continue;
     }
-    writeMarker(db, v.id, v.slug, shas[0] as string);
-    written.push({ story: v.id, slug: v.slug, sha: shas[0] as string });
+    // No commit to copy, but the branch is in: the story did reach the base, inside
+    // somebody else's merge. There is no sha that is the answer, so the ledger carries
+    // what is true and the marker stays empty.
+    if (ancestryOf(git, base)(storyBranch(v.slug)) === "in") {
+      writeReached(db, v.id);
+      reached.push({ story: v.id, slug: v.slug });
+      continue;
+    }
+    left.push({ story: v.id, slug: v.slug, why });
   }
-  return { written, left };
+  return { written, reached, left };
+}
+
+/** The ledger line for a story that is in the base with nothing to name. Said once: a
+ *  second heal of the same story would be the same sentence again, and the fact it records
+ *  is git's, not the record's. */
+function writeReached(db: DatabaseSync, story: number): void {
+  const said = db
+    .prepare("SELECT 1 FROM ledger WHERE entity = 'story' AND entity_id = ? AND verb = 'heal' AND to_state = ?")
+    .get(story, REACHED_INSIDE_ANOTHER_MERGE);
+  if (said !== undefined) return;
+  db.prepare(
+    `INSERT INTO ledger (entity, entity_id, verb, from_state, to_state, actor, at)
+     VALUES ('story', ?, 'heal', ?, ?, 'doctor', ?)`,
+  ).run(story, `no landed marker`, REACHED_INSIDE_ANOTHER_MERGE, now());
 }
 
 /** Commits in the base whose subject is exactly `land story/<slug>`. `--grep` narrows, the
