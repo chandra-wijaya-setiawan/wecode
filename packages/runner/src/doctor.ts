@@ -126,9 +126,8 @@ export class Doctor {
     return found;
   }
 
-  /** Each invariant inside its own boundary. A check that throws is not silently dropped:
-   *  it becomes a violation naming itself, because an invariant nobody can evaluate is a
-   *  thing a person needs to see as much as one that failed. */
+  /** The shared pass, `runChecks`, over this tick's snapshot. A snapshot that cannot be
+   *  taken is reported in the same shape as a check that threw. */
   private run(): readonly Violation[] {
     let s: Snapshot;
     try {
@@ -136,20 +135,7 @@ export class Doctor {
     } catch (err) {
       return [broken("snapshot", err)];
     }
-    const found = this.invariants.flatMap((i) => {
-      try {
-        return i.check(s);
-      } catch (err) {
-        return [broken(i.name, err)];
-      }
-    });
-    try {
-      return keepUnlanded(found, ancestryOf(this.git, this.base));
-    } catch (err) {
-      // git could not be asked. The worst case is what core already said, and a report
-      // that over-accuses is better than a tick that dies of a missing repository.
-      return [...found, broken("delivered_story_has_landed", err)];
-    }
+    return runChecks(s, worldOf(this.git, this.base), this.invariants);
   }
 
   /** Replaced, not appended: the answer to "what is wrong now" is this pass and only this
@@ -212,6 +198,66 @@ export const ancestryOf =
     }
   };
 
+/** The one check that cannot be answered from the record alone. Named once here and copied
+ *  verbatim into the cli, so "which checks needed git" is a fact both halves read off the
+ *  same sentence rather than a habit each of them has. */
+export const WORLD_CHECK = "delivered_story_has_landed";
+
+/** Every check a pass runs, and which of them has to ask the world. Core owns the pure set;
+ *  this column is the half that may read git. A copy that gained a check the other could not
+ *  see would differ here, which is what `packages/cli/test/doctor-parity.test.ts` reads. */
+export const checksOf = (
+  invariants: readonly Invariant[] = INVARIANTS,
+): readonly { readonly name: string; readonly world: boolean }[] =>
+  invariants.map((i) => ({ name: i.name, world: i.name === WORLD_CHECK }));
+
+/** git as the checks are allowed to see it, and whether it was there to be asked at all.
+ *  The two are separate facts: with no repository to hand every branch answers `no-branch`,
+ *  which is indistinguishable from a story that never had one, so the pass carries the
+ *  difference instead of letting the report imply the stronger claim. */
+export interface World {
+  readonly ancestry: (branch: string) => Ancestry;
+  readonly reachable: boolean;
+}
+
+export function worldOf(git: Git, base = "HEAD"): World {
+  let reachable = true;
+  try {
+    git(["rev-parse", "--verify", base]);
+  } catch {
+    reachable = false;
+  }
+  return { ancestry: ancestryOf(git, base), reachable };
+}
+
+/** One pass: core's pure set, each check inside its own boundary, then the one question that
+ *  needs the world. The tick and `wecode doctor` run exactly this, which is the whole of the
+ *  answer the two are supposed to share.
+ *
+ *  A check that throws is not silently dropped: it becomes a violation naming itself,
+ *  because an invariant nobody can evaluate is a thing a person needs to see as much as one
+ *  that failed. */
+export function runChecks(
+  s: Snapshot,
+  world: World,
+  invariants: readonly Invariant[] = INVARIANTS,
+): readonly Violation[] {
+  const found = invariants.flatMap((i) => {
+    try {
+      return i.check(s);
+    } catch (err) {
+      return [broken(i.name, err)];
+    }
+  });
+  try {
+    return keepUnlanded(found, world.ancestry);
+  } catch (err) {
+    // git could not be asked. The worst case is what core already said, and a report that
+    // over-accuses is better than a pass that dies of a missing repository.
+    return [...found, broken(WORLD_CHECK, err)];
+  }
+}
+
 /** A marker written, and the commit it was read from. */
 export interface Backfilled {
   readonly story: number;
@@ -254,7 +300,7 @@ export function healLandedMarkers(
   const reached: Reached[] = [];
   const left: LeftAlone[] = [];
   for (const v of found) {
-    if (v.invariant !== "delivered_story_has_landed" || v.id === null) continue;
+    if (v.invariant !== WORLD_CHECK || v.id === null) continue;
     const shas = landCommits(git, base, v.slug);
     const why = refusal(shas.length, base, v.slug) ?? emptyStory(db, v.id);
     if (why === null) {

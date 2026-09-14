@@ -1,7 +1,18 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { checkRecord, currentDatabase, now, type RecordNode, type Snapshot, type Violation } from "@wecode/core";
+import {
+  currentDatabase,
+  INVARIANTS,
+  keepUnlanded,
+  now,
+  storyBranch,
+  REACHED_INSIDE_ANOTHER_MERGE,
+  type Ancestry,
+  type RecordNode,
+  type Snapshot,
+  type Violation,
+} from "@wecode/core";
 
 /** Where each entity's row lives and what its parent key is called. The one place in the
  *  doctor that knows the shape of the tables; the invariants themselves see only the
@@ -41,7 +52,7 @@ function landedShas(db: DatabaseSync): Map<number, string> {
 }
 
 /** One plain object, no live handle: everything the invariants are allowed to see. */
-function snapshot(db: DatabaseSync): Snapshot {
+export function snapshot(db: DatabaseSync): Snapshot {
   const landed = landedShas(db);
   const nodes = TABLES.flatMap(({ entity, fk, extra }) => {
     const rows = db
@@ -70,6 +81,11 @@ function snapshot(db: DatabaseSync): Snapshot {
  *  particular it is never migrated, because a doctor that upgraded the file it was
  *  inspecting would repair the one drift it is meant to report.
  *
+ *  The pass is `runChecks`, the same one the tick runs, so the command's answer is the
+ *  tick's answer: core's pure set, and then the one check that has to ask git. A workspace
+ *  with no repository to hand is not an error — every other check still reports, and the
+ *  output says which check went unanswered rather than passing its worst case off as a fact.
+ *
  *  Non-zero when anything is still broken, so a script can gate on it. */
 export function doctor(args: readonly string[]): number {
   const heal = args.includes("--heal");
@@ -81,12 +97,14 @@ export function doctor(args: readonly string[]): number {
 
   const db = new DatabaseSync(path, heal ? {} : { readOnly: true });
   let violations: readonly Violation[];
+  let world: World;
   try {
-    violations = checkRecord(snapshot(db));
+    world = worldOf(gitIn(repoOf(db)));
+    violations = runChecks(snapshot(db), world);
     if (heal) {
       process.stdout.write(healed(healLandedMarkers(db, violations, gitIn(repoOf(db)))));
       // What is reported afterwards is what the heal could not settle, refusals included.
-      violations = checkRecord(snapshot(db));
+      violations = runChecks(snapshot(db), world);
     }
   } finally {
     db.close();
@@ -96,7 +114,7 @@ export function doctor(args: readonly string[]): number {
   // noise on every tick of the thing that runs it.
   if (violations.length === 0) return 0;
 
-  process.stdout.write(report(violations));
+  process.stdout.write(report(violations, world));
   return 1;
 }
 
@@ -125,13 +143,16 @@ const gitIn =
 /** Grouped by invariant, because the invariant is the sentence that was broken and the
  *  entities are the evidence for it. Ungrouped, the same drift on forty rows reads as
  *  forty problems. */
-function report(violations: readonly Violation[]): string {
+function report(violations: readonly Violation[], world: World): string {
   const groups = new Map<string, Violation[]>();
   for (const v of violations) groups.set(v.invariant, [...(groups.get(v.invariant) ?? []), v]);
+  const needsGit = new Set(checksOf().filter((c) => c.world).map((c) => c.name));
 
   const lines: string[] = [];
   for (const [name, found] of groups) {
-    lines.push(name);
+    // Which checks had to ask the world, said on the line that names them: the reader is
+    // owed the difference between "the record says so" and "git was asked and agreed".
+    lines.push(needsGit.has(name) ? `${name} (asked git)` : name);
     // A violation with no id is not a row — `role` names a role nobody fills — so it is
     // named by its slug alone rather than by a `#null` nobody could go and look at.
     for (const v of found) {
@@ -141,7 +162,14 @@ function report(violations: readonly Violation[]): string {
   }
   const what = violations.length === 1 ? "1 entity" : `${violations.length} entities`;
   const how = groups.size === 1 ? "1 invariant" : `${groups.size} invariants`;
-  lines.push(`${what} breaking ${how}\n`);
+  lines.push(`${what} breaking ${how}`);
+  // No repository to hand is not an error — the rest of the pass is above. It is only the
+  // git-answered checks that are unproven here, and saying so is cheaper than a reader
+  // believing an accusation nothing confirmed.
+  if (!world.reachable) {
+    lines.push(`no repository to ask — unanswered: ${[...needsGit].join(", ")}`);
+  }
+  lines.push("");
   return lines.join("\n");
 }
 
@@ -157,12 +185,103 @@ function report(violations: readonly Violation[]): string {
  *  is drift to report. A heal that picked one of two commits would be inventing the answer,
  *  and an unexplained fix is worse than visible drift.
  *
- *  A copy of `packages/runner/src/doctor.ts`, like `snapshot` above it: `@wecode/cli`
- *  depends on `@wecode/core` alone and cannot import the runner. The two are pinned
- *  identical by `packages/runner/test/backfill-landed.test.ts`, which runs both. */
+ *  A copy of `packages/runner/src/doctor.ts`, like `snapshot` and `runChecks` above it:
+ *  `@wecode/cli` depends on `@wecode/core` alone and cannot import the runner. The two are
+ *  pinned identical by `packages/runner/test/backfill-landed.test.ts`, which runs both
+ *  heals, and by `packages/cli/test/doctor-parity.test.ts`, which runs both passes over one
+ *  database and compares the checks each of them declares. */
 
 /** git, read-only, as the heal is allowed to see it: argv in, stdout out. */
 export type Git = (args: readonly string[]) => string;
+
+/** Is the branch in the base? Asked as `rev-list branch ^base` rather than as
+ *  `merge-base --is-ancestor`, because this git speaks in stdout and not in exit codes:
+ *  nothing on the branch that the base does not already have is what being in means.
+ *  A ref nobody can resolve is the story with no branch at all. */
+export const ancestryOf =
+  (git: Git, base: string) =>
+  (branch: string): Ancestry => {
+    try {
+      return git(["rev-list", "--count", branch, `^${base}`]).trim() === "0" ? "in" : "out";
+    } catch {
+      return "no-branch";
+    }
+  };
+
+/** The one check that cannot be answered from the record alone. Named once in each copy, so
+ *  "which checks needed git" is a fact both halves read off the same sentence rather than a
+ *  habit each of them has. */
+export const WORLD_CHECK = "delivered_story_has_landed";
+
+/** Every check a pass runs, and which of them has to ask the world. Core owns the pure set;
+ *  this column is the half that may read git. A copy that gained a check the other could not
+ *  see would differ here, which is what `packages/cli/test/doctor-parity.test.ts` reads. */
+export const checksOf = (
+  invariants: readonly Invariant[] = INVARIANTS,
+): readonly { readonly name: string; readonly world: boolean }[] =>
+  invariants.map((i) => ({ name: i.name, world: i.name === WORLD_CHECK }));
+
+/** One invariant: the sentence and the function that finds who breaks it. */
+export interface Invariant {
+  readonly name: string;
+  readonly check: (s: Snapshot) => readonly Violation[];
+}
+
+/** git as the checks are allowed to see it, and whether it was there to be asked at all.
+ *  The two are separate facts: with no repository to hand every branch answers `no-branch`,
+ *  which is indistinguishable from a story that never had one, so the pass carries the
+ *  difference instead of letting the report imply the stronger claim. */
+export interface World {
+  readonly ancestry: (branch: string) => Ancestry;
+  readonly reachable: boolean;
+}
+
+export function worldOf(git: Git, base = "HEAD"): World {
+  let reachable = true;
+  try {
+    git(["rev-parse", "--verify", base]);
+  } catch {
+    reachable = false;
+  }
+  return { ancestry: ancestryOf(git, base), reachable };
+}
+
+/** One pass: core's pure set, each check inside its own boundary, then the one question that
+ *  needs the world. The tick and `wecode doctor` run exactly this, which is the whole of the
+ *  answer the two are supposed to share.
+ *
+ *  A check that throws is not silently dropped: it becomes a violation naming itself,
+ *  because an invariant nobody can evaluate is a thing a person needs to see as much as one
+ *  that failed. */
+export function runChecks(
+  s: Snapshot,
+  world: World,
+  invariants: readonly Invariant[] = INVARIANTS,
+): readonly Violation[] {
+  const found = invariants.flatMap((i) => {
+    try {
+      return i.check(s);
+    } catch (err) {
+      return [broken(i.name, err)];
+    }
+  });
+  try {
+    return keepUnlanded(found, world.ancestry);
+  } catch (err) {
+    // git could not be asked. The worst case is what core already said, and a report that
+    // over-accuses is better than a pass that dies of a missing repository.
+    return [...found, broken(WORLD_CHECK, err)];
+  }
+}
+
+/** A check that could not be run, said out loud in the shape of the thing it failed to be. */
+const broken = (name: string, err: unknown): Violation => ({
+  invariant: name,
+  entity: "invariant",
+  id: null,
+  slug: name,
+  detail: `the check itself failed: ${(err as Error).message}`,
+});
 
 /** A marker written, and the commit it was read from. */
 export interface Backfilled {
@@ -178,8 +297,16 @@ export interface LeftAlone {
   readonly why: string;
 }
 
+/** A story that is in the base with no commit of its own to name. */
+export interface Reached {
+  readonly story: number;
+  readonly slug: string;
+}
+
 export interface HealReport {
   readonly written: readonly Backfilled[];
+  /** In the base inside another story's merge: no marker to write, and no drift either. */
+  readonly reached: readonly Reached[];
   readonly left: readonly LeftAlone[];
 }
 
@@ -195,19 +322,42 @@ export function healLandedMarkers(
   base = "HEAD",
 ): HealReport {
   const written: Backfilled[] = [];
+  const reached: Reached[] = [];
   const left: LeftAlone[] = [];
   for (const v of found) {
-    if (v.invariant !== "delivered_story_has_landed" || v.id === null) continue;
+    if (v.invariant !== WORLD_CHECK || v.id === null) continue;
     const shas = landCommits(git, base, v.slug);
     const why = refusal(shas.length, base, v.slug) ?? emptyStory(db, v.id);
-    if (why !== null) {
-      left.push({ story: v.id, slug: v.slug, why });
+    if (why === null) {
+      writeMarker(db, v.id, v.slug, shas[0] as string);
+      written.push({ story: v.id, slug: v.slug, sha: shas[0] as string });
       continue;
     }
-    writeMarker(db, v.id, v.slug, shas[0] as string);
-    written.push({ story: v.id, slug: v.slug, sha: shas[0] as string });
+    // No commit to copy, but the branch is in: the story did reach the base, inside
+    // somebody else's merge. There is no sha that is the answer, so the ledger carries
+    // what is true and the marker stays empty.
+    if (ancestryOf(git, base)(storyBranch(v.slug)) === "in") {
+      writeReached(db, v.id);
+      reached.push({ story: v.id, slug: v.slug });
+      continue;
+    }
+    left.push({ story: v.id, slug: v.slug, why });
   }
-  return { written, left };
+  return { written, reached, left };
+}
+
+/** The ledger line for a story that is in the base with nothing to name. Said once: a
+ *  second heal of the same story would be the same sentence again, and the fact it records
+ *  is git's, not the record's. */
+function writeReached(db: DatabaseSync, story: number): void {
+  const said = db
+    .prepare("SELECT 1 FROM ledger WHERE entity = 'story' AND entity_id = ? AND verb = 'heal' AND to_state = ?")
+    .get(story, REACHED_INSIDE_ANOTHER_MERGE);
+  if (said !== undefined) return;
+  db.prepare(
+    `INSERT INTO ledger (entity, entity_id, verb, from_state, to_state, actor, at)
+     VALUES ('story', ?, 'heal', ?, ?, 'doctor', ?)`,
+  ).run(story, `no landed marker`, REACHED_INSIDE_ANOTHER_MERGE, now());
 }
 
 /** Commits in the base whose subject is exactly `land story/<slug>`. `--grep` narrows, the
