@@ -143,6 +143,9 @@ export class Examiner {
     const unrunnable: number[] = [];
     const refused: Refused[] = [];
     const tip = await this.tip(cwd);
+    // Stamped beside every verdict this pass takes: what the test was run against, not just
+    // when. A pass that cannot say which sources it proves is a pass nobody can check.
+    const provenance = await this.treeSha(cwd);
 
     for (const row of rows) {
       const script = scriptPathOf(row.artefact);
@@ -164,8 +167,10 @@ export class Examiner {
       const out = await this.runOne(row.artefact, cwd);
       const at = now();
       this.db
-        .prepare(`UPDATE ${entity} SET last_run_at = ?, last_output = ?, updated_at = ? WHERE id = ?`)
-        .run(at, out.output.slice(-8000), at, row.id);
+        .prepare(
+          `UPDATE ${entity} SET last_run_at = ?, last_output = ?, provenance_sha = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(at, out.output.slice(-8000), provenance, at, row.id);
       if (print !== null) {
         this.db
           .prepare(
@@ -199,6 +204,27 @@ export class Examiner {
       .prepare("SELECT fingerprint FROM script_run WHERE entity = ? AND test_id = ?")
       .get(entity, row.id) as { fingerprint: string } | undefined;
     return seen?.fingerprint === print;
+  }
+
+  /** The git tree sha of the sources this run saw — `git rev-parse HEAD:.`. A commit sha
+   *  names a history; a tree sha names the files, which is what a test proves something
+   *  about, and two commits with the same sources deserve the same stamp. It asks git and
+   *  nothing else, so it answers the same in any language and never consults a toolchain.
+   *
+   *  Asked as `HEAD:<prefix>` rather than as `HEAD:.`, because git refuses the `.` at the
+   *  top of a checkout — "path '.' exists on disk, but not in 'HEAD'" — and a worktree is
+   *  exactly that. `--show-prefix` is empty there and `sub/` below it, so one form answers
+   *  in both places and still names the sources of the directory the test ran in.
+   *
+   *  Null where there is no git to ask, and a null stamp accuses nothing later. */
+  private async treeSha(cwd: string): Promise<string | null> {
+    try {
+      const { stdout: prefix } = await exec("git", ["rev-parse", "--show-prefix"], { cwd });
+      const { stdout } = await exec("git", ["rev-parse", `HEAD:${prefix.trim()}`], { cwd });
+      return stdout.trim() || null;
+    } catch {
+      return null;
+    }
   }
 
   /** The commit the tree is at, or null when there is no git here to ask. */

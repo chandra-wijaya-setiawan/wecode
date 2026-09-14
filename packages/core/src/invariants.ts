@@ -274,6 +274,73 @@ export function runnerBuildIsCurrent(r: RunnerBuild | null): readonly Violation[
   ];
 }
 
+/** One verdict and what it was taken against. `provenance_sha` is the stamp the examiner
+ *  wrote — the git tree sha of the worktree the artefact ran in — and `tree_sha` is what
+ *  that story's tree is now, read by the runner, which is the only party with a checkout to
+ *  ask. Either may be absent: a verdict older than the stamp, or a story whose tree nobody
+ *  could read. */
+export interface Verdict {
+  readonly entity: "acceptance_test" | "task_test";
+  readonly id: number;
+  readonly slug: string;
+  readonly state: string;
+  readonly story_slug?: string;
+  readonly provenance_sha?: string | null;
+  readonly tree_sha?: string | null;
+}
+
+/** Said of a pass whose sources are not the sources anybody has now. The words are the
+ *  action, because nothing here invalidates the verdict: re-proving it is a decision. */
+export const IT_PROVES_A_TREE_NOBODY_HAS = "it proves a tree nobody has now";
+
+/** A passed test's provenance is the current tree of its story: a pass says which sources
+ *  it proves, and if those are not the sources the story stands at, it proves a tree nobody
+ *  has.
+ *
+ *  Three verdicts were wrong on 15 Sep this way — acceptance_test 166 failed twice in a
+ *  story tree missing a box that had already landed, then passed untouched once the tree
+ *  was refreshed — and nothing in the record could tell a red against the code from a red
+ *  against a stale tree.
+ *
+ *  Quiet about an unstamped verdict and about a tree nobody read: this accuses a verdict of
+ *  proving the wrong sources, and it may only do that on two shas it actually has. Quiet
+ *  about a failure too — a red is a question, and naming it drift would read as an excuse
+ *  for it. */
+export function verdictProvenanceIsCurrent(vs: readonly Verdict[]): readonly Violation[] {
+  return vs
+    .filter(
+      (v) =>
+        v.state === "passed" &&
+        typeof v.provenance_sha === "string" &&
+        typeof v.tree_sha === "string" &&
+        v.provenance_sha !== v.tree_sha,
+    )
+    .map((v) => ({
+      invariant: "verdict_provenance_is_current",
+      entity: v.entity,
+      id: v.id,
+      slug: v.slug,
+      detail:
+        `passed against tree ${v.provenance_sha!.slice(0, 12)}, and ` +
+        `${v.story_slug === undefined ? "its story" : `story ${v.story_slug}`} is at ` +
+        `${v.tree_sha!.slice(0, 12)} — ${IT_PROVES_A_TREE_NOBODY_HAS}`,
+    }));
+}
+
+/** The checks about verdicts and the trees they were taken in. Kept apart from `INVARIANTS`
+ *  for the same reason `RUNNER_INVARIANTS` is: that set is a pure function of a `Snapshot`
+ *  of rows and both doctors heal what it names, and nothing here is healable. The only
+ *  remedy is running the test again, which changes a verdict, and docs/design/19 says
+ *  healing may never do that. Naming the drift is the whole job. */
+export const VERDICT_INVARIANTS: readonly {
+  readonly name: string;
+  readonly check: (vs: readonly Verdict[]) => readonly Violation[];
+}[] = [{ name: "verdict_provenance_is_current", check: verdictProvenanceIsCurrent }];
+
+/** One pass over the verdicts on the board. Reports and changes nothing. */
+export const checkVerdicts = (vs: readonly Verdict[]): readonly Violation[] =>
+  VERDICT_INVARIANTS.flatMap((i) => i.check(vs));
+
 /** Every invariant, in the order a person would read them. The caller runs the set; no
  *  function here knows about any other. */
 export const INVARIANTS: readonly { readonly name: string; readonly check: (s: Snapshot) => readonly Violation[] }[] = [
