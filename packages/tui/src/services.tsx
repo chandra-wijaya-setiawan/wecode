@@ -20,7 +20,10 @@ import {
   leaseAgeMs,
   leaseIsStale,
   now,
+  A_RESTART_IS_OWED,
+  checkRunner,
   readLease,
+  type Lease,
   SCHEMA_VERSION,
   STALE_INTERVALS,
 } from "@wecode/core";
@@ -134,6 +137,32 @@ function workersByRole(
  *  only thing that distinguishes a runner that has crashed from one that has nothing to do
  *  is whether anything was waiting for it. A quiet log is not a hung runner, and a red row
  *  every quiet evening is a row nobody reads by Friday. */
+
+/** What the holder is running, appended to whatever else its row says.
+ *
+ *  Read from the lease, like everything else in this box: the holder measured it against a
+ *  repository this host may not even have. Whether that is drift is `runner_build_is_current`'s
+ *  to say and not this file's, so the row asks the invariant and prints what it answers — a
+ *  cockpit that disagreed with the doctor about a stale runner would be worse than either.
+ *  A build that cannot say and a build that is current both read `build <sha>` and nothing
+ *  more; and nothing here restarts anything, because the thing to do is never automatic. */
+function buildOf(lease: Lease): { readonly say: string; readonly owed: boolean } {
+  if (lease.buildSha === undefined) return { say: "", owed: false };
+  const sha = `build ${lease.buildSha.slice(0, 12)}`;
+  const drift = checkRunner({
+    holder: lease.holder,
+    buildSha: lease.buildSha,
+    ...(lease.buildBehind === undefined ? {} : { behind: lease.buildBehind }),
+  });
+  const behind = lease.buildBehind ?? 0;
+  return drift.length === 0
+    ? { say: sha, owed: false }
+    : { say: `${sha} · ${behind} behind the base — ${A_RESTART_IS_OWED}`, owed: true };
+}
+
+const withBuild = (detail: string, build: { readonly say: string }): string =>
+  build.say === "" ? detail : `${detail} · ${build.say}`;
+
 function runner(db: DatabaseSync, queued: number, at: string): ServiceRow {
   const waiting = queued === 0 ? "nothing queued" : `${queued} queued`;
   const lease = readLease(db);
@@ -147,11 +176,21 @@ function runner(db: DatabaseSync, queued: number, at: string): ServiceRow {
   }
   const stale = leaseIsStale(lease, at);
   const beat = `beat ${ago(leaseAgeMs(lease, at))} ago · every ${ago(lease.intervalMs)}`;
-  if (!stale) return { what: "runner", state: "alive", detail: `${lease.holder} · ${beat}`, alarm: false };
+  const build = buildOf(lease);
+  // A runner behind its base is an alarm while it is alive: it is taking work and doing it
+  // with code the operator has already replaced. Dead, the restart is owed anyway.
+  if (!stale) {
+    return {
+      what: "runner",
+      state: build.owed ? "stale build" : "alive",
+      detail: withBuild(`${lease.holder} · ${beat}`, build),
+      alarm: build.owed,
+    };
+  }
   return {
     what: "runner",
     state: queued === 0 ? "idle" : "dead",
-    detail: `${lease.holder} · ${beat} · ${STALE_INTERVALS} intervals missed · ${waiting}`,
+    detail: withBuild(`${lease.holder} · ${beat} · ${STALE_INTERVALS} intervals missed · ${waiting}`, build),
     alarm: queued > 0,
   };
 }

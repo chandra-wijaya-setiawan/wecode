@@ -41,6 +41,17 @@ export interface RecordNode {
   readonly role?: string;
 }
 
+/** What the process holding the workspace is running, as its own lease claims. `buildSha`
+ *  is the commit that build was made from; `behind` is how many commits the base has gained
+ *  since, measured by that holder. Either may be absent — an install with no git beside it,
+ *  or a holder that has not measured yet — and an absent one is a question nobody answered
+ *  rather than an answer of zero. */
+export interface RunnerBuild {
+  readonly holder: string;
+  readonly buildSha?: string;
+  readonly behind?: number;
+}
+
 export interface WorkerRow {
   readonly slug: string;
   readonly role: string;
@@ -233,6 +244,36 @@ export function schemaVersionIsUnderstood(s: Snapshot): readonly Violation[] {
       }];
 }
 
+/** Said of a runner whose build the base has moved past. The words are the action, because
+ *  nothing here restarts anything: a runner that decides to replace itself mid-attempt is a
+ *  worse problem than a stale one. */
+export const A_RESTART_IS_OWED = "a restart is owed";
+
+/** The runner's build is an ancestor of the base: the process holding this workspace is
+ *  running the code that has landed.
+ *
+ *  Landing a fix changes nothing until the process restarts, and until this sentence
+ *  existed nothing said so — the fix that keeps an agent's commits landed and the very next
+ *  task still lost its work, because the runner that ran it predated the fix by twenty
+ *  minutes. The count is named, not just the fact: "behind" is not something a person can
+ *  weigh and "7 commits behind" is.
+ *
+ *  Quiet about a build that cannot say and about a holder that has not measured: this
+ *  invariant accuses a runner of being old, and it may only do that on a number. */
+export function runnerBuildIsCurrent(r: RunnerBuild | null): readonly Violation[] {
+  if (r === null || r.behind === undefined || r.behind <= 0) return [];
+  const built = r.buildSha === undefined ? "an unnamed commit" : r.buildSha.slice(0, 12);
+  return [
+    {
+      invariant: "runner_build_is_current",
+      entity: "runner",
+      id: null,
+      slug: r.holder,
+      detail: `built from ${built}, ${r.behind} ${r.behind === 1 ? "commit" : "commits"} behind the base — ${A_RESTART_IS_OWED}`,
+    },
+  ];
+}
+
 /** Every invariant, in the order a person would read them. The caller runs the set; no
  *  function here knows about any other. */
 export const INVARIANTS: readonly { readonly name: string; readonly check: (s: Snapshot) => readonly Violation[] }[] = [
@@ -245,6 +286,21 @@ export const INVARIANTS: readonly { readonly name: string; readonly check: (s: S
   { name: "failing_criteria_has_an_open_task", check: failingCriteriaHasAnOpenTask },
   { name: "schema_version_is_understood", check: schemaVersionIsUnderstood },
 ];
+
+/** The checks about the process rather than about the record. Kept apart from `INVARIANTS`
+ *  on purpose: that set is a pure function of a `Snapshot` of rows, and both doctors run it
+ *  over a record they have just read and then heal what it names. Nothing here is healable
+ *  — the only remedy is a person restarting a process, and this code may never do that —
+ *  and the subject is not in the snapshot at all. */
+export const RUNNER_INVARIANTS: readonly {
+  readonly name: string;
+  readonly check: (r: RunnerBuild | null) => readonly Violation[];
+}[] = [{ name: "runner_build_is_current", check: runnerBuildIsCurrent }];
+
+/** One pass over the runner of record. Null when nobody holds the workspace, and then
+ *  there is nothing to say. */
+export const checkRunner = (r: RunnerBuild | null): readonly Violation[] =>
+  RUNNER_INVARIANTS.flatMap((i) => i.check(r));
 
 /** One pass. Reports everything it finds and changes nothing. */
 export function checkRecord(s: Snapshot): readonly Violation[] {

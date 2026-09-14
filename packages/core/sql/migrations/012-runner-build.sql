@@ -1,0 +1,22 @@
+-- What the runner holding this workspace is actually running.
+--
+-- Landing a runner fix changes nothing until the runner restarts, and nothing said so.
+-- Story 175 landed the fix that keeps an agent's commits and the very next task still lost
+-- its work; story 187 landed chore dispatch while three chores sat planned for half an
+-- hour. Both times the live process predated the fix and the record could not tell: the
+-- lease said who held the workspace, never what they were running.
+--
+-- `build_sha` is the commit the running process was built from, read from the build and not
+-- from a working tree — a checkout moves on under a process that cannot notice. It is
+-- written when the lease is taken, because that is when the process begins, and never
+-- rewritten while the same holder keeps it.
+--
+-- `build_behind` is how many commits the base has gained since that build, measured by the
+-- runner on every renewal. It lives here rather than being computed by each reader because
+-- the cockpit is opened wherever the operator is standing and has no repository to ask; the
+-- holder is the one process that does.
+--
+-- Both are NULL for a lease taken by a build that cannot say — an install with no git
+-- beside it — and a NULL says nothing rather than accusing.
+ALTER TABLE runner_lease ADD COLUMN build_sha TEXT;
+ALTER TABLE runner_lease ADD COLUMN build_behind INTEGER;
