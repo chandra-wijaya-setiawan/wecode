@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
-import { applyChore, board, choreFor, ensureChore, Maker, open } from "@wecode/core";
+import { applyChore, board, choreFor, ensureChore, Maker, open, SCHEMA_VERSION } from "@wecode/core";
 import { DEFAULT_BUDGET, Runner } from "../src/index.js";
 
 const git = (cwd: string, ...args: string[]): string =>
@@ -25,7 +25,13 @@ beforeEach(() => {
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", "seed");
 
-  db = open(join(repo, "wecode.db"));
+  // A workspace that existed before chores did, then upgraded — which is every workspace
+  // anyone is actually working in. A database created from nothing runs every migration
+  // whatever it is numbered, so it would pass with the chore table unreachable in the
+  // field; this one only has a chore table if the upgrade puts one there.
+  const path = join(repo, "wecode.db");
+  open(path, { to: SCHEMA_VERSION - 1 }).close();
+  db = open(path);
   make = new Maker(db);
   const ws = make.workspace("acme", repo);
   project = make.project(ws, "storefront", repo);
