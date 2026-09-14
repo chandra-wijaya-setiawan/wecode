@@ -55,6 +55,9 @@ export interface Tick {
   /** Acceptance tests this tick ran at their story's base: red there, or green and so
    *  unable to prove anything. */
   readonly redAtBase: RedAtBase;
+  /** Stories whose tree is behind the base and could not be brought up to it. Nothing in
+   *  them was judged this tick. */
+  readonly behind: readonly Behind[];
   /** What the invariant set found this tick. Recorded as well as returned, so a view reads
    *  the table rather than running the pass again. Empty is the healthy answer. */
   readonly doctor: readonly Violation[];
@@ -67,6 +70,18 @@ export interface Drift {
   readonly task: number;
   readonly slug: string;
   readonly story: string;
+  readonly why: string;
+}
+
+/** A story whose tree is missing what the base has, and why wecode could not fix it.
+ *
+ *  An acceptance test judged in such a tree is not failing, it is uninformed: acceptance
+ *  test 166 went red in loadViews because the branch predated the services box that landed
+ *  with story 152, and re-proving could never help because the tree was wrong rather than
+ *  the code. So a story that is behind is named and nothing under it is judged — a red
+ *  verdict out of a stale tree is a lie, and it costs the next attempt its whole budget. */
+export interface Behind {
+  readonly story: number;
   readonly why: string;
 }
 
@@ -87,6 +102,14 @@ const CHORE_BUDGET: Budget = { tokens: 250000, seconds: 3600 };
 /** Where a project declares its roles, relative to its repository. Named once, because the
  *  refusals quote it and a quoted path that is not the path read is a lie. */
 const ROLES_FILE = "config/roles.yaml";
+
+/** What git said, first line only. The conflict list behind it is the worker's to read in
+ *  the tree; a refusal on the board wants the sentence, not the file list. */
+const reasonOf = (err: unknown): string => {
+  const e = err as { stderr?: string; stdout?: string; message?: string };
+  const said = (e.stderr ?? "").trim() || (e.stdout ?? "").trim() || (e.message ?? "").trim();
+  return said.split("\n")[0] ?? "git said nothing";
+};
 
 export interface RedAtBase {
   readonly proven: readonly number[];
@@ -166,7 +189,7 @@ export class Runner {
     const exhausted = this.enforceRetryLimit();
     // Last, and after settle(): a story becomes delivered in settle(), and the condition
     // this reads is about a story that already is.
-    const chores = await this.raiseMergeChores();
+    const chores = await this.raiseStoryChores(acceptance.behind);
     // Raised first, then performed: a chore created on this tick is dispatched on it, and a
     // chore whose attempt has ended is judged before the tick says what is still owed.
     const performed = await this.performChores();
@@ -194,12 +217,13 @@ export class Runner {
       chores: chores.filter((id) => !performed.done.includes(id)),
       drift,
       redAtBase,
+      behind: acceptance.behind,
       settled: settled2.map((c) => `${c.entity} #${c.id} → ${c.to}`),
       scripts: {
-        passed: [...settled.scripts.passed, ...acceptance.passed],
-        failed: [...settled.scripts.failed, ...acceptance.failed],
-        skipped: [...settled.scripts.skipped, ...acceptance.skipped],
-        refused: [...(settled.scripts.refused ?? []), ...(acceptance.refused ?? [])],
+        passed: [...settled.scripts.passed, ...acceptance.scripts.passed],
+        failed: [...settled.scripts.failed, ...acceptance.scripts.failed],
+        skipped: [...settled.scripts.skipped, ...acceptance.scripts.skipped],
+        refused: [...(settled.scripts.refused ?? []), ...(acceptance.scripts.refused ?? [])],
       },
     };
   }
@@ -539,8 +563,9 @@ export class Runner {
       .run(testId, `${base}|${artefact}`, at);
   }
 
-  /** Acceptance tests, in the story tree, once the story's tasks are finished. */
-  private async proveStories(): Promise<ScriptReport> {
+  /** Acceptance tests, in the story tree, once the story's tasks are finished — and never
+   *  before that tree has what the base has. */
+  private async proveStories(): Promise<{ readonly scripts: ScriptReport; readonly behind: readonly Behind[] }> {
     const stories = this.db
       .prepare(
         `SELECT DISTINCT s.id AS id, s.slug AS slug, p.repo AS repo
@@ -559,10 +584,18 @@ export class Runner {
     const failed: number[] = [];
     const skipped: number[] = [];
     const refused: Refused[] = [];
+    const behind: Behind[] = [];
     for (const story of stories) {
       try {
         const repo = this.opts.repoRoot ?? story.repo;
         const tree = await this.treesFor(repo).storyTree(story.slug, join(this.worktreeRoot(repo), `story-${story.slug}`));
+        const fresh = await this.refreshStoryTree(story.slug, repo, tree);
+        if (!fresh.ok) {
+          // Nothing is judged here, and nothing is recorded against the tests: they stay
+          // exactly as they were, and the tick says why instead.
+          behind.push({ story: story.id, why: fresh.why });
+          continue;
+        }
         const r = await this.examiner.runAcceptanceTests(story.id, tree);
         passed.push(...r.passed);
         failed.push(...r.failed);
@@ -572,15 +605,96 @@ export class Runner {
         // a story with no branch yet has nothing to prove
       }
     }
-    return { passed, failed, skipped, refused };
+    return { scripts: { passed, failed, skipped, refused }, behind };
   }
 
-  /** docs/design/18. A story is delivered and its branch will not merge into the base.
+  /** docs/design/18 `refresh`: the base has moved and a story tree in flight is behind it.
+   *
+   *  The check the design names is that the base is an ancestor of the story branch, and
+   *  that is what this asks — off the graph, with `merge-base --is-ancestor`, rather than
+   *  off a report. When it is not, the base is merged in, here and now: a fast merge the
+   *  runner can make itself needs no worker, no chore and no tick of latency, and the
+   *  common case of a story that is merely behind is exactly that.
+   *
+   *  When it will not merge, the answer is not a red verdict — it is `behind`. Judging in
+   *  a tree that is missing the world tells you about the tree, and re-proving can never
+   *  help because the code was never what was wrong. The caller raises the chore. */
+  private async refreshStoryTree(
+    slug: string,
+    repo: string,
+    tree: string,
+  ): Promise<{ ok: true } | { ok: false; why: string }> {
+    const branch = `story/${slug}`;
+    let base: string;
+    try {
+      base = await this.treesFor(repo).integrationBranch();
+    } catch (err) {
+      return { ok: false, why: (err as Error).message };
+    }
+    // A repository whose base has no commit yet, or a story cut on the base itself, has
+    // nothing to be behind.
+    if (branch === base || !(await this.hasCommit(repo, base))) return { ok: true };
+    if (await this.contains(repo, branch, base)) return { ok: true };
+
+    try {
+      await exec(
+        "git",
+        [
+          "-c",
+          "user.name=wecode",
+          "-c",
+          "user.email=wecode@localhost",
+          "merge",
+          "--no-ff",
+          "-q",
+          "-m",
+          `refresh ${branch} from ${base}`,
+          base,
+        ],
+        { cwd: tree },
+      );
+    } catch (err) {
+      // Leave no half-merge standing: the next tick, and the chore's worker, both want the
+      // branch as it was.
+      await exec("git", ["merge", "--abort"], { cwd: tree }).catch(() => undefined);
+      return { ok: false, why: `${branch} is behind ${base} and will not take it: ${reasonOf(err)}` };
+    }
+    if (!(await this.contains(repo, branch, base))) {
+      return { ok: false, why: `${branch} still does not contain ${base} after the merge` };
+    }
+    return { ok: true };
+  }
+
+  private async hasCommit(repo: string, ref: string): Promise<boolean> {
+    return await exec("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo })
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  /** docs/design/18. A story's branch will not merge into the base, or its tree will not
+   *  take the base. Either way wecode owes itself the merge nobody can make deterministically.
    *
    *  Until now that was a sentence in a report: the merge in `landDoneTasks` swallowed the
    *  conflict, and a delivered story that could not be landed looked exactly like one that
    *  had been. Four of them sat that way for a day. A chore is the record of it — on the
    *  board, with a target and a check, and takeable by a worker.
+   *
+   *  Every story with work under it is read, not only a delivered one, because `refresh`
+   *  is owed while the work is in flight and not after it: story 165 was `in_progress`, its
+   *  tree was a story behind the base, and because this read only `delivered` nothing was
+   *  raised — so the same acceptance test was re-proved in the same wrong tree, with nothing
+   *  on the board to say why. `planned` is left out because a story nobody has started has
+   *  no branch, and `dropped` because nothing is owed on it.
+   *
+   *  `merge` stays a delivered story's alone. A branch in flight is expected to diverge from
+   *  the base, and that divergence is neither owed nor anybody's to fix until the story is
+   *  finished; raising it early is a chore on every board in the workspace. `refresh` is the
+   *  opposite case and that is why it is a second kind rather than a widened first: it is
+   *  about the tree wecode is judging in right now.
+   *
+   *  "With work under it" is not a second clause in the query, because the branch is already
+   *  the answer: `mergesCleanly` says yes to a ref that is not there, and a story with
+   *  nothing under it has no branch, so it raises nothing without being asked separately.
    *
    *  This runs every tick and creates nothing on the second one: `ensureChore` is keyed on
    *  (kind, target), which is the condition itself.
@@ -589,17 +703,18 @@ export class Runner {
    *  follows it: true again re-raises a chore that had settled, false closes one that had
    *  not. Neither is a timer and neither is a guess — this reads the branch against the base
    *  before it says either. */
-  private async raiseMergeChores(): Promise<number[]> {
+  private async raiseStoryChores(behind: readonly Behind[]): Promise<number[]> {
     const stories = this.db
       .prepare(
-        `SELECT s.id AS id, s.slug AS slug, rel.project_id AS project, p.repo AS repo
+        `SELECT s.id AS id, s.slug AS slug, s.state AS state, rel.project_id AS project, p.repo AS repo
            FROM story s
            JOIN epic e ON e.id = s.epic_id
            JOIN release rel ON rel.id = e.release_id
            JOIN project p ON p.id = rel.project_id
-          WHERE s.state = 'delivered'`,
+          WHERE s.state IN ('in_progress', 'on_hold', 'delivered')
+          ORDER BY s.id`,
       )
-      .all() as unknown as { id: number; slug: string; project: number; repo: string }[];
+      .all() as unknown as { id: number; slug: string; project: number; repo: string; state: string }[];
 
     const open: number[] = [];
     for (const story of stories) {
@@ -609,6 +724,8 @@ export class Runner {
         .catch(() => null);
       if (base === null) continue;
       const branch = `story/${story.slug}`;
+      open.push(...this.followRefresh(story, repo, branch, base, behind));
+      if (story.state !== "delivered") continue;
       if (await this.mergesCleanly(repo, base, branch)) {
         // The other half of the same rule. The conflict is gone, so an open chore for it is
         // a stale claim, and the row should say the world moved rather than sit in `failed`
@@ -635,6 +752,41 @@ export class Runner {
       if (chore.state !== "done") open.push(chore.id);
     }
     return open;
+  }
+
+  /** The `refresh` chore, following the one condition proveStories already read.
+   *
+   *  It is not re-read here on purpose. `proveStories` is the only thing that tries the
+   *  merge, and asking a second time would let the two disagree — the board saying the tree
+   *  is fine while the tests were skipped because it is not. A story `proveStories` did not
+   *  look at is a story this says nothing about: it neither raises nor closes. */
+  private followRefresh(
+    story: { id: number; slug: string; project: number },
+    repo: string,
+    branch: string,
+    base: string,
+    behind: readonly Behind[],
+  ): number[] {
+    const stale = behind.find((b) => b.story === story.id);
+    const chore = choreFor(this.db, "refresh", "story", story.id);
+    if (stale === undefined) {
+      // The world moved: the tree took the base, so what was owed is not owed any more.
+      // `running` is left alone — a worker is in the tree on it, and the verdict is that
+      // attempt's to give.
+      if (chore !== null && chore.state !== "running") {
+        closeChore(this.db, chore.id, `${branch} is up to date with ${base}`, "runner");
+      }
+      return [];
+    }
+    const raised = ensureChore(this.db, {
+      project_id: story.project,
+      kind: "refresh",
+      target_type: "story",
+      target_id: story.id,
+      check: "the base is an ancestor of the branch",
+    });
+    recordChoreRefusal(this.db, stale.why, raised.id);
+    return raised.state === "done" ? [] : [raised.id];
   }
 
   /** docs/design/18. The other half of a chore: judge the attempt that has ended, then hand
@@ -755,9 +907,16 @@ export class Runner {
 
   /** The check, proved by this machine. For `merge`: the base is an ancestor of the branch —
    *  which is the merge having been made, not an agent's report of it — and the suite the
-   *  story carries is still green. */
+   *  story carries is still green.
+   *
+   *  `refresh` proves the same two things, so it is the same code and not a copy of it.
+   *  docs/design/18 words them from either end — "the branch merges cleanly into the base"
+   *  and "the base merges into the story branch" — but one graph answers both: once the
+   *  base is an ancestor of the branch there is nothing left to conflict. */
   private async proveChore(chore: Chore): Promise<{ ok: true } | { ok: false; why: string }> {
-    if (chore.kind !== "merge") return { ok: false, why: `nothing here knows how to prove a ${chore.kind} chore` };
+    if (chore.kind !== "merge" && chore.kind !== "refresh") {
+      return { ok: false, why: `nothing here knows how to prove a ${chore.kind} chore` };
+    }
     const target = this.storyTargetOf(chore);
     if (target === null) return { ok: false, why: "its target story is not on the record" };
 
