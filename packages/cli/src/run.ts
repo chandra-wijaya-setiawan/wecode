@@ -10,6 +10,7 @@ import {
   currentDatabase,
   databaseOf,
   listWorkspaces,
+  loadRoles,
   tree,
   type Node,
   loadMachines,
@@ -50,7 +51,7 @@ function dispatch(argv: readonly string[]): number {
     const what = rest[0] ?? "";
     return isStateful(what) ? entityHelp(what) : usage();
   }
-  if (head === "board") return showBoard();
+  if (head === "board") return showBoard(rest);
   if (head === "init") return init();
   if (head === "answer") return answer(rest);
   if (head === "show") return show(rest);
@@ -362,9 +363,16 @@ function onboard(args: readonly string[]): number {
     (conn.prepare("SELECT id FROM workspace WHERE name = ?").get(wsName) as { id: number } | undefined)?.id ??
     make.workspace(wsName, workspaceDir(wsName));
 
+  // Roles without workers is a board nothing can be dispatched from: the runner refuses
+  // every candidate with "no worker free for role engineer", and nowhere does it say a
+  // worker is a thing you make. So onboarding makes one per agent role, named after it.
+  const hired = hire(conn, make, join(config, "roles.yaml"));
+
   const existing = conn.prepare("SELECT id FROM project WHERE repo = ?").get(root) as { id: number } | undefined;
   if (existing !== undefined) {
-    process.stdout.write(`project #${existing.id} is already onboarded here\n`);
+    process.stdout.write(
+      `project #${existing.id} is already onboarded here\n${workerLines(hired).join("\n")}${hired.length > 0 ? "\n" : ""}`,
+    );
     return 0;
   }
 
@@ -382,6 +390,7 @@ function onboard(args: readonly string[]): number {
       "",
       `workspace   ${wsName}  (${path})`,
       `project #${project}  release #${release}`,
+      ...workerLines(hired),
       "",
       "next: wecode epic create --parent " + String(release) + ' "<what this release is for>"',
       "",
@@ -391,6 +400,32 @@ function onboard(args: readonly string[]): number {
   );
   return 0;
 }
+
+interface Hired {
+  readonly id: number;
+  readonly role: string;
+  readonly fresh: boolean;
+}
+
+/** One agent worker per agent role, named after the role. A role that already has a worker
+ *  keeps it: onboarding twice must not double the workforce. Human roles are people, and
+ *  wecode does not get to hire those. */
+function hire(conn: ReturnType<typeof open>, make: Maker, rolesFile: string): Hired[] {
+  const hired: Hired[] = [];
+  for (const role of Object.values(loadRoles(rolesFile).roles)) {
+    if (role.worker_kind !== "agent") continue;
+    const had = conn.prepare("SELECT id FROM worker WHERE role = ?").get(role.name) as { id: number } | undefined;
+    hired.push(
+      had === undefined
+        ? { id: make.worker(role.name, role.name, "agent"), role: role.name, fresh: true }
+        : { id: had.id, role: role.name, fresh: false },
+    );
+  }
+  return hired;
+}
+
+const workerLines = (hired: readonly Hired[]): string[] =>
+  hired.map((h) => `worker #${h.id}  ${h.role}${h.fresh ? "" : "  (already there)"}`);
 
 /** Roles whose scopes are paths this repository has, rather than paths wecode assumed. */
 function rolesFor(c: { source: readonly string[]; tests: readonly string[] }): string {
@@ -504,8 +539,39 @@ function db() {
 
 class Missing extends Error {}
 
-function showBoard(): number {
-  const b = board(db());
+/** The project this repository is, or null when you are standing outside all of them. */
+function hereProject(): { id: number; name: string } | null {
+  return (
+    (db().prepare("SELECT id, name FROM project WHERE repo = ?").get(resolve(process.cwd())) as
+      | { id: number; name: string }
+      | undefined) ?? null
+  );
+}
+
+/** `wecode board [--all] [--project N]` — by default, only the project you are standing in.
+ *
+ *  A board of every project in the workspace cannot answer "what is left here", which is
+ *  the question somebody in a repository is asking. `--all` is the workspace-wide view. */
+function showBoard(args: readonly string[]): number {
+  const { values } = parseArgs({
+    args: [...args],
+    options: { all: { type: "boolean" }, project: { type: "string" } },
+  });
+
+  // Outside every project's repo there is no "here" to narrow to, so the board is the
+  // workspace's — which is what it always was.
+  const asked = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
+  const chosen = values.all === true ? null : asked;
+  if (chosen !== null && !Number.isInteger(chosen)) return fail("wecode board --project <id>");
+
+  const b = board(db(), chosen);
+  const mine = b.projects.find((p) => p.id === chosen);
+  if (chosen !== null && mine === undefined) return fail(`no project #${chosen}`);
+  process.stdout.write(
+    mine === undefined
+      ? `\nall ${b.projects.length} projects in this workspace\n`
+      : `\n#${mine.id} ${mine.what} · wecode board --all for the whole workspace\n`,
+  );
   const groups: [string, readonly { id: number; what: string; state: string; detail: string }[]][] = [
     ["RUNNING", b.running],
     ["NEEDS YOU", b.needs_human],
@@ -797,7 +863,7 @@ function usage(): number {
       "START HERE",
       "  wecode onboard [name] [--workspace <ws>]   learn this repo, join a workspace, write config",
       "  wecode init                                an empty workspace, before you have a repo",
-      "  wecode board                               what is running, waiting, queued, failed",
+      "  wecode board [--all]                       what is running, waiting, queued, failed",
       "  wecode workspaces                          which workspaces exist, and which is current",
       "",
       "MAKING WORK",
