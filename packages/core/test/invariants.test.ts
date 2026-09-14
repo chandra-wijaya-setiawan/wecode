@@ -3,7 +3,10 @@ import {
   allChildrenDroppedIsNotSuccess,
   checkRecord,
   deliveredStoryHasLanded,
+  failingCriteriaHasAnOpenTask,
   INVARIANTS,
+  schemaVersionIsUnderstood,
+  SCHEMA_VERSION,
   readyAcceptanceTestWasRedAtBase,
   readyTaskHasAReadyTaskTest,
   roleWithReadyWorkHasAWorker,
@@ -185,15 +188,70 @@ describe("a ready task has a task_test that is ready or passed", () => {
   });
 });
 
-/** One record that breaks all six at once, so a pass has to report all six. */
+describe("a criteria with a failing acceptance_test has an open task under it", () => {
+  const failed = (taskState: string | null): Snapshot => {
+    const base = withNode("acceptance_test", 1, { state: "failed" });
+    return {
+      ...base,
+      nodes: taskState === null
+        ? base.nodes.filter((n) => n.entity !== "task" && n.entity !== "task_test")
+        : base.nodes.map((n) => (n.entity === "task" ? { ...n, state: taskState } : n)),
+    };
+  };
+
+  it("names the criteria whose failed test has no task at all under it", () => {
+    expect(named(failingCriteriaHasAnOpenTask(failed(null)))).toEqual(["acceptance_criteria#1 emailed"]);
+  });
+
+  it("names the criteria whose failed test is only worked by a task that is done", () => {
+    expect(named(failingCriteriaHasAnOpenTask(failed("done")))).toEqual(["acceptance_criteria#1 emailed"]);
+  });
+
+  it("says which test of the criteria it means", () => {
+    expect(failingCriteriaHasAnOpenTask(failed(null))[0]?.detail).toContain("mail-arrives");
+  });
+
+  it.each(["planned", "ready", "failed"])("is silent while a task under the test is %s", (state) => {
+    expect(failingCriteriaHasAnOpenTask(failed(state))).toEqual([]);
+  });
+
+  it("is silent for a test that has not failed", () => {
+    expect(failingCriteriaHasAnOpenTask(clean())).toEqual([]);
+  });
+});
+
+describe("the record's schema_version is the one this build understands", () => {
+  it("names the version the file is at", () => {
+    const v = schemaVersionIsUnderstood({ ...clean(), schema_version: 999 });
+    expect(named(v)).toEqual(["schema_version#- 999"]);
+    expect(v[0]?.detail).toContain(String(SCHEMA_VERSION));
+  });
+
+  it("names a record with no version row at all, which reads as 0", () => {
+    expect(named(schemaVersionIsUnderstood({ ...clean(), schema_version: 0 }))).toEqual(["schema_version#- 0"]);
+  });
+
+  it("is silent at the version this build understands", () => {
+    expect(schemaVersionIsUnderstood({ ...clean(), schema_version: SCHEMA_VERSION })).toEqual([]);
+  });
+
+  it("is silent for a caller that did not ask about the version", () => {
+    expect(schemaVersionIsUnderstood(clean())).toEqual([]);
+  });
+});
+
+/** One record that breaks every invariant at once, so a pass has to report them all. */
 const broken: Snapshot = {
+  schema_version: 0,
   nodes: [
     node("epic", 1, "recovery", "delivered", { parent_id: 1 }),
     node("epic", 2, "signin", "in_progress", { parent_id: 1 }),
     node("story", 1, "reset", "dropped", { parent_id: 1 }),
     node("story", 2, "lockout", "delivered", { parent_id: 2 }),
     node("story", 3, "unlock", "in_progress", { parent_id: 2 }),
+    node("acceptance_criteria", 1, "emailed", "in_progress", { parent_id: 1 }),
     node("acceptance_test", 1, "mail-arrives", "ready", { parent_id: 1 }),
+    node("acceptance_test", 2, "mail-bounces", "failed", { parent_id: 1 }),
     node("task", 1, "send-mail", "ready", { parent_id: 1, role: "engineer" }),
   ],
   workers: [],
@@ -214,8 +272,10 @@ describe("one pass", () => {
   it("names the entity that broke it, never its parent or its child", () => {
     expect(named(checkRecord(broken)).sort()).toEqual(
       [
+        "acceptance_criteria#1 emailed",
         "acceptance_test#1 mail-arrives",
         "epic#1 recovery",
+        "schema_version#- 0",
         "role#- engineer",
         "story#2 lockout",
         "story#3 unlock",

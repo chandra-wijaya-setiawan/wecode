@@ -8,6 +8,8 @@
  *  and gets back the entities that violate each sentence. Nothing is healed, nothing is
  *  proposed and nothing is written; that is the next slice. */
 
+import { SCHEMA_VERSION } from "./store.js";
+
 /** The entities a check can name. The chain project → … → task_test of docs/design/04,
  *  minus project and workspace, which no invariant here speaks about. */
 export const CHECKED = [
@@ -49,6 +51,9 @@ export interface WorkerRow {
 export interface Snapshot {
   readonly nodes: readonly RecordNode[];
   readonly workers: readonly WorkerRow[];
+  /** The version the record says it is at, or 0 for a file with no version row at all.
+   *  Omitted by a caller that is asking only about entities, and then not checked. */
+  readonly schema_version?: number;
 }
 
 /** What a check found: the invariant it broke and the one entity that broke it. */
@@ -150,6 +155,36 @@ export function roleWithReadyWorkHasAWorker(s: Snapshot): readonly Violation[] {
     }));
 }
 
+/** A criteria with a failing acceptance_test has an open task under that test: a red test
+ *  with nobody working on it is a criteria that has quietly stopped being pursued. */
+export function failingCriteriaHasAnOpenTask(s: Snapshot): readonly Violation[] {
+  const open = (t: RecordNode): boolean =>
+    childrenOf(s, t).some((k) => k.state === "planned" || k.state === "ready" || k.state === "failed");
+  return of(s, "acceptance_criteria").flatMap((c) =>
+    childrenOf(s, c)
+      .filter((t) => t.state === "failed" && !open(t))
+      .map((t) =>
+        violation("failing_criteria_has_an_open_task", c, `acceptance_test ${t.slug} #${t.id} is failed and no task under it is open`),
+      ),
+  );
+}
+
+/** The record's schema_version is the one this build understands: every sentence above is
+ *  read through this build's idea of the tables, so a file at another version is being
+ *  judged by the wrong rules. */
+export function schemaVersionIsUnderstood(s: Snapshot): readonly Violation[] {
+  const found = s.schema_version;
+  return found === undefined || found === SCHEMA_VERSION
+    ? []
+    : [{
+        invariant: "schema_version_is_understood",
+        entity: "schema_version",
+        id: null,
+        slug: String(found),
+        detail: `the record is at ${found} and this build understands ${SCHEMA_VERSION}`,
+      }];
+}
+
 /** Every invariant, in the order a person would read them. The caller runs the set; no
  *  function here knows about any other. */
 export const INVARIANTS: readonly { readonly name: string; readonly check: (s: Snapshot) => readonly Violation[] }[] = [
@@ -159,6 +194,8 @@ export const INVARIANTS: readonly { readonly name: string; readonly check: (s: S
   { name: "ready_acceptance_test_was_red_at_base", check: readyAcceptanceTestWasRedAtBase },
   { name: "role_with_ready_work_has_a_worker", check: roleWithReadyWorkHasAWorker },
   { name: "ready_task_has_a_ready_task_test", check: readyTaskHasAReadyTaskTest },
+  { name: "failing_criteria_has_an_open_task", check: failingCriteriaHasAnOpenTask },
+  { name: "schema_version_is_understood", check: schemaVersionIsUnderstood },
 ];
 
 /** One pass. Reports everything it finds and changes nothing. */
