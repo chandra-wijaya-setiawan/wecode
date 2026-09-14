@@ -149,11 +149,21 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
                AND a.phase IN ('pending','running','waiting'))
         ORDER BY t.id`,
     ),
+    // Stopped work, in the two ways work stops — and they are not the same thing. A dropped
+    // task was somebody's decision and wants nothing from anyone; an exhausted one is
+    // waiting for a person to retry it or drop it, and used to read identically. A failed
+    // task with attempts left is neither: the next pass will pick it up.
     failed: rows(
       `SELECT t.id AS id, t.title AS what, t.state AS state,
-              'attempts ' || t.attempts || '/' || t.max_retry AS detail
+              CASE
+                WHEN t.state = 'dropped' THEN 'dropped by decision'
+                WHEN t.attempts >= t.max_retry
+                  THEN 'out of attempts · ' || t.attempts || ' of ' || t.max_retry
+                       || ' · retry it with a reason, or drop it'
+                ELSE 'attempts ' || t.attempts || '/' || t.max_retry
+              END AS detail
          FROM task t
-        WHERE t.state = 'failed' AND ${only(ofTask("t.id"))}
+        WHERE t.state IN ('failed', 'dropped') AND ${only(ofTask("t.id"))}
         ORDER BY t.id`,
     ),
     // Ready to run, but nobody has watched it fail — so passing it would prove nothing.
