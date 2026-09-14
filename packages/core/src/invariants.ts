@@ -97,12 +97,60 @@ const violation = (invariant: string, node: RecordNode, detail: string): Violati
   detail,
 });
 
-/** A `delivered` story has a landed marker: delivered says the work is in the base, and
- *  without a sha nothing says it ever got there. */
+/** The branch a story's work is on. The one naming convention this file shares with the
+ *  lander, and the thing the ancestry question below is asked about. */
+export const storyBranch = (slug: string): string => `story/${slug}`;
+
+/** What git says about a story's branch against the base.
+ *
+ *  `in` is the fact a delivered story asserts — the work is in the base, whether it got
+ *  there by a land commit of its own or inside somebody else's merge. `out` and
+ *  `no-branch` are the two ways of not being there. */
+export type Ancestry = "in" | "out" | "no-branch";
+
+/** Said of a story whose branch is in the base with no marker naming the commit. */
+export const REACHED_INSIDE_ANOTHER_MERGE = "reached the base inside another merge";
+
+/** Said of a story that is not in the base. Only ever of those: a story that reached the
+ *  base must never be described as not having. */
+export const NEVER_REACHED_THE_BASE = "delivered with no landed_sha — it never reached the base";
+
+/** A `delivered` story has reached the base. The marker is the convenience and not the
+ *  fact: it says which commit did it, and a story merged inside another story's merge has
+ *  no land commit of its own to name.
+ *
+ *  So this half is the question, not the answer. It names every delivered story with no
+ *  marker, because that is all a pure pass over the record can know, and the accusation it
+ *  writes is only true of the ones git then says are not in. The runner asks git and drops
+ *  the rest with `keepUnlanded`; a caller that cannot ask is reading a worst case. */
 export function deliveredStoryHasLanded(s: Snapshot): readonly Violation[] {
   return of(s, "story")
     .filter((n) => n.state === "delivered" && (n.landed_sha ?? null) === null)
-    .map((n) => violation("delivered_story_has_landed", n, "delivered with no landed_sha — it never reached the base"));
+    .map((n) => violation("delivered_story_has_landed", n, NEVER_REACHED_THE_BASE));
+}
+
+/** The ancestry question this check wants asked, one per story it accused. */
+export function landedQuestions(
+  found: readonly Violation[],
+): readonly { readonly violation: Violation; readonly branch: string }[] {
+  return found
+    .filter((v) => v.invariant === "delivered_story_has_landed" && v.id !== null)
+    .map((v) => ({ violation: v, branch: storyBranch(v.slug) }));
+}
+
+/** The answers, applied: a story whose branch is in the base has reached it and is not
+ *  drift. Everything else is passed through untouched, this one invariant included — the
+ *  filter can only ever remove an accusation the world contradicts. */
+export function keepUnlanded(
+  found: readonly Violation[],
+  ancestryOf: (branch: string) => Ancestry,
+): readonly Violation[] {
+  const reached = new Set(
+    landedQuestions(found)
+      .filter((q) => ancestryOf(q.branch) === "in")
+      .map((q) => q.violation),
+  );
+  return found.filter((v) => !reached.has(v));
 }
 
 /** An `in_progress` story has work under it: a shape with nothing in it is not in progress,
