@@ -143,7 +143,8 @@ describe("a box screen", () => {
     // Ten lines of rows inside the box — more than the six it gets on the dashboard — and
     // no other box on the screen.
     expect(titled(out, "Running (")).toBe(-1);
-    expect(inside(out, 0).filter((l) => /^\d/.test(l)).length).toBeGreaterThan(6);
+    // A row begins with its code, which is a number said as one: "#12".
+    expect(inside(out, 0).filter((l) => /^#\d/.test(l)).length).toBeGreaterThan(6);
     expect(inverted(frame(100, 12))).toHaveLength(1);
   });
 
