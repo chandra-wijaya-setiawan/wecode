@@ -53,6 +53,23 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return { phase: "running", session: session.id ?? work.session ?? "", spent: session.spent };
   }
 
+  /** Reattach to a session this process did not start. Claude Code keeps the transcript, so
+   *  `--resume` continues the attempt rather than beginning it again; the instruction goes
+   *  back in because the resumed run needs to know what it is still for. */
+  async resume(work: Work): Promise<Observation> {
+    if (work.session === null) return { phase: "failed", session: null, spent: zero(), reason: "lost" };
+    return this.spawn(work, [
+      "--resume",
+      work.session,
+      "-p",
+      this.prompt(work),
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      ...this.scopeFlags(work),
+    ]);
+  }
+
   async answer(work: Work, answer: string): Promise<Observation> {
     if (work.session === null) return { phase: "failed", session: null, spent: zero(), reason: "lost" };
     return this.spawn(work, [

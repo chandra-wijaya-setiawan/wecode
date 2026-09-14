@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { Engine } from "../src/index.js";
-import { freshDb, seed, stateOf } from "./helpers.js";
+import { freshDb, recordRed, seed, stateOf } from "./helpers.js";
 
 let db: DatabaseSync;
 let tree: ReturnType<typeof seed>;
@@ -11,6 +11,10 @@ beforeEach(() => {
   db = freshDb();
   tree = seed(db);
   engine = new Engine(db);
+  // These are tests about the cascade, not about `test_has_been_red`: the acceptance_test
+  // has been watched failing at its base, so passing it is legal and what follows is the
+  // cascade. What that guard refuses is red-at-base.test.ts's subject.
+  recordRed(db, tree.acceptance);
 });
 
 describe("a task is ready only when it can prove itself", () => {
