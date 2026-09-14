@@ -169,6 +169,74 @@ describe("a task that keeps failing stops", () => {
   });
 });
 
+/** A second ready task in the same story, with a scope of its own so it collides with
+ *  nothing. Returns its id. */
+function secondTask(file: string): number {
+  const make2 = new Maker(db);
+  const e2 = new Engine(db);
+  const c = (db.prepare("SELECT id FROM acceptance_criteria LIMIT 1").get() as { id: number }).id;
+  const at = make2.acceptanceTest(c, `${file} arrives`, "script", `test -f ${file}`);
+  e2.apply("acceptance_test", at, "deliver", "chief");
+  const t = make2.task(at, `write ${file}`, { role: "engineer", scope: { write: [file], tools: [] } });
+  const tt = make2.taskTest(t, "unit", "script", "true");
+  e2.apply("task_test", tt, "deliver", "chief");
+  e2.apply("task", t, "start", "chief");
+  return t;
+}
+
+const refusalFor = (id: number): string | undefined =>
+  (db.prepare("SELECT why FROM refusal WHERE task_id = ?").get(id) as { why: string } | undefined)?.why;
+
+describe("the allocator's choice is the one that gets a tree", () => {
+  it("starts the task fresh_first chose, rather than deadlocking on the lowest id", async () => {
+    // The 14 Sep instance: a free worker, two ready tasks, and a retry with the lower id.
+    db.prepare("UPDATE task SET attempts = 1 WHERE id = ?").run(task);
+    const fresh = secondTask("other.ts");
+    expect(task).toBeLessThan(fresh);
+
+    const r = await runner().tick();
+
+    expect(r.allocated.created).not.toBeNull();
+    const started = db.prepare("SELECT objective_id FROM assignment WHERE id = ?").get(r.allocated.created) as {
+      objective_id: number;
+    };
+    expect(started.objective_id).toBe(fresh);
+    // and nothing on the board claims there was no worker, because there was one
+    const reasons = (db.prepare("SELECT why FROM refusal").all() as unknown as { why: string }[]).map((x) => x.why);
+    expect(reasons.join()).not.toContain("no worker free");
+  });
+
+  it("says why about the task it could not place, and about no other", async () => {
+    // One worker, and the fresh task needs a role nobody fills.
+    db.prepare("UPDATE task SET attempts = 1 WHERE id = ?").run(task);
+    const fresh = secondTask("other.ts");
+    db.prepare("UPDATE task SET role = 'designer' WHERE id = ?").run(fresh);
+
+    const r = await runner().tick();
+
+    expect(refusalFor(fresh)).toBe("no worker free for role designer");
+    // the engineer was free, so the pass did not stall: the other task ran
+    const started = db.prepare("SELECT objective_id FROM assignment WHERE id = ?").get(r.allocated.created) as {
+      objective_id: number;
+    };
+    expect(started.objective_id).toBe(task);
+    expect(refusalFor(task)).toBeUndefined();
+  });
+
+  it("drops a reason that no longer holds rather than leaving it on the board", async () => {
+    const other = secondTask("other.ts");
+    const { recordRefusal } = await import("@wecode/core");
+    recordRefusal(db, "no worker free for role engineer", other);
+    // it is no longer ready, so nothing can be refusing it any more
+    db.prepare("UPDATE task SET attempts = max_retry WHERE id = ?").run(other);
+    expect(new Engine(db).apply("task", other, "give_up", "runner").ok).toBe(true);
+
+    await runner().tick();
+
+    expect(refusalFor(other)).toBeUndefined();
+  });
+});
+
 describe("a refused task says why on the board", () => {
   it("records the reason while the collision lasts", async () => {
     const { board, Engine: E, Maker: M } = await import("@wecode/core");

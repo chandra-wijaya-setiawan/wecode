@@ -94,39 +94,38 @@ export class Runner {
     };
   }
 
-  /** allocate() is synchronous and cutting a tree is not, so a placement is prepared for
-   *  the first candidate that has a free worker, and the allocator then decides. */
+  /** The allocator chooses; this only places. It is handed a `place` it calls for the one
+   *  candidate it picked, so a tree is never cut for a task the pass does not go on to
+   *  choose, and the reason a task did not start is always that task's own reason. */
   private async allocateOne(): Promise<Pass> {
-    const prepared = new Map<number, { worker_id: number; worktree: string }>();
-    const trouble = new Map<number, string>();
-    for (const c of readyCandidates(this.db)) {
+    const cut = new Map<number, string>();
+    const pass = await allocate(this.db, this.opts.budget, async (c) => {
       const worker = this.freeWorker(c.role);
-      if (worker === null) {
-        trouble.set(c.id, `no worker free for role ${c.role || "(none)"}`);
-        continue;
-      }
-      const cut = await this.cutTree(c);
-      if (typeof cut !== "string") {
-        trouble.set(c.id, cut.why);
-        continue;
-      }
-      prepared.set(c.id, { worker_id: worker, worktree: cut });
-      break; // one per tick
-    }
-    const pass = allocate(this.db, this.opts.budget, (c) => prepared.get(c.id) ?? null);
+      if (worker === null) return { why: `no worker free for role ${c.role || "(none)"}` };
+      const tree = await this.cutTree(c);
+      if (typeof tree !== "string") return tree;
+      cut.set(c.id, tree);
+      return { worker_id: worker, worktree: tree };
+    });
 
     // What the pass decided, on the record, so the board can say why nothing is running —
     // and so staleness is read from a reason rather than guessed from a timestamp.
     for (const r of pass.refused) {
-      if (r.id !== 0) recordRefusal(this.db, trouble.get(r.id) ?? r.why, r.id);
+      if (r.id !== 0) recordRefusal(this.db, r.why, r.id);
     }
-    for (const [id, why] of trouble) recordRefusal(this.db, why, id);
 
     // Everything ready that this pass did not reach. One assignment per tick is deliberate,
     // but a task nobody has looked at should still be able to say how long it has waited.
-    const decided = new Set([...pass.refused.map((r) => r.id), ...trouble.keys(), ...prepared.keys()]);
+    const decided = new Set(pass.refused.map((r) => r.id));
     for (const c of readyCandidates(this.db)) {
       if (!decided.has(c.id)) recordRefusal(this.db, "waiting for a slot", c.id);
+      decided.add(c.id);
+    }
+    // A reason must not outlive the tick it was true in. Anything the pass did not speak
+    // about this time round — it started, it finished, it is no longer ready — has no
+    // current reason, so it must not still be showing yesterday's.
+    for (const row of this.db.prepare("SELECT task_id FROM refusal").all() as unknown as { task_id: number }[]) {
+      if (!decided.has(row.task_id)) clearRefusal(this.db, row.task_id);
     }
     if (pass.created !== null) {
       const started = this.db.prepare("SELECT objective_id FROM assignment WHERE id = ?").get(pass.created) as
@@ -135,11 +134,10 @@ export class Runner {
       if (started !== undefined) clearRefusal(this.db, started.objective_id);
     }
     // A tree cut for a task the allocator then refused is released rather than left behind.
-    for (const [id, place] of prepared) {
-      void id;
-      if (pass.created === null || !this.assignmentUses(pass.created, place.worktree)) {
+    for (const [id, worktree] of cut) {
+      if (pass.created === null || !this.assignmentUses(pass.created, worktree)) {
         const slugs = this.slugsFor(id);
-        if (slugs !== null) await this.treesFor(slugs.repo).release(place.worktree).catch(() => undefined);
+        if (slugs !== null) await this.treesFor(slugs.repo).release(worktree).catch(() => undefined);
       }
     }
     return pass;
