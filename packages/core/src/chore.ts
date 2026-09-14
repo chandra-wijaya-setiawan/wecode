@@ -51,9 +51,14 @@ export type ChoreTarget = (typeof CHORE_TARGETS)[number];
 
 /** planned → ready → running → done, and failed beside it.
  *
- *  `failed` is not terminal: a merge that could not be made today can be made once the
- *  branch it fought with has moved. `done` is, because the condition that created the
- *  chore is gone by then, and the unique key means nothing will create it again. */
+ *  Neither `failed` nor `done` is a memo about the past. A chore's state is a claim about
+ *  the world now, and the world moves both ways: a merge that could not be made today can
+ *  be made once the branch it fought with has moved, and a story whose branch merged
+ *  cleanly can fall behind the base the moment the story beside it lands. So `reprove`
+ *  comes back from `done` as well as from `failed`, and `close` goes to `done` from every
+ *  state nobody is working in. `done` stays terminal in the machine's sense — no attempt
+ *  may be begun there, and nothing is owed — but it is not beyond wecode re-reading the
+ *  condition and saying otherwise. */
 export const CHORE_MACHINE: Machine = {
   states: ["planned", "ready", "running", "done", "failed"],
   initial: "planned",
@@ -64,7 +69,8 @@ export const CHORE_MACHINE: Machine = {
     { verb: "finish", from: ["running"], to: "done" },
     { verb: "fail", from: ["running"], to: "failed" },
     { verb: "retry", from: ["failed"], to: "ready" },
-    { verb: "reprove", from: ["failed"], to: "planned" },
+    { verb: "reprove", from: ["failed", "done"], to: "planned" },
+    { verb: "close", from: ["planned", "ready", "failed"], to: "done" },
   ],
 };
 
@@ -73,6 +79,12 @@ export const CHORE_MACHINE: Machine = {
  *  so a kind that waits for approval waits for it again rather than inheriting the go that
  *  was given to the attempt that failed. */
 export const REPROVE = "reprove";
+
+/** The edge out, and wecode's alone: the condition the chore was raised for is no longer
+ *  true, so the chore is over whether or not anybody ever performed it. `running` is left
+ *  out on purpose — a worker is in a tree on it, and `finish` or `fail` is that attempt's
+ *  to say. */
+export const CLOSE = "close";
 
 export interface Chore {
   readonly id: number;
@@ -110,11 +122,13 @@ const slugOf = (s: ChoreSpec): string => `${s.kind}-${s.target_type}-${s.target_
 export function ensureChore(db: DatabaseSync, spec: ChoreSpec, by = "runner"): Chore {
   const found = choreFor(db, spec.kind, spec.target_type, spec.target_id);
   if (found !== null) {
-    // The one place a failed chore stops being a dead end. Being here at all is the caller
-    // saying the condition is still true — that is what `ensureChore` means — so the chore
-    // goes back to `planned` and is raised again. Never on a timer, and never quietly: the
-    // reraise is a ledger row, and the attempts behind it stay on the record.
-    if (found.state === "failed") reraiseChore(db, found.id, by);
+    // The one place a settled chore stops being a dead end. Being here at all is the caller
+    // saying the condition is true — that is what `ensureChore` means — so the chore goes
+    // back to `planned` and is raised again. `done` as much as `failed`: a chore that was
+    // discharged and whose condition has come back is the same chore with a second pass,
+    // not a memo about the merge that worked in March. Never on a timer, and never quietly:
+    // the reraise is a ledger row, and the attempts behind it stay on the record.
+    if (found.state === "failed" || found.state === "done") reraiseChore(db, found.id, by);
     return choreById(db, found.id) ?? found;
   }
 
@@ -218,22 +232,54 @@ export function choreAttempts(db: DatabaseSync, id: number): ChoreAttempts | nul
   return { attempts: row.n, max_retry: CHORE_KIND_DEFS[chore.kind].max_retry };
 }
 
-/** Put a failed chore back to `planned`, because the condition that made it is still true.
+/** Put a settled chore back to `planned`, because the condition that made it is true again.
  *
  *  The caller's presence is the proof: `ensureChore` is only reached from a runner that has
- *  just re-read the condition. So this refuses on everything else — a chore that is not
- *  failed has nothing to come back from, and one that has used its attempts is drift for
- *  the doctor to name rather than a loop to keep turning. */
+ *  just re-read the condition. So this refuses on everything else — `planned`, `ready` and
+ *  `running` have nothing to come back from, because they never left — and one that has
+ *  used its attempts is drift for the doctor to name rather than a loop to keep turning.
+ *
+ *  The attempts stay: a reraised chore is on its second pass, and the board says so. That
+ *  is the point of reraising rather than deleting the row and letting `ensureChore` insert
+ *  a fresh one, which would lose every attempt and read as if this were the first time. */
 export function reraiseChore(db: DatabaseSync, id: number, by = "runner"): ChoreOutcome {
   const chore = choreById(db, id);
   if (chore === null) return { ok: false, why: `no chore #${id}` };
-  if (chore.state !== "failed") return { ok: false, why: `a ${chore.state} chore is not waiting to be raised again` };
+  if (chore.state !== "failed" && chore.state !== "done") {
+    return { ok: false, why: `a ${chore.state} chore is not waiting to be raised again` };
+  }
 
   const tries = choreAttempts(db, id);
   if (tries !== null && tries.attempts >= tries.max_retry) {
     return { ok: false, why: outOfAttempts(tries) };
   }
-  return applyChore(db, id, REPROVE, by);
+  const out = applyChore(db, id, REPROVE, by);
+  // Whatever was last said about why this chore was not being handed out is about a world
+  // that has moved on. The reason it is back is the ledger row this just wrote.
+  if (out.ok) clearChoreRefusal(db, id);
+  return out;
+}
+
+/** Close a chore whose condition no longer holds.
+ *
+ *  The mirror of `reraiseChore`, and one rule with it: a chore's state is a claim about the
+ *  world now. When the branch that would not merge merges, nothing is owed, and leaving the
+ *  row in `failed` is a stale claim that the board keeps showing and the allocator keeps
+ *  refusing. So the runner says so with a verb, and with the reason it read.
+ *
+ *  `max_retry` does not bear on this. Attempts bound how often wecode hands a chore out
+ *  again; they say nothing about whether the work is still owed, and a chore out of
+ *  attempts whose condition has gone is exactly the one most worth closing.
+ *
+ *  The reason is kept where a chore's other free text about itself is kept — `chore_refusal`,
+ *  one row per chore — so `choreRefusal(db, id)` reads why a closed chore was closed. */
+export function closeChore(db: DatabaseSync, id: number, why: string, by = "runner"): ChoreOutcome {
+  const chore = choreById(db, id);
+  if (chore === null) return { ok: false, why: `no chore #${id}` };
+
+  const out = applyChore(db, id, CLOSE, by);
+  if (out.ok) recordChoreRefusal(db, why, id);
+  return out;
 }
 
 const outOfAttempts = (t: ChoreAttempts): string => `out of attempts · ${t.attempts} of ${t.max_retry}`;
