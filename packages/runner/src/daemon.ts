@@ -23,6 +23,14 @@ export interface Tick {
   readonly exhausted: readonly number[];
   /** Completion transitions that fired because their guard had become true. */
   readonly settled: readonly string[];
+  /** Acceptance tests this tick ran at their story's base: red there, or green and so
+   *  unable to prove anything. */
+  readonly redAtBase: RedAtBase;
+}
+
+export interface RedAtBase {
+  readonly proven: readonly number[];
+  readonly unproven: readonly number[];
 }
 
 export interface RunnerOptions {
@@ -64,12 +72,25 @@ export class Runner {
          merged_at TEXT NOT NULL
        )`,
     );
+    // What a test proved before the work started. Runner-owned like landed_branch: the
+    // ledger says what is true of the work, this says what this machine has witnessed.
+    // A row with no sha is a test that could not be proven, and carries why.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS red_at_base (
+         test_id        INTEGER PRIMARY KEY,
+         red_at_base_sha TEXT,
+         red_at_base_at  TEXT,
+         reason          TEXT
+       )`,
+    );
   }
 
   /** allocate, run, prove, land. The order is the point: a task_test is run in the tree the
    *  attempt wrote in, before that tree is released, and an acceptance_test in the story
    *  tree, after the tasks it depends on have merged. */
   async tick(): Promise<Tick> {
+    // First, because the point of it is that it happens before the work does.
+    const redAtBase = await this.proveRedAtBase();
     const allocated = await this.allocateOne();
     const foreman = await this.foreman.tick();
     const settled = await this.settleEnded();
@@ -85,6 +106,7 @@ export class Runner {
       committed: settled.committed,
       merged,
       exhausted,
+      redAtBase,
       settled: settled2.map((c) => `${c.entity} #${c.id} → ${c.to}`),
       scripts: {
         passed: [...settled.scripts.passed, ...acceptance.passed],
@@ -268,6 +290,109 @@ export class Runner {
       if (this.engine.apply("task", row.id, "give_up", "runner").ok) stopped.push(row.id);
     }
     return stopped;
+  }
+
+  /** A test nobody has seen fail proves nothing by passing. So each ready acceptance test is
+   *  run once at the commit its story was cut from — the merge-base of the story branch and
+   *  the integration branch — before any of its tasks has written a line. Red there is the
+   *  proof, and is recorded. Green there is a test that cannot fail, and the reason it
+   *  proves nothing is recorded against it instead. */
+  private async proveRedAtBase(): Promise<RedAtBase> {
+    const rows = this.db
+      .prepare(
+        `SELECT a.id AS id, a.artefact AS artefact, s.slug AS story, p.repo AS repo
+           FROM acceptance_test a
+           JOIN acceptance_criteria c ON c.id = a.parent_id
+           JOIN requirement r ON r.id = c.requirement_id
+           JOIN story s ON s.id = r.story_id
+           JOIN epic e ON e.id = s.epic_id
+           JOIN release rel ON rel.id = e.release_id
+           JOIN project p ON p.id = rel.project_id
+          WHERE s.state = 'in_progress' AND a.state = 'ready' AND a.kind = 'script'
+            AND a.artefact IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM red_at_base b
+                             WHERE b.test_id = a.id AND b.red_at_base_sha IS NOT NULL)`,
+      )
+      .all() as unknown as { id: number; artefact: string; story: string; repo: string }[];
+
+    const proven: number[] = [];
+    const unproven: number[] = [];
+    for (const row of rows) {
+      const repo = this.opts.repoRoot ?? row.repo;
+      try {
+        const trees = this.treesFor(repo);
+        const tree = await trees.storyTree(row.story, join(this.worktreeRoot(repo), `story-${row.story}`));
+        const base = await this.mergeBase(repo, `story/${row.story}`, await trees.integrationBranch());
+        if (base === null || this.ranAtBase(row.id, base, row.artefact)) continue;
+        const green = await this.runAtBase({ repo, story: row.story, tree, base, artefact: row.artefact });
+        this.recordBaseRun(row.id, base, row.artefact, green);
+        (green ? unproven : proven).push(row.id);
+      } catch {
+        // no branch, or no tree to be had: there is no base to prove anything against yet
+      }
+    }
+    return { proven, unproven };
+  }
+
+  private async mergeBase(repo: string, a: string, b: string): Promise<string | null> {
+    try {
+      const { stdout } = await exec("git", ["merge-base", a, b], { cwd: repo });
+      return stdout.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The same ledger of finished work the verdicts use, under an entity of its own: one run
+   *  per test per base sha, so a tick does only the work that is owed. */
+  private ranAtBase(testId: number, base: string, artefact: string): boolean {
+    const row = this.db
+      .prepare("SELECT fingerprint FROM script_run WHERE entity = 'acceptance_test@base' AND test_id = ?")
+      .get(testId) as { fingerprint: string } | undefined;
+    return row?.fingerprint === `${base}|${artefact}`;
+  }
+
+  /** True when the artefact passed at base. The story tree is put back on its branch either
+   *  way: the merge and the ordinary prove-the-story pass both expect to find it there. */
+  private async runAtBase(at: {
+    repo: string;
+    story: string;
+    tree: string;
+    base: string;
+    artefact: string;
+  }): Promise<boolean> {
+    await exec("git", ["checkout", "--detach", "-q", at.base], { cwd: at.tree });
+    await exec("git", ["reset", "--hard", "-q", at.base], { cwd: at.tree });
+    try {
+      await exec("bash", ["-lc", at.artefact], {
+        cwd: at.tree,
+        timeout: 10 * 60 * 1000,
+        maxBuffer: 4 * 1024 * 1024,
+      });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      await this.treesFor(at.repo).storyTree(at.story, at.tree);
+    }
+  }
+
+  private recordBaseRun(testId: number, base: string, artefact: string, green: boolean): void {
+    const at = now();
+    this.db
+      .prepare(
+        `INSERT INTO red_at_base (test_id, red_at_base_sha, red_at_base_at, reason) VALUES (?, ?, ?, ?)
+           ON CONFLICT (test_id) DO UPDATE SET red_at_base_sha = excluded.red_at_base_sha,
+                                               red_at_base_at  = excluded.red_at_base_at,
+                                               reason          = excluded.reason`,
+      )
+      .run(testId, green ? null : base, green ? null : at, green ? "it passes at base, so it cannot fail" : null);
+    this.db
+      .prepare(
+        `INSERT INTO script_run (entity, test_id, fingerprint, ran_at) VALUES ('acceptance_test@base', ?, ?, ?)
+           ON CONFLICT (entity, test_id) DO UPDATE SET fingerprint = excluded.fingerprint, ran_at = excluded.ran_at`,
+      )
+      .run(testId, `${base}|${artefact}`, at);
   }
 
   /** Acceptance tests, in the story tree, once the story's tasks are finished. */
