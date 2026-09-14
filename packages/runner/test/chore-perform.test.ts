@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -76,6 +76,24 @@ beforeEach(() => {
   git(repo, "config", "user.name", "t");
   git(repo, "config", "user.email", "t@localhost");
   writeFileSync(join(repo, "README.md"), "the base\n");
+  // The role is the project's config, not this file's: docs/design/18 gives `system` the
+  // whole repository because a conflict does not respect scopes.
+  mkdirSync(join(repo, "config"), { recursive: true });
+  writeFileSync(
+    join(repo, "config", "roles.yaml"),
+    [
+      "invariants:",
+      "  never_touch: []",
+      "  never_run: []",
+      "roles:",
+      "  system:",
+      "    worker_kind: agent",
+      "    scope:",
+      '      write: ["**"]',
+      '      tools: ["bash", "read", "edit", "write"]',
+      "",
+    ].join("\n"),
+  );
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", "seed");
 
@@ -84,9 +102,6 @@ beforeEach(() => {
   const ws = make.workspace("acme", repo);
   project = make.project(ws, "storefront", repo);
   epic = make.epic(make.release(project, "1.0.0"), "recovery");
-  // The role is the record's, not this file's: docs/design/18 gives `system` the whole
-  // repository because a conflict does not respect scopes.
-  make.role("system", { write: ["**"], tools: ["bash", "read", "edit", "write"] }, "agent");
   make.worker("system-1", "system", "agent");
 });
 

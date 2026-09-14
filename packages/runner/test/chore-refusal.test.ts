@@ -58,10 +58,27 @@ beforeEach(() => {
   epic = make.epic(make.release(project, "1.0.0"), "recovery");
 });
 
-/** The role and a worker to fill it. Both are the record's, and each test that wants one of
- *  them missing simply does not call this half. */
+/** The role and a worker to fill it. The role is the project's config file — see
+ *  role-scope.test.ts — and each test that wants one of them missing simply does not call
+ *  this half. */
 function theSystemRole(): void {
-  make.role("system", { write: ["**"], tools: ["bash", "read", "edit", "write"] }, "agent");
+  rolesFile(
+    [
+      "  system:",
+      "    worker_kind: agent",
+      "    scope:",
+      '      write: ["**"]',
+      '      tools: ["bash", "read", "edit", "write"]',
+    ].join("\n"),
+  );
+}
+
+function rolesFile(roles: string): void {
+  mkdirSync(join(repo, "config"), { recursive: true });
+  writeFileSync(
+    join(repo, "config", "roles.yaml"),
+    ["invariants:", "  never_touch: []", "  never_run: []", "roles:", roles, ""].join("\n"),
+  );
 }
 const aSystemWorker = (): number => make.worker("system-1", "system", "agent");
 
@@ -102,12 +119,13 @@ describe("a chore nothing could dispatch", () => {
   });
 
   it("says where the missing scope should have come from", async () => {
-    // No role row at all: config/roles.yaml was never loaded into this workspace.
+    // A config that is there and well formed, and simply does not declare `system`.
+    rolesFile(["  engineer:", "    worker_kind: agent", "    scope:", '      write: ["src/**"]'].join("\n"));
     const story = anUnmergeableStory();
 
     await runner().tick();
 
-    expect(whyOf(story.id)).toBe("no scope for role system in config/roles.yaml");
+    expect(whyOf(story.id)).toBe("no role system in config/roles.yaml");
   });
 
   it("says the story it targets is gone", async () => {
