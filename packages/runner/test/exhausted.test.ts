@@ -218,12 +218,17 @@ describe("the board", () => {
     const abandoned = make.task(at, "send the letter", { role: "engineer", scope: { write: [], tools: [] } });
     engine.apply("task", abandoned, "drop", "operator");
 
-    const failed = board(db).failed;
-    const detail = (id: number): string => failed.find((r) => r.id === id)?.detail ?? "";
+    const b = board(db);
+    const detail = (rows: readonly { id: number; detail: string }[], id: number): string =>
+      rows.find((r) => r.id === id)?.detail ?? "";
 
-    expect(detail(task)).toContain("out of attempts");
-    expect(detail(task)).toContain("3 of 3");
-    expect(detail(abandoned)).toBe("dropped by decision");
-    expect(detail(abandoned)).not.toContain("attempts");
+    // Two boxes, not one reason: failed is what ran out of attempts, dropped is what a
+    // person put down, and neither carries a row belonging to the other.
+    expect(b.failed.map((r) => r.id)).toEqual([task]);
+    expect(detail(b.failed, task)).toContain("out of attempts");
+    expect(detail(b.failed, task)).toContain("3 of 3");
+    expect(b.dropped.map((r) => r.id)).toEqual([abandoned]);
+    expect(detail(b.dropped, abandoned)).toBe("dropped by decision");
+    expect(detail(b.dropped, abandoned)).not.toContain("attempts");
   });
 });
