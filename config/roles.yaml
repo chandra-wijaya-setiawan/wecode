@@ -10,12 +10,12 @@ roles:
   engineer:
     worker_kind: agent
     scope:
-      write: ["src/**", "tests/**"]
+      write: ["packages/*/src/**", "packages/*/test/**", "packages/*/config/**", "src/**", "tests/**"]
       tools: ["bash", "read", "edit", "write"]
 
   acceptance-tester:
     worker_kind: agent
     scope:
-      write: ["tests/acceptance/**"]
+      write: ["packages/*/test/**", "tests/acceptance/**"]
       tools: ["bash", "read", "edit", "write"]
     budget: { tokens: 120000, seconds: 1800 }

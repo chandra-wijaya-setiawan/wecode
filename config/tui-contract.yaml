@@ -1,0 +1,42 @@
+# The contract the cockpit's tasks are built and judged against. Each task writes one
+# module; this file is how they agree without reading each other's code.
+#
+# The shape is one reusable list at three sizes — a box on the dashboard, a box at full
+# height, and a node's children — because a box that differs from the box beside it only in
+# which rows it keeps is not a second component.
+
+modules:
+  "packages/tui/src/list.ts":
+    exports:
+      - "renderList(rows: Row[], columns: Column[], height: number, cursor: number | null, width: number): string[]"
+      - "type Row = { id: number; what: string; state: string; detail: string }"
+      - "type Column = '#' | 'what' | 'state' | 'detail'"
+    rules:
+      - one row per line, columns in the order given, truncated with an ellipsis never wrapped
+      - a row hidden by the height is reported as "… and N more" on the last line
+      - cursor null draws no cursor; otherwise that row is marked and the others are not
+
+  "packages/tui/src/app.ts":
+    exports:
+      - "class App { screen; cursor; status; quit; key(k: string): void; refresh(): void; lines(): Row[]; verbs(): string[] }"
+    rules:
+      - "screens are dashboard | box | node, and a stack of them is what esc pops"
+      - "j k g G move the cursor, enter descends, esc goes back, q quits, r refreshes"
+      - "v then a box's letter opens that box full height"
+      - "a arms the verbs the row can take, read off its state machine; a letter picks one by its initial; an ambiguous letter is refused rather than guessed"
+      - "a node screen descends into children: project to release to epic to story to requirement to criteria to acceptance_test to task to task_test"
+
+  "packages/tui/src/screens.ts":
+    exports:
+      - "draw(app: App, width: number, height: number): string"
+    rules:
+      - "the dashboard draws every box in config order, each trimmed to its declared height"
+      - "a box page draws one filter at full height with the cursor"
+      - "a node draws the record's fields, then its children as a list"
+      - "a key bar is the last line and never drops a key: a key the bar omits is a screen with no way in"
+
+  "packages/tui/config/views.yaml":
+    rules:
+      - "each box declares title, key, filter, columns, rows and empty"
+      - "a key is a single letter, pressed after v"
+      - "every filter name must resolve to one the code knows, or loading fails"

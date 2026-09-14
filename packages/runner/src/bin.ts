@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { currentDatabase, open } from "@wecode/core";
 import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
@@ -25,7 +25,13 @@ const { values } = parseArgs({
 // The workspace, not a repository: one runner serves every project in it, under one
 // attention budget — which is the budget of one person.
 const dbPath = values.db ?? currentDatabase();
-const budgetPath = values.budget ?? resolve(process.cwd(), "config/budget.yaml");
+// The attention budget is one person's, so it belongs to the workspace — not to whichever
+// directory the runner happened to be started in. A project's own config/budget.yaml is
+// the fallback, for a workspace that has never had one written.
+const workspaceBudget = join(dirname(currentDatabase()), "budget.yaml");
+const budgetPath =
+  values.budget ??
+  (existsSync(workspaceBudget) ? workspaceBudget : resolve(process.cwd(), "config/budget.yaml"));
 
 if (!existsSync(dbPath)) {
   process.stderr.write(`no wecode workspace at ${dbPath}\n  wecode onboard   in a repository\n`);
@@ -50,6 +56,7 @@ const say = (t: Tick): void => {
     t.scripts.failed.length > 0 ? `test failed ${t.scripts.failed.join(",")}` : null,
     t.merged.length > 0 ? `merged ${t.merged.join(",")}` : null,
     t.exhausted.length > 0 ? `out of attempts ${t.exhausted.join(",")}` : null,
+    t.settled.length > 0 ? `settled ${t.settled.join(", ")}` : null,
   ].filter((p) => p !== null);
   if (parts.length === 0) return; // a quiet tick says nothing
   process.stdout.write(`${new Date().toISOString()}  ${parts.join("  ")}\n`);
@@ -64,7 +71,7 @@ if (values.once === true) {
   }
   const everyMs = Number(values.interval ?? 15) * 1000;
   process.stdout.write(
-    `wecode-runner  ${dbPath}  every ${everyMs / 1000}s  max_open ${budget.max_open}\n`,
+    `wecode-runner  ${dbPath}\n  budget ${budgetPath}  max_open ${budget.max_open}  every ${everyMs / 1000}s\n`,
   );
   await loop(runner, everyMs, stop.signal, say);
 }

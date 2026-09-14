@@ -1,5 +1,5 @@
 # Raising max_open is the easiest change in this file and usually the wrong one.
-max_open: 3
+max_open: 10
 
 order:
   fresh_first: true

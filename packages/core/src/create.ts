@@ -19,13 +19,38 @@ const slugify = (s: string): string =>
     .replace(/^-|-$/g, "")
     .slice(0, 48) || "item";
 
+/** "UNIQUE constraint failed: task.slug" — sqlite names the columns, and only the columns. */
+const UNIQUE = /UNIQUE constraint failed: (.+)/;
+
+/** The row that already holds the slug is the only thing that tells the caller what to do
+ *  next, so it is looked up and named. A dropped row still holds its slug: the collision is
+ *  invisible on a board that hides dropped work, and unexplained without this. */
+function taken(db: DatabaseSync, table: string, row: Record<string, string | number | null>, columns: string): string {
+  const keys = columns.split(",").map((c) => c.trim().split(".").pop() as string);
+  const where = keys.map((k) => `${k} IS ?`).join(" AND ");
+  const held = db
+    .prepare(`SELECT * FROM ${table} WHERE ${where}`)
+    .get(...keys.map((k) => row[k] ?? null)) as Record<string, string | number | null> | undefined;
+  const slug = String(row.slug ?? "");
+  if (held === undefined) return `${table}: slug ${JSON.stringify(slug)} is already taken. Choose a different title.`;
+  const state = typeof held.state === "string" ? held.state : null;
+  const dropped = state === "dropped" ? " A dropped row still holds its slug." : "";
+  return (
+    `${table}: slug ${JSON.stringify(slug)} is already taken by ${table} #${held.id}` +
+    `${state === null ? "" : ` (${state})`}.${dropped} Choose a different title.`
+  );
+}
+
 function insert(db: DatabaseSync, table: string, row: Record<string, string | number | null>): number {
   const cols = Object.keys(row);
   const sql = `INSERT INTO ${table} (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`;
   try {
     db.prepare(sql).run(...cols.map((c) => row[c] ?? null));
   } catch (err) {
-    throw new CreateError(`${table}: ${(err as Error).message}`);
+    const message = (err as Error).message;
+    const hit = UNIQUE.exec(message);
+    const columns = hit?.[1];
+    throw new CreateError(columns === undefined ? `${table}: ${message}` : taken(db, table, row, columns));
   }
   return (db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id;
 }
@@ -153,8 +178,10 @@ export class Maker {
     budget: Budget;
     worktree: string;
   }): number {
-    return insert(this.db, "assignment", {
-      ...this.stamp(null, `${spec.objective_type}-${spec.objective_id}-${Date.now()}`),
+    // The id is the only thing certain to be unique. A timestamp is not: two attempts at
+    // one objective inside the same millisecond collide, and a retry is exactly that.
+    const id = insert(this.db, "assignment", {
+      ...this.stamp(null, `pending-${Math.random().toString(36).slice(2, 10)}`),
       objective_type: spec.objective_type,
       objective_id: spec.objective_id,
       worker_id: spec.worker_id,
@@ -164,5 +191,9 @@ export class Maker {
       phase: initialOf(this.m, "assignment"),
       spent: JSON.stringify({ tokens: 0, seconds: 0 }),
     });
+    this.db
+      .prepare("UPDATE assignment SET slug = ? WHERE id = ?")
+      .run(`${spec.objective_type}-${spec.objective_id}-${id}`, id);
+    return id;
   }
 }
