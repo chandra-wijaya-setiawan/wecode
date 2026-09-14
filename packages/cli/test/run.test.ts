@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -336,6 +336,81 @@ describe("show answers a stale id", () => {
     expect(run(["show", "workspace", "1"])).toBe(0);
     expect(said()).toContain("acme");
     expect(said()).not.toContain("project  ");
+  });
+});
+
+describe("landing a story that will not merge", () => {
+  let repo: string;
+  let was: string;
+
+  const git = (...args: string[]): string =>
+    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: repo, encoding: "utf8" });
+
+  const sql = (): import("node:sqlite").DatabaseSync => {
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    return new DatabaseSync(process.env["WECODE_DB"] as string);
+  };
+
+  beforeEach(() => {
+    was = process.cwd();
+    repo = mkdtempSync(join(tmpdir(), "wecode-land-"));
+    process.chdir(repo);
+    git("init", "-q", "-b", "master");
+    git("config", "user.name", "A Person");
+    git("config", "user.email", "person@example.com");
+    git("config", "commit.gpgsign", "false");
+    writeFileSync(join(repo, "foreman.ts"), "export const tick = () => 1;\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "seed");
+
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    run(["project", "create", "--parent", "1", "p", "--path", repo]);
+    run(["release", "create", "--parent", "1", "0.0.1"]);
+    run(["epic", "create", "--parent", "1", "e"]);
+    run(["story", "create", "--parent", "1", "rescue the foreman"]);
+    const db = sql();
+    db.prepare("UPDATE story SET state = 'delivered' WHERE id = 1").run();
+    const slug = (db.prepare("SELECT slug FROM story WHERE id = 1").get() as { slug: string }).slug;
+    db.close();
+
+    // the story's branch and master both rewrite the same line — a real conflict
+    git("checkout", "-q", "-b", `story/${slug}`);
+    writeFileSync(join(repo, "foreman.ts"), "export const tick = () => 2;\n");
+    git("commit", "-q", "-am", "the story's answer");
+    git("checkout", "-q", "master");
+    writeFileSync(join(repo, "foreman.ts"), "export const tick = () => 3;\n");
+    git("commit", "-q", "-am", "somebody else's answer");
+  });
+
+  afterEach(() => process.chdir(was));
+
+  it("aborts the merge, leaving the tree as it was found and the story unlanded", () => {
+    const before = git("rev-parse", "HEAD").trim();
+
+    expect(run(["land", "1"])).toBe(1);
+
+    // the incident: a half-finished merge left behind for the next commit to swallow
+    expect(git("status", "--porcelain").trim()).toBe("");
+    expect(existsSync(join(repo, ".git", "MERGE_HEAD"))).toBe(false);
+    expect(git("rev-parse", "HEAD").trim()).toBe(before);
+    expect(readFileSync(join(repo, "foreman.ts"), "utf8")).toBe("export const tick = () => 3;\n");
+    expect(readFileSync(join(repo, "foreman.ts"), "utf8")).not.toContain("<<<<<<<");
+
+    const db = sql();
+    const story = db.prepare("SELECT state FROM story WHERE id = 1").get() as { state: string };
+    db.close();
+    expect(story.state).toBe("delivered");
+  });
+
+  it("says which files conflicted and that the story needs a merge chore", () => {
+    expect(run(["land", "1"])).toBe(1);
+
+    const why = err.join("");
+    expect(why).toContain("foreman.ts");
+    expect(why).toContain("the merge was aborted");
+    expect(why).toContain("merge chore");
+    expect(said()).not.toContain("landed");
   });
 });
 
