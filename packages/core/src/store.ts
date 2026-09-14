@@ -7,18 +7,38 @@ import { currentDatabase } from "./home.js";
 
 const MIGRATIONS = fileURLToPath(new URL("../sql/migrations", import.meta.url));
 
+export class StoreError extends Error {}
+
 /** Every file in sql/migrations, in name order. The number in the filename is the version
- *  it brings the database to, so adding one is a file rather than an edit. */
+ *  it brings the database to, so adding one is a file rather than an edit.
+ *
+ *  Two files may not share a number. A database records the version it reached, and this
+ *  loop skips anything at or below it: a second file numbered like one already applied is
+ *  never run against a database that existed before it was written, however new it looks.
+ *  The chore table went missing from every live workspace exactly that way, so the
+ *  collision is refused here rather than found later in the field. */
 function migrations(): readonly { version: number; path: string }[] {
-  return readdirSync(MIGRATIONS)
+  const all = readdirSync(MIGRATIONS)
     .filter((f) => f.endsWith(".sql"))
     .sort()
-    .map((f) => ({ version: Number.parseInt(f, 10), path: join(MIGRATIONS, f) }));
+    .map((f) => ({ version: Number.parseInt(f, 10), path: join(MIGRATIONS, f), file: f }));
+
+  const seen = new Map<number, string>();
+  for (const m of all) {
+    const first = seen.get(m.version);
+    if (first !== undefined) {
+      throw new StoreError(
+        `two migrations are numbered ${m.version}: ${first} and ${m.file}. A database ` +
+          `already at ${m.version} would never run the second one. Renumber it to the ` +
+          `next free version.`,
+      );
+    }
+    seen.set(m.version, m.file);
+  }
+  return all;
 }
 
 export const SCHEMA_VERSION = migrations().reduce((n, m) => Math.max(n, m.version), 0);
-
-export class StoreError extends Error {}
 
 /** The database is newer than this build. Not merely a refusal: the doctor reports it, and
  *  the numbers are on the error so it can say which build to run. */
