@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Engine, Maker, open } from "@wecode/core";
 import { Scripts } from "../src/index.js";
 import { recordRed } from "../../core/test/helpers.js";
+import { tmp } from "../../core/test/tmpdir.js";
 
 let db: DatabaseSync;
 let make: Maker;
@@ -19,7 +19,7 @@ const stateOf = (table: string, id: number): string =>
   (db.prepare(`SELECT state FROM ${table} WHERE id = ?`).get(id) as { state: string }).state;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "wecode-scripts-"));
+  dir = tmp("wecode-scripts-");
   db = open(join(dir, "wecode.db"));
   make = new Maker(db);
   engine = new Engine(db);
@@ -92,7 +92,7 @@ describe("a verdict stands until the thing it was reached against moves", () => 
   const runs = (): number => readFileSync(log, "utf8").trim().split("\n").filter(Boolean).length;
 
   beforeEach(() => {
-    tree = mkdtempSync(join(tmpdir(), "wecode-tree-"));
+    tree = tmp("wecode-tree-");
     log = join(dir, "runs.log");
     writeFileSync(log, "");
     artefact = `echo ran >> ${log}; exit 1`;
