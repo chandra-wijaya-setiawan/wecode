@@ -43,14 +43,16 @@ export function board(db: DatabaseSync): Board {
     // Nothing is moving it, and nothing is going to. Derived rather than a state: staleness
     // is an observation about the world, and the moment it becomes a column somebody has to
     // keep it in agreement with the world.
+    // Staleness is read from what the allocator recorded, not guessed: it is the only
+    // thing that knows why a ready task did not become an assignment.
     stale: rows(
       db,
       `SELECT t.id AS id, t.title AS what, 'ready' AS state,
-              coalesce(f.why, 'nothing has picked it up')
-                || ' · ' || cast((julianday('now') - julianday(t.updated_at)) * 1440 AS int) || 'm' AS detail
-         FROM task t LEFT JOIN refusal f ON f.task_id = t.id
+              f.why || ' · ' || f.passes || ' passes · '
+                   || cast((julianday('now') - julianday(f.since)) * 1440 AS int) || 'm' AS detail
+         FROM task t JOIN refusal f ON f.task_id = t.id
         WHERE t.state = 'ready'
-          AND (julianday('now') - julianday(t.updated_at)) * 1440 > 15
+          AND f.passes >= 3
           AND NOT EXISTS (SELECT 1 FROM assignment a
                            WHERE a.objective_type = 'task' AND a.objective_id = t.id
                              AND a.phase IN ('pending','running','waiting'))
@@ -64,8 +66,7 @@ export function board(db: DatabaseSync): Board {
         WHERE a.phase = 'waiting'
           AND (julianday('now') - julianday(a.updated_at)) * 1440 > 15
         UNION ALL
-       SELECT s.id AS id, s.title AS what, s.state AS state,
-              'no work under it' AS detail
+       SELECT s.id AS id, s.title AS what, s.state AS state, 'no work under it' AS detail
          FROM story s
         WHERE s.state = 'in_progress'
           AND NOT EXISTS (SELECT 1 FROM requirement r
@@ -149,10 +150,17 @@ export function board(db: DatabaseSync): Board {
 /** What the last pass decided about a task it did not start. One row per task, replaced
  *  each time, so the board always shows the current reason rather than a history. */
 export function recordRefusal(db: DatabaseSync, why: string, taskId: number): void {
+  const at = new Date().toISOString();
+  // The same reason keeps its `since`: a task refused for the same thing all morning is a
+  // different problem from one refused for a new reason a minute ago.
   db.prepare(
-    `INSERT INTO refusal (task_id, why, at) VALUES (?, ?, ?)
-     ON CONFLICT (task_id) DO UPDATE SET why = excluded.why, at = excluded.at`,
-  ).run(taskId, why, new Date().toISOString());
+    `INSERT INTO refusal (task_id, why, at, since, passes) VALUES (?, ?, ?, ?, 1)
+     ON CONFLICT (task_id) DO UPDATE SET
+       why    = excluded.why,
+       at     = excluded.at,
+       since  = CASE WHEN refusal.why = excluded.why THEN refusal.since ELSE excluded.since END,
+       passes = CASE WHEN refusal.why = excluded.why THEN refusal.passes + 1 ELSE 1 END`,
+  ).run(taskId, why, at, at);
 }
 
 export function clearRefusal(db: DatabaseSync, taskId: number): void {

@@ -99,11 +99,19 @@ export class Runner {
     }
     const pass = allocate(this.db, this.opts.budget, (c) => prepared.get(c.id) ?? null);
 
-    // What the pass decided, on the record, so the board can say why nothing is running.
+    // What the pass decided, on the record, so the board can say why nothing is running —
+    // and so staleness is read from a reason rather than guessed from a timestamp.
     for (const r of pass.refused) {
       if (r.id !== 0) recordRefusal(this.db, trouble.get(r.id) ?? r.why, r.id);
     }
     for (const [id, why] of trouble) recordRefusal(this.db, why, id);
+
+    // Everything ready that this pass did not reach. One assignment per tick is deliberate,
+    // but a task nobody has looked at should still be able to say how long it has waited.
+    const decided = new Set([...pass.refused.map((r) => r.id), ...trouble.keys(), ...prepared.keys()]);
+    for (const c of readyCandidates(this.db)) {
+      if (!decided.has(c.id)) recordRefusal(this.db, "waiting for a slot", c.id);
+    }
     if (pass.created !== null) {
       const started = this.db.prepare("SELECT objective_id FROM assignment WHERE id = ?").get(pass.created) as
         | { objective_id: number }
