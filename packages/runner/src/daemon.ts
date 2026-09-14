@@ -8,7 +8,7 @@ import { allocate, candidates as readyCandidates, type Candidate, type Pass } fr
 import type { BudgetConfig } from "./budget.js";
 import { Foreman, type TickReport } from "./foreman.js";
 import type { WorkerAdapter } from "./ports.js";
-import { Scripts, type Refused, type ScriptReport } from "./scripts.js";
+import { Examiner, type Refused, type ScriptReport } from "./examiner.js";
 import { Trees } from "./git.js";
 
 const exec = promisify(execFile);
@@ -49,7 +49,7 @@ export interface RunnerOptions {
  *  optimisation; the timer is the guarantee. */
 export class Runner {
   private readonly foreman: Foreman;
-  private readonly scripts: Scripts;
+  private readonly examiner: Examiner;
   private readonly engine: Engine;
   /** One per repository. A workspace holds many projects, and each has its own branches. */
   private readonly treesByRepo = new Map<string, Trees>();
@@ -59,7 +59,7 @@ export class Runner {
     private readonly opts: RunnerOptions,
   ) {
     this.foreman = new Foreman(db, opts.adapters, opts.deadlineSeconds ?? 3600);
-    this.scripts = new Scripts(db);
+    this.examiner = new Examiner(db);
     this.engine = new Engine(db);
     // A merge is not derivable from the record: a done task with a commit stays done and
     // committed forever, so without this landDoneTasks re-merges it on every tick and every
@@ -250,7 +250,7 @@ export class Runner {
         // The attempt is judged in the tree it wrote in, before that tree goes.
         // The assignment is what makes this attempt distinct: a retry cuts a fresh tree at
         // the same branch tip, so the tip alone would read as "already judged".
-        const r = await this.scripts.runTaskTests(row.task, row.worktree, { attempt: row.id });
+        const r = await this.examiner.runTaskTests(row.task, row.worktree, { attempt: row.id });
         passed.push(...r.passed);
         failed.push(...r.failed);
         skipped.push(...r.skipped);
@@ -418,7 +418,7 @@ export class Runner {
       try {
         const repo = this.opts.repoRoot ?? story.repo;
         const tree = await this.treesFor(repo).storyTree(story.slug, join(this.worktreeRoot(repo), `story-${story.slug}`));
-        const r = await this.scripts.runAcceptanceTests(story.id, tree);
+        const r = await this.examiner.runAcceptanceTests(story.id, tree);
         passed.push(...r.passed);
         failed.push(...r.failed);
         skipped.push(...r.skipped);
