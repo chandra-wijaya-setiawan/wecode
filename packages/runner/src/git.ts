@@ -270,6 +270,52 @@ export class Trees {
     }
   }
 
+  /** docs/design/14. Field report 105. The merge that lands a story belongs in the checkout
+   *  that holds the base branch, and nowhere else. Run from the story's own worktree,
+   *  `git merge story/x` merges the branch into itself: git says "Already up to date", the
+   *  operator is told it landed, and the base never gained the commit. Any other tree is
+   *  worse — a wrong-tree merge is how a conflicted merge commit reached master once — so
+   *  land never retargets silently. It names the tree it was called in, names the tree it
+   *  should be run in, and merges nothing. */
+  async landStory(storySlug: string, from: string): Promise<string> {
+    const branch = `story/${storySlug}`;
+    const base = await this.integrationBranch();
+    const here = real(await git(from, ["rev-parse", "--show-toplevel"]).catch(() => from));
+    const trees = await this.checkouts();
+    const baseTree = trees.find((c) => c.branch === base);
+    if (baseTree === undefined) {
+      throw new GitError(
+        `land ${branch} refused in ${here}: no checkout has ${base} checked out, ` +
+          `so there is no tree the merge into ${base} could happen in`,
+      );
+    }
+    if (here !== real(baseTree.path)) {
+      const holds = trees.find((c) => real(c.path) === here)?.branch;
+      const what = holds === branch
+        ? `it is the ${branch} worktree, and merging ${branch} there merges it into itself`
+        : holds === null || holds === undefined
+          ? "it is not the tree that holds the base branch"
+          : `it holds ${holds}, not ${base}`;
+      throw new GitError(
+        `land ${branch} refused in ${here}: ${what}. ` +
+          `Run it in ${baseTree.path}, the checkout that holds ${base}.`,
+      );
+    }
+    await git(here, [
+      "-c",
+      "user.name=wecode",
+      "-c",
+      "user.email=wecode@localhost",
+      "merge",
+      "--no-ff",
+      "-q",
+      "-m",
+      `land ${branch}`,
+      branch,
+    ]);
+    return await git(here, ["rev-parse", "HEAD"]);
+  }
+
   /** Guarded by the task's tests passing. Runs in the story tree, so nothing an agent can
    *  be dispatched into is ever the tree holding the integration branch. */
   async mergeTaskIntoStory(taskBranch: string, storySlug: string, storyTreePath: string): Promise<void> {
