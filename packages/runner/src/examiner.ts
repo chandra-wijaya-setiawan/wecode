@@ -81,7 +81,7 @@ interface Row {
  *  minutes each while eleven ready tasks waited, and the runner read as idle rather than
  *  hung. So each run records a fingerprint of the tree tip, the attempt and the artefact,
  *  and a standing verdict is left alone until one of the three moves. */
-export class Scripts {
+export class Examiner {
   private readonly engine: Engine;
 
   constructor(

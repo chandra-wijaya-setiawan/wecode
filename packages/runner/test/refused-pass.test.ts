@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Engine, Maker, open } from "@wecode/core";
-import { Scripts } from "../src/index.js";
+import { Examiner } from "../src/index.js";
 import { recordRed } from "../../core/test/helpers.js";
 
 let db: DatabaseSync;
@@ -101,7 +101,7 @@ describe("a pass the engine refuses is not a pass", () => {
     // Nobody watched this one fail at its base, so `test_has_been_red` refuses the pass.
     const at = readyTest("true");
 
-    const r = await new Scripts(db).runAcceptanceTests(story, dir);
+    const r = await new Examiner(db).runAcceptanceTests(story, dir);
 
     expect(r.passed).not.toContain(at);
     expect(r.failed).not.toContain(at);
@@ -120,7 +120,7 @@ describe("a pass the engine refuses is not a pass", () => {
     // Recorded where the guard reads it: the column on acceptance_test.
     recordRed(db, at);
 
-    const r = await new Scripts(db).runAcceptanceTests(story, dir);
+    const r = await new Examiner(db).runAcceptanceTests(story, dir);
 
     expect(r.passed).toContain(at);
     expect(r.refused ?? []).toEqual([]);
@@ -137,7 +137,7 @@ describe("a pass the engine refuses is not a pass", () => {
     engine = new Engine(db);
     story = old.story;
 
-    const r = await new Scripts(db).runAcceptanceTests(old.story, dir);
+    const r = await new Examiner(db).runAcceptanceTests(old.story, dir);
 
     expect(r.refused ?? []).toEqual([]);
     expect(r.passed).toContain(old.test);
