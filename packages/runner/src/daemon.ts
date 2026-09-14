@@ -8,7 +8,7 @@ import { allocate, candidates as readyCandidates, type Candidate, type Pass } fr
 import type { BudgetConfig } from "./budget.js";
 import { Foreman, type TickReport } from "./foreman.js";
 import type { WorkerAdapter } from "./ports.js";
-import { Scripts, type ScriptReport } from "./scripts.js";
+import { Scripts, type Refused, type ScriptReport } from "./scripts.js";
 import { Trees } from "./git.js";
 
 const exec = promisify(execFile);
@@ -72,17 +72,6 @@ export class Runner {
          merged_at TEXT NOT NULL
        )`,
     );
-    // What a test proved before the work started. Runner-owned like landed_branch: the
-    // ledger says what is true of the work, this says what this machine has witnessed.
-    // A row with no sha is a test that could not be proven, and carries why.
-    db.exec(
-      `CREATE TABLE IF NOT EXISTS red_at_base (
-         test_id        INTEGER PRIMARY KEY,
-         red_at_base_sha TEXT,
-         red_at_base_at  TEXT,
-         reason          TEXT
-       )`,
-    );
   }
 
   /** allocate, run, prove, land. The order is the point: a task_test is run in the tree the
@@ -112,6 +101,7 @@ export class Runner {
         passed: [...settled.scripts.passed, ...acceptance.passed],
         failed: [...settled.scripts.failed, ...acceptance.failed],
         skipped: [...settled.scripts.skipped, ...acceptance.skipped],
+        refused: [...(settled.scripts.refused ?? []), ...(acceptance.refused ?? [])],
       },
     };
   }
@@ -250,6 +240,7 @@ export class Runner {
     const passed: number[] = [];
     const failed: number[] = [];
     const skipped: number[] = [];
+    const refused: Refused[] = [];
 
     for (const row of rows) {
       if (!existsSync(row.worktree)) continue;
@@ -263,6 +254,7 @@ export class Runner {
         passed.push(...r.passed);
         failed.push(...r.failed);
         skipped.push(...r.skipped);
+        refused.push(...(r.refused ?? []));
 
         const trees = this.treesFor(slugs.repo);
         const sha = await trees.commitAttempt(row.worktree, `task/${slugs.task}`, `${slugs.task}: attempt`);
@@ -275,7 +267,7 @@ export class Runner {
         // leave the tree standing rather than lose work nobody has seen
       }
     }
-    return { committed, scripts: { passed, failed, skipped } };
+    return { committed, scripts: { passed, failed, skipped, refused } };
   }
 
   /** A task that has used its attempts stops, and says so. Without this the allocator
@@ -310,8 +302,7 @@ export class Runner {
            JOIN project p ON p.id = rel.project_id
           WHERE s.state = 'in_progress' AND a.state = 'ready' AND a.kind = 'script'
             AND a.artefact IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM red_at_base b
-                             WHERE b.test_id = a.id AND b.red_at_base_sha IS NOT NULL)`,
+            AND a.red_at_base_sha IS NULL`,
       )
       .all() as unknown as { id: number; artefact: string; story: string; repo: string }[];
 
@@ -377,16 +368,24 @@ export class Runner {
     }
   }
 
+  /** The observation goes on the test itself, in the columns `test_has_been_red` reads.
+   *  It used to go in a runner-owned side table, which left the guard reading a null
+   *  column and refusing the pass of a test this machine had watched fail. */
   private recordBaseRun(testId: number, base: string, artefact: string, green: boolean): void {
     const at = now();
     this.db
       .prepare(
-        `INSERT INTO red_at_base (test_id, red_at_base_sha, red_at_base_at, reason) VALUES (?, ?, ?, ?)
-           ON CONFLICT (test_id) DO UPDATE SET red_at_base_sha = excluded.red_at_base_sha,
-                                               red_at_base_at  = excluded.red_at_base_at,
-                                               reason          = excluded.reason`,
+        `UPDATE acceptance_test
+            SET red_at_base_sha = ?, red_at_base_at = ?, red_at_base_reason = ?, updated_at = ?
+          WHERE id = ?`,
       )
-      .run(testId, green ? null : base, green ? null : at, green ? "it passes at base, so it cannot fail" : null);
+      .run(
+        green ? null : base,
+        green ? null : at,
+        green ? "it passes at base, so it cannot fail" : null,
+        at,
+        testId,
+      );
     this.db
       .prepare(
         `INSERT INTO script_run (entity, test_id, fingerprint, ran_at) VALUES ('acceptance_test@base', ?, ?, ?)
@@ -414,6 +413,7 @@ export class Runner {
     const passed: number[] = [];
     const failed: number[] = [];
     const skipped: number[] = [];
+    const refused: Refused[] = [];
     for (const story of stories) {
       try {
         const repo = this.opts.repoRoot ?? story.repo;
@@ -422,11 +422,12 @@ export class Runner {
         passed.push(...r.passed);
         failed.push(...r.failed);
         skipped.push(...r.skipped);
+        refused.push(...(r.refused ?? []));
       } catch {
         // a story with no branch yet has nothing to prove
       }
     }
-    return { passed, failed, skipped };
+    return { passed, failed, skipped, refused };
   }
 
   /** A task whose tests passed lands on its story branch — once. The merge is recorded
