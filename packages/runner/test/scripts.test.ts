@@ -1,4 +1,5 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -72,6 +73,87 @@ describe("a task_test proves one attempt, in that attempt's tree", () => {
     writeFileSync(join(dir, "later.ts"), "x\n");
     await new Scripts(db).runTaskTests(task, dir);
     expect(stateOf("task_test", taskTest)).toBe("passed");
+  });
+});
+
+describe("a verdict stands until the thing it was reached against moves", () => {
+  const git = (cwd: string, ...args: string[]): string =>
+    execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+  let tree: string;
+  let log: string;
+  /** Counts every execution, and fails, from a tree git can name a tip for. */
+  let artefact: string;
+
+  const runs = (): number => readFileSync(log, "utf8").trim().split("\n").filter(Boolean).length;
+
+  beforeEach(() => {
+    tree = mkdtempSync(join(tmpdir(), "wecode-tree-"));
+    log = join(dir, "runs.log");
+    writeFileSync(log, "");
+    artefact = `echo ran >> ${log}; exit 1`;
+    git(tree, "init", "-q", "-b", "main");
+    git(tree, "config", "user.name", "t");
+    git(tree, "config", "user.email", "t@localhost");
+    writeFileSync(join(tree, "README.md"), "seed\n");
+    git(tree, "add", "-A");
+    git(tree, "commit", "-q", "-m", "seed");
+  });
+
+  it("does not run a failed test again on an unchanged tree", async () => {
+    const { task, taskTest } = readyTask(artefact);
+    const scripts = new Scripts(db);
+
+    const first = await scripts.runTaskTests(task, tree, { attempt: 1 });
+    expect(first.failed).toContain(taskTest);
+    expect(runs()).toBe(1);
+
+    const second = await scripts.runTaskTests(task, tree, { attempt: 1 });
+    expect(second.skipped).toContain(taskTest);
+    expect(second.failed).toEqual([]);
+    expect(runs()).toBe(1);
+    expect(stateOf("task_test", taskTest)).toBe("failed");
+  });
+
+  it("runs it again once the tree has a new commit", async () => {
+    const { task, taskTest } = readyTask(artefact);
+    const scripts = new Scripts(db);
+
+    await scripts.runTaskTests(task, tree, { attempt: 1 });
+    await scripts.runTaskTests(task, tree, { attempt: 1 });
+    expect(runs()).toBe(1);
+
+    writeFileSync(join(tree, "fix.ts"), "x\n");
+    git(tree, "add", "-A");
+    git(tree, "commit", "-q", "-m", "fix");
+
+    const third = await scripts.runTaskTests(task, tree, { attempt: 1 });
+    expect(third.failed).toContain(taskTest);
+    expect(third.skipped).toEqual([]);
+    expect(runs()).toBe(2);
+  });
+
+  it("runs it again for a new attempt, which a fresh tree at the same tip would hide", async () => {
+    const { task, taskTest } = readyTask(artefact);
+    const scripts = new Scripts(db);
+
+    await scripts.runTaskTests(task, tree, { attempt: 1 });
+    const retry = await scripts.runTaskTests(task, tree, { attempt: 2 });
+
+    expect(retry.failed).toContain(taskTest);
+    expect(runs()).toBe(2);
+  });
+
+  it("runs it again when the artefact itself is rewritten", async () => {
+    const { task, taskTest } = readyTask(artefact);
+    const scripts = new Scripts(db);
+
+    await scripts.runTaskTests(task, tree, { attempt: 1 });
+    db.prepare("UPDATE task_test SET artefact = ? WHERE id = ?").run(`echo ran >> ${log}; true`, taskTest);
+
+    const after = await scripts.runTaskTests(task, tree, { attempt: 1 });
+    expect(after.passed).toContain(taskTest);
+    expect(runs()).toBe(2);
   });
 });
 

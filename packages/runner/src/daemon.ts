@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { clearRefusal, Engine, recordRefusal } from "@wecode/core";
+import { clearRefusal, Engine, now, recordRefusal } from "@wecode/core";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
 import { allocate, candidates as readyCandidates, type Candidate, type Pass } from "./allocator.js";
 import type { BudgetConfig } from "./budget.js";
@@ -8,6 +10,8 @@ import { Foreman, type TickReport } from "./foreman.js";
 import type { WorkerAdapter } from "./ports.js";
 import { Scripts, type ScriptReport } from "./scripts.js";
 import { Trees } from "./git.js";
+
+const exec = promisify(execFile);
 
 export interface Tick {
   readonly allocated: Pass;
@@ -49,6 +53,17 @@ export class Runner {
     this.foreman = new Foreman(db, opts.adapters, opts.deadlineSeconds ?? 3600);
     this.scripts = new Scripts(db);
     this.engine = new Engine(db);
+    // A merge is not derivable from the record: a done task with a commit stays done and
+    // committed forever, so without this landDoneTasks re-merges it on every tick and every
+    // log line carries every task that ever landed.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS landed_branch (
+         task_id   INTEGER PRIMARY KEY,
+         branch    TEXT NOT NULL,
+         sha       TEXT NOT NULL,
+         merged_at TEXT NOT NULL
+       )`,
+    );
   }
 
   /** allocate, run, prove, land. The order is the point: a task_test is run in the tree the
@@ -74,6 +89,7 @@ export class Runner {
       scripts: {
         passed: [...settled.scripts.passed, ...acceptance.passed],
         failed: [...settled.scripts.failed, ...acceptance.failed],
+        skipped: [...settled.scripts.skipped, ...acceptance.skipped],
       },
     };
   }
@@ -213,6 +229,7 @@ export class Runner {
     const committed: number[] = [];
     const passed: number[] = [];
     const failed: number[] = [];
+    const skipped: number[] = [];
 
     for (const row of rows) {
       if (!existsSync(row.worktree)) continue;
@@ -220,9 +237,12 @@ export class Runner {
       if (slugs === null) continue;
       try {
         // The attempt is judged in the tree it wrote in, before that tree goes.
-        const r = await this.scripts.runTaskTests(row.task, row.worktree);
+        // The assignment is what makes this attempt distinct: a retry cuts a fresh tree at
+        // the same branch tip, so the tip alone would read as "already judged".
+        const r = await this.scripts.runTaskTests(row.task, row.worktree, { attempt: row.id });
         passed.push(...r.passed);
         failed.push(...r.failed);
+        skipped.push(...r.skipped);
 
         const trees = this.treesFor(slugs.repo);
         const sha = await trees.commitAttempt(row.worktree, `task/${slugs.task}`, `${slugs.task}: attempt`);
@@ -235,7 +255,7 @@ export class Runner {
         // leave the tree standing rather than lose work nobody has seen
       }
     }
-    return { committed, scripts: { passed, failed } };
+    return { committed, scripts: { passed, failed, skipped } };
   }
 
   /** A task that has used its attempts stops, and says so. Without this the allocator
@@ -270,6 +290,7 @@ export class Runner {
 
     const passed: number[] = [];
     const failed: number[] = [];
+    const skipped: number[] = [];
     for (const story of stories) {
       try {
         const repo = this.opts.repoRoot ?? story.repo;
@@ -277,14 +298,17 @@ export class Runner {
         const r = await this.scripts.runAcceptanceTests(story.id, tree);
         passed.push(...r.passed);
         failed.push(...r.failed);
+        skipped.push(...r.skipped);
       } catch {
         // a story with no branch yet has nothing to prove
       }
     }
-    return { passed, failed };
+    return { passed, failed, skipped };
   }
 
-  /** A task whose tests passed lands on its story branch. */
+  /** A task whose tests passed lands on its story branch — once. The merge is recorded
+   *  against the branch tip it merged, so a branch that grows a commit afterwards lands
+   *  again and one that has not is left alone. */
   private async landDoneTasks(): Promise<number[]> {
     const rows = this.db
       .prepare(
@@ -300,21 +324,48 @@ export class Runner {
     for (const row of rows) {
       const slugs = this.slugsFor(row.id);
       if (slugs === null) continue;
+      const branch = `task/${slugs.task}`;
+      const tip = await this.tipOf(slugs.repo, branch);
+      if (this.alreadyLanded(row.id, branch, tip)) continue;
       try {
         await this.treesFor(slugs.repo).mergeTaskIntoStory(
-          `task/${slugs.task}`,
+          branch,
           slugs.story,
           join(this.worktreeRoot(slugs.repo), `story-${slugs.story}`),
         );
-        this.db.prepare("UPDATE task SET updated_at = updated_at WHERE id = ?").run(row.id);
+        this.db
+          .prepare(
+            `INSERT INTO landed_branch (task_id, branch, sha, merged_at) VALUES (?, ?, ?, ?)
+               ON CONFLICT (task_id) DO UPDATE SET branch = excluded.branch, sha = excluded.sha,
+                                                   merged_at = excluded.merged_at`,
+          )
+          .run(row.id, branch, tip ?? "", now());
         merged.push(row.id);
       } catch {
-        // already merged, or a conflict a person has to see
+        // a conflict a person has to see. Unrecorded, so the next tick tries again.
       }
     }
     return merged;
   }
 
+  /** A tip we could not read is no proof, so the merge is attempted; git itself refuses a
+   *  second merge of an unchanged branch, and that refusal stays the backstop. */
+  private alreadyLanded(taskId: number, branch: string, tip: string | null): boolean {
+    if (tip === null) return false;
+    const row = this.db.prepare("SELECT branch, sha FROM landed_branch WHERE task_id = ?").get(taskId) as
+      | { branch: string; sha: string }
+      | undefined;
+    return row?.branch === branch && row.sha === tip;
+  }
+
+  private async tipOf(repo: string, ref: string): Promise<string | null> {
+    try {
+      const { stdout } = await exec("git", ["rev-parse", "--verify", "--quiet", ref], { cwd: repo });
+      return stdout.trim() || null;
+    } catch {
+      return null;
+    }
+  }
 }
 
 /** Wake on a timer, forever, until something says stop. */
