@@ -5,11 +5,13 @@ import {
   applyChore,
   choreById,
   CHORE_KIND_DEFS,
+  clearChoreRefusal,
   clearRefusal,
   Engine,
   ensureChore,
   Maker,
   now,
+  recordChoreRefusal,
   recordRefusal,
   type Budget,
   type Chore,
@@ -656,32 +658,44 @@ export class Runner {
   /** The attempt: a system worker, in a tree at the chore's target branch, with the role's
    *  own scope off the record.
    *
-   *  Every refusal here is silent and level-triggered — no worker free, no slot, no role on
-   *  the record — because none of them is the chore's fault and all of them heal on a later
-   *  tick. The chore is left where it was and stays on the board: a `planned` chore is only
+   *  Every refusal here is level-triggered — no worker free, no slot, no role on the record
+   *  — because none of them is the chore's fault and all of them heal on a later tick. None
+   *  of them is silent: a chore that sits in `planned` for half an hour is only readable if
+   *  it says which of these is holding it, so each one is written to `chore_refusal` in the
+   *  same voice a task's refusal uses, and cleared the moment the chore is dispatched. What
+   *  is decided here is unchanged — only what is recorded about it.
+   *
+   *  The chore is left where it was and stays on the board: a `planned` chore is only
    *  started once there is somewhere for it to go, so "created, shown, and taken by nobody"
    *  still reads as planned rather than as ready forever. */
   private async dispatchChore(chore: Chore): Promise<number | null> {
     const def = CHORE_KIND_DEFS[chore.kind];
-    if (def === undefined) return null;
+    if (def === undefined) return this.refuseChore(chore, `no kind on the record for a ${chore.kind} chore`);
     const target = this.storyTargetOf(chore);
-    if (target === null) return null;
+    if (target === null) return this.refuseChore(chore, "the story it targets is gone");
     const scope = this.scopeOfRole(def.role);
-    if (scope === null) return null;
-    if (this.openAssignments() >= this.opts.budget.max_open) return null;
+    if (scope === null) return this.refuseChore(chore, `no scope for role ${def.role} in config/roles.yaml`);
+    const open = this.openAssignments();
+    const max = this.opts.budget.max_open;
+    if (open >= max) return this.refuseChore(chore, `${max - open} of ${max} slots are open`);
     const worker = this.freeWorker(def.role);
-    if (worker === null) return null;
+    if (worker === null) return this.refuseChore(chore, `no worker free for role ${def.role}`);
 
     try {
       const trees = this.treesFor(target.repo);
       const branch = `story/${target.slug}`;
       // The one thing a chore may never be given: a tree on the base branch. A merge made
       // there is a landing, and landing is the operator's verb.
-      if (branch === (await trees.integrationBranch())) return null;
+      if (branch === (await trees.integrationBranch())) {
+        return this.refuseChore(chore, `${branch} is the base branch: landing is yours to do, not a chore's`);
+      }
       const tree = await trees.storyTree(target.slug, join(this.worktreeRoot(target.repo), `story-${target.slug}`));
       // The approval guard lives in `start`, so a kind that needs one refuses here and
       // nothing is created for it.
-      if (chore.state === "planned" && !applyChore(this.db, chore.id, "start", "runner").ok) return null;
+      if (chore.state === "planned") {
+        const started = applyChore(this.db, chore.id, "start", "runner");
+        if (!started.ok) return this.refuseChore(chore, started.why);
+      }
       const id = new Maker(this.db).assignment({
         objective_type: "chore" as "task",
         objective_id: chore.id,
@@ -690,12 +704,23 @@ export class Runner {
         budget: this.opts.choreBudget ?? CHORE_BUDGET,
         worktree: tree,
       });
-      if (!applyChore(this.db, chore.id, "begin", `worker-${worker}`).ok) return null;
+      const begun = applyChore(this.db, chore.id, "begin", `worker-${worker}`);
+      if (!begun.ok) return this.refuseChore(chore, begun.why);
+      // Dispatched: whatever was holding it a tick ago is no longer true of it.
+      clearChoreRefusal(this.db, chore.id);
       return id;
     } catch {
       // no branch, or no tree to be had: there is nothing to merge in yet
-      return null;
+      return this.refuseChore(chore, "no branch to merge into yet");
     }
+  }
+
+  /** Write the reason down and hand back the answer dispatchChore already gives. One
+   *  statement, so no branch of dispatchChore can record a reason and return the other
+   *  thing, or return without recording. */
+  private refuseChore(chore: Chore, why: string): null {
+    recordChoreRefusal(this.db, why, chore.id);
+    return null;
   }
 
   /** The check, proved by this machine. For `merge`: the base is an ancestor of the branch —
