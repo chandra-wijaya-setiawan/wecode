@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { board, Engine, Maker, openAssignments, recordRefusal } from "../src/index.js";
-import { freshDb, seed } from "./helpers.js";
+import { freshDb, recordRed, seed } from "./helpers.js";
 
 describe("the board", () => {
   it("shows a ready task in the queue until something is attempting it", () => {
@@ -61,6 +61,22 @@ describe("the board", () => {
     engine.apply("assignment", a, "start", "runner");
     engine.apply("assignment", a, "fail", "runner");
     expect(openAssignments(db)).toBe(0);
+  });
+});
+
+describe("the unproven box", () => {
+  it("lists a ready acceptance_test nobody has watched fail, and drops it once somebody has", () => {
+    const db = freshDb();
+    const tree = seed(db);
+
+    // Rows here are acceptance_tests — which is the entity the cockpit has to descend into
+    // when a line in this box is opened.
+    const before = board(db).unproven;
+    expect(before.map((r) => r.id)).toEqual([tree.acceptance]);
+    expect(before[0]?.detail).toBe("no red run recorded");
+
+    recordRed(db, tree.acceptance);
+    expect(board(db).unproven).toEqual([]);
   });
 });
 

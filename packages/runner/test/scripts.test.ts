@@ -6,6 +6,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Engine, Maker, open } from "@wecode/core";
 import { Scripts } from "../src/index.js";
+import { recordRed } from "../../core/test/helpers.js";
 
 let db: DatabaseSync;
 let make: Maker;
@@ -41,6 +42,9 @@ function readyTask(artefact: string, acceptance = "true"): { task: number; taskT
   engine.apply("task_test", taskTest, "deliver", "chief");
   engine.apply("task", task, "start", "chief");
   engine.apply("acceptance_test", at, "deliver", "chief");
+  // Somebody watched it fail at the base before the work began; without that record
+  // `test_has_been_red` refuses the pass these tests are about.
+  recordRed(db, at);
   return { task, taskTest, acceptance: at };
 }
 
