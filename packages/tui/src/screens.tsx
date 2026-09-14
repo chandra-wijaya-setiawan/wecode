@@ -8,6 +8,7 @@ import type { ReactNode } from "react";
 import { Box, Text } from "ink";
 import { boxKeys, type App, type Screen } from "./app.js";
 import { clip, columnWidths, List, type Column, type Row } from "./list.js";
+import { Services, SERVICE_ROWS, SERVICES } from "./services.js";
 
 /** Every column, on every screen. views.yaml declares title, filter, rows and empty but no
  *  columns, so there is nothing per-box to honour here: a box and its full-height page
@@ -111,7 +112,10 @@ interface ScreenProps {
   readonly height: number;
 }
 
-/** Every box in config order, each trimmed to the height it declares. */
+/** What is holding the workspace up, then every box in config order, each trimmed to the
+ *  height it declares. The services box is first because a dead runner or a schema this
+ *  build cannot read is the reason every box under it is wrong, and it is not in
+ *  views.yaml: it is not a filter over the board and `v` does not open it. */
 export function Dashboard({ app, width }: ScreenProps) {
   const rows = app.lines();
   const widths = columnWidths(boardRows(app), COLUMNS);
@@ -119,6 +123,9 @@ export function Dashboard({ app, width }: ScreenProps) {
   const inner = width - BORDER;
   return (
     <>
+      <Panel title={SERVICES} width={width} height={SERVICE_ROWS + BORDER}>
+        <Services app={app} width={inner} />
+      </Panel>
       {boxes(app, rows).map((box) => {
         // The cursor runs over every box's rows at once; only the box holding it draws one.
         const local = app.cursor - box.at;

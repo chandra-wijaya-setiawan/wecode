@@ -70,10 +70,24 @@ describe("the frame", () => {
     for (const line of lines(28, 40)) expect(line.length).toBeLessThanOrEqual(28);
   });
 
+  /** Every box the dashboard is supposed to draw, named. A tally against views.length said
+   *  the same thing only for as long as views.yaml was the whole dashboard: the services
+   *  box is not a filter over the board and is in no view, so the count broke the moment it
+   *  arrived while every box on the screen was still perfectly well bordered. What is
+   *  wanted is that each box that should be there is, and is a box — so each is asked for
+   *  by name, and the tops and bottoms are only checked to pair up. */
   it("is laid out, not printed: every box on it is bordered", () => {
     const out = lines();
-    expect(out.filter((l) => l.startsWith("┌")).length).toBe(views.length);
-    expect(out.filter((l) => l.startsWith("└")).length).toBe(views.length);
+    for (const title of ["Services", ...views.map((v) => `${v.title} (`)]) {
+      const at = titled(out, title);
+      expect(at, `no box titled ${title}`).toBeGreaterThanOrEqual(0);
+      expect(out[at]?.startsWith("┌"), `${title} has no top border`).toBe(true);
+      const bottom = at + inside(out, at).length + 1;
+      expect(out[bottom]?.startsWith("└"), `${title} has no bottom border`).toBe(true);
+    }
+    expect(out.filter((l) => l.startsWith("┌")).length).toBe(
+      out.filter((l) => l.startsWith("└")).length,
+    );
     for (const line of out.filter((l) => l.startsWith("│"))) {
       expect(line.endsWith("│")).toBe(true);
     }
@@ -81,6 +95,28 @@ describe("the frame", () => {
 });
 
 describe("the dashboard", () => {
+  it("draws the services box first, above every box of work", () => {
+    const out = lines();
+    expect(titled(out, "Services")).toBe(0);
+    expect(inside(out, 0).map((l) => l.split(/ {2,}/)[0])).toEqual([
+      "runner",
+      "schema",
+      "fleet",
+      "doctor",
+    ]);
+    // And it is above the first box views.yaml orders.
+    expect(titled(out, `${views[0]?.title} (`)).toBeGreaterThan(0);
+  });
+
+  it("keeps the services box off a box page and a node screen", () => {
+    app.key("v");
+    app.key("p");
+    expect(titled(lines(100, 12), "Services")).toBe(-1);
+    app.key("esc");
+    descendTo("storefront");
+    expect(titled(lines(100, 20), "Services")).toBe(-1);
+  });
+
   it("draws every box in config order", () => {
     const out = lines();
     const titles = views.map((v) => titled(out, `${v.title} (`));
