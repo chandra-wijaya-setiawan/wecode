@@ -8,7 +8,7 @@ import { allocate, candidates as readyCandidates, type Candidate, type Pass } fr
 import type { BudgetConfig } from "./budget.js";
 import { Foreman, type TickReport } from "./foreman.js";
 import type { WorkerAdapter } from "./ports.js";
-import { Scripts, type ScriptReport } from "./scripts.js";
+import { Scripts, type Refused, type ScriptReport } from "./scripts.js";
 import { Trees } from "./git.js";
 
 const exec = promisify(execFile);
@@ -21,11 +21,23 @@ export interface Tick {
   readonly merged: readonly number[];
   /** Tasks that ran out of attempts on this tick. */
   readonly exhausted: readonly number[];
+  /** Tasks that have used every attempt while the story that needs them is still open. */
+  readonly drift: readonly Drift[];
   /** Completion transitions that fired because their guard had become true. */
   readonly settled: readonly string[];
   /** Acceptance tests this tick ran at their story's base: red there, or green and so
    *  unable to prove anything. */
   readonly redAtBase: RedAtBase;
+}
+
+/** An exhausted task, and the story left waiting on it. Named, because the cost is the
+ *  story: three tasks at 3 of 3 held two stories open for a day and the only thing that
+ *  moved them was a person noticing. */
+export interface Drift {
+  readonly task: number;
+  readonly slug: string;
+  readonly story: string;
+  readonly why: string;
 }
 
 export interface RedAtBase {
@@ -72,17 +84,6 @@ export class Runner {
          merged_at TEXT NOT NULL
        )`,
     );
-    // What a test proved before the work started. Runner-owned like landed_branch: the
-    // ledger says what is true of the work, this says what this machine has witnessed.
-    // A row with no sha is a test that could not be proven, and carries why.
-    db.exec(
-      `CREATE TABLE IF NOT EXISTS red_at_base (
-         test_id        INTEGER PRIMARY KEY,
-         red_at_base_sha TEXT,
-         red_at_base_at  TEXT,
-         reason          TEXT
-       )`,
-    );
   }
 
   /** allocate, run, prove, land. The order is the point: a task_test is run in the tree the
@@ -100,18 +101,23 @@ export class Runner {
     // that just ran settles here, rather than waiting for an event that already happened.
     const settled2 = this.engine.settle();
     const exhausted = this.enforceRetryLimit();
+    // After enforcement, so a task that ran out of attempts on this very tick is already
+    // named rather than named a minute later.
+    const drift = this.exhaustedTasks();
     return {
       allocated,
       foreman,
       committed: settled.committed,
       merged,
       exhausted,
+      drift,
       redAtBase,
       settled: settled2.map((c) => `${c.entity} #${c.id} → ${c.to}`),
       scripts: {
         passed: [...settled.scripts.passed, ...acceptance.passed],
         failed: [...settled.scripts.failed, ...acceptance.failed],
         skipped: [...settled.scripts.skipped, ...acceptance.skipped],
+        refused: [...(settled.scripts.refused ?? []), ...(acceptance.refused ?? [])],
       },
     };
   }
@@ -250,6 +256,7 @@ export class Runner {
     const passed: number[] = [];
     const failed: number[] = [];
     const skipped: number[] = [];
+    const refused: Refused[] = [];
 
     for (const row of rows) {
       if (!existsSync(row.worktree)) continue;
@@ -263,6 +270,7 @@ export class Runner {
         passed.push(...r.passed);
         failed.push(...r.failed);
         skipped.push(...r.skipped);
+        refused.push(...(r.refused ?? []));
 
         const trees = this.treesFor(slugs.repo);
         const sha = await trees.commitAttempt(row.worktree, `task/${slugs.task}`, `${slugs.task}: attempt`);
@@ -275,11 +283,58 @@ export class Runner {
         // leave the tree standing rather than lose work nobody has seen
       }
     }
-    return { committed, scripts: { passed, failed, skipped } };
+    return { committed, scripts: { passed, failed, skipped, refused } };
+  }
+
+  /** Every task that has used its attempts while its story is still open.
+   *
+   *  Reported, never acted on: `retry` is an operator's verb, because the machine cannot
+   *  know whether a task failed three times for a reason a fourth attempt would fix. So
+   *  this is the doctor's read — one line per drift, naming the story that is waiting —
+   *  and `wecode task retry <id> --reason` is the only thing that clears it.
+   *
+   *  A dropped task is not here: abandoning one is a decision, and a decision is not
+   *  drift. */
+  private exhaustedTasks(): Drift[] {
+    const rows = this.db
+      .prepare(
+        `SELECT t.id AS task, t.slug AS slug, t.attempts AS attempts, t.max_retry AS max_retry,
+                s.slug AS story, s.state AS story_state
+           FROM task t
+           JOIN acceptance_test a ON a.id = t.acceptance_test_id
+           JOIN acceptance_criteria c ON c.id = a.parent_id
+           JOIN requirement r ON r.id = c.requirement_id
+           JOIN story s ON s.id = r.story_id
+          WHERE t.state NOT IN ('done', 'dropped')
+            AND t.attempts >= t.max_retry
+            AND s.state NOT IN ('delivered', 'dropped')
+          ORDER BY t.id`,
+      )
+      .all() as unknown as {
+      task: number;
+      slug: string;
+      attempts: number;
+      max_retry: number;
+      story: string;
+      story_state: string;
+    }[];
+
+    return rows.map((row) => ({
+      task: row.task,
+      slug: row.slug,
+      story: row.story,
+      why:
+        `${row.attempts} of ${row.max_retry} attempts used, and story ${row.story} is still ` +
+        `${row.story_state} — wecode task retry ${row.task} --reason "…", or drop it`,
+    }));
   }
 
   /** A task that has used its attempts stops, and says so. Without this the allocator
-   *  retries a broken task forever — a crash loop with the machine holding the stopwatch. */
+   *  retries a broken task forever — a crash loop with the machine holding the stopwatch.
+   *
+   *  It only ever stops one. The runner has no path back the other way: nothing here
+   *  applies `retry`, because bringing an exhausted task back is a judgement about why it
+   *  failed, and the machine has not got one. */
   private enforceRetryLimit(): number[] {
     const rows = this.db
       .prepare(`SELECT id FROM task WHERE state = 'ready' AND attempts >= max_retry`)
@@ -310,8 +365,7 @@ export class Runner {
            JOIN project p ON p.id = rel.project_id
           WHERE s.state = 'in_progress' AND a.state = 'ready' AND a.kind = 'script'
             AND a.artefact IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM red_at_base b
-                             WHERE b.test_id = a.id AND b.red_at_base_sha IS NOT NULL)`,
+            AND a.red_at_base_sha IS NULL`,
       )
       .all() as unknown as { id: number; artefact: string; story: string; repo: string }[];
 
@@ -377,16 +431,24 @@ export class Runner {
     }
   }
 
+  /** The observation goes on the test itself, in the columns `test_has_been_red` reads.
+   *  It used to go in a runner-owned side table, which left the guard reading a null
+   *  column and refusing the pass of a test this machine had watched fail. */
   private recordBaseRun(testId: number, base: string, artefact: string, green: boolean): void {
     const at = now();
     this.db
       .prepare(
-        `INSERT INTO red_at_base (test_id, red_at_base_sha, red_at_base_at, reason) VALUES (?, ?, ?, ?)
-           ON CONFLICT (test_id) DO UPDATE SET red_at_base_sha = excluded.red_at_base_sha,
-                                               red_at_base_at  = excluded.red_at_base_at,
-                                               reason          = excluded.reason`,
+        `UPDATE acceptance_test
+            SET red_at_base_sha = ?, red_at_base_at = ?, red_at_base_reason = ?, updated_at = ?
+          WHERE id = ?`,
       )
-      .run(testId, green ? null : base, green ? null : at, green ? "it passes at base, so it cannot fail" : null);
+      .run(
+        green ? null : base,
+        green ? null : at,
+        green ? "it passes at base, so it cannot fail" : null,
+        at,
+        testId,
+      );
     this.db
       .prepare(
         `INSERT INTO script_run (entity, test_id, fingerprint, ran_at) VALUES ('acceptance_test@base', ?, ?, ?)
@@ -414,6 +476,7 @@ export class Runner {
     const passed: number[] = [];
     const failed: number[] = [];
     const skipped: number[] = [];
+    const refused: Refused[] = [];
     for (const story of stories) {
       try {
         const repo = this.opts.repoRoot ?? story.repo;
@@ -422,11 +485,12 @@ export class Runner {
         passed.push(...r.passed);
         failed.push(...r.failed);
         skipped.push(...r.skipped);
+        refused.push(...(r.refused ?? []));
       } catch {
         // a story with no branch yet has nothing to prove
       }
     }
-    return { passed, failed, skipped };
+    return { passed, failed, skipped, refused };
   }
 
   /** A task whose tests passed lands on its story branch — once. The merge is recorded
