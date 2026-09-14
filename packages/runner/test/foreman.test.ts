@@ -4,19 +4,28 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Maker, open } from "@wecode/core";
-import { Foreman, type Observation, type WorkerAdapter, type Work } from "../src/index.js";
+import {
+  ClaudeCodeAdapter,
+  Foreman,
+  type Observation,
+  type WorkerAdapter,
+  type Work,
+} from "../src/index.js";
 
 /** An adapter that reports whatever the test queued, so the foreman can be exercised
  *  without a harness. */
 class Fake implements WorkerAdapter {
   readonly kind = "agent";
   readonly seen: string[] = [];
+  /** Every Work handed over, so a test can read what the foreman built. */
+  readonly work: Work[] = [];
   constructor(private readonly script: Observation[]) {}
   private next(): Observation {
     return this.script.shift() ?? { phase: "failed", session: null, spent: spent(), reason: "other" };
   }
   async start(w: Work): Promise<Observation> {
     this.seen.push(`start:${w.id}`);
+    this.work.push(w);
     return this.next();
   }
   async poll(w: Work): Promise<Observation> {
@@ -187,6 +196,154 @@ describe("a session that finishes in one call", () => {
     ]);
     await new Foreman(db, { agent: fake }).tick();
     expect(phaseOf(id)).toBe("waiting");
+  });
+});
+
+describe("what carries between attempts", () => {
+  /** Put the task where a retry would find it: n attempts made, and the last assignment
+   *  ended with a reason and a commit that is on the branch. */
+  const afterAnAttempt = (attempts: number, reason: string, sha: string | null): number => {
+    const prev = assign();
+    db.prepare("UPDATE assignment SET phase = 'failed', reason = ?, commit_sha = ? WHERE id = ?").run(
+      reason,
+      sha,
+      prev,
+    );
+    db.prepare("UPDATE task SET attempts = ? WHERE id = ?").run(attempts, task);
+    return prev;
+  };
+
+  const failing = (statement: string, output: string | null): number => {
+    const id = make.taskTest(task, statement, "script", "bash t.sh");
+    db.prepare("UPDATE task_test SET state = 'failed', last_output = ? WHERE id = ?").run(output, id);
+    return id;
+  };
+
+  const startAndTakeWork = async (): Promise<Work> => {
+    const fake = new Fake([{ phase: "running", session: "s", spent: spent() }]);
+    await new Foreman(db, { agent: fake }).tick();
+    return fake.work[fake.work.length - 1] as Work;
+  };
+
+  it("gives a first attempt no history at all", async () => {
+    assign();
+    const work = await startAndTakeWork();
+    expect(work.history).toBeNull();
+  });
+
+  it("tells a retry how many attempts were made, and how the last one ended", async () => {
+    afterAnAttempt(1, "out_of_scope", "deadbee");
+    assign();
+    const work = await startAndTakeWork();
+    expect(work.history?.attempts).toBe(1);
+    expect(work.history?.reason).toBe("out_of_scope");
+    expect(work.history?.commit).toBe("deadbee");
+  });
+
+  it("reads the previous assignment, not this one", async () => {
+    afterAnAttempt(2, "timeout", "cafe01");
+    const id = assign();
+    const work = await startAndTakeWork();
+    expect(work.id).toBe(id);
+    expect(work.history?.commit).toBe("cafe01");
+    expect(work.history?.attempts).toBe(2);
+  });
+
+  it("carries the last non-empty line of each failed task_test", async () => {
+    afterAnAttempt(1, "other", "abc123");
+    failing("the mail is sent", "running...\nExpected 1 mail, got 0\n\n");
+    failing("the mail is addressed", "AssertionError: no recipient\n");
+    make.taskTest(task, "the mail is signed", "script", "bash t.sh"); // planned, not failed
+    assign();
+    const work = await startAndTakeWork();
+    expect(work.history?.failures).toEqual([
+      { statement: "the mail is sent", line: "Expected 1 mail, got 0" },
+      { statement: "the mail is addressed", line: "AssertionError: no recipient" },
+    ]);
+  });
+
+  it("still names a failing test that said nothing", async () => {
+    afterAnAttempt(1, "other", null);
+    failing("the mail is sent", null);
+    assign();
+    const work = await startAndTakeWork();
+    expect(work.history?.failures).toEqual([{ statement: "the mail is sent", line: "" }]);
+    expect(work.history?.commit).toBeNull();
+  });
+
+  it("gives no history to an assignment that is not on a task", async () => {
+    db.prepare("UPDATE task SET attempts = 3 WHERE id = ?").run(task);
+    const id = make.assignment({
+      objective_type: "task_test",
+      objective_id: failing("the mail is sent", "boom"),
+      worker_id: worker,
+      scope: { write: ["src/**"], tools: ["bash"] },
+      budget: { tokens: 100, seconds: 10 },
+      worktree: "/tmp/wt",
+    });
+    const work = await startAndTakeWork();
+    expect(work.id).toBe(id);
+    expect(work.history).toBeNull();
+  });
+});
+
+describe("the prompt a retry is given", () => {
+  const promptOf = (work: Work): string =>
+    (new ClaudeCodeAdapter() as unknown as { prompt(w: Work): string }).prompt(work);
+
+  const work = (history: Work["history"]): Work => ({
+    id: 1,
+    objective_type: "task",
+    objective_id: task,
+    instruction: "send the mail",
+    scope: { write: ["src/**"], tools: ["bash"] },
+    budget: { tokens: 100, seconds: 10 },
+    worktree: "/tmp/wt",
+    session: null,
+    history,
+  });
+
+  it("is exactly today's prompt on a first attempt", () => {
+    expect(promptOf(work(null))).toBe(
+      [
+        "send the mail",
+        "",
+        "You may change only: src/**.",
+        "Write the tests that prove this work, and run them.",
+        "If you need a decision from a person, say so and stop rather than guessing.",
+      ].join("\n"),
+    );
+  });
+
+  it("names the commit already on the branch", () => {
+    const out = promptOf(
+      work({ attempts: 1, reason: "out_of_scope", commit: "deadbee", failures: [] }),
+    );
+    expect(out).toContain("## What happened before");
+    expect(out).toContain("attempt 2");
+    expect(out).toContain("deadbee");
+    expect(out).toContain("git show deadbee");
+    expect(out).toContain("out_of_scope");
+  });
+
+  it("lists what is still failing, and says so when nothing was committed", () => {
+    const out = promptOf(
+      work({
+        attempts: 2,
+        reason: "timeout",
+        commit: null,
+        failures: [{ statement: "the mail is sent", line: "Expected 1 mail, got 0" }],
+      }),
+    );
+    expect(out).toContain("2 have already been made");
+    expect(out).toContain("left no commit");
+    expect(out).toContain("- the mail is sent — Expected 1 mail, got 0");
+  });
+
+  it("keeps the original instruction and scope first", () => {
+    const out = promptOf(work({ attempts: 1, reason: null, commit: "abc", failures: [] }));
+    expect(out.startsWith("send the mail\n\nYou may change only: src/**.")).toBe(true);
+    expect(out).not.toContain("It ended:");
   });
 });
 
