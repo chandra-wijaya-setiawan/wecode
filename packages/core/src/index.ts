@@ -15,3 +15,4 @@ export * from "./home.js";
 export * from "./tree.js";
 export * from "./lease.js";
 export * from "./order.js";
+export * from "./delivered.js";
