@@ -46,3 +46,18 @@ export function setArtefact(
     .run(artefact, now(), id);
   if (changed.changes === 0n || changed.changes === 0) throw new EditError(`no ${entity} #${id}`);
 }
+
+/** Set where a test's script is meant to live, or clear it with null. This is spec, not a
+ *  reading of the filesystem: the path may name a file that does not exist yet, and nothing
+ *  here checks, because the answer differs per branch and would be stale by the next one. */
+export function setScriptPath(
+  db: DatabaseSync,
+  entity: "acceptance_test" | "task_test",
+  id: number,
+  script_path: string | null,
+): void {
+  const changed = db
+    .prepare(`UPDATE ${entity} SET script_path = ?, updated_at = ? WHERE id = ?`)
+    .run(script_path, now(), id);
+  if (changed.changes === 0n || changed.changes === 0) throw new EditError(`no ${entity} #${id}`);
+}
