@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Engine, Maker, open } from "@wecode/core";
-import { Scripts } from "../src/index.js";
+import { Examiner } from "../src/index.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
 let db: DatabaseSync;
@@ -63,7 +63,7 @@ describe("a test whose script is not there is unrunnable, not failed", () => {
   it("leaves a test whose script_path is absent ready, with the reason", async () => {
     const { task, taskTest } = readyTask("./scripts/proof.sh");
 
-    const r = await new Scripts(db).runTaskTests(task, dir);
+    const r = await new Examiner(db).runTaskTests(task, dir);
 
     expect(r.unrunnable).toContain(taskTest);
     expect(r.failed).toEqual([]);
@@ -77,7 +77,7 @@ describe("a test whose script is not there is unrunnable, not failed", () => {
     const { task, taskTest } = readyTask("./scripts/proof.sh");
     writeScript("scripts/proof.sh", "echo no; exit 3");
 
-    const r = await new Scripts(db).runTaskTests(task, dir);
+    const r = await new Examiner(db).runTaskTests(task, dir);
 
     expect(r.failed).toContain(taskTest);
     // The bucket is always reported, so the board can tell "no missing scripts" from

@@ -1,3 +1,6 @@
+/** Why a candidate was passed over is the same fact as why a bulk action declined an
+ *  id, so Refusal has one definition, in types. */
+import type { Refusal } from "./types.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { Budget, Scope } from "./entities.js";
 
@@ -9,13 +12,6 @@ export interface Candidate {
   readonly scope: Scope;
   readonly budget: Budget;
   readonly attempts: number;
-}
-
-/** Why a candidate was passed over. Recorded so a board can answer *why is nothing
- *  running* per task — a refusal nobody sees is how a task starves silently. */
-export interface Refusal {
-  readonly id: number;
-  readonly why: string;
 }
 
 /** The half of the budget that decides order. */

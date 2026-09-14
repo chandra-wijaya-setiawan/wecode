@@ -89,14 +89,43 @@ export class Trees {
     return path;
   }
 
+  /** True when `ancestor` is reachable from `descendant`. */
+  private async isAncestor(path: string, ancestor: string, descendant: string): Promise<boolean> {
+    try {
+      await git(path, ["merge-base", "--is-ancestor", ancestor, descendant]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** The tree is cut `--detach`, so an attempt that commits for itself — a merge, a revert,
+   *  a rebase, or just an agent that ran `git commit` — moves HEAD and leaves the branch
+   *  where it was cut. Nothing else moves the ref, so that work becomes unreachable. Carried
+   *  forward here, before the working tree is committed on top of it. */
+  private async fastForwardToHead(path: string, branch: string): Promise<string | null> {
+    const head = await git(path, ["rev-parse", "HEAD"]);
+    const tip = await git(this.repo, ["rev-parse", `refs/heads/${branch}`]);
+    if (head === tip) return null;
+    if (!(await this.isAncestor(path, tip, head))) {
+      throw new GitError(
+        `commitAttempt refused ${path}: HEAD ${head} has diverged from ${branch} ${tip}; ` +
+          `no fast-forward can express it`,
+      );
+    }
+    await git(this.repo, ["update-ref", `refs/heads/${branch}`, head, tip]);
+    return head;
+  }
+
   /** Everything the attempt wrote, on its branch. A rejected attempt still commits: the
    *  next one must be able to see what is already there. */
   async commitAttempt(path: string, branch: string, message: string): Promise<string | null> {
     await this.refuseBaseCheckout(path, "commitAttempt");
     await this.refuseAttached(path, "commitAttempt");
+    const forwarded = await this.fastForwardToHead(path, branch);
     await git(path, ["add", "-A"]);
     const staged = await git(path, ["diff", "--cached", "--name-only"]);
-    if (staged === "") return null;
+    if (staged === "") return forwarded;
     await git(path, [
       "-c",
       "user.name=wecode",
