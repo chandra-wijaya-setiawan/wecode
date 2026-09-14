@@ -112,6 +112,56 @@ describe("help is what an agent reads first", () => {
     expect(out).toContain("automatic");
   });
 
+  it("answers create --help with that entity's own flags and an example", () => {
+    expect(run(["task", "create", "--help"])).toBe(0);
+    const out = said();
+    expect(out).toContain("wecode task create [flags]");
+    expect(out).toContain("--parent");
+    expect(out).toContain("--role");
+    expect(out).toContain('wecode task create --parent 1 "send the mail" --role engineer');
+    expect(err.join("")).toBe("");
+  });
+
+  it("accepts -h, and does not create anything while answering", () => {
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    out.length = 0;
+    expect(run(["workspace", "create", "-h"])).toBe(0);
+    expect(said()).toContain("--path");
+    out.length = 0;
+    run(["workspaces"]);
+    expect(said()).not.toContain("-h");
+  });
+
+  it("names only the flags the entity in hand actually takes", () => {
+    expect(run(["story", "create", "--help"])).toBe(0);
+    const out = said();
+    expect(out).toContain("--parent");
+    expect(out).not.toContain("--artefact");
+    expect(out).not.toContain("--role");
+  });
+
+  it("offers --artefact and --kind on the tests, which is where they are read", () => {
+    expect(run(["acceptance_test", "create", "--help"])).toBe(0);
+    expect(said()).toContain("--artefact");
+    expect(said()).toContain("--kind");
+  });
+
+  it("says which entity it cannot make, rather than printing empty flags", () => {
+    expect(run(["nonsense", "create", "--help"])).toBe(1);
+    expect(err.join("")).toContain("no such entity: nonsense");
+  });
+
+  it("answers scope --help with --write and --tools and the rule that bites", () => {
+    expect(run(["task", "scope", "--help"])).toBe(0);
+    const out = said();
+    expect(out).toContain("wecode task scope <id>");
+    expect(out).toContain("--write");
+    expect(out).toContain("--tools");
+    expect(out).toContain("overlap");
+    expect(err.join("")).toBe("");
+  });
+
   it("falls back to the manual for a word that is not an entity", () => {
     expect(run(["worker", "--help"])).toBe(0);
     expect(said()).toContain("THE SHAPE OF THE WORK");
