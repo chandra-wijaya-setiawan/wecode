@@ -11,6 +11,10 @@ export interface Work {
   readonly worktree: string;
   /** Set when a killed attempt is being continued rather than restarted. */
   readonly session: string | null;
+  /** What earlier attempts on this project learned, newest first and capped at ten. Absent
+   *  when the project has none — an empty heading teaches the next agent nothing and costs
+   *  it the attention the real lines need. See docs/design/17. */
+  readonly lessons?: readonly string[];
 }
 
 /** What an adapter saw. Nothing here is a decision — the foreman turns it into a verb. */
@@ -24,8 +28,23 @@ export type Observation =
       readonly question: string;
       readonly options: readonly string[];
     }
-  | { readonly phase: "succeeded"; readonly session: string; readonly spent: Budget; readonly commit: string | null }
-  | { readonly phase: "failed"; readonly session: string | null; readonly spent: Budget; readonly reason: FailReason };
+  | {
+      readonly phase: "succeeded";
+      readonly session: string;
+      readonly spent: Budget;
+      readonly commit: string | null;
+      /** One sentence the session ended with, if it offered one. An adapter that cannot ask
+       *  never sets it. */
+      readonly lesson?: string;
+    }
+  | {
+      readonly phase: "failed";
+      readonly session: string | null;
+      readonly spent: Budget;
+      readonly reason: FailReason;
+      /** A failed attempt is the one most likely to have learned something. */
+      readonly lesson?: string;
+    };
 
 /** One per kind of worker. The only thing in wecode that knows a harness from a person.
  *

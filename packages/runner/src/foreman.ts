@@ -33,6 +33,7 @@ export class Foreman {
     private readonly deadlineSeconds = 3600,
   ) {
     this.engine = new Engine(db);
+    this.db.exec(LESSON_TABLE);
   }
 
   /** One pass over every open assignment. Level-triggered: it reads state and acts, so a
@@ -110,6 +111,7 @@ export class Foreman {
   }
 
   private workOf(row: OpenRow): Work {
+    const lessons = this.lessonsFor(row.id);
     return {
       id: row.id,
       objective_type: row.objective_type,
@@ -119,7 +121,36 @@ export class Foreman {
       budget: JSON.parse(row.budget) as Budget,
       worktree: row.worktree,
       session: row.session,
+      // A project with nothing to teach hands over no field at all: an empty list still
+      // renders a heading, and a heading nothing follows is how the brief gets skimmed.
+      ...(lessons.length > 0 ? { lessons } : {}),
     };
+  }
+
+  /** The ten newest lessons of this assignment's project, newest first. */
+  private lessonsFor(id: number): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT text FROM lesson WHERE project_id = (${PROJECT_OF})
+          ORDER BY id DESC LIMIT 10`,
+      )
+      .all(id) as unknown as { text: string }[];
+    return rows.map((r) => r.text);
+  }
+
+  /** What an attempt learned, kept against the project rather than the task: the thing that
+   *  bought this — a worktree that could not install — was true of all three tasks that hit
+   *  it. The assignment is kept too, so a suspicious lesson can be traced back. */
+  private recordLesson(id: number, lesson: string): void {
+    const text = lesson.trim();
+    if (text === "") return;
+    const project = this.db.prepare(`SELECT (${PROJECT_OF}) AS project`).get(id) as
+      | { project: number | null }
+      | undefined;
+    if (project?.project == null) return;
+    this.db
+      .prepare("INSERT INTO lesson (project_id, assignment_id, text, created_at) VALUES (?, ?, ?, ?)")
+      .run(project.project, id, text, now());
   }
 
   private instructionFor(row: OpenRow): string {
@@ -141,6 +172,12 @@ export class Foreman {
   private record(id: number, seen: Observation): boolean {
     const spent = JSON.stringify(seen.spent);
     const at = now();
+
+    // Recorded whatever the attempt then counts as: what a failure learned is the half most
+    // worth keeping, and the phase it ended in says nothing about whether it is true.
+    if ((seen.phase === "succeeded" || seen.phase === "failed") && seen.lesson !== undefined) {
+      this.recordLesson(id, seen.lesson);
+    }
 
     // A session can finish, or ask, inside the same call that started it. Neither is legal
     // from pending, so the start is recorded first: the record must be able to say the
@@ -201,3 +238,37 @@ export class Foreman {
 }
 
 const zero = (): Budget => ({ tokens: 0, seconds: 0 });
+
+/** A lesson is a note about a world that changes, not part of the record of the work, so it
+ *  is nullable everywhere it touches one and deleting it costs nothing. */
+const LESSON_TABLE = `
+CREATE TABLE IF NOT EXISTS lesson (
+  id            INTEGER PRIMARY KEY,
+  project_id    INTEGER NOT NULL REFERENCES project(id),
+  assignment_id INTEGER NOT NULL REFERENCES assignment(id),
+  text          TEXT NOT NULL,
+  created_at    TEXT NOT NULL
+)`;
+
+/** An assignment's project, by the walk up from whichever of the three objectives it has.
+ *  Nothing below a project carries a project_id, so the walk is the only way to know. */
+const upFromTest = (test: string): string =>
+  `SELECT r.project_id
+     FROM acceptance_test x
+     JOIN acceptance_criteria c ON c.id = x.parent_id
+     JOIN requirement q ON q.id = c.requirement_id
+     JOIN story s ON s.id = q.story_id
+     JOIN epic e ON e.id = s.epic_id
+     JOIN release r ON r.id = e.release_id
+    WHERE x.id = ${test}`;
+const testOfTask = (task: string): string =>
+  `(SELECT t.acceptance_test_id FROM task t WHERE t.id = ${task})`;
+const taskOfTaskTest = (id: string): string =>
+  `(SELECT tt.parent_id FROM task_test tt WHERE tt.id = ${id})`;
+
+const PROJECT_OF = `SELECT CASE a.objective_type
+    WHEN 'task' THEN (${upFromTest(testOfTask("a.objective_id"))})
+    WHEN 'acceptance_test' THEN (${upFromTest("a.objective_id")})
+    WHEN 'task_test' THEN (${upFromTest(testOfTask(taskOfTaskTest("a.objective_id")))})
+  END
+  FROM assignment a WHERE a.id = ?`;
