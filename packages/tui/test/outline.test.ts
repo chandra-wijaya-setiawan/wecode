@@ -137,7 +137,9 @@ describe("what it opens at", () => {
   });
 
   it("shows every row's id and state beside it", () => {
-    expect(row("storefront")).toMatch(new RegExp(`^${tree.project}\\b`));
+    // A code, not a bare number — the outline draws rows through the same contract as
+    // every other list, and list.tsx is the one place that decides what a code looks like.
+    expect(row("storefront")).toMatch(new RegExp(`^#${tree.project}\\b`));
     expect(row("storefront")).toContain("in_progress");
     expect(row("password reset")).toContain("story");
   });

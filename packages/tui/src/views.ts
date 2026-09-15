@@ -22,7 +22,7 @@ const FILTERS = [
   "stale",
   "queued",
   "failed",
-  "roadmap",
+  "open",
   "delivered",
 ] as const;
 

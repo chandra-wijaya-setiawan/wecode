@@ -48,7 +48,7 @@ const ENTITY: Readonly<Record<keyof Board, StatefulEntity | null>> = {
   stale: "task",
   unproven: "acceptance_test",
   // Two tables in one box; board.ts tags which in the detail.
-  roadmap: null,
+  open: null,
   delivered: "story",
   unmergeable: "story",
 };
