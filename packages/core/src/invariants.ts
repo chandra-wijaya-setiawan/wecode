@@ -164,6 +164,65 @@ export function keepUnlanded(
   return found.filter((v) => !reached.has(v));
 }
 
+/** What one attempt to merge a story branch into the base came to. The same two shapes the
+ *  runner's own `land` returns, so a caller can hand its result straight here. */
+export type Landing =
+  | { readonly kind: "merged"; readonly sha: string }
+  | { readonly kind: "nothing"; readonly why: "no-branch" | "already-ancestor" };
+
+/** A story the base has not been told about yet, and the branch a tick would merge.
+ *
+ *  `landed_sha` is the whole guard. docs/design/14 — "merge once": a tick that sees the
+ *  commit recorded does nothing, which is what stops the second tick merging a story the
+ *  first one already landed. A boolean would do that too; a sha also says *as what*, so a
+ *  rewritten branch cannot go stale in silence.
+ *
+ *  Only `delivered` stories are here. A story still in progress has not asked to land, and
+ *  offering it would land half a story. */
+export function storiesToLand(s: Snapshot): readonly { readonly story: RecordNode; readonly branch: string }[] {
+  return of(s, "story")
+    .filter((n) => n.state === "delivered" && (n.landed_sha ?? null) === null)
+    .map((n) => ({ story: n, branch: storyBranch(n.slug) }));
+}
+
+/** Said of a story a tick declined to merge because the record already names the commit.
+ *  The words are the whole point of the marker, so they are said once and shared. */
+export const ALREADY_IN_THE_BASE = "already in the base";
+
+/** Why this story was not offered to the lander, or null when it was.
+ *
+ *  Kept apart from `storiesToLand` because the list is what a tick acts on and this is what
+ *  it says: a story skipped in silence reads exactly like a story nobody looked at, and that
+ *  is the report the repeating `merged 101,102,…` log came from. */
+export function landingSkipped(n: RecordNode): string | null {
+  const sha = n.landed_sha ?? null;
+  if (n.state !== "delivered") return `${n.state}, and only a delivered story lands`;
+  return sha === null ? null : `${ALREADY_IN_THE_BASE} as ${sha.slice(0, 12)}`;
+}
+
+/** What to record on the story once the merge has been attempted.
+ *
+ *  `sha` is the marker — the commit the base became — and null means no marker is owed.
+ *  `note` is the sentence for the ledger, because two of the three outcomes have something
+ *  true to say and no sha to say it with:
+ *
+ *  | outcome | marker | why |
+ *  |---|---|---|
+ *  | merged | the new head of the base | the commit the base became, which is the fact |
+ *  | already-ancestor | none | it is in the base inside somebody else's merge, and no commit here is the answer |
+ *  | no-branch | none | there is nothing in the base and nothing to merge; the accusation stands |
+ *
+ *  `already-ancestor` writing no marker is deliberate: `landed_sha` is a sha or it is
+ *  nothing, and inventing the base's head for a story that did not make it would name a
+ *  commit that is not this story's landing. */
+export function landingRecord(landing: Landing): { readonly sha: string | null; readonly note: string } {
+  if (landing.kind === "merged") return { sha: landing.sha, note: `landed as ${landing.sha.slice(0, 12)}` };
+  return {
+    sha: null,
+    note: landing.why === "already-ancestor" ? REACHED_INSIDE_ANOTHER_MERGE : NEVER_REACHED_THE_BASE,
+  };
+}
+
 /** An `in_progress` story has work under it: a shape with nothing in it is not in progress,
  *  it is empty. */
 export function storyInProgressHasARequirement(s: Snapshot): readonly Violation[] {
