@@ -211,7 +211,7 @@ export class Runner {
     const exhausted = this.enforceRetryLimit();
     // Last, and after settle(): a story becomes delivered in settle(), and the condition
     // this reads is about a story that already is.
-    const chores = await this.raiseStoryChores(acceptance.behind, acceptance.waiting);
+    const chores = await this.raiseStoryChores(acceptance.behind);
     // Raised first, then performed: a chore created on this tick is dispatched on it, and a
     // chore whose attempt has ended is judged before the tick says what is still owed.
     const performed = await this.performChores();
@@ -745,7 +745,7 @@ export class Runner {
    *  follows it: true again re-raises a chore that had settled, false closes one that had
    *  not. Neither is a timer and neither is a guess — this reads the branch against the base
    *  before it says either. */
-  private async raiseStoryChores(behind: readonly Behind[], waiting: readonly Waiting[] = []): Promise<number[]> {
+  private async raiseStoryChores(behind: readonly Behind[] = []): Promise<number[]> {
     const stories = this.db
       .prepare(
         `SELECT s.id AS id, s.slug AS slug, s.state AS state, rel.project_id AS project, p.repo AS repo
@@ -766,7 +766,10 @@ export class Runner {
         .catch(() => null);
       if (base === null) continue;
       const branch = `story/${story.slug}`;
-      open.push(...this.followRefresh(story, repo, branch, base, behind, waiting));
+      // `refresh` is about the tree wecode is judging in right now, and that is an
+      // in_progress story's. A story on hold or delivered is not being proved in, and for a
+      // delivered one `merge` below is the chore that is owed.
+      if (story.state === "in_progress") open.push(...(await this.followRefresh(story, repo, branch, base, behind)));
       if (story.state !== "delivered") continue;
       if (await this.mergesCleanly(repo, base, branch)) {
         // The other half of the same rule. The conflict is gone, so an open chore for it is
@@ -796,27 +799,34 @@ export class Runner {
     return open;
   }
 
-  /** The `refresh` chore, following the one condition proveStories already read.
+  /** The `refresh` chore, read off the branch.
    *
-   *  It is not re-read here on purpose. `proveStories` is the only thing that tries the
-   *  merge, and asking a second time would let the two disagree — the board saying the tree
-   *  is fine while the tests were skipped because it is not. A story `proveStories` did not
-   *  look at is a story this says nothing about: it neither raises nor closes. */
-  private followRefresh(
+   *  The condition is `merge-base --is-ancestor base branch` and nothing else — the same
+   *  question `refreshStoryTree` asks, asked again here rather than inherited from what the
+   *  proving pass happened to report. That is the whole point of the change: `proveStories`
+   *  looks only at an in_progress story with a ready or failed *script* acceptance test, so
+   *  an in_progress story whose tests are not scripts yet, or has none written, was invisible
+   *  to it and nothing was ever raised about a tree that was plainly behind. The graph knows
+   *  about all of them.
+   *
+   *  It also means the two can no longer disagree in the other direction. A story
+   *  `proveStories` skipped because this very chore is open used to need a `waiting` list to
+   *  stop the skip reading as "the tree took the base"; now the branch answers that itself,
+   *  and it says no, so the chore stays raised without being told.
+   *
+   *  `behind` is still taken, for one thing only: when the proving pass did try the merge,
+   *  its conflict is the better sentence to record against the chore than "does not contain".
+   *  It never decides whether the chore is owed. */
+  private async followRefresh(
     story: { id: number; slug: string; project: number },
     repo: string,
     branch: string,
     base: string,
     behind: readonly Behind[],
-    waiting: readonly Waiting[],
-  ): number[] {
-    const stale = behind.find((b) => b.story === story.id);
+  ): Promise<number[]> {
     const chore = choreFor(this.db, "refresh", "story", story.id);
-    // The literal case of "did not look at": the story was skipped because this very chore
-    // is open. Closing it here would say the tree took the base, which nothing checked.
-    if (waiting.some((w) => w.story === story.id)) return chore === null || chore.state === "done" ? [] : [chore.id];
-    if (stale === undefined) {
-      // The world moved: the tree took the base, so what was owed is not owed any more.
+    if (!(await this.isBehind(repo, branch, base))) {
+      // The world moved: the branch took the base, so what was owed is not owed any more.
       // `running` is left alone — a worker is in the tree on it, and the verdict is that
       // attempt's to give.
       if (chore !== null && chore.state !== "running") {
@@ -824,6 +834,7 @@ export class Runner {
       }
       return [];
     }
+    const why = behind.find((b) => b.story === story.id)?.why ?? `${branch} does not contain ${base}`;
     const raised = ensureChore(this.db, {
       project_id: story.project,
       kind: "refresh",
@@ -831,8 +842,18 @@ export class Runner {
       target_id: story.id,
       check: "the base is an ancestor of the branch",
     });
-    recordChoreRefusal(this.db, stale.why, raised.id);
+    recordChoreRefusal(this.db, why, raised.id);
     return raised.state === "done" ? [] : [raised.id];
+  }
+
+  /** Is this story's branch missing the base? Two things are not being behind rather than
+   *  being behind: a story cut on the base itself, and a branch that is not there at all —
+   *  a story nobody has started owes no merge, and asking git about a missing ref would
+   *  answer "no, it does not contain the base" and raise a chore with no tree to do it in. */
+  private async isBehind(repo: string, branch: string, base: string): Promise<boolean> {
+    if (branch === base) return false;
+    if (!(await this.hasCommit(repo, base)) || !(await this.hasCommit(repo, branch))) return false;
+    return !(await this.contains(repo, branch, base));
   }
 
   /** docs/design/18. The other half of a chore: judge the attempt that has ended, then hand
