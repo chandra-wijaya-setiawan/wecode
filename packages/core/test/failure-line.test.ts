@@ -22,6 +22,10 @@ const failTest = (
   );
 };
 
+/** What the board says about attempts on its own, before the last line is hung off it.
+ *  `failTask` exhausts the task, so this is the out-of-attempts wording. */
+const ATTEMPTS = "out of attempts · 3 of 3 · retry it with a reason, or drop it";
+
 describe("the last line of a failed test's output", () => {
   it("is the last line that has something on it", () => {
     expect(lastLine("running\n\nAssertionError: expected 2 to be 3\n\n")).toBe(
@@ -48,7 +52,7 @@ describe("the last line of a failed test's output", () => {
 
     const row = board(db).failed[0];
     expect(row?.id).toBe(tree.task);
-    expect(row?.detail).toBe("attempts 3/3 · expected the mailer to be called");
+    expect(row?.detail).toBe(`${ATTEMPTS} · expected the mailer to be called`);
   });
 
   it("falls back to the acceptance test when no task test is red", () => {
@@ -57,7 +61,7 @@ describe("the last line of a failed test's output", () => {
     failTask(db, tree.task);
     failTest(db, "acceptance_test", tree.acceptance, "no link arrived within 60s");
 
-    expect(board(db).failed[0]?.detail).toBe("attempts 3/3 · no link arrived within 60s");
+    expect(board(db).failed[0]?.detail).toBe(`${ATTEMPTS} · no link arrived within 60s`);
   });
 
   it("prefers the task's own test to the acceptance test above it", () => {
@@ -81,7 +85,7 @@ describe("the last line of a failed test's output", () => {
                '2026-09-14T00:00:00.000Z','the newer failure','2026-09-13T00:00:00.000Z','2026-09-13T00:00:00.000Z')`,
     ).run();
 
-    expect(board(db).failed[0]?.detail).toBe("attempts 3/3 · the newer failure");
+    expect(board(db).failed[0]?.detail).toBe(`${ATTEMPTS} · the newer failure`);
   });
 
   it("says only the attempts when the tests left no output", () => {
@@ -89,7 +93,7 @@ describe("the last line of a failed test's output", () => {
     const tree = seed(db);
     failTask(db, tree.task);
 
-    expect(board(db).failed[0]?.detail).toBe("attempts 3/3");
+    expect(board(db).failed[0]?.detail).toBe(ATTEMPTS);
     expect(board(db).failed[0]).not.toHaveProperty("output");
   });
 
