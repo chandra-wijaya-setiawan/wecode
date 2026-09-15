@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { commandOf } from "./checks.js";
 import type { Budget, ObjectiveType, Scope } from "./entities.js";
 import { loadMachines } from "./machines.js";
 import { now } from "./store.js";
@@ -53,6 +54,33 @@ function insert(db: DatabaseSync, table: string, row: Record<string, string | nu
     throw new CreateError(columns === undefined ? `${table}: ${message}` : taken(db, table, row, columns));
   }
   return (db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id;
+}
+
+/** The verdict states of acceptance_test, and the way out of each — a different verb from
+ *  each state, because the machine has a different one: `invalidate` from `passed`,
+ *  `reprove` from `failed`. Both used to say `invalidate`, and from `failed` that is not a
+ *  legal verb. The commands come from `COMMAND_REFUSALS` so that they are checked.
+ *
+ *  Belongs in the machine's
+ *  own config beside the states it names; it lives here until the task that owns
+ *  machines.yaml lands, and a state added there without a row here reads as unsettled. */
+const SETTLED: Record<string, string> = {
+  passed: `Re-prove it with \`${commandOf("create.settled.passed")}\`, or choose another parent.`,
+  failed: `Re-prove it with \`${commandOf("create.settled.failed")}\`, or choose another parent.`,
+  dropped: "Choose another parent: a dropped test is never re-proved.",
+};
+
+/** A parent that is planned or ready is fine — the verdict is still open. */
+function settled(db: DatabaseSync, acceptance_test_id: number): void {
+  const parent = db.prepare("SELECT state FROM acceptance_test WHERE id = ?").get(acceptance_test_id) as
+    | { state: string }
+    | undefined;
+  if (parent === undefined) return;
+  const remedy = SETTLED[parent.state];
+  if (remedy === undefined) return;
+  throw new CreateError(
+    `task: acceptance_test #${acceptance_test_id} is ${parent.state}, so a task under it could never be accepted. ${remedy}`,
+  );
 }
 
 /** Creates rows. Nothing here decides a state — every row starts where its machine says. */
@@ -124,21 +152,32 @@ export class Maker {
     });
   }
 
-  acceptanceTest(parent_id: number, statement: string, kind: TestKind, artefact: string | null = null): number {
+  acceptanceTest(
+    parent_id: number,
+    statement: string,
+    kind: TestKind,
+    artefact: string | null = null,
+    script_path: string | null = null,
+  ): number {
     return insert(this.db, "acceptance_test", {
       ...this.stamp("acceptance_test", slugify(statement)),
       parent_id,
       statement,
       kind,
       artefact,
+      script_path,
     });
   }
 
+  /** A task under a settled acceptance_test is work that could never be accepted: the parent
+   *  has already reached its verdict, and finishing the task cannot change it. Attached to a
+   *  failed test on 14 Sep, and the work was carried out for nothing. */
   task(
     acceptance_test_id: number,
     title: string,
     opts: { scope?: Scope; role?: string; budget?: Budget; max_retry?: number } = {},
   ): number {
+    settled(this.db, acceptance_test_id);
     return insert(this.db, "task", {
       ...this.stamp("task", slugify(title)),
       acceptance_test_id,
@@ -150,13 +189,20 @@ export class Maker {
     });
   }
 
-  taskTest(parent_id: number, statement: string, kind: TestKind, artefact: string | null = null): number {
+  taskTest(
+    parent_id: number,
+    statement: string,
+    kind: TestKind,
+    artefact: string | null = null,
+    script_path: string | null = null,
+  ): number {
     return insert(this.db, "task_test", {
       ...this.stamp("task_test", slugify(statement)),
       parent_id,
       statement,
       kind,
       artefact,
+      script_path,
     });
   }
 

@@ -1,9 +1,37 @@
 import { execFile } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 
+/** Symlinked temp roots and `..`-shaped paths are the same directory spelled differently. */
+const real = (path: string): string => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
+
 export class GitError extends Error {}
+
+/** What a landing did. Field report: `land` printed "story/x landed" whether the base
+ *  gained a commit or git said "Already up to date", so a story read unlanded on the next
+ *  sweep and nobody could tell the two apart. There is no third outcome: either the base
+ *  moved and there is a sha to show, or nothing happened and there is a reason. */
+export type Landing =
+  | { readonly kind: "merged"; readonly sha: string }
+  | { readonly kind: "nothing"; readonly why: "no-branch" | "already-ancestor" };
+
+/** One vocabulary for the outcome, so the cli and the runner cannot describe the same
+ *  landing differently. */
+export function landingReport(branch: string, base: string, landing: Landing): string {
+  if (landing.kind === "merged") return `${branch} landed on ${base}: ${landing.sha.slice(0, 12)}`;
+  return landing.why === "no-branch"
+    ? `nothing to land: there is no ${branch}`
+    : `nothing to land: ${branch} is already in ${base}`;
+}
 
 /** What cleanup did, and what it refused to do. The refusals are the half that matters:
  *  they are what the board reports instead of a deletion. */
@@ -79,12 +107,43 @@ export class Trees {
     return path;
   }
 
+  /** True when `ancestor` is reachable from `descendant`. */
+  private async isAncestor(path: string, ancestor: string, descendant: string): Promise<boolean> {
+    try {
+      await git(path, ["merge-base", "--is-ancestor", ancestor, descendant]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** The tree is cut `--detach`, so an attempt that commits for itself — a merge, a revert,
+   *  a rebase, or just an agent that ran `git commit` — moves HEAD and leaves the branch
+   *  where it was cut. Nothing else moves the ref, so that work becomes unreachable. Carried
+   *  forward here, before the working tree is committed on top of it. */
+  private async fastForwardToHead(path: string, branch: string): Promise<string | null> {
+    const head = await git(path, ["rev-parse", "HEAD"]);
+    const tip = await git(this.repo, ["rev-parse", `refs/heads/${branch}`]);
+    if (head === tip) return null;
+    if (!(await this.isAncestor(path, tip, head))) {
+      throw new GitError(
+        `commitAttempt refused ${path}: HEAD ${head} has diverged from ${branch} ${tip}; ` +
+          `no fast-forward can express it`,
+      );
+    }
+    await git(this.repo, ["update-ref", `refs/heads/${branch}`, head, tip]);
+    return head;
+  }
+
   /** Everything the attempt wrote, on its branch. A rejected attempt still commits: the
    *  next one must be able to see what is already there. */
   async commitAttempt(path: string, branch: string, message: string): Promise<string | null> {
+    await this.refuseBaseCheckout(path, "commitAttempt");
+    await this.refuseAttached(path, "commitAttempt");
+    const forwarded = await this.fastForwardToHead(path, branch);
     await git(path, ["add", "-A"]);
     const staged = await git(path, ["diff", "--cached", "--name-only"]);
-    if (staged === "") return null;
+    if (staged === "") return forwarded;
     await git(path, [
       "-c",
       "user.name=wecode",
@@ -103,13 +162,38 @@ export class Trees {
   /** Released once the attempt is committed — the branch is the surviving copy, and the
    *  directory beside it is a checkout held against a retry nobody has promised. */
   async release(path: string): Promise<void> {
+    await this.refuseBaseCheckout(path, "release");
+    await this.refuseAttached(path, "release");
     await git(this.repo, ["worktree", "remove", "--force", path]);
+  }
+
+  /** The primary checkout: the first tree git lists, and the one a person works in. */
+  private async rootPath(): Promise<string> {
+    const list = await git(this.repo, ["worktree", "list", "--porcelain"]).catch(() => "");
+    return /^worktree (.+)$/m.exec(list)?.[1] ?? this.repo;
+  }
+
+  /** A wecode attempt only ever commits in a detached worktree it cut. The primary checkout
+   *  belongs to a person: an `add -A` there stages their work, and a `worktree remove`
+   *  there is their repository. Named, with what was found, rather than silently skipped. */
+  private async refuseBaseCheckout(path: string, what: string): Promise<void> {
+    const top = await git(path, ["rev-parse", "--show-toplevel"]).catch(() => path);
+    if (real(top) !== real(await this.rootPath())) return;
+    throw new GitError(`${what} refused ${path}: it is the repository root`);
+  }
+
+  /** A branch checked out means the commit lands on a ref nobody pointed this attempt at. */
+  private async refuseAttached(path: string, what: string): Promise<void> {
+    const branch = await git(path, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "");
+    if (branch === "") return;
+    throw new GitError(`${what} refused ${path}: branch ${branch} is checked out, not detached`);
   }
 
   /** One reusable tree at the story branch tip. Acceptance tests run here, after the
    *  tasks they depend on have merged, and this is where a merge happens — the integration
    *  checkout is never touched. */
   async storyTree(storySlug: string, path: string): Promise<string> {
+    await this.refuseBaseCheckout(path, "storyTree");
     const branch = await this.storyBranch(storySlug);
     if (!(await this.isWorktree(path))) {
       await git(this.repo, ["worktree", "add", path, branch]);
@@ -204,21 +288,106 @@ export class Trees {
     }
   }
 
+  /** docs/design/14. Field report 105. The merge that lands a story belongs in the checkout
+   *  that holds the base branch, and nowhere else. Run from the story's own worktree,
+   *  `git merge story/x` merges the branch into itself: git says "Already up to date", the
+   *  operator is told it landed, and the base never gained the commit. Any other tree is
+   *  worse — a wrong-tree merge is how a conflicted merge commit reached master once — so
+   *  land never retargets silently. It names the tree it was called in, names the tree it
+   *  should be run in, and merges nothing. */
+  async landStory(storySlug: string, from: string): Promise<string> {
+    const landing = await this.land(storySlug, from);
+    if (landing.kind === "merged") return landing.sha;
+    throw new GitError(
+      `land story/${storySlug} did nothing: ${landingReport(`story/${storySlug}`, await this.integrationBranch(), landing)}`,
+    );
+  }
+
+  /** The same merge, reporting what it found instead of a sha it cannot always have. */
+  async land(storySlug: string, from: string): Promise<Landing> {
+    const branch = `story/${storySlug}`;
+    const base = await this.integrationBranch();
+    const here = real(await git(from, ["rev-parse", "--show-toplevel"]).catch(() => from));
+    const trees = await this.checkouts();
+    const baseTree = trees.find((c) => c.branch === base);
+    if (baseTree === undefined) {
+      throw new GitError(
+        `land ${branch} refused in ${here}: no checkout has ${base} checked out, ` +
+          `so there is no tree the merge into ${base} could happen in`,
+      );
+    }
+    if (here !== real(baseTree.path)) {
+      const holds = trees.find((c) => real(c.path) === here)?.branch;
+      const what = holds === branch
+        ? `it is the ${branch} worktree, and merging ${branch} there merges it into itself`
+        : holds === null || holds === undefined
+          ? "it is not the tree that holds the base branch"
+          : `it holds ${holds}, not ${base}`;
+      throw new GitError(
+        `land ${branch} refused in ${here}: ${what}. ` +
+          `Run it in ${baseTree.path}, the checkout that holds ${base}.`,
+      );
+    }
+    if (!(await this.has(branch))) return { kind: "nothing", why: "no-branch" };
+    // Asked before the merge, because git answers "Already up to date" and exit 0 for it —
+    // indistinguishable, afterwards, from a merge that happened.
+    if (await this.isAncestor(here, branch, "HEAD")) return { kind: "nothing", why: "already-ancestor" };
+    const before = await git(here, ["rev-parse", "HEAD"]);
+    await this.mergeInto(here, branch, `land ${branch}`, `land ${branch}`);
+    const sha = await git(here, ["rev-parse", "HEAD"]);
+    return sha === before ? { kind: "nothing", why: "already-ancestor" } : { kind: "merged", sha };
+  }
+
   /** Guarded by the task's tests passing. Runs in the story tree, so nothing an agent can
    *  be dispatched into is ever the tree holding the integration branch. */
   async mergeTaskIntoStory(taskBranch: string, storySlug: string, storyTreePath: string): Promise<void> {
+    await this.refuseBaseCheckout(storyTreePath, "mergeTaskIntoStory");
     const tree = await this.storyTree(storySlug, storyTreePath);
-    await git(tree, [
-      "-c",
-      "user.name=wecode",
-      "-c",
-      "user.email=wecode@localhost",
-      "merge",
-      "--no-ff",
-      "-q",
-      "-m",
-      `merge ${taskBranch}`,
+    await this.mergeInto(
+      tree,
       taskBranch,
-    ]);
+      `merge ${taskBranch}`,
+      `merge ${taskBranch} into story/${storySlug}`,
+    );
+  }
+
+  /** Every merge this class makes goes through here. A merge that conflicts exits non-zero
+   *  with the tree it ran in left mid-merge — a conflicted index, `MERGE_HEAD` written, and
+   *  half of someone else's branch in the working files. Nothing downstream wants that: the
+   *  story tree is reused by the next task merge and by the examiner, and the base checkout
+   *  belongs to a person. So the merge is aborted here and the caller is told which of the
+   *  two things is true, because the failure alone read the same either way.
+   *
+   *  Whether the abort worked is read back off the tree rather than off its exit code —
+   *  `merge --abort` also fails when there was no merge to abort, and such a tree is not
+   *  wedged. A tree still holding `MERGE_HEAD` is, and then the sentence has to say so. */
+  private async mergeInto(tree: string, branch: string, message: string, what: string): Promise<void> {
+    try {
+      await git(tree, [
+        "-c",
+        "user.name=wecode",
+        "-c",
+        "user.email=wecode@localhost",
+        "merge",
+        "--no-ff",
+        "-q",
+        "-m",
+        message,
+        branch,
+      ]);
+    } catch (err) {
+      await git(tree, ["merge", "--abort"]).catch(() => "");
+      const after = (await this.midMerge(tree))
+        ? `the merge would not abort: ${tree} is left mid-merge and wants a person`
+        : "no merge is left standing: the tree is as it was";
+      throw new GitError(`${what} failed: ${(err as Error).message} — ${after}`);
+    }
+  }
+
+  /** Is this tree still in the middle of a merge? `MERGE_HEAD` is git's own record of it,
+   *  and it lives in the tree's own git dir, not the repository's. */
+  private async midMerge(tree: string): Promise<boolean> {
+    const dir = await git(tree, ["rev-parse", "--absolute-git-dir"]).catch(() => "");
+    return dir !== "" && existsSync(join(dir, "MERGE_HEAD"));
   }
 }

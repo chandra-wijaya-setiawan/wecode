@@ -3,12 +3,13 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Budget } from "@wecode/core";
 import type { Observation, WorkerAdapter, Work } from "../ports.js";
+import { denialsIn, type WriteDenials } from "./denials.js";
 
 /** Claude Code, as a worker.
  *
  *  Everything harness-specific is here: the flags a scope becomes, the shape of what it
  *  prints, how a session is resumed. Nothing above this file learns which harness ran. */
-export class ClaudeCodeAdapter implements WorkerAdapter {
+export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
   readonly kind = "agent";
 
   constructor(
@@ -26,6 +27,19 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    *  a tick that waited for the agent could never start a second one, and the attention
    *  budget was unreachable. */
   private readonly live = new Map<number, Session>();
+
+  /** Writes the permission gate refused, per assignment, waiting to be carried to the
+   *  record. Kept outside `live` on purpose: a session that ends is dropped from `live` by
+   *  the poll that reads it, and the refusal that burned the attempt must outlive it — it
+   *  is the one thing the next reader of the board needs. */
+  private readonly denied = new Map<number, Set<string>>();
+
+  takeRefusedWrites(assignment: number): readonly string[] {
+    const paths = this.denied.get(assignment);
+    if (paths === undefined) return [];
+    this.denied.delete(assignment);
+    return [...paths];
+  }
 
   async start(work: Work): Promise<Observation> {
     return this.spawn(work, [
@@ -51,6 +65,23 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       return session.ended;
     }
     return { phase: "running", session: session.id ?? work.session ?? "", spent: session.spent };
+  }
+
+  /** Reattach to a session this process did not start. Claude Code keeps the transcript, so
+   *  `--resume` continues the attempt rather than beginning it again; the instruction goes
+   *  back in because the resumed run needs to know what it is still for. */
+  async resume(work: Work): Promise<Observation> {
+    if (work.session === null) return { phase: "failed", session: null, spent: zero(), reason: "lost" };
+    return this.spawn(work, [
+      "--resume",
+      work.session,
+      "-p",
+      this.prompt(work),
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      ...this.scopeFlags(work),
+    ]);
   }
 
   async answer(work: Work, answer: string): Promise<Observation> {
@@ -94,13 +125,53 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   private prompt(work: Work): string {
+    const lessons = work.lessons ?? [];
     return [
       work.instruction,
       "",
+      ...(lessons.length > 0
+        ? ["What earlier attempts on this repository learned:", ...lessons.map((l) => `- ${l}`), ""]
+        : []),
       `You may change only: ${work.scope.write.join(", ") || "(nothing)"}.`,
       "Write the tests that prove this work, and run them.",
       "If you need a decision from a person, say so and stop rather than guessing.",
+      ASK,
+      ...this.before(work),
     ].join("\n");
+  }
+
+  /** What happened before, for a retry. A first attempt gets nothing: no heading, no blank
+   *  line, exactly the prompt it would have got anyway.
+   *
+   *  The point is the commit. A new session remembers nothing, but the branch it is
+   *  standing on already holds the last attempt, so the choice is read it or redo it. */
+  private before(work: Work): string[] {
+    const h = work.history;
+    if (h === null) return [];
+    const out = [
+      "",
+      "## What happened before",
+      "",
+      `This is attempt ${h.attempts + 1}; ${plural(h.attempts)} already been made.`,
+    ];
+    if (h.commit !== null) {
+      out.push(
+        `The last attempt's work is already committed on this branch as ${h.commit} — read it` +
+          " with `git show " +
+          h.commit +
+          "` before changing anything, and do not redo what is already there.",
+      );
+    } else {
+      out.push("The last attempt left no commit on this branch.");
+    }
+    if (h.reason !== null) out.push(`It ended: ${h.reason}.`);
+    if (h.failures.length > 0) {
+      out.push("", "Still failing:");
+      for (const f of h.failures) {
+        out.push(f.line === "" ? `- ${f.statement}` : `- ${f.statement} — ${f.line}`);
+      }
+    }
+    return out;
   }
 
   /** Start a session and return at once. What it does afterwards lands in `live`, and the
@@ -113,10 +184,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       cwd: work.worktree,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const session: Session = { child, id: work.session, spent: zero(), ended: null };
+    const session: Session = { child, id: work.session, spent: zero(), ended: null, last: "" };
     this.live.set(work.id, session);
 
     let rest = "";
+    // Correlates a denied tool_result back to the tool_use that named the path, so it
+    // spans the whole stream rather than one chunk of it.
+    const asked = new Map<string, string>();
     child.stdout?.on("data", (chunk: Buffer) => {
       appendFileSync(log, chunk);
       rest += chunk.toString();
@@ -126,6 +200,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         const event = parse(line);
         if (event === null) continue;
         if (typeof event["session_id"] === "string") session.id = event["session_id"];
+        for (const path of denialsIn(event, asked, work.worktree)) {
+          const paths = this.denied.get(work.id) ?? new Set<string>();
+          paths.add(path);
+          this.denied.set(work.id, paths);
+        }
+        const text = textOf(event);
+        if (text !== null) session.last = text;
         const usage = event["usage"];
         if (usage !== null && typeof usage === "object") {
           const u = usage as Record<string, unknown>;
@@ -146,14 +227,22 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     });
 
     child.on("close", (code) => {
+      const lesson = lessonIn(session.last);
       session.ended =
         code === 0
-          ? { phase: "succeeded", session: session.id ?? "", spent: session.spent, commit: null }
+          ? {
+              phase: "succeeded",
+              session: session.id ?? "",
+              spent: session.spent,
+              commit: null,
+              ...(lesson === null ? {} : { lesson }),
+            }
           : {
               phase: "failed",
               session: session.id,
               spent: session.spent,
               reason: code === null ? "lost" : "other",
+              ...(lesson === null ? {} : { lesson }),
             };
     });
 
@@ -166,9 +255,47 @@ interface Session {
   id: string | null;
   spent: Budget;
   ended: Observation | null;
+  /** The most recent thing the session said, so the last one is still here at close. */
+  last: string;
 }
 
 const zero = (): Budget => ({ tokens: 0, seconds: 0 });
+
+/** The asking half of a lesson. One line, because a lesson that needs a paragraph is a
+ *  design document — see docs/design/17. */
+const ASK =
+  "If you learned something a future attempt on this repository should know, end your " +
+  "final message with a single line beginning LESSON:";
+
+/** The reading half. The last `LESSON:` line of the final message, or nothing: an agent
+ *  with nothing to say says nothing, and that must not be recorded as a lesson. */
+function lessonIn(message: string): string | null {
+  let found: string | null = null;
+  for (const line of message.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("LESSON:")) continue;
+    const body = trimmed.slice("LESSON:".length).trim();
+    if (body !== "") found = body;
+  }
+  return found;
+}
+
+/** What the session said, out of whichever event shape carried it. A `result` event is the
+ *  final message; an `assistant` event is one on the way to it. */
+function textOf(event: Record<string, unknown>): string | null {
+  if (typeof event["result"] === "string") return event["result"];
+  const message = event["message"];
+  if (message === null || typeof message !== "object") return null;
+  const content = (message as Record<string, unknown>)["content"];
+  if (!Array.isArray(content)) return null;
+  const parts = content
+    .filter((b): b is Record<string, unknown> => b !== null && typeof b === "object")
+    .filter((b) => b["type"] === "text" && typeof b["text"] === "string")
+    .map((b) => b["text"] as string);
+  return parts.length === 0 ? null : parts.join("\n");
+}
+
+const plural = (n: number): string => (n === 1 ? "one has" : `${n} have`);
 
 /** ours -> Claude Code's. An unmapped name is passed through, so a role can name a tool
  *  wecode has never heard of. */

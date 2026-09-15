@@ -11,6 +11,8 @@ import {
   databaseOf,
   listWorkspaces,
   loadRoles,
+  lessons,
+  dropLesson,
   tree,
   type Node,
   loadMachines,
@@ -19,6 +21,11 @@ import {
   workspaceDir,
   writePointer,
   readProjectConfig,
+  restate,
+  isRestatable,
+  RESTATABLE,
+  setArtefact,
+  setScriptPath,
   setTaskScope,
   STATEFUL,
   type StatefulEntity,
@@ -27,6 +34,8 @@ import {
   writeProjectConfig,
 } from "@wecode/core";
 import { plan } from "./plan.js";
+import { doctor } from "./doctor.js";
+import { delivered as deliveredStories } from "./delivered.js";
 
 const DB = (): string => currentDatabase();
 
@@ -52,6 +61,7 @@ function dispatch(argv: readonly string[]): number {
     return isStateful(what) ? entityHelp(what) : usage();
   }
   if (head === "board") return showBoard(rest);
+  if (head === "doctor") return doctor(rest);
   if (head === "init") return init();
   if (head === "answer") return answer(rest);
   if (head === "show") return show(rest);
@@ -62,6 +72,11 @@ function dispatch(argv: readonly string[]): number {
   if (head === "tree") return showTree(rest);
   if (head === "watch") return watch(rest);
   if (head === "wait") return wait(rest);
+  // Before verb(): `delivered` is a story state as well as a command, so falling through
+  // would read it as an entity and answer "delivered has no states".
+  if (head === "delivered") return deliveredStories(rest);
+  if (head === "lessons") return showLessons(rest);
+  if (head === "lesson") return lesson(rest);
   return verb(head, rest);
 }
 
@@ -473,6 +488,7 @@ function land(args: readonly string[]): number {
   }
 
   const branch = `story/${story.slug}`;
+  const base = headBranch();
 
   // The landing commit is the operator's, so it needs the operator's identity. wecode signs
   // an agent's attempt; it does not sign a person's merge.
@@ -485,6 +501,7 @@ function land(args: readonly string[]): number {
     );
   }
 
+  let sha: string;
   try {
     // Tracked changes only. An untracked file does not affect a merge, and git refuses on
     // its own if one would be overwritten — refusing here as well blocked a landing over
@@ -493,13 +510,146 @@ function land(args: readonly string[]): number {
     if (dirty !== "") {
       return fail(`your working tree has changes. Commit or stash them first:\n${dirty}`);
     }
-    execFileSync("git", ["merge", "--no-ff", "-m", `land ${branch}`, branch], { stdio: "inherit" });
+    // A delivered story whose branch is gone has nothing to merge, and calling that a
+    // landing is the reported defect. It is a failure, not a quiet success: the work is
+    // somewhere else, or nowhere.
+    if (!hasRef(branch)) return fail(nothingToLand(branch, base, "no-branch"));
+    // git answers "Already up to date" and exit 0 for a branch the base already holds, and
+    // that was indistinguishable, afterwards, from a merge that happened.
+    if (isAncestor(branch, "HEAD")) {
+      process.stdout.write(`${nothingToLand(branch, base, "already-ancestor")}\n`);
+      return 0;
+    }
+    const before = headSha();
+    try {
+      execFileSync("git", ["merge", "--no-ff", "-m", `land ${branch}`, branch], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      // A half-finished merge is the hazard: left in the tree, the next thing to commit —
+      // an agent, a hook, a person in a hurry — commits the conflict markers onto master.
+      // So the tree goes back exactly as it was found, and the conflict becomes a chore.
+      const conflicted = unmerged();
+      abortMerge();
+      const why = conflicted.length > 0
+        ? `${branch} conflicts with your branch in:\n${conflicted.map((f) => `  ${f}`).join("\n")}`
+        : `${branch} would not merge:\n${((err as { stderr?: string }).stderr ?? (err as Error).message).trim()}`;
+      return fail(
+        `${why}\n` +
+          "  the merge was aborted, so your tree is as you left it and the story has not landed.\n" +
+          `  the story needs a merge chore: rebase or merge your branch into ${branch}, redeliver, then land again.`,
+      );
+    }
+    sha = headSha();
+    if (sha === before) {
+      process.stdout.write(`${nothingToLand(branch, base, "already-ancestor")}\n`);
+      return 0;
+    }
   } catch (err) {
     return fail(`git: ${(err as Error).message}`);
   }
 
-  process.stdout.write(`${branch} landed\n`);
+  recordLanding(conn, id, branch, sha);
+  process.stdout.write(`${branch} landed on ${base}: ${sha.slice(0, 12)}\n`);
   return 0;
+}
+
+/** Why nothing happened. Same two reasons, and the same words, as the runner's own
+ *  `landingReport`: an operator reading one and a log line from the other must not have to
+ *  work out whether they mean the same thing. */
+function nothingToLand(branch: string, base: string, why: "no-branch" | "already-ancestor"): string {
+  return why === "no-branch"
+    ? `nothing to land: there is no ${branch}`
+    : `nothing to land: ${branch} is already in ${base}`;
+}
+
+/** The branch the operator is standing on, or the sha when they are detached. */
+function headBranch(): string {
+  const named = gitSay(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  return named === "" ? headSha().slice(0, 12) : named;
+}
+
+const headSha = (): string => gitSay(["rev-parse", "HEAD"]);
+
+const hasRef = (ref: string): boolean => gitSay(["rev-parse", "--verify", "--quiet", ref]) !== "";
+
+/** True when the base already holds every commit on `ref`. */
+function isAncestor(ref: string, of: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", ref, of], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function gitSay(args: readonly string[]): string {
+  try {
+    return execFileSync("git", [...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return "";
+  }
+}
+
+/** The landing, where a query can see it. The doctor's first invariant reads `landed_branch`
+ *  through the story's tasks, and it reported stories unlanded that were sitting in the base
+ *  because this path merged and recorded nothing. Written here, on the path that actually
+ *  merges, and nowhere else. */
+function recordLanding(
+  conn: ReturnType<typeof db>,
+  storyId: number,
+  branch: string,
+  sha: string,
+): void {
+  // The runner owns this table and creates it on its first merge; a repository landed by
+  // hand may never have run a tick.
+  conn.exec(
+    `CREATE TABLE IF NOT EXISTS landed_branch (
+       task_id   INTEGER PRIMARY KEY,
+       branch    TEXT NOT NULL,
+       sha       TEXT NOT NULL,
+       merged_at TEXT NOT NULL
+     )`,
+  );
+  const tasks = conn
+    .prepare(
+      `SELECT t.id AS id FROM task t
+         JOIN acceptance_test a ON a.id = t.acceptance_test_id
+         JOIN acceptance_criteria c ON c.id = a.parent_id
+         JOIN requirement q ON q.id = c.requirement_id
+        WHERE q.story_id = ?`,
+    )
+    .all(storyId) as unknown as { id: number }[];
+  const at = new Date().toISOString();
+  for (const t of tasks) {
+    conn
+      .prepare(
+        `INSERT INTO landed_branch (task_id, branch, sha, merged_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT (task_id) DO UPDATE SET branch = excluded.branch, sha = excluded.sha,
+                                               merged_at = excluded.merged_at`,
+      )
+      .run(t.id, branch, sha, at);
+  }
+}
+
+/** The paths git left with conflict markers, read before the merge is undone. */
+function unmerged(): string[] {
+  try {
+    const out = execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], { encoding: "utf8" });
+    return out.split("\n").filter((l) => l !== "");
+  } catch {
+    return [];
+  }
+}
+
+/** Best effort: if the merge never started there is nothing to abort, and saying so helps nobody. */
+function abortMerge(): void {
+  try {
+    execFileSync("git", ["merge", "--abort"], { stdio: "ignore" });
+  } catch {
+    /* no merge in progress */
+  }
 }
 
 function gitConfig(key: string): string {
@@ -510,19 +660,60 @@ function gitConfig(key: string): string {
   }
 }
 
-/** `wecode show <entity> <id>` — one record, and what hangs off it. */
+/** Which table each entity is, what names one, and the row it hangs off. The one place
+ *  the shape of the tree is written down in this client — `where`, `show` and the missing-id
+ *  answer all read it rather than each carrying their own copy. */
+const ENTITIES: Readonly<Record<string, { label: string; parent?: { table: string; fk: string } }>> = {
+  workspace: { label: "name" },
+  project: { label: "name", parent: { table: "workspace", fk: "workspace_id" } },
+  release: { label: "version", parent: { table: "project", fk: "project_id" } },
+  epic: { label: "title", parent: { table: "release", fk: "release_id" } },
+  story: { label: "title", parent: { table: "epic", fk: "epic_id" } },
+  requirement: { label: "statement", parent: { table: "story", fk: "story_id" } },
+  acceptance_criteria: { label: "statement", parent: { table: "requirement", fk: "requirement_id" } },
+  acceptance_test: { label: "statement", parent: { table: "acceptance_criteria", fk: "parent_id" } },
+  task: { label: "title", parent: { table: "acceptance_test", fk: "acceptance_test_id" } },
+  task_test: { label: "statement", parent: { table: "task", fk: "parent_id" } },
+  assignment: { label: "slug" },
+  role: { label: "name" },
+  worker: { label: "name" },
+};
+
+/** `wecode show <entity> <id>` — one record, whatever state it is in, and where it lives.
+ *
+ *  A record is shown in every state, dropped and done included: somebody reading an id out of
+ *  old notes is asking what became of it, and a refusal answers that with silence. When the id
+ *  is not there at all, the ids that are there are the answer — the epic did not vanish, it was
+ *  rebuilt under another number, and only a list of the live ones says so. */
 function show(args: readonly string[]): number {
   const [entity, raw] = args;
   const id = Number(raw);
   if (entity === undefined || !Number.isInteger(id)) return fail("wecode show <entity> <id>");
+  if (ENTITIES[entity] === undefined) {
+    return fail(`no entity called ${entity}. There is ${Object.keys(ENTITIES).join(", ")}`);
+  }
   const conn = db();
   const row = conn.prepare(`SELECT * FROM ${entity} WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
-  if (row === undefined) return fail(`no ${entity} #${id}`);
+  if (row === undefined) return fail(instead(conn, entity, id));
   for (const [k, v] of Object.entries(row)) {
     if (v === null || v === "") continue;
     process.stdout.write(`${k.padEnd(18)} ${String(v)}\n`);
   }
+  const owner = projectOf(entity, id);
+  if (owner !== null) process.stdout.write(`${"project".padEnd(18)} #${owner.id} ${owner.name}\n`);
   return 0;
+}
+
+/** What to say about an id that is not there: the ids of that entity that are. */
+function instead(conn: ReturnType<typeof db>, entity: string, id: number): string {
+  const label = ENTITIES[entity]?.label ?? "slug";
+  const rows = conn
+    .prepare(`SELECT id, ${label} AS label FROM ${entity} ORDER BY id`)
+    .all() as unknown as { id: number; label: string }[];
+  if (rows.length === 0) return `no ${entity} #${id}, and no ${entity} at all yet.`;
+  const shown = rows.slice(0, 20).map((r) => `  #${r.id}  ${String(r.label)}`);
+  const more = rows.length > shown.length ? [`  … and ${rows.length - shown.length} more`] : [];
+  return [`no ${entity} #${id}. These ${entity} ids exist:`, ...shown, ...more].join("\n");
 }
 
 /** Every command but init and onboard needs a database. A missing one is the commonest
@@ -578,7 +769,7 @@ function showBoard(args: readonly string[]): number {
     ["STALE", b.stale],
     ["QUEUE", b.queued],
     ["FAILED", b.failed],
-    ["ROADMAP", b.roadmap],
+    ["OPEN", b.open],
   ];
   for (const [title, rows] of groups) {
     process.stdout.write(`\n${title} (${rows.length})\n`);
@@ -596,13 +787,73 @@ function showBoard(args: readonly string[]): number {
   return 0;
 }
 
+/** `wecode lessons [--project N]` — what earlier attempts on this repository learned.
+ *
+ *  Each line carries the assignment that learned it and how old it is, because those are
+ *  what a suspicious lesson is judged on: a lesson is a note about a world that changes. */
+function showLessons(args: readonly string[]): number {
+  const { values } = parseArgs({ args: [...args], options: { project: { type: "string" } } });
+  const chosen = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
+  if (chosen === null) {
+    return fail("no project here. wecode lessons --project <id>");
+  }
+  if (!Number.isInteger(chosen)) return fail("wecode lessons --project <id>");
+
+  const conn = db();
+  const found = lessons(conn, chosen);
+  if (found.length === 0) {
+    process.stdout.write("no lessons here yet\n");
+    return 0;
+  }
+  for (const l of found) {
+    const from = l.assignment_id === null ? "by hand" : assignmentName(conn, l.assignment_id);
+    process.stdout.write(`  #${String(l.id).padStart(3)}  ${l.text}\n`);
+    process.stdout.write(`        ${grey(`${from} · ${age(l.created_at)}`)}\n`);
+  }
+  return 0;
+}
+
+/** The assignment a lesson came from, so a suspicious one can be traced back to the attempt
+ *  that wrote it. The foreign key is what makes the row certain to be there. */
+function assignmentName(conn: ReturnType<typeof open>, id: number): string {
+  const row = conn.prepare("SELECT slug FROM assignment WHERE id = ?").get(id) as
+    | { slug: string }
+    | undefined;
+  return row === undefined ? `assignment #${id}` : `${row.slug} #${id}`;
+}
+
+function age(at: string): string {
+  const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(at)) / 60_000));
+  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)}h ago`;
+  return `${Math.floor(minutes / (60 * 24))}d ago`;
+}
+
+/** `wecode lesson drop <id>` — the operator's call, like everything else that is a
+ *  judgement. A wrong lesson is worse than none, so this is one command with no ceremony. */
+function lesson(args: readonly string[]): number {
+  const [name, raw] = args;
+  if (name !== "drop") return fail("wecode lesson drop <id>");
+  const id = Number(raw);
+  if (!Number.isInteger(id)) return fail("wecode lesson drop <id>");
+  if (!dropLesson(db(), id)) return fail(`no lesson #${id}`);
+  process.stdout.write(`lesson #${id} dropped\n`);
+  return 0;
+}
+
 /** `wecode <entity> <verb> [id|args]` — the surface in docs/design/06. */
 function verb(entity: string, rest: readonly string[]): number {
   const [name, ...args] = rest;
   if (name === undefined) return fail(`wecode ${entity} <verb> …`);
 
-  if (name === "create") return create(entity, args);
-  if (name === "scope") return scope(entity, args);
+  // parseArgs would call --help an unknown option. It is the one place a newcomer looks
+  // for create's flags, so answer it here, before the flags are parsed at all.
+  const asked = args.some((a) => a === "--help" || a === "-h");
+  if (name === "create") return asked ? createHelp(entity) : create(entity, args);
+  if (name === "scope") return asked ? scopeHelp() : scope(entity, args);
+  if (name === "artefact") return asked ? artefactHelp() : artefact(entity, args);
+  if (name === "restate") return asked ? restateHelp() : restateVerb(entity, args);
+  if (name === "retry" && entity === "task") return retry(args);
 
   if (!isStateful(entity)) return fail(`${entity} has no states; its only verb is create`);
   const id = Number(args[0]);
@@ -615,6 +866,48 @@ function verb(entity: string, rest: readonly string[]): number {
   for (const c of out.changes) {
     process.stdout.write(`${c.entity} #${c.id}  ${c.from} → ${c.to}${c.automatic ? "  (cascade)" : ""}\n`);
   }
+  return 0;
+}
+
+/** `wecode task retry <id> --reason "<text>"` — the way back from failed.
+ *
+ *  The reason is required, and attempts go back to zero: a retry with the counter left at
+ *  the limit fails the guard again on the next tick, which is how an exhausted task
+ *  dangles. The runner never comes down this path — it can push a task to failed and no
+ *  further, because a fourth attempt is a judgement about why the first three did not
+ *  work. The reason rides on the ledger's actor, which is the only column that survives
+ *  with the transition it explains. */
+function retry(args: readonly string[]): number {
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { reason: { type: "string" } },
+  });
+  const id = Number(positionals[0]);
+  const reason = (values.reason ?? "").trim();
+  if (!Number.isInteger(id) || reason === "") {
+    return fail('wecode task retry <id> --reason "<why a further attempt will go differently>"');
+  }
+
+  const wrong = elsewhere("task", id);
+  if (wrong !== null) return fail(wrong);
+
+  const conn = db();
+  const before = conn.prepare("SELECT attempts, max_retry FROM task WHERE id = ?").get(id) as
+    | { attempts: number; max_retry: number }
+    | undefined;
+  if (before === undefined) return fail(`no task #${id}`);
+
+  const who = process.env["WECODE_ACTOR"] ?? "operator";
+  const out = new Engine(conn).apply("task", id, "retry", `${who}: ${reason}`);
+  if (!out.ok) return fail(out.why);
+  // After the transition: a refused retry must not leave the counter reset behind it.
+  conn.prepare("UPDATE task SET attempts = 0, updated_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+
+  for (const c of out.changes) {
+    process.stdout.write(`${c.entity} #${c.id}  ${c.from} → ${c.to}${c.automatic ? "  (cascade)" : ""}\n`);
+  }
+  process.stdout.write(`attempts ${before.attempts} → 0 of ${before.max_retry}  ·  ${who}: ${reason}\n`);
   return 0;
 }
 
@@ -649,6 +942,132 @@ function scope(entity: string, args: readonly string[]): number {
   } catch (err) {
     return fail((err as Error).message);
   }
+}
+
+/** `wecode acceptance_test artefact <id> --set "bash test/mail.sh" [--script-path test/mail.sh]`
+ *
+ *  Without this the only cure for a wrongly typed artefact was to drop the test, which
+ *  cascades its parent to a settled state and cannot be undone. */
+function artefact(entity: string, args: readonly string[]): number {
+  if (entity !== "acceptance_test" && entity !== "task_test") {
+    return fail("only an acceptance_test or a task_test carries an artefact");
+  }
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { set: { type: "string" }, "script-path": { type: "string" } },
+  });
+  const id = Number(positionals[0]);
+  const how = `wecode ${entity} artefact <id> --set "<cmd>" [--script-path <path>]`;
+  if (!Number.isInteger(id)) return fail(how);
+
+  // The same guard scope has: ids are global, and this one writes.
+  const wrong = elsewhere(entity, id);
+  if (wrong !== null) return fail(wrong);
+
+  const path = values["script-path"];
+  if (values.set === undefined && path === undefined) return fail(how);
+
+  try {
+    if (values.set !== undefined) {
+      setArtefact(db(), entity, id, values.set);
+      process.stdout.write(`${entity} #${id} artefact ${values.set}\n`);
+    }
+    if (path !== undefined) {
+      // An empty --script-path clears it: the path is spec, and a test may stop having one.
+      setScriptPath(db(), entity, id, path.trim() === "" ? null : path);
+      process.stdout.write(
+        path.trim() === ""
+          ? `${entity} #${id} script path cleared\n`
+          : `${entity} #${id} script path ${path}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+}
+
+/** `wecode story restate <id> --to "the words that are right"`
+ *
+ *  The cure for a typo. Before this the only route was to drop the record and create it
+ *  again, which costs the slug (taken forever, so the replacement must be worded round it),
+ *  a drop event on the ledger for what was a typo, and every record citing the id, which
+ *  now points at a dropped row.
+ *
+ *  It takes only words. There is no flag here that names a state, and none is accepted:
+ *  what happened to a record is a verdict, and a verdict is not a thing you retype. */
+function restateVerb(entity: string, args: readonly string[]): number {
+  if (!isRestatable(entity)) {
+    return fail(`only ${Object.keys(RESTATABLE).join(", ")} carry prose to restate`);
+  }
+  const how = `wecode ${entity} restate <id> --to "<the words that are right>"`;
+  let values: { to?: string };
+  let positionals: string[];
+  try {
+    ({ values, positionals } = parseArgs({
+      args: [...args],
+      allowPositionals: true,
+      options: { to: { type: "string" } },
+    }));
+  } catch {
+    // An unknown flag — `--state` among them — is the usage line, not a crash.
+    return fail(how);
+  }
+  const id = Number(positionals[0]);
+  if (!Number.isInteger(id) || values.to === undefined) return fail(how);
+
+  // The same guard scope and artefact have: ids are global, and this one writes.
+  const wrong = elsewhere(entity, id);
+  if (wrong !== null) return fail(wrong);
+
+  try {
+    const who = process.env["WECODE_ACTOR"] ?? "operator";
+    const said = restate(db(), entity, id, values.to, who);
+    process.stdout.write(`${entity} #${id} restated  was "${said.was}"  now "${said.now}"\n`);
+    return 0;
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+}
+
+function restateHelp(): number {
+  process.stdout.write(
+    [
+      `wecode <${Object.keys(RESTATABLE).join("|")}> restate <id> --to "<words>"`,
+      "",
+      "  correct the wording of a record without dropping it. the old wording goes on",
+      "  the ledger, so the correction is itself part of the record.",
+      "",
+      "  the slug does not move: worktrees and branches are named after it.",
+      "  this corrects words only — it can never change a state.",
+      "",
+      '  wecode story restate 201 --to "the typescript build ships a bundle"',
+      "",
+      "",
+    ].join("\n"),
+  );
+  return 0;
+}
+
+function artefactHelp(): number {
+  process.stdout.write(
+    [
+      "wecode <acceptance_test|task_test> artefact <id> [flags]",
+      "",
+      "  the command that proves the test, and where its script is meant to live.",
+      "  changing the command clears any recorded red-at-base run: that run proved",
+      "  something about the old command.",
+      "",
+      "  --set <cmd>          the command — refused when it is empty",
+      "  --script-path <path> where the script lives (empty to clear it)",
+      "",
+      '  wecode acceptance_test artefact 1 --set "bash test/mail.sh" --script-path test/mail.sh',
+      "",
+      "",
+    ].join("\n"),
+  );
+  return 0;
 }
 
 function create(entity: string, args: readonly string[]): number {
@@ -740,46 +1159,36 @@ function project(): ReturnType<typeof readProjectConfig> {
   return readProjectConfig(resolve(process.cwd(), "config/project.yaml"));
 }
 
-/** The project a row belongs to, by walking up. Null when the entity has no project. */
+/** The project a row belongs to, by walking the tree up one link at a time. Null for the
+ *  entities that hang off no project at all — a worker, a role, the workspace itself. */
 function projectOf(entity: string, id: number): { id: number; name: string; repo: string } | null {
-  const up: Readonly<Record<string, string>> = {
-    release: "SELECT p.id, p.name, p.repo FROM release x JOIN project p ON p.id = x.project_id WHERE x.id = ?",
-    epic: "SELECT p.id, p.name, p.repo FROM epic x JOIN release r ON r.id = x.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    story:
-      "SELECT p.id, p.name, p.repo FROM story x JOIN epic e ON e.id = x.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    requirement:
-      "SELECT p.id, p.name, p.repo FROM requirement x JOIN story s ON s.id = x.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    acceptance_criteria:
-      "SELECT p.id, p.name, p.repo FROM acceptance_criteria x JOIN requirement q ON q.id = x.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    acceptance_test:
-      "SELECT p.id, p.name, p.repo FROM acceptance_test x JOIN acceptance_criteria c ON c.id = x.parent_id JOIN requirement q ON q.id = c.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    task: "SELECT p.id, p.name, p.repo FROM task x JOIN acceptance_test a ON a.id = x.acceptance_test_id JOIN acceptance_criteria c ON c.id = a.parent_id JOIN requirement q ON q.id = c.requirement_id JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE x.id = ?",
-    project: "SELECT p.id, p.name, p.repo FROM project p WHERE p.id = ?",
-  };
-  const sql = up[entity];
-  if (sql === undefined) return null;
-  try {
-    return (db().prepare(sql).get(id) as { id: number; name: string; repo: string } | undefined) ?? null;
-  } catch {
-    return null;
+  const conn = db();
+  let here = entity;
+  let at = id;
+  // The chain is nine deep at most; the bound stops a cycle in bad data spinning forever.
+  for (let step = 0; step <= Object.keys(ENTITIES).length; step += 1) {
+    if (here === "project") {
+      return (
+        (conn.prepare("SELECT id, name, repo FROM project WHERE id = ?").get(at) as
+          | { id: number; name: string; repo: string }
+          | undefined) ?? null
+      );
+    }
+    const up = ENTITIES[here]?.parent;
+    if (up === undefined) return null;
+    const row = conn.prepare(`SELECT ${up.fk} AS pid FROM ${here} WHERE id = ?`).get(at) as
+      | { pid: number }
+      | undefined;
+    if (row === undefined) return null;
+    here = up.table;
+    at = row.pid;
   }
+  return null;
 }
-
-/** The parent entity a child of this kind hangs off. */
-const PARENT_OF: Readonly<Record<string, string>> = {
-  release: "project",
-  epic: "release",
-  story: "epic",
-  requirement: "story",
-  acceptance_criteria: "requirement",
-  acceptance_test: "acceptance_criteria",
-  task: "acceptance_test",
-  task_test: "task",
-};
 
 /** Refuse a parent whose project is not the one this repository is. */
 function crossesProject(entity: string, parent: number): string | null {
-  const parentEntity = PARENT_OF[entity];
+  const parentEntity = ENTITIES[entity]?.parent?.table;
   if (parentEntity === undefined || parentEntity === "project") return null;
   return elsewhere(parentEntity, parent);
 }
@@ -805,23 +1214,13 @@ function elsewhere(entity: string, id: number): string | null {
 
 /** The parent this row hangs off, named. */
 function where(entity: string, id: number): string {
-  const parents: Readonly<Record<string, { table: string; fk: string; label: string }>> = {
-    project: { table: "workspace", fk: "workspace_id", label: "name" },
-    release: { table: "project", fk: "project_id", label: "name" },
-    epic: { table: "release", fk: "release_id", label: "version" },
-    story: { table: "epic", fk: "epic_id", label: "title" },
-    requirement: { table: "story", fk: "story_id", label: "title" },
-    acceptance_criteria: { table: "requirement", fk: "requirement_id", label: "statement" },
-    acceptance_test: { table: "acceptance_criteria", fk: "parent_id", label: "statement" },
-    task: { table: "acceptance_test", fk: "acceptance_test_id", label: "statement" },
-    task_test: { table: "task", fk: "parent_id", label: "title" },
-  };
-  const up = parents[entity];
-  if (up === undefined) return "";
+  const up = ENTITIES[entity]?.parent;
+  const column = up === undefined ? undefined : ENTITIES[up.table]?.label;
+  if (up === undefined || column === undefined) return "";
   try {
     const row = db()
       .prepare(
-        `SELECT p.id AS id, p.${up.label} AS label FROM ${entity} c JOIN ${up.table} p ON p.id = c.${up.fk} WHERE c.id = ?`,
+        `SELECT p.id AS id, p.${column} AS label FROM ${entity} c JOIN ${up.table} p ON p.id = c.${up.fk} WHERE c.id = ?`,
       )
       .get(id) as { id: number; label: string } | undefined;
     if (row === undefined) return "";
@@ -869,6 +1268,8 @@ function usage(): number {
       "MAKING WORK",
       '  wecode <entity> create --parent <id> "<text>" [--artefact "<cmd>"] [--role <name>]',
       '  wecode task scope <id> --write "a.ts,b.ts"  which files that task may change',
+      '  wecode <test> artefact <id> --set "<cmd>"   fix the command a test is proved by',
+      '  wecode <entity> restate <id> --to "<words>" fix the wording, keeping the slug',
       "  wecode plan <file.yaml> [--epic <id>]      a whole story as one document (--dry-run to look)",
       "  wecode worker create <name> --role engineer --kind agent",
       "",
@@ -883,6 +1284,10 @@ function usage(): number {
       "  wecode watch [--project N] [--json]        one line per state change, forever (--once to drain)",
       "  wecode wait <entity> <id>                  block until it settles; the exit code is the answer",
       "  wecode <entity> --help                     that entity's states and verbs",
+      "  wecode delivered [--all] [--project N]     what wecode can already do (--json)",
+      "  wecode lessons [--project N]               what earlier attempts here learned",
+      "  wecode lesson drop <id>                    a wrong lesson is worse than none",
+      "  wecode doctor                              one pass of the invariants; non-zero if any is broken",
       "",
       "RUNNING",
       "  wecode-runner --once                       one tick: allocate, run an agent, prove, land",
@@ -895,6 +1300,69 @@ function usage(): number {
       "  a task needs a scope, a role and a task_test that is ready before it can start",
       "  two tasks whose write scopes overlap will not run at the same time",
       "  a failing test is the answer — make another task, do not edit the code by hand",
+      "",
+    ].join("\n"),
+  );
+  return 0;
+}
+
+/** Which flags each entity's create reads, and what one call looks like. Kept beside the
+ *  switch in create() — the two must agree, and nothing else can check that they do. */
+const CREATE_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  workspace: ["path"],
+  project: ["parent", "path"],
+  release: ["parent"],
+  epic: ["parent"],
+  story: ["parent"],
+  requirement: ["parent"],
+  acceptance_criteria: ["parent"],
+  acceptance_test: ["parent", "kind", "artefact"],
+  task_test: ["parent", "kind", "artefact"],
+  task: ["parent", "role"],
+  worker: ["role", "kind"],
+};
+
+const FLAG_MEANS: Readonly<Record<string, string>> = {
+  parent: "<id>     the record it hangs off — required, and ids are global",
+  path: "<dir>      where the repository is (default: the current directory)",
+  kind: "<kind>     acceptance_test / task_test: how it is run; worker: agent or human",
+  artefact: "<cmd>  the command that proves it (default: this project's test command)",
+  role: "<name>     which role does the work",
+};
+
+const CREATE_EXAMPLE: Readonly<Record<string, string>> = {
+  workspace: 'wecode workspace create "acme" --path .',
+  project: 'wecode project create --parent 1 "storefront" --path .',
+  acceptance_test: 'wecode acceptance_test create --parent 1 "mail arrives" --artefact "bash mail.sh"',
+  task_test: 'wecode task_test create --parent 1 "mailer called" --artefact "vitest run"',
+  task: 'wecode task create --parent 1 "send the mail" --role engineer',
+  worker: "wecode worker create ada --role engineer --kind agent",
+};
+
+function createHelp(entity: string): number {
+  const flags = CREATE_FLAGS[entity];
+  if (flags === undefined) return fail(`no such entity: ${entity}`);
+
+  const example = CREATE_EXAMPLE[entity] ?? `wecode ${entity} create --parent 1 "<text>"`;
+  const lines = [`wecode ${entity} create [flags] "<text>"`, "", "  the text is everything that is not a flag", ""];
+  for (const f of flags) lines.push(`  --${f} ${FLAG_MEANS[f]}`);
+  process.stdout.write(`${lines.join("\n")}\n\n  ${example}\n\n`);
+  return 0;
+}
+
+function scopeHelp(): number {
+  process.stdout.write(
+    [
+      "wecode task scope <id> [flags]",
+      "",
+      "  which files that task may change, and which tools its agent may use.",
+      "  two tasks whose write scopes overlap will not run at the same time.",
+      "",
+      "  --write <globs>  comma-separated (default: this project's source and test paths)",
+      "  --tools <names>  comma-separated (default: bash,read,edit,write)",
+      "",
+      '  wecode task scope 1 --write "src/**,tests/**" --tools bash,read',
+      "",
       "",
     ].join("\n"),
   );

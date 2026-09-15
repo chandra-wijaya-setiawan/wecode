@@ -15,9 +15,21 @@ export interface Board {
   readonly needs_human: readonly Row[];
   readonly queued: readonly Row[];
   readonly failed: readonly Row[];
-  readonly roadmap: readonly Row[];
+  readonly dropped: readonly Row[];
+  readonly unproven: readonly Row[];
+  /** Every epic and story still open — planned and in_progress alike, not future work. */
+  readonly open: readonly Row[];
   readonly delivered: readonly Row[];
+  readonly unmergeable: readonly Row[];
 }
+
+/** Whether a branch merges is a fact about the repository, so the runner owns both the
+ *  observation and the table it lands in — `land_conflict (story_id, branch, reason, at)`,
+ *  created beside the record the way `landed_branch` and `red_at_base` are. A workspace
+ *  that has never run a lander has no such table, and that is not an error: it is a board
+ *  with nothing recorded against it. */
+export const hasTable = (db: DatabaseSync, name: string): boolean =>
+  db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
 
 /** The project a row belongs to, as an expression over the id of its row. Every group but
  *  `projects` hangs somewhere under a project, and the walk up is the only way to know
@@ -40,6 +52,49 @@ const ofAssignment = (alias: string): string =>
       WHEN 'task_test' THEN ${ofTask(`(SELECT tt.parent_id FROM task_test tt WHERE tt.id = ${alias}.objective_id)`)}
     END)`;
 
+/** A chore the last pass could not dispatch, said beside the tasks it could not start.
+ *
+ *  Same table, same shape, same wording as a task's: the operator asking "why has nothing
+ *  moved" does not care which id space the answer is in, and three merge chores sitting in
+ *  `planned` for half an hour with no reason on the board is the whole complaint. A chore
+ *  carries its project_id, so the walk up that every other group does is not needed here.
+ *
+ *  No `passes >= 3` here, unlike a task's: a task that is merely queued says its reason in
+ *  `queued`, and a chore has no such box, so the first pass that refuses it is the first
+ *  chance anyone has to read why.
+ *
+ *  `chore_refusal` arrives with the chore migration; a workspace older than it has no such
+ *  table, and that is a board with nothing recorded against it rather than an error. */
+const choreRefusals = (db: DatabaseSync): string =>
+  !hasTable(db, "chore_refusal")
+    ? ""
+    : `SELECT c.id AS id,
+              c.kind || ' ' || c.target_type || ' #' || c.target_id AS what,
+              c.state AS state,
+              f.why || ' · ' || f.passes || ' passes · '
+                   || cast((julianday('now') - julianday(f.since)) * 1440 AS int) || 'm' AS detail
+         FROM chore c JOIN chore_refusal f ON f.chore_id = c.id
+        WHERE c.state NOT IN ('done','running')
+          AND ${only("c.project_id")}
+        UNION ALL
+       `;
+
+/** What the task stands refused permission to write, as a clause to hang off a detail.
+ *
+ *  Beside the other refusals rather than in a box of its own: a task is refused a pass by
+ *  the allocator and refused a write by the harness, and the operator reading "why is this
+ *  not moving" wants both in the same sentence. Empty when there is nothing recorded — an
+ *  aggregate over no rows is NULL, so `coalesce` at the call site makes it nothing at all.
+ *
+ *  `scope_refusal` arrives with migration 011, and a database older than it has nothing to
+ *  say here rather than an error to raise. */
+const refusedWrite = (db: DatabaseSync, task: string): string =>
+  !hasTable(db, "scope_refusal")
+    ? "NULL"
+    : `(SELECT ' · refused a write to ' || group_concat(j.value, ', ')
+          FROM scope_refusal sr, json_each(sr.paths) j
+         WHERE sr.task_id = ${task})`;
+
 /** No project asked for is every project: the predicate is true for every row. */
 const only = (project: string): string => `(:project IS NULL OR ${project} = :project)`;
 
@@ -60,10 +115,19 @@ export function lastLine(output: string | null | undefined): string {
   return trimmed.length > WIDTH ? `${trimmed.slice(0, WIDTH - 1)}…` : trimmed;
 }
 
+/** Like `only`, but a row the walk cannot place is shown on every board rather than on
+ *  none. The walk up is five subqueries deep, and `NULL = :project` is NULL, so one missing
+ *  link anywhere above a task takes it off the narrowed board silently — while the
+ *  allocator, which never walks up, goes on dispatching it. An operator reading an empty
+ *  queue beside a busy runner has no way back from that. Used by the queue, because the
+ *  queue is the one group whose absence is mistaken for there being no work. */
+const placed = (project: string): string => `(${only(project)} OR ${project} IS NULL)`;
+
 /** `project` narrows every group but `projects` to one project's work. The projects box is
  *  how you get back out again, so it always shows the whole workspace. */
 export function board(db: DatabaseSync, project: number | null = null): Board {
   const rows = (sql: string): Row[] => db.prepare(sql).all({ project }) as unknown as Row[];
+  const denied = `coalesce(${refusedWrite(db, "t.id")}, '')`;
   return {
     // What exists, with how much of it is finished. Without this a board with nothing in
     // flight is indistinguishable from a board with no project at all.
@@ -88,7 +152,8 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
     stale: rows(
       `SELECT t.id AS id, t.title AS what, 'ready' AS state,
               f.why || ' · ' || f.passes || ' passes · '
-                   || cast((julianday('now') - julianday(f.since)) * 1440 AS int) || 'm' AS detail
+                   || cast((julianday('now') - julianday(f.since)) * 1440 AS int) || 'm'
+                   || ${denied} AS detail
          FROM task t JOIN refusal f ON f.task_id = t.id
         WHERE t.state = 'ready'
           AND f.passes >= 3
@@ -107,6 +172,7 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
           AND ${only(ofAssignment("a"))}
           AND (julianday('now') - julianday(a.updated_at)) * 1440 > 15
         UNION ALL
+       ${choreRefusals(db)}
        SELECT s.id AS id, s.title AS what, s.state AS state, 'no work under it' AS detail
          FROM story s
         WHERE s.state = 'in_progress'
@@ -142,20 +208,28 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
         WHERE a.phase = 'waiting' AND ${only(ofAssignment("a"))}
         ORDER BY a.id`,
     ),
-    // ready, and nothing open is attempting it: the queue is what waits on a slot.
+    // ready, and nothing open is attempting it: the queue is what waits on a slot. This is
+    // the same condition `readyCandidates` dispatches on and nothing more — no state above
+    // the task is consulted, because a task's own machine already decided it was ready and
+    // a second opinion here would be a task the allocator takes and the board never shows.
     // The detail is why it is not running: the last pass's refusal, or its role.
     queued: rows(
       `SELECT t.id AS id, t.title AS what, t.state AS state,
-              coalesce(f.why, t.role) AS detail
+              coalesce(f.why, t.role) || ${denied} AS detail
          FROM task t LEFT JOIN refusal f ON f.task_id = t.id
         WHERE t.state = 'ready'
-          AND ${only(ofTask("t.id"))}
+          AND ${placed(ofTask("t.id"))}
           AND NOT EXISTS (
             SELECT 1 FROM assignment a
              WHERE a.objective_type = 'task' AND a.objective_id = t.id
                AND a.phase IN ('pending','running','waiting'))
         ORDER BY t.id`,
     ),
+    // Work that stopped because its attempts ran out, or because a pass is still owed to
+    // it. Abandoned work is not here: dropped was somebody's decision and wants nothing
+    // from anyone, an exhausted task is waiting for a person to retry it or drop it, and
+    // one box for both made a triage of ten rows say nothing about which was which.
+    //
     // A count of attempts says a task failed; it never says what failed. The last line of
     // the output of the test that is still red is the smallest thing that does, so it is
     // carried here rather than left for a `wecode show` on a test whose id you first have
@@ -163,7 +237,12 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
     failed: (
       db.prepare(
         `SELECT t.id AS id, t.title AS what, t.state AS state,
-                'attempts ' || t.attempts || '/' || t.max_retry AS detail,
+                CASE
+                  WHEN t.attempts >= t.max_retry
+                    THEN 'out of attempts · ' || t.attempts || ' of ' || t.max_retry
+                         || ${denied} || ' · retry it with a reason, or drop it'
+                  ELSE 'attempts ' || t.attempts || '/' || t.max_retry || ${denied}
+                END AS detail,
                 coalesce(
                   (SELECT tt.last_output FROM task_test tt
                     WHERE tt.parent_id = t.id AND tt.state = 'failed'
@@ -180,13 +259,47 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
       const why = lastLine(output);
       return why === "" ? row : { ...row, detail: `${row.detail} · ${why}` };
     }),
+    // Put down on purpose. Its own filter, under its own name, so nothing reading `failed`
+    // has to carry the reason to tell the two apart.
+    dropped: rows(
+      `SELECT t.id AS id, t.title AS what, t.state AS state,
+              'dropped by decision' AS detail
+         FROM task t
+        WHERE t.state = 'dropped' AND ${only(ofTask("t.id"))}
+        ORDER BY t.id`,
+    ),
+    // Ready to run, but nobody has watched it fail — so passing it would prove nothing.
+    // A group rather than a state: red is an observation, and the test is otherwise a
+    // perfectly ordinary ready test. These are what `test_has_been_red` will refuse.
+    unproven: rows(
+      `SELECT a.id AS id, a.statement AS what, a.state AS state,
+              'no red run recorded' AS detail
+         FROM acceptance_test a
+        WHERE a.state = 'ready'
+          AND a.red_at_base_sha IS NULL
+          AND ${only(ofTest("a.id"))}
+        ORDER BY a.id`,
+    ),
     delivered: rows(
       `SELECT s.id AS id, s.title AS what, s.state AS state, 'story' AS detail FROM story s
         WHERE s.state = 'delivered' AND ${only(ofStory("s.id"))}
         ORDER BY s.updated_at DESC LIMIT 20`,
     ),
+    // Delivered, and the last thing that tried to land it could not. A filter rather than
+    // a state: the story is delivered, and stays delivered — what is wrong is between its
+    // branch and master, and only the thing holding a repository can see it. Stories 138
+    // and 139 sat for a day because the only record of it was prose in a chat.
+    unmergeable: hasTable(db, "land_conflict")
+      ? rows(
+          `SELECT s.id AS id, s.title AS what, s.state AS state,
+                  c.branch || ' · ' || c.reason AS detail
+             FROM story s JOIN land_conflict c ON c.story_id = s.id
+            WHERE s.state = 'delivered' AND ${only(ofStory("s.id"))}
+            ORDER BY s.id`,
+        )
+      : [],
     // A story carries how far it has got: tasks done out of tasks that exist.
-    roadmap: rows(
+    open: rows(
       `SELECT x.id AS id, x.title AS what, x.state AS state, 'epic' AS detail FROM epic x
         WHERE x.state NOT IN ('delivered','dropped') AND ${only(ofEpic("x.release_id"))}
         UNION ALL

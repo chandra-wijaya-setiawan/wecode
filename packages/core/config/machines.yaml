@@ -73,8 +73,9 @@ acceptance_test:
   terminal: [dropped]
   transitions:
     - { verb: deliver,    from: [planned],        to: ready, guard: artefact_resolves }
-    - { verb: pass,       from: [ready, failed],  to: passed }
+    - { verb: pass,       from: [ready, failed],  to: passed, guard: test_has_been_red }
     - { verb: fail,       from: [ready, failed],  to: failed }
+    - { verb: reprove,    from: [failed],         to: ready, guard: test_may_be_reproved }
     - { verb: invalidate, from: [passed],         to: ready }
     - { verb: drop,       from: [planned, ready, failed], to: dropped }
 
@@ -86,6 +87,7 @@ task_test:
     - { verb: deliver,    from: [planned],        to: ready, guard: artefact_resolves }
     - { verb: pass,       from: [ready, failed],  to: passed }
     - { verb: fail,       from: [ready, failed],  to: failed }
+    - { verb: reprove,    from: [failed],         to: ready, guard: test_may_be_reproved }
     - { verb: invalidate, from: [passed],         to: ready }
     - { verb: drop,       from: [planned, ready, failed], to: dropped }
 

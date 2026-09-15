@@ -1,26 +1,133 @@
+import type { DatabaseSync } from "node:sqlite";
 import { ALLOW, refuse, type Guard, type GuardName, type GuardRegistry } from "./guards.js";
 import type { Repo } from "./repo.js";
 import type { StatefulEntity } from "./types.js";
 
-/** Every child is in one of these states. The cascade guards are all this shape, so they
- *  are built rather than written eight times. */
-function allChildrenIn(repo: Repo, settled: readonly string[], noChildrenIsEnough = false): Guard {
+/** A refusal that tells the operator what to run next.
+ *
+ *  The command is data, not prose, because a verb can be checked and a sentence cannot.
+ *  `wecode acceptance-test invalidate` was wrong twice over — the entity is spelled with an
+ *  underscore everywhere the cli reads one, and `invalidate` is not legal from `failed`,
+ *  which is the state that refusal is raised in; `reprove` is. It was followed twice on
+ *  15 Sep before anybody noticed, because a refusal is read at the moment the operator has
+ *  least reason to doubt it.
+ *
+ *  `test/refusal-commands.test.ts` proves every row here against machines.yaml and the cli's
+ *  own verb table, so a verb that is not legal from `raisedIn` fails the suite rather than
+ *  the operator. The convention the same test relies on: **a refusal that names a command
+ *  writes it in backticks, and takes the text from here.** A backticked `wecode …` in this
+ *  package with no row is a failure too. */
+export interface CommandRefusal {
+  /** The refusal site, so a failure names where to look. */
+  readonly site: string;
+  /** The entity, spelled the way the cli's first argument is spelled. */
+  readonly entity: string;
+  readonly verb: string;
+  /** The state the refusal is raised in. A machine verb has to be legal from here. */
+  readonly raisedIn: string;
+  /** Everything after the verb, as the operator would type it. */
+  readonly tail: string;
+}
+
+export const COMMAND_REFUSALS: readonly CommandRefusal[] = [
+  { site: "create.settled.passed", entity: "acceptance_test", verb: "invalidate", raisedIn: "passed", tail: "<id>" },
+  { site: "create.settled.failed", entity: "acceptance_test", verb: "reprove", raisedIn: "failed", tail: "<id>" },
+  {
+    site: "checks.task_may_be_attempted.no_write_scope",
+    entity: "task",
+    verb: "scope",
+    raisedIn: "planned",
+    tail: '<id> --write "src/**"',
+  },
+  {
+    site: "checks.task_may_be_attempted.planned_test",
+    entity: "task_test",
+    verb: "deliver",
+    raisedIn: "planned",
+    tail: "<id>",
+  },
+  {
+    site: "checks.task_may_be_attempted.planned_parent",
+    entity: "acceptance_test",
+    verb: "deliver",
+    raisedIn: "planned",
+    tail: "<id>",
+  },
+];
+
+/** The command a site names, rendered. Unknown sites throw rather than yield a blank: a
+ *  refusal with no command in it is the dead end this table exists to prevent. */
+export function commandOf(site: string): string {
+  const row = COMMAND_REFUSALS.find((r) => r.site === site);
+  if (row === undefined) throw new Error(`no refusal command registered for ${site}`);
+  return `wecode ${row.entity} ${row.verb} ${row.tail}`.trimEnd();
+}
+
+const kindOf = (repo: Repo, entity: string): string =>
+  repo.childEntityOf(entity as StatefulEntity) ?? "children";
+
+const naming = (children: readonly { id: number; state: string }[]): string =>
+  children.slice(0, 5).map((c) => `#${c.id} is ${c.state}`).join(", ");
+
+/** Every child settled, and at least one of them succeeded. The cascade guards to a
+ *  success state are all this shape, so they are built rather than written five times.
+ *
+ *  Dropping a child is not a way of proving it. Dropping the last one used to satisfy this
+ *  — all-dropped is all-settled — so the parent cascaded to a success state and, since
+ *  drop is not legal from one, could not be undone: story 148 is delivered and empty. An
+ *  all-dropped parent has nothing behind it, so it stays where it is and drop stays legal.
+ *  A parent with no children has nothing behind it either, at any level. */
+function allChildrenSucceeded(repo: Repo, success: readonly string[]): Guard {
+  const settled = [...success, "dropped"];
   return ({ entity, id }) => {
     const children = repo.childrenOf(entity as StatefulEntity, id);
-    if (children.length === 0) {
-      return noChildrenIsEnough
-        ? ALLOW
-        : refuse(`it has no ${repo.childEntityOf(entity as StatefulEntity) ?? "children"} — nothing proves it`);
-    }
+    const kind = kindOf(repo, entity);
+    if (children.length === 0) return refuse(`it has no ${kind} — nothing proves it`);
+
     const unsettled = children.filter((c) => !settled.includes(c.state));
-    return unsettled.length === 0
+    if (unsettled.length > 0) {
+      return refuse(
+        `${unsettled.length} of ${children.length} not yet ${settled.join(" or ")}: ${naming(unsettled)}`,
+      );
+    }
+    return children.some((c) => success.includes(c.state))
       ? ALLOW
       : refuse(
-          `${unsettled.length} of ${children.length} not yet ${settled.join(" or ")}: ` +
-            unsettled.slice(0, 5).map((c) => `#${c.id} is ${c.state}`).join(", "),
+          `all ${children.length} ${kind} are dropped — nothing proves it; drop it rather than ` +
+            `${success[0]} it`,
         );
   };
 }
+
+/** Every child dropped, or none to drop. Nothing fires this on its own: a childless row
+ *  reaches dropped only because somebody said so, which is why the empty case is allowed
+ *  here and refused above. */
+function allChildrenDropped(repo: Repo): Guard {
+  return ({ entity, id }) => {
+    const children = repo.childrenOf(entity as StatefulEntity, id);
+    const live = children.filter((c) => c.state !== "dropped");
+    return live.length === 0
+      ? ALLOW
+      : refuse(
+          `${live.length} of ${children.length} ${kindOf(repo, entity)} not dropped: ${naming(live)}`,
+        );
+  };
+}
+
+/** The database behind a repository.
+ *
+ *  A guard that reads a column Repo exposes no accessor for still has to read it from the
+ *  record, and the registry is built from a Repo alone. Reaching through it is narrower
+ *  than widening every caller's signature; the point being preserved is that a guard's
+ *  only input is the stored row. */
+const dbOf = (repo: Repo): DatabaseSync => (repo as unknown as { db: DatabaseSync }).db;
+
+/** Whether a test names something to run. One definition, because two guards ask it and a
+ *  copy that drifted would let one of them through. */
+const hasArtefact = (repo: Repo, entity: string, id: number): boolean => {
+  const artefact = repo.artefactOf(entity as "acceptance_test" | "task_test", id);
+  return artefact !== null && artefact.trim() !== "";
+};
 
 /** The guards, wired to a repository.
  *
@@ -28,22 +135,54 @@ function allChildrenIn(repo: Repo, settled: readonly string[], noChildrenIsEnoug
  *  passing test to a delivered epic mechanical rather than a decision anybody makes. */
 export function guards(repo: Repo): Readonly<Record<GuardName, Guard>> {
   return {
-    every_epic_delivered_or_dropped: allChildrenIn(repo, ["delivered", "dropped"]),
-    every_epic_dropped: allChildrenIn(repo, ["dropped"], true),
-    every_story_delivered_or_dropped: allChildrenIn(repo, ["delivered", "dropped"]),
-    every_story_dropped: allChildrenIn(repo, ["dropped"], true),
-    every_requirement_met_or_dropped: allChildrenIn(repo, ["met", "dropped"]),
-    every_requirement_dropped: allChildrenIn(repo, ["dropped"], true),
-    every_criteria_accepted_or_dropped: allChildrenIn(repo, ["accepted", "dropped"]),
-    every_criteria_dropped: allChildrenIn(repo, ["dropped"], true),
-    every_acceptance_test_settled: allChildrenIn(repo, ["passed", "dropped"]),
-    every_task_test_settled: allChildrenIn(repo, ["passed", "dropped"]),
+    every_epic_delivered_or_dropped: allChildrenSucceeded(repo, ["delivered"]),
+    every_epic_dropped: allChildrenDropped(repo),
+    every_story_delivered_or_dropped: allChildrenSucceeded(repo, ["delivered"]),
+    every_story_dropped: allChildrenDropped(repo),
+    every_requirement_met_or_dropped: allChildrenSucceeded(repo, ["met"]),
+    every_requirement_dropped: allChildrenDropped(repo),
+    every_criteria_accepted_or_dropped: allChildrenSucceeded(repo, ["accepted"]),
+    every_criteria_dropped: allChildrenDropped(repo),
+    every_acceptance_test_settled: allChildrenSucceeded(repo, ["passed"]),
+    every_task_test_settled: allChildrenSucceeded(repo, ["passed"]),
 
     /** A test whose artefact is missing is unrunnable, and silently so. */
-    artefact_resolves: ({ entity, id }) => {
-      const artefact = repo.artefactOf(entity as "acceptance_test" | "task_test", id);
-      return artefact === null || artefact.trim() === ""
-        ? refuse("it has no artefact — there is nothing to run or to follow")
+    artefact_resolves: ({ entity, id }) =>
+      hasArtefact(repo, entity, id) ? ALLOW : refuse("it has no artefact — there is nothing to run or to follow"),
+
+    /** A failed test asks to be judged again.
+     *
+     *  `failed` used to be where a test stopped: the only ways out were `pass`, which
+     *  `test_has_been_red` guards, and `drop`. A test that failed because its tree had no
+     *  node_modules was therefore finished, and so was its story — four of them sat there.
+     *
+     *  What `reprove` clears is the verdict itself: `failed` *is* the recorded verdict, and
+     *  returning the test to `ready` says only that nothing is proved of it yet. It asserts
+     *  no outcome — a re-proved test still has to be run, and an acceptance_test still has
+     *  to be seen red at its base, before `pass` will have it (docs/design/19: healing may
+     *  re-run a test, it may never mark one passed). So this guard asks only whether there
+     *  is anything to run again. A test with no artefact would go back to `ready` and stay
+     *  there, unrunnable, which is the dead end again under a better-looking state. */
+    test_may_be_reproved: ({ entity, id }) =>
+      hasArtefact(repo, entity, id) ? ALLOW : refuse("it has no artefact — there is nothing to run again"),
+
+    /** A test nobody has seen fail cannot pass: it may assert what the code already did.
+     *
+     *  This reads the record and only the record. It does not run the test, stat a file or
+     *  look at a clock — a guard is evaluated wherever a verb is applied, which is often
+     *  nowhere near a worktree, so anything derived from the tree would be a guess. Red is
+     *  recorded by whoever watched it happen; this only insists that somebody did. */
+    test_has_been_red: ({ entity, id }) => {
+      if (entity !== "acceptance_test") return refuse(`${entity} records no red run at its base`);
+      const row = dbOf(repo)
+        .prepare("SELECT slug, statement, red_at_base_sha FROM acceptance_test WHERE id = ?")
+        .get(id) as { slug: string; statement: string; red_at_base_sha: string | null } | undefined;
+      if (row === undefined) return refuse(`no acceptance_test #${id}`);
+      return row.red_at_base_sha === null
+        ? refuse(
+            `acceptance_test ${row.slug} #${id} ("${row.statement}") has never been seen to fail — ` +
+              "record the base it was red at before passing it",
+          )
         : ALLOW;
     },
 
@@ -53,13 +192,51 @@ export function guards(repo: Repo): Readonly<Record<GuardName, Guard>> {
       if (task === null) return refuse(`no task #${id}`);
       const scope = JSON.parse(task.scope) as { write?: string[] };
       if (!Array.isArray(scope.write) || scope.write.length === 0) {
-        return refuse("it has no write scope — wecode task scope sets one");
+        return refuse(
+          `it has no write scope — \`${commandOf("checks.task_may_be_attempted.no_write_scope")}\` sets one`,
+        );
       }
       if (task.role.trim() === "") return refuse("no role is assigned");
       const tests = repo.childrenOf("task", id);
-      return tests.some((t) => t.state === "ready" || t.state === "passed")
-        ? ALLOW
-        : refuse("no task_test is ready — a task says how it proves itself before it runs");
+      // A task_test left in `planned` is neither passed nor dropped, so `finish`'s guard
+      // — every_task_test_settled — can never be satisfied: the task dispatches, an agent
+      // works, and it runs to max_retry with the board saying nothing about why. Observed
+      // on task 198 on 15 Sep, which carried one planned test beside one ready one and so
+      // satisfied the ready-or-passed requirement below. The gap is closed where the work
+      // starts rather than where it ends, so the operator learns before an attempt is
+      // spent. Dropped is settled and does not block.
+      //
+      // The older requirement is asked first: a task whose only test is planned has no way
+      // of proving itself at all, and "no task_test is ready" is the nearer answer to that
+      // than a lecture about settling.
+      const planned = tests.filter((t) => t.state === "planned");
+      if (!tests.some((t) => t.state === "ready" || t.state === "passed")) {
+        return refuse("no task_test is ready — a task says how it proves itself before it runs");
+      }
+      if (planned.length > 0) {
+        return refuse(
+          `${planned.length} task_test still planned (${naming(planned)}) — a planned test can never ` +
+            `settle, so the task could never finish; \`${commandOf("checks.task_may_be_attempted.planned_test")}\` ` +
+            "delivers it, or drop it",
+        );
+      }
+      // The task proves itself against its parent acceptance_test, and a parent left in
+      // `planned` has not been delivered: it has no run anybody could judge the criteria
+      // by. The task would finish, its own tests would settle, and the criteria above it
+      // would still be unaccepted with nothing on the board saying why. This is the same
+      // dead end as a planned task_test, one level up, so it is caught at the same place —
+      // where the work starts, before an attempt is spent. Every other parent state is
+      // fine here: `create` already refuses a task under a settled acceptance_test, and a
+      // `ready` or re-proved one is exactly what a task is for.
+      const parent = repo.parentOf("task", id);
+      if (parent !== null && repo.stateOf(parent.entity, parent.id) === "planned") {
+        return refuse(
+          `its acceptance_test #${parent.id} is still planned — nothing would judge the work, so the ` +
+            `criteria above it could never be accepted; ` +
+            `\`${commandOf("checks.task_may_be_attempted.planned_parent")}\` delivers it`,
+        );
+      }
+      return ALLOW;
     },
 
     /** One failed attempt does not fail a task; the retry limit does. */

@@ -1,5 +1,5 @@
 stack: pnpm
-test: pnpm install --frozen-lockfile && pnpm -r build && pnpm typecheck && pnpm exec vitest run
+test: pnpm install && pnpm -r build && pnpm typecheck && pnpm exec vitest run
 typecheck: pnpm typecheck
 source:
   - src/**
