@@ -1,5 +1,13 @@
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,13 +54,19 @@ export class SchemaAheadError extends StoreError {
   constructor(
     readonly found: number,
     readonly understood: number,
+    readonly path = "",
   ) {
     super(
-      `the database is at schema ${found} and this build understands ${understood}. ` +
+      `${where(path)} is at schema ${found} and this build understands ${understood}. ` +
         `Upgrade wecode rather than running an older copy against it.`,
     );
   }
 }
+
+/** Which database a refusal is about. A person runs wecode against several workspaces —
+ *  the incident was `wecode board` in one project reporting on another workspace's file —
+ *  so a refusal that says only "the database" names nothing the person can go and fix. */
+const where = (path: string): string => (path === "" ? "the database" : `the database ${path}`);
 
 /** The database is older than this build and the caller said not to upgrade it. Migrating is
  *  a decision: { migrate: false } is how a caller asks to be told rather than upgraded. */
@@ -60,10 +74,40 @@ export class SchemaBehindError extends StoreError {
   constructor(
     readonly found: number,
     readonly understood: number,
+    readonly path = "",
   ) {
     super(
-      `the database is at schema ${found} and this build understands ${understood}. ` +
+      `${where(path)} is at schema ${found} and this build understands ${understood}. ` +
         `Migrating is a decision: run the upgrade, or open with { migrate: true }.`,
+    );
+  }
+}
+
+/** The database cannot be written, and the caller asked for something that would write it.
+ *
+ *  The refusal wecode owes the person instead of SQLite's `attempt to write a readonly
+ *  database`: it names the workspace, says a read was turned into a write, and says the
+ *  upgrade is theirs to run. */
+export class ReadOnlyDatabaseError extends StoreError {
+  constructor(
+    readonly path: string,
+    readonly found: number,
+    readonly understood: number,
+  ) {
+    super(
+      `${where(path)} cannot be written by this process, and opening it would upgrade it ` +
+        `from schema ${found} to ${understood}. A command that only reads must open it ` +
+        `read-only; run the upgrade yourself against a workspace you can write.`,
+    );
+  }
+}
+
+/** The database is not there, and a read-only open cannot create one. */
+export class MissingDatabaseError extends StoreError {
+  constructor(readonly path: string) {
+    super(
+      `${where(path)} does not exist, and a read-only open creates nothing — a question ` +
+        `may not bring a workspace into being. Initialise that workspace first.`,
     );
   }
 }
@@ -129,6 +173,10 @@ export interface OpenOptions {
   /** Stop at this version rather than the newest. How a test builds a database that is
    *  honestly older than the build, instead of one with its version lied down. */
   readonly to?: number;
+  /** Open for questions only. The connection cannot write, so nothing this call does can
+   *  change the file: no schema is created and no migration runs, whatever `migrate` says.
+   *  A command that only reads the record opens this way. */
+  readonly readOnly?: boolean;
 }
 
 export type SchemaState = "absent" | "current" | "behind" | "ahead";
@@ -181,7 +229,10 @@ export function open(path?: string, options: OpenOptions = {}): DatabaseSync {
     );
   }
 
-  const db = new DatabaseSync(target);
+  const asked = options.readOnly === true;
+  if (asked && !existsSync(target)) throw new MissingDatabaseError(target);
+
+  const db = new DatabaseSync(target, asked ? { readOnly: true } : {});
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
 
@@ -189,27 +240,64 @@ export function open(path?: string, options: OpenOptions = {}): DatabaseSync {
 
   if (found > SCHEMA_VERSION) {
     db.close();
-    throw new SchemaAheadError(found, SCHEMA_VERSION);
+    throw new SchemaAheadError(found, SCHEMA_VERSION, target);
   }
 
   // A file with no schema at all is this call's to create; an older one is upgraded unless
-  // the caller said to be told instead.
+  // the caller said to be told instead. A read-only open never migrates: the questions it
+  // answers are the ones this build's schema and the file's have in common.
   const wanted = options.to ?? SCHEMA_VERSION;
-  const mayMigrate = options.migrate ?? true;
-  if (found < wanted && !mayMigrate) {
-    db.close();
-    throw new SchemaBehindError(found, SCHEMA_VERSION);
+  const behind = found < wanted;
+  if (asked) {
+    if (behind) {
+      db.close();
+      throw new SchemaBehindError(found, SCHEMA_VERSION, target);
+    }
+    return db;
   }
 
-  for (const m of migrations()) {
-    if (m.version <= found || m.version > wanted) continue;
-    db.exec(readFileSync(m.path, "utf8"));
-    db.exec("DELETE FROM schema_version");
-    db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(m.version);
+  if (behind && options.migrate === false) {
+    db.close();
+    throw new SchemaBehindError(found, SCHEMA_VERSION, target);
+  }
+
+  // Migrating a file this process cannot write is where SQLite's own sentence used to reach
+  // the person: refused here, in wecode's words, before the first statement runs.
+  if (behind && existsSync(target) && !writable(target)) {
+    db.close();
+    throw new ReadOnlyDatabaseError(target, found, SCHEMA_VERSION);
+  }
+
+  try {
+    for (const m of migrations()) {
+      if (m.version <= found || m.version > wanted) continue;
+      db.exec(readFileSync(m.path, "utf8"));
+      db.exec("DELETE FROM schema_version");
+      db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(m.version);
+    }
+  } catch (err) {
+    db.close();
+    if (readOnlyFailure(err)) throw new ReadOnlyDatabaseError(target, found, SCHEMA_VERSION);
+    throw err;
   }
 
   return db;
 }
+
+const writable = (path: string): boolean => {
+  try {
+    accessSync(path, constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** SQLite refused the write because the file, or the directory holding its journal, is not
+ *  ours to write. The permission bits can say otherwise — a read-only mount, or a writable
+ *  file in a directory we cannot add the -wal to — so the failure itself is checked too. */
+const readOnlyFailure = (err: unknown): boolean =>
+  err instanceof Error && /readonly|read-only|attempt to write/i.test(err.message);
 
 function version(db: DatabaseSync): number | null {
   const table = db
