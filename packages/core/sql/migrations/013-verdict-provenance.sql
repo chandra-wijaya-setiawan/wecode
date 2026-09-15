@@ -1,0 +1,22 @@
+-- What sources a verdict proves.
+--
+-- Three verdicts were wrong on 15 Sep because the tree was stale rather than the code:
+-- acceptance_test 166 failed twice in a story tree that was missing the services box that
+-- had already landed, then passed untouched once the tree was refreshed. The record held
+-- `last_run_at` and `last_output` — when the verdict was taken and what it printed — and
+-- nothing at all about what it was taken against, so nobody reading it could tell a real
+-- red from a red against sources nobody has any more.
+--
+-- `provenance_sha` is the git tree sha of the worktree the artefact ran in:
+-- `git rev-parse HEAD:.`, which needs no toolchain and answers the same way in any
+-- language. A commit sha would name a branch's history; a tree sha names the sources, which
+-- is what a test proves something about.
+--
+-- NULL for a verdict taken before this column existed, or in a directory with no git to
+-- ask, and a NULL says nothing rather than accusing the verdict of being stale.
+--
+-- Nothing is invalidated by this column. Provenance is the stamp, ancestry is the fact:
+-- a pass whose stamp is not the story's tree now is drift the doctor names, and re-proving
+-- it stays a decision a person makes.
+ALTER TABLE acceptance_test ADD COLUMN provenance_sha TEXT;
+ALTER TABLE task_test ADD COLUMN provenance_sha TEXT;
