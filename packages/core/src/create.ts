@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { commandOf } from "./checks.js";
 import type { Budget, ObjectiveType, Scope } from "./entities.js";
 import { loadMachines } from "./machines.js";
 import { now } from "./store.js";
@@ -55,12 +56,17 @@ function insert(db: DatabaseSync, table: string, row: Record<string, string | nu
   return (db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id;
 }
 
-/** The verdict states of acceptance_test, and the way out of each. Belongs in the machine's
+/** The verdict states of acceptance_test, and the way out of each — a different verb from
+ *  each state, because the machine has a different one: `invalidate` from `passed`,
+ *  `reprove` from `failed`. Both used to say `invalidate`, and from `failed` that is not a
+ *  legal verb. The commands come from `COMMAND_REFUSALS` so that they are checked.
+ *
+ *  Belongs in the machine's
  *  own config beside the states it names; it lives here until the task that owns
  *  machines.yaml lands, and a state added there without a row here reads as unsettled. */
 const SETTLED: Record<string, string> = {
-  passed: "Re-prove it with `wecode acceptance-test invalidate`, or choose another parent.",
-  failed: "Re-prove it with `wecode acceptance-test invalidate`, or choose another parent.",
+  passed: `Re-prove it with \`${commandOf("create.settled.passed")}\`, or choose another parent.`,
+  failed: `Re-prove it with \`${commandOf("create.settled.failed")}\`, or choose another parent.`,
   dropped: "Choose another parent: a dropped test is never re-proved.",
 };
 
