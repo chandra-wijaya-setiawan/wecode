@@ -769,7 +769,7 @@ function showBoard(args: readonly string[]): number {
     ["STALE", b.stale],
     ["QUEUE", b.queued],
     ["FAILED", b.failed],
-    ["ROADMAP", b.roadmap],
+    ["OPEN", b.open],
   ];
   for (const [title, rows] of groups) {
     process.stdout.write(`\n${title} (${rows.length})\n`);

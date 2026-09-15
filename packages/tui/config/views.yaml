@@ -5,7 +5,7 @@
 # Rearranging, renaming or resizing the board is an edit to this file. A new filter is not.
 
 page:
-  order: [projects, running, needs_human, stale, queued, failed, roadmap, delivered]
+  order: [projects, running, needs_human, stale, queued, failed, open, delivered]
 
 # The services box is not one of the views: it is not a filter over the board, `v` does not
 # open it, and its four rows are four different questions rather than one query's rows. What
@@ -61,9 +61,9 @@ views:
     filter: failed
     rows: 5
     empty: nothing has given up
-  roadmap:
-    title: Roadmap
-    filter: roadmap
+  open:
+    title: Open
+    filter: open
     rows: 8
     empty: no epics or stories open
   delivered:
