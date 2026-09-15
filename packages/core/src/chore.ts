@@ -296,14 +296,27 @@ const attemptDetail = (t: ChoreAttempts, check: string): string =>
       ? `${outOfAttempts(t)} · ${check}`
       : `attempt ${t.attempts + 1} of ${t.max_retry} · ${check}`;
 
+/** Something is attempting this chore right now. The one wording of it, because three
+ *  places ask — the board's state, the candidate list, and whether a refusal may be
+ *  written — and three copies of a phase list is how they come to disagree. */
+const ATTEMPTED = `EXISTS (SELECT 1 FROM assignment a
+                            WHERE a.objective_type = 'chore' AND a.objective_id = %ID%
+                              AND a.phase IN ('pending','running','waiting'))`;
+const attempted = (id: string): string => ATTEMPTED.replace("%ID%", id);
+
 /** Everything not done, in the board's shape. A chore that is waiting for approval says so
- *  where the reason a task is not running is said: in the detail. */
+ *  where the reason a task is not running is said: in the detail.
+ *
+ *  A chore with an assignment open on it reads `running` whatever the column says. The
+ *  assignment is the fact — somebody is in a tree on it — and on 15 Sep the board showed
+ *  chore 2 as `planned` while assignment 271 ran it, because the row and the assignment
+ *  were two answers to one question. There is one answer, and the assignment gives it. */
 export function openChores(db: DatabaseSync, project: number | null = null): readonly Row[] {
   const rows = db
     .prepare(
       `SELECT c.id AS id,
               c.kind || ' ' || c.target_type || ' ' || coalesce(s.title, p.name, c.target_id) AS what,
-              c.state AS state,
+              CASE WHEN ${attempted("c.id")} THEN 'running' ELSE c.state END AS state,
               c."check" AS "check",
               c.kind AS kind,
               c.approved_at AS approved_at,
@@ -394,10 +407,7 @@ export function choreCandidates(
                 WHERE l.entity = 'chore' AND l.entity_id = c.id AND l.verb = 'begin') AS attempts
          FROM chore c
         WHERE c.state NOT IN ('done','running')
-          AND NOT EXISTS (
-            SELECT 1 FROM assignment a
-             WHERE a.objective_type = 'chore' AND a.objective_id = c.id
-               AND a.phase IN ('pending','running','waiting'))
+          AND NOT ${attempted("c.id")}
         ORDER BY c.id`,
     )
     .all() as unknown as {
@@ -440,8 +450,16 @@ export function choreCandidates(
 }
 
 /** Why this chore was passed over on the last pass, kept the way a task's refusal is kept:
- *  one row, replaced each pass, and the same reason keeps its `since`. */
+ *  one row, replaced each pass, and the same reason keeps its `since`.
+ *
+ *  A chore something is attempting was not passed over, so nothing may be written about it
+ *  here and anything already written is wrong the moment the assignment exists. Guarded
+ *  here rather than at each caller because the callers are the problem: dispatchChore has
+ *  six ways out and nextUp has another, and a refusal outliving its condition only needs
+ *  one of them to forget. `no worker free for role system` survived sixteen passes past
+ *  the worker arriving that way. */
 export function recordChoreRefusal(db: DatabaseSync, why: string, choreId: number): void {
+  if (isAttempted(db, choreId)) return clearChoreRefusal(db, choreId);
   const at = now();
   db.prepare(
     `INSERT INTO chore_refusal (chore_id, why, at, since, passes) VALUES (?, ?, ?, ?, 1)
@@ -455,6 +473,13 @@ export function recordChoreRefusal(db: DatabaseSync, why: string, choreId: numbe
 
 export function clearChoreRefusal(db: DatabaseSync, choreId: number): void {
   db.prepare("DELETE FROM chore_refusal WHERE chore_id = ?").run(choreId);
+}
+
+/** Is anything attempting this chore? The row `openChores` reads, asked one chore at a
+ *  time, so the state the board shows and the guard on a refusal are the same question. */
+export function isAttempted(db: DatabaseSync, choreId: number): boolean {
+  const row = db.prepare(`SELECT ${attempted("?")} AS yes`).get(choreId) as { yes: number };
+  return row.yes === 1;
 }
 
 export interface ChoreRefusal extends Refusal {
