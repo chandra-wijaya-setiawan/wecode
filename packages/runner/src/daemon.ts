@@ -876,6 +876,12 @@ export class Runner {
       if (proved.ok) {
         if (applyChore(this.db, chore.id, "finish", "runner").ok) done.push(chore.id);
       } else if (applyChore(this.db, chore.id, "fail", "runner").ok) {
+        // The verdict is written to the chore, not only reported in the pass. `fail` clears
+        // whatever the last tick said about this chore, and the pass is a log line that
+        // scrolls, so without this a failed chore sits on the board saying nothing at all —
+        // and the one that has used its attempts sits there for good, never raised again and
+        // never explained. Recorded after the verb, so the reason is the one this tick read.
+        recordChoreRefusal(this.db, proved.why, chore.id);
         failed.push({ id: chore.id, why: proved.why });
       }
     }
