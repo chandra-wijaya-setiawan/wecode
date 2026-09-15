@@ -35,6 +35,7 @@ import {
 } from "@wecode/core";
 import { plan } from "./plan.js";
 import { doctor } from "./doctor.js";
+import { delivered as deliveredStories } from "./delivered.js";
 
 const DB = (): string => currentDatabase();
 
@@ -71,6 +72,9 @@ function dispatch(argv: readonly string[]): number {
   if (head === "tree") return showTree(rest);
   if (head === "watch") return watch(rest);
   if (head === "wait") return wait(rest);
+  // Before verb(): `delivered` is a story state as well as a command, so falling through
+  // would read it as an entity and answer "delivered has no states".
+  if (head === "delivered") return deliveredStories(rest);
   if (head === "lessons") return showLessons(rest);
   if (head === "lesson") return lesson(rest);
   return verb(head, rest);
@@ -1280,6 +1284,7 @@ function usage(): number {
       "  wecode watch [--project N] [--json]        one line per state change, forever (--once to drain)",
       "  wecode wait <entity> <id>                  block until it settles; the exit code is the answer",
       "  wecode <entity> --help                     that entity's states and verbs",
+      "  wecode delivered [--all] [--project N]     what wecode can already do (--json)",
       "  wecode lessons [--project N]               what earlier attempts here learned",
       "  wecode lesson drop <id>                    a wrong lesson is worse than none",
       "  wecode doctor                              one pass of the invariants; non-zero if any is broken",
