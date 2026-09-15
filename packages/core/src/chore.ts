@@ -281,7 +281,9 @@ export function closeChore(db: DatabaseSync, id: number, why: string, by = "runn
   if (chore === null) return { ok: false, why: `no chore #${id}` };
 
   const out = applyChore(db, id, CLOSE, by);
-  if (out.ok) recordChoreRefusal(db, why, id);
+  // Unguarded on purpose: this is not "passed over", it is the epitaph, and it has to stand
+  // even when an assignment is still open on the chore. See `writeChoreRefusal`.
+  if (out.ok) writeChoreRefusal(db, why, id);
   return out;
 }
 
@@ -460,6 +462,15 @@ export function choreCandidates(
  *  the worker arriving that way. */
 export function recordChoreRefusal(db: DatabaseSync, why: string, choreId: number): void {
   if (isAttempted(db, choreId)) return clearChoreRefusal(db, choreId);
+  writeChoreRefusal(db, why, choreId);
+}
+
+/** The row itself, with no guard on it. `chore_refusal` holds two kinds of sentence — why a
+ *  chore was passed over, and why a closed chore was closed — and only the first is a claim
+ *  that nothing is attempting it. `closeChore` writes through here so that the reason a
+ *  chore was closed survives an assignment still standing open against it, which is exactly
+ *  the shape a chore left `planned` by a failed `begin` is in. */
+function writeChoreRefusal(db: DatabaseSync, why: string, choreId: number): void {
   const at = now();
   db.prepare(
     `INSERT INTO chore_refusal (chore_id, why, at, since, passes) VALUES (?, ?, ?, ?, 1)

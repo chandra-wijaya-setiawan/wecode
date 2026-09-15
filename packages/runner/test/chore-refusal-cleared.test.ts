@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
-import { board, choreFor, choreRefusal, Maker, open, recordChoreRefusal } from "@wecode/core";
+import { board, choreFor, choreRefusal, closeChore, Maker, open, recordChoreRefusal } from "@wecode/core";
 import { DEFAULT_BUDGET, Runner } from "../src/index.js";
 import type { Observation, Work, WorkerAdapter } from "../src/index.js";
 
@@ -181,6 +181,48 @@ describe("a dispatched chore", () => {
     recordChoreRefusal(db, "no worker free for role system", chore);
 
     expect(choreRefusal(db, chore)).toBeNull();
+  });
+
+  it("is never both on the board as attempted and showing a reason it is not running", async () => {
+    // The 15 Sep board, read as a whole: the two boxes are fed from `chore.state` and from
+    // `chore_refusal`, and the complaint was that they answered differently about chore 2.
+    // Whatever a pass does, no chore may appear in both readings at once.
+    theSystemRole();
+    aSystemWorker();
+    const story = anUnmergeableStory();
+    await runner().tick();
+    const chore = choreOf(story.id);
+
+    // The row left behind by a `begin` that did not land, with last pass's sentence still on it.
+    db.prepare("UPDATE chore SET state = 'planned' WHERE id = ?").run(chore);
+    await runner().tick();
+
+    for (const row of board(db).chores) {
+      if (row.state === "running") expect(choreRefusal(db, row.id)).toBeNull();
+    }
+    expect(choreRow(chore)?.state).toBe("running");
+    expect(board(db).stale.some((r) => r.id === chore)).toBe(false);
+  });
+});
+
+describe("a chore that was closed", () => {
+  it("keeps the reason it was closed for, even with an assignment still open on it", async () => {
+    // `chore_refusal` carries two different sentences. "Passed over because X" is a claim
+    // that nothing is attempting the chore, and must go when something does. "Closed
+    // because X" is the epitaph, and an assignment left standing — the very shape a failed
+    // `begin` leaves behind — must not swallow it.
+    theSystemRole();
+    aSystemWorker();
+    const story = anUnmergeableStory();
+    await runner().tick();
+    const chore = choreOf(story.id);
+    db.prepare("UPDATE chore SET state = 'planned' WHERE id = ?").run(chore);
+    expect(openAssignmentsOn(chore)).toBe(1);
+
+    const out = closeChore(db, chore, "the branch merged on its own");
+
+    expect(out.ok).toBe(true);
+    expect(choreRefusal(db, chore)?.why).toBe("the branch merged on its own");
   });
 });
 
