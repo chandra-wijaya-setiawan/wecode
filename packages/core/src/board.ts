@@ -43,6 +43,23 @@ const ofAssignment = (alias: string): string =>
 /** No project asked for is every project: the predicate is true for every row. */
 const only = (project: string): string => `(:project IS NULL OR ${project} = :project)`;
 
+/** The one line of a test's output worth carrying. A failing runner says why on its last
+ *  line — the assertion, the exception, the exit status — and everything above it is the
+ *  part you only need once you have decided to go and look. Trailing blank lines are what
+ *  a process's output ends with far more often than not, so the last *non-blank* line is
+ *  the one meant here. */
+const WIDTH = 120;
+export function lastLine(output: string | null | undefined): string {
+  if (output === null || output === undefined) return "";
+  const line = output
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .findLast((l) => l.trim() !== "");
+  if (line === undefined) return "";
+  const trimmed = line.trim();
+  return trimmed.length > WIDTH ? `${trimmed.slice(0, WIDTH - 1)}…` : trimmed;
+}
+
 /** `project` narrows every group but `projects` to one project's work. The projects box is
  *  how you get back out again, so it always shows the whole workspace. */
 export function board(db: DatabaseSync, project: number | null = null): Board {
@@ -139,13 +156,30 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
                AND a.phase IN ('pending','running','waiting'))
         ORDER BY t.id`,
     ),
-    failed: rows(
-      `SELECT t.id AS id, t.title AS what, t.state AS state,
-              'attempts ' || t.attempts || '/' || t.max_retry AS detail
-         FROM task t
-        WHERE t.state = 'failed' AND ${only(ofTask("t.id"))}
-        ORDER BY t.id`,
-    ),
+    // A count of attempts says a task failed; it never says what failed. The last line of
+    // the output of the test that is still red is the smallest thing that does, so it is
+    // carried here rather than left for a `wecode show` on a test whose id you first have
+    // to go and find.
+    failed: (
+      db.prepare(
+        `SELECT t.id AS id, t.title AS what, t.state AS state,
+                'attempts ' || t.attempts || '/' || t.max_retry AS detail,
+                coalesce(
+                  (SELECT tt.last_output FROM task_test tt
+                    WHERE tt.parent_id = t.id AND tt.state = 'failed'
+                      AND tt.last_output IS NOT NULL
+                    ORDER BY tt.last_run_at DESC, tt.id DESC LIMIT 1),
+                  (SELECT a.last_output FROM acceptance_test a
+                    WHERE a.id = t.acceptance_test_id AND a.state = 'failed')
+                ) AS output
+           FROM task t
+          WHERE t.state = 'failed' AND ${only(ofTask("t.id"))}
+          ORDER BY t.id`,
+      ).all({ project }) as unknown as (Row & { output: string | null })[]
+    ).map(({ output, ...row }) => {
+      const why = lastLine(output);
+      return why === "" ? row : { ...row, detail: `${row.detail} · ${why}` };
+    }),
     delivered: rows(
       `SELECT s.id AS id, s.title AS what, s.state AS state, 'story' AS detail FROM story s
         WHERE s.state = 'delivered' AND ${only(ofStory("s.id"))}
