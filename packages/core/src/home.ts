@@ -92,9 +92,18 @@ function workspaceOfDatabase(path: string): string | null {
  *  the name from a lower rank than the path it has to agree with is how `wecode workspaces`
  *  came to star a row the commands were not writing to. */
 export function namedWorkspace(cwd: string = process.cwd()): string | null {
+  return askedWorkspace() ?? readPointer(cwd) ?? null;
+}
+
+/** The name somebody said *now*, on this command: an explicit database or an explicit name.
+ *  Distinguished from the pointer because the two have different lifetimes. An environment
+ *  variable is a person's live instruction, so a workspace it names is one they are about to
+ *  create. A pointer is a file in the repository, written the day it was onboarded and often
+ *  carried into another home entirely — by a clone, or by WECODE_HOME moving. */
+function askedWorkspace(): string | null {
   const explicit = process.env["WECODE_DB"];
   const fromPath = explicit === undefined ? null : workspaceOfDatabase(resolve(explicit));
-  return fromPath ?? process.env["WECODE_WORKSPACE"] ?? readPointer(cwd) ?? null;
+  return fromPath ?? process.env["WECODE_WORKSPACE"] ?? null;
 }
 
 /** Which workspace a command is talking to. The one place this is decided. */
@@ -102,18 +111,26 @@ export function currentWorkspace(cwd: string = process.cwd()): string {
   return namedWorkspace(cwd) ?? "default";
 }
 
-/** Every workspace that exists, and the one that was asked for whether it exists or not.
- *  Used to say which ones there are when the one asked for is not among them — so leaving
- *  the asked-for one out is how a list can disagree with the workspace in use. */
-export function listWorkspaces(cwd: string = process.cwd()): readonly string[] {
+/** Every workspace this home holds, and the one somebody asked for on this command whether
+ *  it exists yet or not. Used to say which ones there are when the one asked for is not
+ *  among them — so leaving the asked-for one out is how a list can disagree with the
+ *  workspace in use.
+ *
+ *  The repository's pointer is not an ask. It names a workspace in whatever home it was
+ *  onboarded against, and pushing it here invented a row for a board this home does not
+ *  hold: `wecode workspaces` listed a name with no database behind it, and `wecode onboard`
+ *  offered `--workspace <that name>` as one of the existing ones to join. A pointer whose
+ *  workspace this home does hold needs no pushing — it is already in the listing. So this takes
+ *  no cwd: what the repository says cannot change the list. */
+export function listWorkspaces(): readonly string[] {
   const root = workspacesRoot();
   const existing = existsSync(root)
     ? readdirSync(root, { withFileTypes: true })
         .filter((e) => e.isDirectory() && existsSync(join(root, e.name, "wecode.db")))
         .map((e) => e.name)
     : [];
-  const named = namedWorkspace(cwd);
-  if (named !== null && !existing.includes(named)) existing.push(named);
+  const asked = askedWorkspace();
+  if (asked !== null && !existing.includes(asked)) existing.push(asked);
   return existing.sort();
 }
 
