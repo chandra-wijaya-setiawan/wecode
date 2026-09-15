@@ -13,11 +13,21 @@
  *  of it, and runs it through the cli — the operator's move, made by the suite.
  */
 import { mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { COMMAND_REFUSALS, CreateError, Engine, Maker, commandOf, open } from "../src/index.js";
+import {
+  COMMAND_REFUSALS,
+  CreateError,
+  Engine,
+  Maker,
+  commandOf,
+  currentDatabase,
+  currentWorkspace,
+  databaseOf,
+  open,
+} from "../src/index.js";
 import { loadMachines } from "../src/machines.js";
 import { STATEFUL } from "../src/types.js";
 import { run } from "../../cli/src/run.js";
@@ -179,25 +189,68 @@ describe("the refusals themselves carry the checked command", () => {
 /** The operator's move, made by the suite: read the refusal, type what it says, get unstuck.
  *
  *  The cli reads its database from WECODE_HOME, so the fixture is seeded at the path the cli
- *  will open rather than handed to it. */
+ *  will open rather than handed to it. `currentDatabase()` is that path and the test asks
+ *  for it rather than spelling it: which workspace under WECODE_HOME the cli opens is not
+ *  always `default` — `currentWorkspace()` prefers WECODE_WORKSPACE, then the
+ *  `.wecode/workspace` pointer of the directory the suite runs in. Seeding `default` by
+ *  hand passed in a fresh worktree, which has no pointer, and failed in the master checkout,
+ *  which points at `cws`: the cli opened a database nobody had made and exited 1 on
+ *  `no wecode workspace at …`. The command in the refusal was right the whole time. */
 describe("following the refusal gets the operator unstuck", () => {
   const home = tmp();
-  let previous: string | undefined;
+  // WECODE_DB names a database outright and outranks WECODE_HOME, so an ambient one would
+  // send the cli out of the fixture entirely. The workspace *name* is left alone: whatever
+  // picks it, it is a directory under this home, which is the point being proved.
+  const controlled = ["WECODE_HOME", "WECODE_DB"] as const;
+  let previous: (string | undefined)[] = [];
 
   beforeEach(() => {
-    previous = process.env["WECODE_HOME"];
+    previous = controlled.map((k) => process.env[k]);
     process.env["WECODE_HOME"] = home;
+    delete process.env["WECODE_DB"];
   });
 
   afterEach(() => {
-    if (previous === undefined) delete process.env["WECODE_HOME"];
-    else process.env["WECODE_HOME"] = previous;
+    controlled.forEach((k, i) => {
+      const was = previous[i];
+      if (was === undefined) delete process.env[k];
+      else process.env[k] = was;
+    });
+  });
+
+  /** Run the cli and keep what it said. An exit code alone cannot be diagnosed — the one
+   *  fact that identified the failure above was the message on stderr, which no assertion
+   *  was looking at, so this hands it to the assertion that fails. */
+  const cli = (argv: readonly string[]): { code: number; said: string } => {
+    let said = "";
+    const streams = [process.stdout, process.stderr] as const;
+    const originals = streams.map((s) => s.write.bind(s));
+    for (const s of streams) {
+      s.write = ((chunk: string | Uint8Array): boolean => {
+        said += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+        return true;
+      }) as typeof s.write;
+    }
+    try {
+      return { code: run([...argv]), said };
+    } finally {
+      streams.forEach((s, i) => {
+        s.write = originals[i] as typeof s.write;
+      });
+    }
+  };
+
+  it("the fixture is seeded at the database the cli resolves, not at a spelled-out one", () => {
+    // The pointer of whatever directory the suite happens to run in decides this, so the
+    // path is asked for. This is the assertion the hand-written `workspaces/default` lost.
+    expect(currentDatabase()).toBe(databaseOf(currentWorkspace()));
+    expect(currentDatabase().startsWith(join(home, "workspaces"))).toBe(true);
   });
 
   it("a task under a failed acceptance_test, after running what the refusal said", () => {
-    const where = join(home, "workspaces", "default");
-    mkdirSync(where, { recursive: true });
-    const db = open(join(where, "wecode.db"));
+    const where = currentDatabase();
+    mkdirSync(dirname(where), { recursive: true });
+    const db = open(where);
     const tree = seed(db);
     db.prepare("UPDATE acceptance_test SET state = 'failed' WHERE id = ?").run(tree.acceptance);
 
@@ -212,7 +265,8 @@ describe("following the refusal gets the operator unstuck", () => {
     expect(command).toBeDefined();
     // Typed as printed, with the placeholder filled in — which is all the operator does.
     const argv = (command as string).split(/\s+/).map((a) => (a === "<id>" ? String(tree.acceptance) : a));
-    expect(run(argv)).toBe(0);
+    const out = cli(argv);
+    expect(out.code, `\`wecode ${argv.join(" ")}\` said:\n${out.said}`).toBe(0);
 
     const after = db.prepare("SELECT state FROM acceptance_test WHERE id = ?").get(tree.acceptance) as {
       state: string;
