@@ -12,9 +12,11 @@ import { App } from "../src/app.js";
 import { tmp } from "../../core/test/tmpdir.js";
 import { Cockpit } from "../src/screens.js";
 import { loadViews, ViewError } from "../src/views.js";
+import { loadServices } from "../src/services.js";
 import { seed, T, ins } from "./seed.js";
 
 const views = loadViews();
+const services = loadServices();
 const machines = loadMachines();
 
 let db: DatabaseSync;
@@ -70,12 +72,24 @@ describe("the frame", () => {
     for (const line of lines(28, 40)) expect(line.length).toBeLessThanOrEqual(28);
   });
 
+  /** Every box the dashboard is supposed to draw, named. A tally against views.length said
+   *  the same thing only for as long as views.yaml was the whole dashboard: the services
+   *  box is not a filter over the board and is in no view, so the count broke the moment it
+   *  arrived while every box on the screen was still perfectly well bordered. What is
+   *  wanted is that each box that should be there is, and is a box — so each is asked for
+   *  by name, and the tops and bottoms are only checked to pair up. */
   it("is laid out, not printed: every box on it is bordered", () => {
     const out = lines();
-    // Every box of work, plus the services box above them — it is drawn the same way.
-    const boxes = views.length + 1;
-    expect(out.filter((l) => l.startsWith("┌")).length).toBe(boxes);
-    expect(out.filter((l) => l.startsWith("└")).length).toBe(boxes);
+    for (const title of [services.title, ...views.map((v) => `${v.title} (`)]) {
+      const at = titled(out, title);
+      expect(at, `no box titled ${title}`).toBeGreaterThanOrEqual(0);
+      expect(out[at]?.startsWith("┌"), `${title} has no top border`).toBe(true);
+      const bottom = at + inside(out, at).length + 1;
+      expect(out[bottom]?.startsWith("└"), `${title} has no bottom border`).toBe(true);
+    }
+    expect(out.filter((l) => l.startsWith("┌")).length).toBe(
+      out.filter((l) => l.startsWith("└")).length,
+    );
     for (const line of out.filter((l) => l.startsWith("│"))) {
       expect(line.endsWith("│")).toBe(true);
     }
@@ -83,6 +97,28 @@ describe("the frame", () => {
 });
 
 describe("the dashboard", () => {
+  it("draws the services box first, above every box of work", () => {
+    const out = lines();
+    expect(titled(out, "Services")).toBe(0);
+    expect(inside(out, 0).map((l) => l.split(/ {2,}/)[0])).toEqual([
+      "runner",
+      "schema",
+      "fleet",
+      "doctor",
+    ]);
+    // And it is above the first box views.yaml orders.
+    expect(titled(out, `${views[0]?.title} (`)).toBeGreaterThan(0);
+  });
+
+  it("keeps the services box off a box page and a node screen", () => {
+    app.key("v");
+    app.key("p");
+    expect(titled(lines(100, 12), "Services")).toBe(-1);
+    app.key("esc");
+    descendTo("storefront");
+    expect(titled(lines(100, 20), "Services")).toBe(-1);
+  });
+
   it("draws every box in config order", () => {
     const out = lines();
     const titles = views.map((v) => titled(out, `${v.title} (`));
@@ -145,7 +181,8 @@ describe("a box screen", () => {
     // Ten lines of rows inside the box — more than the six it gets on the dashboard — and
     // no other box on the screen.
     expect(titled(out, "Running (")).toBe(-1);
-    expect(inside(out, 0).filter((l) => /^\d/.test(l)).length).toBeGreaterThan(6);
+    // A row begins with its code, which is a number said as one: "#12".
+    expect(inside(out, 0).filter((l) => /^#\d/.test(l)).length).toBeGreaterThan(6);
     expect(inverted(frame(100, 12))).toHaveLength(1);
   });
 
@@ -263,9 +300,15 @@ describe("views", () => {
       "stale",
       "queued",
       "failed",
-      "roadmap",
+      "open",
       "delivered",
     ]);
+  });
+
+  /** The rename has to reach the whitelist too: a box named `open` whose filter the code
+   *  does not know is a refusal to start, so this is what loadViews accepting it proves. */
+  it("resolves the open box to the open filter", () => {
+    expect(views.find((v) => v.name === "open")?.filter).toBe("open");
   });
 
   it("refuses a filter the code does not know", () => {

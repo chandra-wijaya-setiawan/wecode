@@ -17,7 +17,8 @@ export interface Board {
   readonly failed: readonly Row[];
   readonly dropped: readonly Row[];
   readonly unproven: readonly Row[];
-  readonly roadmap: readonly Row[];
+  /** Every epic and story still open — planned and in_progress alike, not future work. */
+  readonly open: readonly Row[];
   readonly delivered: readonly Row[];
   readonly unmergeable: readonly Row[];
 }
@@ -252,7 +253,7 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
         )
       : [],
     // A story carries how far it has got: tasks done out of tasks that exist.
-    roadmap: rows(
+    open: rows(
       `SELECT x.id AS id, x.title AS what, x.state AS state, 'epic' AS detail FROM epic x
         WHERE x.state NOT IN ('delivered','dropped') AND ${only(ofEpic("x.release_id"))}
         UNION ALL
