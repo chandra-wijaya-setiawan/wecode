@@ -41,6 +41,14 @@ export interface DeliveredStory {
   /** The kind of the open chore the story waits on, or null when none is open. Carried
    *  beside `reach` because "waits on a chore" is not actionable without the kind. */
   readonly owed: string | null;
+  /** Why that chore has not been carried out, in the chore's own words — the sentence on
+   *  its `chore_refusal` row — or null when nothing has been said about it.
+   *
+   *  A `failed` refresh chore out of its attempts is the case this exists for: nothing will
+   *  come back to rewrite that row, the chore will never be handed out again, and the story
+   *  is stuck behind the base for a reason only the chore knows. Read onto the story rather
+   *  than left on the chore because the story is what a person is looking at. */
+  readonly why: string | null;
   readonly criteria: readonly DeliveredCriteria[];
 }
 
@@ -71,21 +79,39 @@ const CRITERIA = `
 /** Every chore nobody has finished, against the story it targets. `done` is the only
  *  terminal state, so anything else is work still owed — `failed` included, because a
  *  chore that failed its check is re-raised and the branch has still not arrived. */
-const OPEN_CHORES = `
-  SELECT target_id AS story, kind AS kind
-    FROM chore
-   WHERE target_type = 'story' AND state <> 'done'
-   ORDER BY id`;
+const openChores = (db: DatabaseSync): string => `
+  SELECT c.target_id AS story, c.kind AS kind,
+         ${hasTable(db, "chore_refusal") ? `(SELECT f.why FROM chore_refusal f WHERE f.chore_id = c.id)` : "NULL"} AS why
+    FROM chore c
+   WHERE c.target_type = 'story' AND c.state <> 'done'
+   ORDER BY c.id`;
 
 /** Which reach the record supports, most definite first. A landing is a fact about the
  *  base branch and outranks every chore: a chore open against a story that has already
  *  landed is the next merge's problem, not this delivery's. */
-const reachOf = (landed: boolean, kinds: readonly string[]): { reach: StoryReach; owed: string | null } => {
-  if (landed) return { reach: "landed", owed: null };
-  if (kinds.includes("refresh")) return { reach: "behind", owed: "refresh" };
-  if (kinds.length > 0) return { reach: "waiting", owed: kinds[0] as string };
-  return { reach: "unlanded", owed: null };
+const reachOf = (landed: boolean, open: readonly OpenChore[]): Reached => {
+  if (landed) return { reach: "landed", owed: null, why: null };
+  const refresh = open.filter((c) => c.kind === "refresh");
+  if (refresh.length > 0) return { reach: "behind", owed: "refresh", why: reasonOf(refresh) };
+  const first = open[0];
+  if (first !== undefined) {
+    return { reach: "waiting", owed: first.kind, why: reasonOf(open.filter((c) => c.kind === first.kind)) };
+  }
+  return { reach: "unlanded", owed: null, why: null };
 };
+
+interface OpenChore {
+  readonly kind: string;
+  readonly why: string | null;
+}
+
+type Reached = Pick<DeliveredStory, "reach" | "owed" | "why">;
+
+/** The reason among the chores of the owed kind, oldest first. Two open chores of one kind
+ *  is already a state nobody wants, and in it the sentence to show is the one the earliest
+ *  chore is stuck on rather than a blank from a later chore nothing has said anything
+ *  about yet. */
+const reasonOf = (chores: readonly OpenChore[]): string | null => chores.find((c) => c.why !== null)?.why ?? null;
 
 /** What wecode can already do: every delivered story, newest first, with the statements of
  *  the criteria it met and whether its branch is on the base.
@@ -99,9 +125,9 @@ export function delivered(db: DatabaseSync, project: number | null = null): read
     : [];
   const shaOf = new Map(landed.map((l) => [l.branch, l.sha]));
 
-  const open = db.prepare(OPEN_CHORES).all() as unknown as { story: number; kind: string }[];
-  const owedTo = new Map<number, string[]>();
-  for (const c of open) owedTo.set(c.story, [...(owedTo.get(c.story) ?? []), c.kind]);
+  const open = db.prepare(openChores(db)).all() as unknown as (OpenChore & { story: number })[];
+  const owedTo = new Map<number, OpenChore[]>();
+  for (const c of open) owedTo.set(c.story, [...(owedTo.get(c.story) ?? []), { kind: c.kind, why: c.why }]);
 
   const stories = db.prepare(STORIES).all({ project }) as unknown as {
     id: number;
@@ -141,7 +167,12 @@ export function deliveredRows(db: DatabaseSync, project: number | null = null): 
  *  explains it, which is exactly what a person needs to see. */
 const says = (s: DeliveredStory): string => {
   if (s.reach === "landed") return `landed ${s.branch}`;
-  if (s.reach === "behind") return "behind the base · refresh chore open";
-  if (s.reach === "waiting") return `unlanded · waits on a ${s.owed ?? ""} chore`;
+  if (s.reach === "behind") return because("behind the base · refresh chore open", s.why);
+  if (s.reach === "waiting") return because(`unlanded · waits on a ${s.owed ?? ""} chore`, s.why);
   return "unlanded";
 };
+
+/** The chore's sentence, after the reach that made it worth reading. The reach alone says a
+ *  person has to act; the sentence is the only thing that says what they would be acting
+ *  on, so it goes on the same line rather than a page away. */
+const because = (reach: string, why: string | null): string => (why === null ? reach : `${reach} · ${why}`);
