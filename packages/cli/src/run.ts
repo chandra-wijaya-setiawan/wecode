@@ -21,6 +21,9 @@ import {
   workspaceDir,
   writePointer,
   readProjectConfig,
+  restate,
+  isRestatable,
+  RESTATABLE,
   setArtefact,
   setScriptPath,
   setTaskScope,
@@ -845,6 +848,7 @@ function verb(entity: string, rest: readonly string[]): number {
   if (name === "create") return asked ? createHelp(entity) : create(entity, args);
   if (name === "scope") return asked ? scopeHelp() : scope(entity, args);
   if (name === "artefact") return asked ? artefactHelp() : artefact(entity, args);
+  if (name === "restate") return asked ? restateHelp() : restateVerb(entity, args);
   if (name === "retry" && entity === "task") return retry(args);
 
   if (!isStateful(entity)) return fail(`${entity} has no states; its only verb is create`);
@@ -978,6 +982,68 @@ function artefact(entity: string, args: readonly string[]): number {
   } catch (err) {
     return fail((err as Error).message);
   }
+}
+
+/** `wecode story restate <id> --to "the words that are right"`
+ *
+ *  The cure for a typo. Before this the only route was to drop the record and create it
+ *  again, which costs the slug (taken forever, so the replacement must be worded round it),
+ *  a drop event on the ledger for what was a typo, and every record citing the id, which
+ *  now points at a dropped row.
+ *
+ *  It takes only words. There is no flag here that names a state, and none is accepted:
+ *  what happened to a record is a verdict, and a verdict is not a thing you retype. */
+function restateVerb(entity: string, args: readonly string[]): number {
+  if (!isRestatable(entity)) {
+    return fail(`only ${Object.keys(RESTATABLE).join(", ")} carry prose to restate`);
+  }
+  const how = `wecode ${entity} restate <id> --to "<the words that are right>"`;
+  let values: { to?: string };
+  let positionals: string[];
+  try {
+    ({ values, positionals } = parseArgs({
+      args: [...args],
+      allowPositionals: true,
+      options: { to: { type: "string" } },
+    }));
+  } catch {
+    // An unknown flag — `--state` among them — is the usage line, not a crash.
+    return fail(how);
+  }
+  const id = Number(positionals[0]);
+  if (!Number.isInteger(id) || values.to === undefined) return fail(how);
+
+  // The same guard scope and artefact have: ids are global, and this one writes.
+  const wrong = elsewhere(entity, id);
+  if (wrong !== null) return fail(wrong);
+
+  try {
+    const who = process.env["WECODE_ACTOR"] ?? "operator";
+    const said = restate(db(), entity, id, values.to, who);
+    process.stdout.write(`${entity} #${id} restated  was "${said.was}"  now "${said.now}"\n`);
+    return 0;
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+}
+
+function restateHelp(): number {
+  process.stdout.write(
+    [
+      `wecode <${Object.keys(RESTATABLE).join("|")}> restate <id> --to "<words>"`,
+      "",
+      "  correct the wording of a record without dropping it. the old wording goes on",
+      "  the ledger, so the correction is itself part of the record.",
+      "",
+      "  the slug does not move: worktrees and branches are named after it.",
+      "  this corrects words only — it can never change a state.",
+      "",
+      '  wecode story restate 201 --to "the typescript build ships a bundle"',
+      "",
+      "",
+    ].join("\n"),
+  );
+  return 0;
 }
 
 function artefactHelp(): number {
@@ -1199,6 +1265,7 @@ function usage(): number {
       '  wecode <entity> create --parent <id> "<text>" [--artefact "<cmd>"] [--role <name>]',
       '  wecode task scope <id> --write "a.ts,b.ts"  which files that task may change',
       '  wecode <test> artefact <id> --set "<cmd>"   fix the command a test is proved by',
+      '  wecode <entity> restate <id> --to "<words>" fix the wording, keeping the slug',
       "  wecode plan <file.yaml> [--epic <id>]      a whole story as one document (--dry-run to look)",
       "  wecode worker create <name> --role engineer --kind agent",
       "",

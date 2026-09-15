@@ -1,9 +1,69 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { Scope } from "./entities.js";
 import { withinCeiling, type RoleConfig } from "./roles.js";
-import { now } from "./store.js";
+import { now, transact } from "./store.js";
 
 export class EditError extends Error {}
+
+/** The entities that carry prose a person wrote, and the column it lives in. Anything not
+ *  here has no words of its own to correct. */
+export const RESTATABLE = {
+  epic: "title",
+  story: "title",
+  requirement: "statement",
+  acceptance_criteria: "statement",
+  acceptance_test: "statement",
+  task: "title",
+  task_test: "statement",
+} as const;
+
+export type Restatable = keyof typeof RESTATABLE;
+
+export const isRestatable = (s: string): s is Restatable => s in RESTATABLE;
+
+/** What the ledger row is refused for when there is nothing to say. */
+export const NO_WORDS = "restate needs the new wording — there is nothing to say";
+
+/** Rewrite the prose of a record in place, and put the old wording on the ledger.
+ *
+ *  This corrects words, never verdicts: the state column is read and written back
+ *  unchanged, so the row the ledger gains has from_state === to_state and no reader of the
+ *  history can mistake a correction for something having happened. There is deliberately no
+ *  way to reach a state from here — `Engine.apply` is the only verb that moves one.
+ *
+ *  The slug is *not* recomputed. It is derived from the first wording and is the name of
+ *  every worktree and branch cut for this record; a slug that followed the prose would
+ *  orphan all of them, and that breakage is the reason the prose looked write-once in the
+ *  first place. The slug names the record, the prose describes it, and only the second is
+ *  a statement that can be wrong. */
+export function restate(
+  db: DatabaseSync,
+  entity: Restatable,
+  id: number,
+  words: string,
+  actor: string,
+): { was: string; now: string; state: string } {
+  const text = words.trim();
+  if (text === "") throw new EditError(NO_WORDS);
+
+  const col = RESTATABLE[entity];
+  return transact(db, () => {
+    const row = db.prepare(`SELECT ${col} AS words, state FROM ${entity} WHERE id = ?`).get(id) as
+      | { words: string; state: string }
+      | undefined;
+    if (row === undefined) throw new EditError(`no ${entity} #${id}`);
+
+    const at = now();
+    db.prepare(`UPDATE ${entity} SET ${col} = ?, updated_at = ? WHERE id = ?`).run(text, at, id);
+    // from_state and to_state are the same state, on purpose: nothing happened to this
+    // record, someone only said what it was more accurately.
+    db.prepare(
+      `INSERT INTO ledger (entity, entity_id, verb, from_state, to_state, actor, at)
+       VALUES (?, ?, 'restate', ?, ?, ?, ?)`,
+    ).run(entity, id, row.state, row.state, `${actor}: was "${row.words}"`, at);
+    return { was: row.words, now: text, state: row.state };
+  });
+}
 
 /** Set a task's scope. Checked against its role's ceiling when one is loaded — a task may
  *  narrow a role and never exceed it. */
