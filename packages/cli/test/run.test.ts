@@ -49,6 +49,7 @@ describe("the cli", () => {
 
     run(["task", "scope", "1", "--write", "src/**", "--tools", "bash"]);
     run(["task_test", "deliver", "1"]);
+    run(["acceptance_test", "deliver", "1"]);
     expect(run(["task", "start", "1"])).toBe(0);
 
     out.length = 0;
@@ -56,7 +57,6 @@ describe("the cli", () => {
     expect(said()).toContain("task #1  ready → done  (cascade)");
 
     out.length = 0;
-    run(["acceptance_test", "deliver", "1"]);
     watchedItFail(1);
     run(["acceptance_test", "pass", "1"]);
     expect(said()).toContain("epic #1  in_progress → delivered  (cascade)");

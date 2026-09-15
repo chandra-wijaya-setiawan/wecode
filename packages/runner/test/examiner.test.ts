@@ -40,8 +40,8 @@ function readyTask(artefact: string, acceptance = "true"): { task: number; taskT
   const task = make.task(at, `do-${artefact}`, { role: "engineer", scope: { write: ["src/**"], tools: [] } });
   const taskTest = make.taskTest(task, `unit-${artefact}`, "script", artefact);
   engine.apply("task_test", taskTest, "deliver", "chief");
-  engine.apply("task", task, "start", "chief");
   engine.apply("acceptance_test", at, "deliver", "chief");
+  engine.apply("task", task, "start", "chief");
   // Somebody watched it fail at the base before the work began; without that record
   // `test_has_been_red` refuses the pass these tests are about.
   recordRed(db, at);

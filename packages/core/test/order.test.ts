@@ -42,6 +42,7 @@ function readyTask(title: string, scope: Scope, role = "engineer"): number {
   make.taskTest(t, `${title} unit`, "script", "vitest run");
   const tests = db.prepare("SELECT id FROM task_test WHERE parent_id = ?").all(t) as unknown as { id: number }[];
   for (const tt of tests) engine.apply("task_test", tt.id, "deliver", "chief");
+  engine.apply("acceptance_test", at, "deliver", "chief");
   engine.apply("task", t, "start", "chief");
   return t;
 }
