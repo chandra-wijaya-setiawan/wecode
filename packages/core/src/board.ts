@@ -98,6 +98,23 @@ const refusedWrite = (db: DatabaseSync, task: string): string =>
 /** No project asked for is every project: the predicate is true for every row. */
 const only = (project: string): string => `(:project IS NULL OR ${project} = :project)`;
 
+/** The one line of a test's output worth carrying. A failing runner says why on its last
+ *  line — the assertion, the exception, the exit status — and everything above it is the
+ *  part you only need once you have decided to go and look. Trailing blank lines are what
+ *  a process's output ends with far more often than not, so the last *non-blank* line is
+ *  the one meant here. */
+const WIDTH = 120;
+export function lastLine(output: string | null | undefined): string {
+  if (output === null || output === undefined) return "";
+  const line = output
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .findLast((l) => l.trim() !== "");
+  if (line === undefined) return "";
+  const trimmed = line.trim();
+  return trimmed.length > WIDTH ? `${trimmed.slice(0, WIDTH - 1)}…` : trimmed;
+}
+
 /** Like `only`, but a row the walk cannot place is shown on every board rather than on
  *  none. The walk up is five subqueries deep, and `NULL = :project` is NULL, so one missing
  *  link anywhere above a task takes it off the narrowed board silently — while the
@@ -212,18 +229,36 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
     // it. Abandoned work is not here: dropped was somebody's decision and wants nothing
     // from anyone, an exhausted task is waiting for a person to retry it or drop it, and
     // one box for both made a triage of ten rows say nothing about which was which.
-    failed: rows(
-      `SELECT t.id AS id, t.title AS what, t.state AS state,
-              CASE
-                WHEN t.attempts >= t.max_retry
-                  THEN 'out of attempts · ' || t.attempts || ' of ' || t.max_retry
-                       || ${denied} || ' · retry it with a reason, or drop it'
-                ELSE 'attempts ' || t.attempts || '/' || t.max_retry || ${denied}
-              END AS detail
-         FROM task t
-        WHERE t.state = 'failed' AND ${only(ofTask("t.id"))}
-        ORDER BY t.id`,
-    ),
+    //
+    // A count of attempts says a task failed; it never says what failed. The last line of
+    // the output of the test that is still red is the smallest thing that does, so it is
+    // carried here rather than left for a `wecode show` on a test whose id you first have
+    // to go and find.
+    failed: (
+      db.prepare(
+        `SELECT t.id AS id, t.title AS what, t.state AS state,
+                CASE
+                  WHEN t.attempts >= t.max_retry
+                    THEN 'out of attempts · ' || t.attempts || ' of ' || t.max_retry
+                         || ${denied} || ' · retry it with a reason, or drop it'
+                  ELSE 'attempts ' || t.attempts || '/' || t.max_retry || ${denied}
+                END AS detail,
+                coalesce(
+                  (SELECT tt.last_output FROM task_test tt
+                    WHERE tt.parent_id = t.id AND tt.state = 'failed'
+                      AND tt.last_output IS NOT NULL
+                    ORDER BY tt.last_run_at DESC, tt.id DESC LIMIT 1),
+                  (SELECT a.last_output FROM acceptance_test a
+                    WHERE a.id = t.acceptance_test_id AND a.state = 'failed')
+                ) AS output
+           FROM task t
+          WHERE t.state = 'failed' AND ${only(ofTask("t.id"))}
+          ORDER BY t.id`,
+      ).all({ project }) as unknown as (Row & { output: string | null })[]
+    ).map(({ output, ...row }) => {
+      const why = lastLine(output);
+      return why === "" ? row : { ...row, detail: `${row.detail} · ${why}` };
+    }),
     // Put down on purpose. Its own filter, under its own name, so nothing reading `failed`
     // has to carry the reason to tell the two apart.
     dropped: rows(
