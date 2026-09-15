@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -332,18 +333,7 @@ export class Trees {
     // indistinguishable, afterwards, from a merge that happened.
     if (await this.isAncestor(here, branch, "HEAD")) return { kind: "nothing", why: "already-ancestor" };
     const before = await git(here, ["rev-parse", "HEAD"]);
-    await git(here, [
-      "-c",
-      "user.name=wecode",
-      "-c",
-      "user.email=wecode@localhost",
-      "merge",
-      "--no-ff",
-      "-q",
-      "-m",
-      `land ${branch}`,
-      branch,
-    ]);
+    await this.mergeInto(here, branch, `land ${branch}`, `land ${branch}`);
     const sha = await git(here, ["rev-parse", "HEAD"]);
     return sha === before ? { kind: "nothing", why: "already-ancestor" } : { kind: "merged", sha };
   }
@@ -353,17 +343,51 @@ export class Trees {
   async mergeTaskIntoStory(taskBranch: string, storySlug: string, storyTreePath: string): Promise<void> {
     await this.refuseBaseCheckout(storyTreePath, "mergeTaskIntoStory");
     const tree = await this.storyTree(storySlug, storyTreePath);
-    await git(tree, [
-      "-c",
-      "user.name=wecode",
-      "-c",
-      "user.email=wecode@localhost",
-      "merge",
-      "--no-ff",
-      "-q",
-      "-m",
-      `merge ${taskBranch}`,
+    await this.mergeInto(
+      tree,
       taskBranch,
-    ]);
+      `merge ${taskBranch}`,
+      `merge ${taskBranch} into story/${storySlug}`,
+    );
+  }
+
+  /** Every merge this class makes goes through here. A merge that conflicts exits non-zero
+   *  with the tree it ran in left mid-merge — a conflicted index, `MERGE_HEAD` written, and
+   *  half of someone else's branch in the working files. Nothing downstream wants that: the
+   *  story tree is reused by the next task merge and by the examiner, and the base checkout
+   *  belongs to a person. So the merge is aborted here and the caller is told which of the
+   *  two things is true, because the failure alone read the same either way.
+   *
+   *  Whether the abort worked is read back off the tree rather than off its exit code —
+   *  `merge --abort` also fails when there was no merge to abort, and such a tree is not
+   *  wedged. A tree still holding `MERGE_HEAD` is, and then the sentence has to say so. */
+  private async mergeInto(tree: string, branch: string, message: string, what: string): Promise<void> {
+    try {
+      await git(tree, [
+        "-c",
+        "user.name=wecode",
+        "-c",
+        "user.email=wecode@localhost",
+        "merge",
+        "--no-ff",
+        "-q",
+        "-m",
+        message,
+        branch,
+      ]);
+    } catch (err) {
+      await git(tree, ["merge", "--abort"]).catch(() => "");
+      const after = (await this.midMerge(tree))
+        ? `the merge would not abort: ${tree} is left mid-merge and wants a person`
+        : "no merge is left standing: the tree is as it was";
+      throw new GitError(`${what} failed: ${(err as Error).message} — ${after}`);
+    }
+  }
+
+  /** Is this tree still in the middle of a merge? `MERGE_HEAD` is git's own record of it,
+   *  and it lives in the tree's own git dir, not the repository's. */
+  private async midMerge(tree: string): Promise<boolean> {
+    const dir = await git(tree, ["rev-parse", "--absolute-git-dir"]).catch(() => "");
+    return dir !== "" && existsSync(join(dir, "MERGE_HEAD"));
   }
 }
