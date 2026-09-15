@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -79,6 +79,33 @@ const LIVE_HOME = join(homedir(), ".wecode");
 const underTest = (): boolean =>
   process.env["VITEST"] !== undefined || process.env["NODE_ENV"] === "test";
 
+/** Every temp directory open() has made in this process and not yet removed. */
+const madeUnderTest = new Set<string>();
+let sweepRegistered = false;
+
+/** Removes every temp database directory this process made. Registered on process exit,
+ *  and exported so a test can prove the sweep rather than wait for its own exit. */
+export function sweepTempDatabases(): void {
+  for (const dir of madeUnderTest) rmSync(dir, { recursive: true, force: true });
+  madeUnderTest.clear();
+}
+
+/** A database of a test run's own, under the system temp directory.
+ *
+ *  The directory is registered so the run removes it: without that every open() with no
+ *  path left a `wecode-db-*` tree behind, and a suite that opens hundreds of databases
+ *  filled /tmp. Exit is the right moment — the database is open for as long as the process
+ *  that asked for it lives, so nothing earlier can be sure it is finished with. */
+function tempDatabase(): string {
+  const dir = mkdtempSync(join(tmpdir(), "wecode-db-"));
+  madeUnderTest.add(dir);
+  if (!sweepRegistered) {
+    sweepRegistered = true;
+    process.on("exit", sweepTempDatabases);
+  }
+  return join(dir, "wecode.db");
+}
+
 const isLive = (path: string): boolean =>
   path === LIVE_HOME || path.startsWith(LIVE_HOME + sep);
 
@@ -144,7 +171,7 @@ export function diagnose(path: string = currentDatabase()): Diagnosis {
  *  everything else gets the current workspace. The default is temporary on purpose: the
  *  suite reaching the operator's workspace once left the installed CLI unable to land. */
 export function open(path?: string, options: OpenOptions = {}): DatabaseSync {
-  const target = path ?? (underTest() ? join(mkdtempSync(join(tmpdir(), "wecode-db-")), "wecode.db") : currentDatabase());
+  const target = path ?? (underTest() ? tempDatabase() : currentDatabase());
 
   if (underTest() && isLive(resolve(target))) {
     throw new LiveDatabaseError(
