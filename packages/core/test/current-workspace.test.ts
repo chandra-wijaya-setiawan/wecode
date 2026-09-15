@@ -101,36 +101,35 @@ describe("the list agrees with the current workspace", () => {
   it("every workspace with a database in it is listed, sorted", () => {
     make("b");
     make("a");
-    expect(listWorkspaces(tmp("wecode-repo-"))).toEqual(["a", "b"]);
+    expect(listWorkspaces()).toEqual(["a", "b"]);
   });
 
   it("a directory without a database is not a workspace", () => {
     mkdirSync(join(home, "workspaces", "half-made"), { recursive: true });
-    expect(listWorkspaces(tmp("wecode-repo-"))).toEqual([]);
+    expect(listWorkspaces()).toEqual([]);
   });
 
-  /** The proof, over every way of naming one: the name the commands resolve is in the list
-   *  the commands print, whether or not it has been created yet. */
-  for (const [how, named] of [
-    ["the pointer", (cwd: string) => writePointer(cwd, "pointed")],
+  /** The proof, over every way of asking for one *now*: the name the commands resolve is in
+   *  the list the commands print, whether or not it has been created yet. */
+  for (const [how, ask] of [
     ["the environment", () => (process.env["WECODE_WORKSPACE"] = "environed")],
     ["an explicit database", () => (process.env["WECODE_DB"] = databaseOf("by-path"))],
   ] as const) {
-    it(`the workspace named by ${how} is in the list even before it exists`, () => {
+    it(`the workspace asked for by ${how} is in the list even before it exists`, () => {
       const cwd = tmp("wecode-repo-");
       make("already-there");
-      named(cwd);
+      ask();
       const here = currentWorkspace(cwd);
-      expect(listWorkspaces(cwd)).toContain(here);
-      expect(listWorkspaces(cwd)).toContain("already-there");
+      expect(listWorkspaces()).toContain(here);
+      expect(listWorkspaces()).toContain("already-there");
     });
 
-    it(`the workspace named by ${how} is listed once when it does exist`, () => {
+    it(`the workspace asked for by ${how} is listed once when it does exist`, () => {
       const cwd = tmp("wecode-repo-");
-      named(cwd);
+      ask();
       const here = currentWorkspace(cwd);
       make(here);
-      expect(listWorkspaces(cwd).filter((w) => w === here)).toEqual([here]);
+      expect(listWorkspaces().filter((w) => w === here)).toEqual([here]);
     });
   }
 
@@ -139,7 +138,47 @@ describe("the list agrees with the current workspace", () => {
    *  project on a board nobody was looking at. */
   it("the default is not listed when nobody named it", () => {
     make("cws");
-    expect(listWorkspaces(tmp("wecode-repo-"))).toEqual(["cws"]);
+    expect(listWorkspaces()).toEqual(["cws"]);
+  });
+});
+
+/** The pointer is not an ask. It was written the day this repository was onboarded, against
+ *  whatever home was current then, and it travels with a clone into homes that never held
+ *  that workspace. Pushing it into the list invented a row with no database behind it:
+ *  `wecode workspaces` printed a name it could not count projects for, and `wecode onboard`
+ *  offered `--workspace <that name>` among the existing ones to join. */
+describe("the repository's pointer does not put a workspace in the list", () => {
+  it("a pointer to a workspace this home does not hold adds nothing", () => {
+    const cwd = tmp("wecode-repo-");
+    make("here");
+    writePointer(cwd, "from-another-home");
+    expect(currentWorkspace(cwd)).toBe("from-another-home");
+    expect(listWorkspaces()).toEqual(["here"]);
+  });
+
+  it("a pointer is not enough to make a list out of an empty home", () => {
+    writePointer(tmp("wecode-repo-"), "from-another-home");
+    expect(listWorkspaces()).toEqual([]);
+  });
+
+  /** A pointer to one this home does hold needs no pushing: the directory is already there,
+   *  so the list and the workspace in use still agree. */
+  it("a pointer to a workspace this home does hold is listed, once, on its own account", () => {
+    const cwd = tmp("wecode-repo-");
+    make("mine");
+    writePointer(cwd, "mine");
+    expect(currentWorkspace(cwd)).toBe("mine");
+    expect(listWorkspaces()).toEqual(["mine"]);
+  });
+
+  /** The environment still outranks the pointer for the name, and still puts that name in
+   *  the list — so the pointer cannot smuggle a row in behind an explicit ask either. */
+  it("an explicit ask over a pointer lists the ask and not the pointer", () => {
+    const cwd = tmp("wecode-repo-");
+    writePointer(cwd, "pointed");
+    process.env["WECODE_WORKSPACE"] = "asked";
+    expect(currentWorkspace(cwd)).toBe("asked");
+    expect(listWorkspaces()).toEqual(["asked"]);
   });
 });
 
@@ -181,10 +220,10 @@ describe("with no home of its own, a test run does not get the operator's", () =
   });
 
   it("lists the run's own workspaces, not whatever the operator has", () => {
-    expect(listWorkspaces(tmp("wecode-repo-"))).toEqual([]);
+    expect(listWorkspaces()).toEqual([]);
     mkdirSync(join(wecodeHome(), "workspaces", "mine"), { recursive: true });
     writeFileSync(join(wecodeHome(), "workspaces", "mine", "wecode.db"), "");
-    expect(listWorkspaces(tmp("wecode-repo-"))).toEqual(["mine"]);
+    expect(listWorkspaces()).toEqual(["mine"]);
   });
 
   it("makes nothing until something writes, and sweeps what it made", () => {
