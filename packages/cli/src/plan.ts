@@ -26,6 +26,12 @@ const { parse } = createRequire(new URL("../node_modules/@wecode/core/package.js
 /** `wecode plan <file.yaml>` — docs/design/13. A whole story as one document: checked
  *  whole, created whole, started, and printed back as a shape. */
 export function plan(args: readonly string[]): number {
+  // Before parseArgs, which would call --help an unknown option and throw past this command.
+  // The file's shape is the one thing a newcomer cannot guess, so --help is the schema itself.
+  if (args.some((a) => a === "--help" || a === "-h")) {
+    process.stdout.write(help());
+    return 0;
+  }
   const { values, positionals } = parseArgs({
     args: [...args],
     allowPositionals: true,
@@ -148,6 +154,49 @@ const KEYS = {
 } as const;
 
 const DEFAULT_TOOLS = ["bash", "read", "edit", "write"] as const;
+
+/** The schema, written from the same constants `read` judges a file by, so the two cannot
+ *  drift: a key added to KEYS or CHILDREN is documented by having been added. */
+function help(): string {
+  const pad = (s: string, n = 16): string => s.padEnd(n);
+  const rows = [
+    ["the file", `${ROOTS.join(" | ")} — the first key names the root`],
+    ...ROOTS.map((r) => [
+      r,
+      `${ABOVE[r as Root] === null ? "" : `${String(ABOVE[r as Root])} (the row it hangs off), `}${CHILDREN[r as Root]}`,
+    ]),
+    ["requirement", KEYS.requirement.join(", ")],
+    ["criteria", KEYS.criteria.join(", ")],
+    ["task", KEYS.task.join(", ")],
+  ];
+  return [
+    "wecode plan <file.yaml> [--epic <id>] [--dry-run]",
+    "",
+    "A whole story as one document: checked whole, created whole, and started.",
+    "An unknown key is an error — a typo that silently plans nothing is worse.",
+    "",
+    "  story: the cockpit is one reusable list      # or an id, to join that story",
+    "  epic: 3                                      # optional; --epic <id> or the newest in-progress otherwise",
+    "  requirements:                                # required, at least one",
+    "    - statement: a person sees one list",
+    "      criteria:",
+    "        - statement: the list renders at three sizes",
+    "          test: pnpm test list                 # optional; config/project.yaml test otherwise",
+    "          tasks:",
+    "            - title: render the list",
+    '              scope: ["src/**", "test/**"]     # optional; project source + tests otherwise',
+    "              test: pnpm test list             # optional",
+    "              role: engineer                   # optional; engineer otherwise",
+    "",
+    "keys",
+    ...rows.map(([where, keys]) => `  ${pad(where as string)}${keys as string}`),
+    "",
+    `A criteria naming no test of its own gets an extra ${AUTHORS} task that writes one.`,
+    `A task's tools come from its role, or ${DEFAULT_TOOLS.join(", ")} when there are no roles.`,
+    `An epic holds ${CHILDREN.epic}, a release holds ${CHILDREN.release}; only the root joins an existing row by id.`,
+    "",
+  ].join("\n");
+}
 
 /** An unknown key is an error. A typo that silently plans nothing is worse than a refusal. */
 function mapping(v: unknown, where: string, allowed: readonly string[], say: string[]): Record<string, unknown> | null {
