@@ -1,5 +1,6 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   currentDatabase,
@@ -7,6 +8,9 @@ import {
   databaseOf,
   listWorkspaces,
   namedWorkspace,
+  sweepTempHome,
+  wecodeHome,
+  workspaceDir,
   writePointer,
 } from "../src/home.js";
 import { tmp } from "./tmpdir.js";
@@ -136,5 +140,63 @@ describe("the list agrees with the current workspace", () => {
   it("the default is not listed when nobody named it", () => {
     make("cws");
     expect(listWorkspaces(tmp("wecode-repo-"))).toEqual(["cws"]);
+  });
+});
+
+/** The reader is one place, and under test that one place may not be the operator's own
+ *  `~/.wecode`. `store.open` already refuses a live *database*, but every other path this
+ *  module hands out came from the same fallback: `listWorkspaces` read the operator's real
+ *  workspace names, and `workspaceDir` named a directory in the home they work in. */
+describe("with no home of its own, a test run does not get the operator's", () => {
+  const live = join(homedir(), ".wecode");
+  const under = (path: string): boolean =>
+    resolve(path) === live || resolve(path).startsWith(live + sep);
+
+  beforeEach(() => {
+    delete process.env["WECODE_HOME"];
+  });
+
+  afterEach(() => {
+    sweepTempHome();
+  });
+
+  it("resolves a home under the system temp directory, not the real one", () => {
+    const got = wecodeHome();
+    expect(under(got)).toBe(false);
+    expect(got.startsWith(resolve(tmpdir()) + sep) || got.startsWith(tmpdir() + sep)).toBe(true);
+  });
+
+  it("answers with the same home every time, so two readers agree", () => {
+    expect(wecodeHome()).toBe(wecodeHome());
+  });
+
+  /** Every path this module hands out, not just the database one that was already guarded. */
+  it("keeps every path it derives out of the operator's home", () => {
+    const cwd = tmp("wecode-repo-");
+    writePointer(cwd, "cws");
+    for (const path of [workspaceDir("cws"), databaseOf("cws"), currentDatabase(cwd)]) {
+      expect(under(path)).toBe(false);
+    }
+    expect(currentWorkspace(cwd)).toBe("cws");
+  });
+
+  it("lists the run's own workspaces, not whatever the operator has", () => {
+    expect(listWorkspaces(tmp("wecode-repo-"))).toEqual([]);
+    mkdirSync(join(wecodeHome(), "workspaces", "mine"), { recursive: true });
+    writeFileSync(join(wecodeHome(), "workspaces", "mine", "wecode.db"), "");
+    expect(listWorkspaces(tmp("wecode-repo-"))).toEqual(["mine"]);
+  });
+
+  it("makes nothing until something writes, and sweeps what it made", () => {
+    const got = wecodeHome();
+    mkdirSync(join(got, "workspaces", "gone"), { recursive: true });
+    sweepTempHome();
+    expect(existsSync(got)).toBe(false);
+  });
+
+  /** An explicit home is still obeyed: the temp one is the fallback, not an override. */
+  it("still obeys WECODE_HOME when it is set", () => {
+    process.env["WECODE_HOME"] = home;
+    expect(wecodeHome()).toBe(home);
   });
 });

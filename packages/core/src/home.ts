@@ -1,10 +1,49 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
-/** Where wecode keeps workspaces. One directory per workspace, one database in each. */
+const underTest = (): boolean =>
+  process.env["VITEST"] !== undefined || process.env["NODE_ENV"] === "test";
+
+/** The home a test run gets when it did not ask for one, made once and kept for the life of
+ *  the process so that two reads of the current workspace agree on where it lives. */
+let ownHome: string | null = null;
+
+/** Removes the home this run made, if it made one. Registered on exit, and exported so a
+ *  test can prove the sweep rather than wait for its own exit. */
+export function sweepTempHome(): void {
+  if (ownHome === null) return;
+  rmSync(ownHome, { recursive: true, force: true });
+  ownHome = null;
+}
+
+function temporaryHome(): string {
+  if (ownHome === null) {
+    ownHome = mkdtempSync(join(tmpdir(), "wecode-home-"));
+    process.on("exit", sweepTempHome);
+  }
+  return ownHome;
+}
+
+/** Where wecode keeps workspaces. One directory per workspace, one database in each.
+ *
+ *  With WECODE_HOME unset a test run gets a home of its own under the system temp directory
+ *  rather than the operator's `~/.wecode`. The fallback to the real home is what made this
+ *  reader unsafe to call from a test: `store.open` refuses a live *database*, but nothing
+ *  stopped `listWorkspaces` from reading the operator's workspace names, or `workspaceDir`
+ *  from being made into a directory in the home a person is actually working in. */
 export function wecodeHome(): string {
-  return process.env["WECODE_HOME"] ?? join(homedir(), ".wecode");
+  const explicit = process.env["WECODE_HOME"];
+  if (explicit !== undefined) return explicit;
+  return underTest() ? temporaryHome() : join(homedir(), ".wecode");
 }
 
 export function workspaceDir(name: string): string {
