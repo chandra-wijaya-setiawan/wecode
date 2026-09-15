@@ -62,6 +62,7 @@ export function plan(args: readonly string[]): number {
   const said: string[] = [];
   const shaped = read(doc, config, roles, said);
   const parent = shaped === null ? null : parentOf(db, shaped, values.epic, said);
+  if (shaped !== null && shaped.top !== null) duplicated(db, shaped.top, said);
 
   if (said.length > 0 || shaped === null || shaped.top === null || parent === null) {
     return fail([`${file} is not a plan yet:`, ...said.map((s) => `  ${s}`)].join("\n"));
@@ -520,6 +521,48 @@ function parentOf(db: DatabaseSync, p: Plan, flag: string | undefined, say: stri
     return null;
   }
   return newest.id;
+}
+
+// ── what this project has already said ───────────────────────────────────────────────────
+
+/** The oldest row in this project already carrying a sentence. */
+const SAME: Record<"story" | "criteria", string> = {
+  story:
+    "SELECT s.id AS id FROM story s JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id " +
+    "WHERE r.project_id = ? AND s.title = ? ORDER BY s.id LIMIT 1",
+  criteria:
+    "SELECT c.id AS id FROM acceptance_criteria c JOIN requirement q ON q.id = c.requirement_id " +
+    "JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id " +
+    "WHERE r.project_id = ? AND c.statement = ? ORDER BY c.id LIMIT 1",
+};
+
+/** A story or criteria this project has already said. Planning the same sentence twice makes
+ *  a second tree nobody asked for and two agents doing one job, so the file is refused by the
+ *  id it duplicates — which is also where the work already is. A root joined by id carries no
+ *  sentence of its own and duplicates nothing. */
+function duplicated(db: DatabaseSync, top: Level, say: string[]): void {
+  const here = db.prepare("SELECT id FROM project WHERE repo = ?").get(resolve(process.cwd())) as
+    | { id: number }
+    | undefined;
+  if (here === undefined) return;
+
+  const at = (sql: string, text: string): number | null =>
+    (db.prepare(sql).get(here.id, text) as { id: number } | undefined)?.id ?? null;
+
+  const walk = (l: Level): void => {
+    if (l.kind === "story" && l.name !== null) {
+      const hit = at(SAME.story, l.name);
+      if (hit !== null) say.push(`story #${hit} already says ${l.name}`);
+    }
+    for (const c of l.children) walk(c);
+    for (const r of l.requirements) {
+      for (const c of r.criteria) {
+        const hit = at(SAME.criteria, c.statement);
+        if (hit !== null) say.push(`criteria #${hit} already says ${c.statement}`);
+      }
+    }
+  };
+  walk(top);
 }
 
 // ── creating ─────────────────────────────────────────────────────────────────────────────
