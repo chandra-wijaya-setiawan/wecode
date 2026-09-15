@@ -8,6 +8,7 @@ import {
   clearChoreRefusal,
   clearRefusal,
   choreFor,
+  choreRefusal,
   closeChore,
   Engine,
   ensureChore,
@@ -842,7 +843,22 @@ export class Runner {
       target_id: story.id,
       check: "the base is an ancestor of the branch",
     });
-    recordChoreRefusal(this.db, why, raised.id);
+    // One row, two voices, and only one of them is worth an operator's attention.
+    //
+    // `chore_refusal` holds a single sentence per chore. This one is the note that raised the
+    // chore — why the work is owed — and the chore's own existence, kind and check already
+    // say that. The dispatcher's and the judge's sentences say the thing the record does not:
+    // no worker free, no slot, the tree would not open, the attempt proved nothing. Written
+    // unconditionally, this note landed on top of one of those on every tick, which cost two
+    // readings at once: the dispatch refusal's `since` and `passes` were reset each pass, so
+    // a chore held for half an hour read as first-seen-now; and a `failed` chore out of
+    // `max_retry` — the one row nothing ever comes back to rewrite — lost its verdict to
+    // "does not contain" for good.
+    //
+    // So it seeds an empty row and never overwrites. Nothing is lost by that: the row is
+    // empty on the first raise, and `reraiseChore` clears it whenever the condition comes
+    // back, which is the only other moment this note is the newest thing known.
+    if (choreRefusal(this.db, raised.id) === null) recordChoreRefusal(this.db, why, raised.id);
     return raised.state === "done" ? [] : [raised.id];
   }
 
