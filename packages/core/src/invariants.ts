@@ -172,14 +172,51 @@ export function storyInProgressHasARequirement(s: Snapshot): readonly Violation[
     .map((n) => violation("story_in_progress_has_a_requirement", n, "in_progress with no requirement under it"));
 }
 
-/** A parent whose every child is dropped is not in a success state: everything that was
+/** Said of a parent whose children all succeeded on nothing — the abandonment is further
+ *  down than its own children. */
+const PROVED_NOTHING = "proving nothing";
+
+/** Every node that proves nothing, found from the leaves up.
+ *
+ *  A dropped node proves nothing because it was abandoned. A node in a success state proves
+ *  nothing when it has children and every one of them proves nothing: the success is
+ *  inherited from work that was all abandoned, so it carries none of its own. That second
+ *  clause is what reaches above the level the abandonment happened at — an epic delivered by
+ *  a story that was itself delivered on nothing but dropped requirements is as empty as the
+ *  story is, and only a walk from the leaves can see it.
+ *
+ *  A childless parent is not here: nothing was abandoned under it, there was never anything,
+ *  and that is `story_in_progress_has_a_requirement`'s sentence rather than this one. */
+function provesNothing(s: Snapshot): ReadonlySet<RecordNode> {
+  const empty = new Set(s.nodes.filter((n) => n.state === "dropped"));
+  // Leaves first, so a parent is decided only after every child it rests on.
+  for (const entity of [...CHECKED].reverse()) {
+    for (const n of of(s, entity)) {
+      if (n.state !== PARENTS[n.entity]?.success) continue;
+      const children = childrenOf(s, n);
+      if (children.length > 0 && children.every((c) => empty.has(c))) empty.add(n);
+    }
+  }
+  return empty;
+}
+
+/** A parent whose every child proves nothing is not in a success state: everything that was
  *  going to prove it was abandoned, so the parent cannot be what its children would have
- *  made it. */
+ *  made it.
+ *
+ *  It names each such parent, at every level, and not only the one the drop happened at: an
+ *  epic delivered above an all-dropped tree is making the same false claim its story is, and
+ *  healing the story leaves the epic's claim standing. The detail says which it is — every
+ *  child dropped outright, or every child a success that proved nothing. */
 export function allChildrenDroppedIsNotSuccess(s: Snapshot): readonly Violation[] {
+  const empty = provesNothing(s);
   return s.nodes
-    .filter((n) => n.state === PARENTS[n.entity]?.success)
-    .filter((n) => childrenOf(s, n).length > 0 && childrenOf(s, n).every((c) => c.state === "dropped"))
-    .map((n) => violation("all_children_dropped_is_not_success", n, `${n.state} with every ${PARENTS[n.entity]?.child} dropped`));
+    .filter((n) => n.state === PARENTS[n.entity]?.success && empty.has(n))
+    .map((n) => {
+      const child = PARENTS[n.entity]?.child;
+      const how = childrenOf(s, n).every((c) => c.state === "dropped") ? "dropped" : PROVED_NOTHING;
+      return violation("all_children_dropped_is_not_success", n, `${n.state} with every ${child} ${how}`);
+    });
 }
 
 /** A `ready` acceptance_test has been observed red at its base: a test nobody has seen fail
