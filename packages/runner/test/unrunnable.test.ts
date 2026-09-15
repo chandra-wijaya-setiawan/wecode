@@ -48,6 +48,10 @@ function readyTask(artefact: string): { task: number; taskTest: number } {
   const task = make.task(at, `do-${artefact}`, { role: "engineer", scope: { write: ["src/**"], tools: [] } });
   const taskTest = make.taskTest(task, `unit-${artefact}`, "script", artefact);
   engine.apply("task_test", taskTest, "deliver", "chief");
+  // A task will not start under an acceptance_test still in `planned`: there would be
+  // nothing to judge its criteria by once the work landed. Deliver the parent first, as
+  // the real flow does, so what this file is about is the missing script and not the tree.
+  engine.apply("acceptance_test", at, "deliver", "chief");
   engine.apply("task", task, "start", "chief");
   return { task, taskTest };
 }

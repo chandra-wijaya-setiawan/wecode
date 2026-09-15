@@ -46,6 +46,13 @@ export const COMMAND_REFUSALS: readonly CommandRefusal[] = [
     raisedIn: "planned",
     tail: "<id>",
   },
+  {
+    site: "checks.task_may_be_attempted.planned_parent",
+    entity: "acceptance_test",
+    verb: "deliver",
+    raisedIn: "planned",
+    tail: "<id>",
+  },
 ];
 
 /** The command a site names, rendered. Unknown sites throw rather than yield a blank: a
@@ -211,6 +218,22 @@ export function guards(repo: Repo): Readonly<Record<GuardName, Guard>> {
           `${planned.length} task_test still planned (${naming(planned)}) — a planned test can never ` +
             `settle, so the task could never finish; \`${commandOf("checks.task_may_be_attempted.planned_test")}\` ` +
             "delivers it, or drop it",
+        );
+      }
+      // The task proves itself against its parent acceptance_test, and a parent left in
+      // `planned` has not been delivered: it has no run anybody could judge the criteria
+      // by. The task would finish, its own tests would settle, and the criteria above it
+      // would still be unaccepted with nothing on the board saying why. This is the same
+      // dead end as a planned task_test, one level up, so it is caught at the same place —
+      // where the work starts, before an attempt is spent. Every other parent state is
+      // fine here: `create` already refuses a task under a settled acceptance_test, and a
+      // `ready` or re-proved one is exactly what a task is for.
+      const parent = repo.parentOf("task", id);
+      if (parent !== null && repo.stateOf(parent.entity, parent.id) === "planned") {
+        return refuse(
+          `its acceptance_test #${parent.id} is still planned — nothing would judge the work, so the ` +
+            `criteria above it could never be accepted; ` +
+            `\`${commandOf("checks.task_may_be_attempted.planned_parent")}\` delivers it`,
         );
       }
       return ALLOW;
