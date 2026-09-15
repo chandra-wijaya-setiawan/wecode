@@ -970,9 +970,12 @@ export class Runner {
       const begun = applyChore(this.db, chore.id, "begin", `worker-${worker}`);
       if (!begun.ok) return this.refuseChore(chore, begun.why);
       return id;
-    } catch {
-      // no branch, or no tree to be had: there is nothing to merge in yet
-      return this.refuseChore(chore, "no branch to merge into yet");
+    } catch (err) {
+      // No branch, or no tree to be had. Which one it was is git's to say: the fixed
+      // "no branch to merge into yet" read identically whether the branch was missing, the
+      // worktree path was occupied by a file, or the index was locked, and the operator had
+      // to go to the tree themselves to find out. Report what was actually caught.
+      return this.refuseChore(chore, (err as Error).message);
     }
   }
 
