@@ -98,6 +98,14 @@ const refusedWrite = (db: DatabaseSync, task: string): string =>
 /** No project asked for is every project: the predicate is true for every row. */
 const only = (project: string): string => `(:project IS NULL OR ${project} = :project)`;
 
+/** Like `only`, but a row the walk cannot place is shown on every board rather than on
+ *  none. The walk up is five subqueries deep, and `NULL = :project` is NULL, so one missing
+ *  link anywhere above a task takes it off the narrowed board silently — while the
+ *  allocator, which never walks up, goes on dispatching it. An operator reading an empty
+ *  queue beside a busy runner has no way back from that. Used by the queue, because the
+ *  queue is the one group whose absence is mistaken for there being no work. */
+const placed = (project: string): string => `(${only(project)} OR ${project} IS NULL)`;
+
 /** `project` narrows every group but `projects` to one project's work. The projects box is
  *  how you get back out again, so it always shows the whole workspace. */
 export function board(db: DatabaseSync, project: number | null = null): Board {
@@ -183,14 +191,17 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
         WHERE a.phase = 'waiting' AND ${only(ofAssignment("a"))}
         ORDER BY a.id`,
     ),
-    // ready, and nothing open is attempting it: the queue is what waits on a slot.
+    // ready, and nothing open is attempting it: the queue is what waits on a slot. This is
+    // the same condition `readyCandidates` dispatches on and nothing more — no state above
+    // the task is consulted, because a task's own machine already decided it was ready and
+    // a second opinion here would be a task the allocator takes and the board never shows.
     // The detail is why it is not running: the last pass's refusal, or its role.
     queued: rows(
       `SELECT t.id AS id, t.title AS what, t.state AS state,
               coalesce(f.why, t.role) || ${denied} AS detail
          FROM task t LEFT JOIN refusal f ON f.task_id = t.id
         WHERE t.state = 'ready'
-          AND ${only(ofTask("t.id"))}
+          AND ${placed(ofTask("t.id"))}
           AND NOT EXISTS (
             SELECT 1 FROM assignment a
              WHERE a.objective_type = 'task' AND a.objective_id = t.id
