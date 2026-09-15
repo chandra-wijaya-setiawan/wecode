@@ -1,0 +1,134 @@
+# Which component owns which module — docs/design/01 §L2/§L3 as data.
+#
+# Exactly once is the whole point: every module under `packages/*/src` is claimed by one
+# row here, and no module is claimed twice, so "which box does this code live in" has one
+# answer and `components-cover-the-tree.test.ts` fails the moment it has none or two.
+#
+# A module is named without its extension, relative to its package's `src/`.
+#
+# Two rows are deliberately not components: `files` is docs/design/01's own "not
+# components, and not at this level" row, and `surface` is a package's entry point, which
+# owns nothing. They exist so the map can cover the tree without inventing a box the
+# architecture does not have.
+
+layers:
+  gate: the domain and its application service — the part that is wecode rather than any backend
+  presentation: queries, read models, listers. Nothing changes here at all
+  data: the store, the migrations, the append-only ledger
+  service: runs on a clock, and is a client of the core like any other
+  client: how a person or an agent reaches a verb
+  files: what the model and the ceiling are written in
+  surface: an entry point — wiring, and nothing decided
+
+components:
+  engine:
+    package: core
+    layer: gate
+    component: true
+    owns: apply a verb, fire the cascade it unblocks, settle anything whose guard came true
+    modules: [apply, create, edit, bulk, cascade, chore, lease, lessons]
+
+  model:
+    package: core
+    layer: gate
+    component: true
+    owns: the entities, their state machines as data, and one named guard per constrained transition
+    modules: [types, entities, machines, guards, checks, invariants, land]
+
+  views:
+    package: core
+    layer: presentation
+    component: true
+    owns: the filters over the record, the walk down the tree, and what is next up
+    modules: [board, tree, order, delivered]
+
+  ledger:
+    package: core
+    layer: data
+    component: true
+    owns: one line per transition, appended inside the same transaction as the state change
+    modules: [repo]
+
+  store:
+    package: core
+    layer: data
+    component: true
+    owns: opening the database, the numbered migrations, transactions, and reading and writing rows
+    modules: [store]
+
+  files:
+    package: core
+    layer: files
+    component: false
+    owns: what is declared rather than coded — the roles, the stacks, the home, and reading a source file
+    modules: [roles, stacks, home, ast]
+
+  core surface:
+    package: core
+    layer: surface
+    component: false
+    owns: what a client of the library may import
+    modules: [index]
+
+  allocator:
+    package: runner
+    layer: service
+    component: true
+    owns: picks the next ready work, binds a worker, creates the assignment — within the attention budget
+    modules: [allocator, budget]
+
+  foreman:
+    package: runner
+    layer: service
+    component: true
+    owns: takes an assignment and makes it real — the session, the tree it runs in, and what the last attempt left
+    modules: [foreman, git, ports]
+
+  examiner:
+    package: runner
+    layer: service
+    component: true
+    owns: runs a test's artefact where the test belongs and records what came back
+    modules: [examiner]
+
+  synchroniser:
+    package: runner
+    layer: service
+    component: true
+    owns: writes what was observed back to the core, so the record and reality agree on every tick
+    modules: [daemon]
+
+  worker adapter:
+    package: runner
+    layer: service
+    component: true
+    owns: one per kind of worker — the only thing that knows the difference
+    modules: [adapters/claude-code, adapters/denials]
+
+  doctor:
+    package: runner
+    layer: service
+    component: true
+    owns: checks wecode against itself, heals what it safely can, and proposes the rest as a chore
+    modules: [doctor]
+
+  runner surface:
+    package: runner
+    layer: surface
+    component: false
+    owns: the daemon's executable and what a client of the package may import
+    modules: [bin, index]
+
+  cli:
+    package: cli
+    layer: client
+    component: true
+    owns: every verb, as a command. The only way an agent reaches wecode
+    modules: [bin, delivered, doctor, index, plan, run]
+
+  tui:
+    package: tui
+    layer: client
+    component: true
+    owns: the board, and the few verbs worth typing while looking at a row
+    modules: [app, bin, index, list, outline, screens, services, views]
