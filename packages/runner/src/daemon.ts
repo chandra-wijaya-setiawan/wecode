@@ -877,9 +877,18 @@ export class Runner {
       .all() as unknown as { id: number; chore: number; worktree: string }[];
   }
 
+  /** Chores with nothing already attempting them. The guard matters: without it a chore
+   *  whose `begin` did not land is handed out again next tick while its first assignment
+   *  is still running, and then two workers are in one tree. */
   private dispatchableChores(): { id: number }[] {
     return this.db
-      .prepare("SELECT id FROM chore WHERE state IN ('planned','ready') ORDER BY id")
+      .prepare(
+        `SELECT id FROM chore c WHERE c.state IN ('planned','ready')
+           AND NOT EXISTS (SELECT 1 FROM assignment a
+                            WHERE a.objective_type = 'chore' AND a.objective_id = c.id
+                              AND a.phase IN ('pending','running','waiting'))
+          ORDER BY id`,
+      )
       .all() as unknown as { id: number }[];
   }
 
@@ -932,10 +941,13 @@ export class Runner {
         budget: this.opts.choreBudget ?? CHORE_BUDGET,
         worktree: tree,
       });
+      // Dispatched: the assignment exists, so whatever was holding it a tick ago is no
+      // longer true of it. Cleared here rather than after `begin`, because every way out
+      // from this line on is a way out with an assignment open — and a chore being
+      // attempted must never also be showing a reason it is not.
+      clearChoreRefusal(this.db, chore.id);
       const begun = applyChore(this.db, chore.id, "begin", `worker-${worker}`);
       if (!begun.ok) return this.refuseChore(chore, begun.why);
-      // Dispatched: whatever was holding it a tick ago is no longer true of it.
-      clearChoreRefusal(this.db, chore.id);
       return id;
     } catch {
       // no branch, or no tree to be had: there is nothing to merge in yet
