@@ -28,7 +28,7 @@ export interface Board {
  *  created beside the record the way `landed_branch` and `red_at_base` are. A workspace
  *  that has never run a lander has no such table, and that is not an error: it is a board
  *  with nothing recorded against it. */
-const hasTable = (db: DatabaseSync, name: string): boolean =>
+export const hasTable = (db: DatabaseSync, name: string): boolean =>
   db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
 
 /** The project a row belongs to, as an expression over the id of its row. Every group but
