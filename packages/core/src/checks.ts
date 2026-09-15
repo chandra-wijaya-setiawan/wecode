@@ -3,6 +3,52 @@ import { ALLOW, refuse, type Guard, type GuardName, type GuardRegistry } from ".
 import type { Repo } from "./repo.js";
 import type { StatefulEntity } from "./types.js";
 
+/** A refusal that tells the operator what to run next.
+ *
+ *  The command is data, not prose, because a verb can be checked and a sentence cannot.
+ *  `wecode acceptance-test invalidate` was wrong twice over — the entity is spelled with an
+ *  underscore everywhere the cli reads one, and `invalidate` is not legal from `failed`,
+ *  which is the state that refusal is raised in; `reprove` is. It was followed twice on
+ *  15 Sep before anybody noticed, because a refusal is read at the moment the operator has
+ *  least reason to doubt it.
+ *
+ *  `test/refusal-commands.test.ts` proves every row here against machines.yaml and the cli's
+ *  own verb table, so a verb that is not legal from `raisedIn` fails the suite rather than
+ *  the operator. The convention the same test relies on: **a refusal that names a command
+ *  writes it in backticks, and takes the text from here.** A backticked `wecode …` in this
+ *  package with no row is a failure too. */
+export interface CommandRefusal {
+  /** The refusal site, so a failure names where to look. */
+  readonly site: string;
+  /** The entity, spelled the way the cli's first argument is spelled. */
+  readonly entity: string;
+  readonly verb: string;
+  /** The state the refusal is raised in. A machine verb has to be legal from here. */
+  readonly raisedIn: string;
+  /** Everything after the verb, as the operator would type it. */
+  readonly tail: string;
+}
+
+export const COMMAND_REFUSALS: readonly CommandRefusal[] = [
+  { site: "create.settled.passed", entity: "acceptance_test", verb: "invalidate", raisedIn: "passed", tail: "<id>" },
+  { site: "create.settled.failed", entity: "acceptance_test", verb: "reprove", raisedIn: "failed", tail: "<id>" },
+  {
+    site: "checks.task_may_be_attempted.no_write_scope",
+    entity: "task",
+    verb: "scope",
+    raisedIn: "planned",
+    tail: '<id> --write "src/**"',
+  },
+];
+
+/** The command a site names, rendered. Unknown sites throw rather than yield a blank: a
+ *  refusal with no command in it is the dead end this table exists to prevent. */
+export function commandOf(site: string): string {
+  const row = COMMAND_REFUSALS.find((r) => r.site === site);
+  if (row === undefined) throw new Error(`no refusal command registered for ${site}`);
+  return `wecode ${row.entity} ${row.verb} ${row.tail}`.trimEnd();
+}
+
 const kindOf = (repo: Repo, entity: string): string =>
   repo.childEntityOf(entity as StatefulEntity) ?? "children";
 
@@ -132,7 +178,9 @@ export function guards(repo: Repo): Readonly<Record<GuardName, Guard>> {
       if (task === null) return refuse(`no task #${id}`);
       const scope = JSON.parse(task.scope) as { write?: string[] };
       if (!Array.isArray(scope.write) || scope.write.length === 0) {
-        return refuse("it has no write scope — wecode task scope sets one");
+        return refuse(
+          `it has no write scope — \`${commandOf("checks.task_may_be_attempted.no_write_scope")}\` sets one`,
+        );
       }
       if (task.role.trim() === "") return refuse("no role is assigned");
       const tests = repo.childrenOf("task", id);
