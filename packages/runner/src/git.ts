@@ -376,12 +376,24 @@ export class Trees {
         branch,
       ]);
     } catch (err) {
+      const conflicted = await this.conflictedPaths(tree);
       await git(tree, ["merge", "--abort"]).catch(() => "");
       const after = (await this.midMerge(tree))
         ? `the merge would not abort: ${tree} is left mid-merge and wants a person`
         : "no merge is left standing: the tree is as it was";
-      throw new GitError(`${what} failed: ${(err as Error).message} — ${after}`);
+      const where =
+        conflicted.length > 0 ? ` — conflicted in: ${conflicted.join(", ")}` : "";
+      throw new GitError(`${what} failed: ${(err as Error).message}${where} — ${after}`);
     }
+  }
+
+  /** Which files the merge could not reconcile. Read from the conflicted index *before* the
+   *  abort, because the abort is what throws that index away — afterwards there is nothing
+   *  left to name. A non-conflict failure (a dirty tree, an unknown branch) has no such
+   *  paths, and then the sentence leaves them out rather than claiming none conflicted. */
+  private async conflictedPaths(tree: string): Promise<readonly string[]> {
+    const out = await git(tree, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "");
+    return out === "" ? [] : out.split("\n");
   }
 
   /** Is this tree still in the middle of a merge? `MERGE_HEAD` is git's own record of it,
