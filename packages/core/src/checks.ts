@@ -39,6 +39,13 @@ export const COMMAND_REFUSALS: readonly CommandRefusal[] = [
     raisedIn: "planned",
     tail: '<id> --write "src/**"',
   },
+  {
+    site: "checks.task_may_be_attempted.planned_test",
+    entity: "task_test",
+    verb: "deliver",
+    raisedIn: "planned",
+    tail: "<id>",
+  },
 ];
 
 /** The command a site names, rendered. Unknown sites throw rather than yield a blank: a
@@ -184,9 +191,29 @@ export function guards(repo: Repo): Readonly<Record<GuardName, Guard>> {
       }
       if (task.role.trim() === "") return refuse("no role is assigned");
       const tests = repo.childrenOf("task", id);
-      return tests.some((t) => t.state === "ready" || t.state === "passed")
-        ? ALLOW
-        : refuse("no task_test is ready — a task says how it proves itself before it runs");
+      // A task_test left in `planned` is neither passed nor dropped, so `finish`'s guard
+      // — every_task_test_settled — can never be satisfied: the task dispatches, an agent
+      // works, and it runs to max_retry with the board saying nothing about why. Observed
+      // on task 198 on 15 Sep, which carried one planned test beside one ready one and so
+      // satisfied the ready-or-passed requirement below. The gap is closed where the work
+      // starts rather than where it ends, so the operator learns before an attempt is
+      // spent. Dropped is settled and does not block.
+      //
+      // The older requirement is asked first: a task whose only test is planned has no way
+      // of proving itself at all, and "no task_test is ready" is the nearer answer to that
+      // than a lecture about settling.
+      const planned = tests.filter((t) => t.state === "planned");
+      if (!tests.some((t) => t.state === "ready" || t.state === "passed")) {
+        return refuse("no task_test is ready — a task says how it proves itself before it runs");
+      }
+      if (planned.length > 0) {
+        return refuse(
+          `${planned.length} task_test still planned (${naming(planned)}) — a planned test can never ` +
+            `settle, so the task could never finish; \`${commandOf("checks.task_may_be_attempted.planned_test")}\` ` +
+            "delivers it, or drop it",
+        );
+      }
+      return ALLOW;
     },
 
     /** One failed attempt does not fail a task; the retry limit does. */
