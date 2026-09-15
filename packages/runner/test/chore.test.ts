@@ -139,14 +139,18 @@ describe("a delivered story that merges cleanly", () => {
     expect((db.prepare("SELECT count(*) AS n FROM chore").get() as { n: number }).n).toBe(0);
   });
 
-  it("nor does a story still in flight, however badly it conflicts", async () => {
+  it("nor does a story still in flight, however badly it conflicts — no *merge* chore", async () => {
     const story = deliveredStory("password reset", "the story's line\n");
     moveTheBase("the base's line\n");
-    // The conflict is real; the story is not finished. A branch in flight is expected to
-    // diverge, and a chore for it would be noise on every board in the workspace.
+    // The conflict is real; the story is not finished. `merge` is about a story that has
+    // finished, and raising it early is a chore on every board in the workspace. What an
+    // in-flight story behind its base owes is a `refresh` instead — the tree wecode is
+    // judging in right now — so the assertion is about the kind, not about silence.
     db.prepare("UPDATE story SET state = 'in_progress' WHERE id = ?").run(story.id);
 
-    expect((await runner().tick()).chores).toEqual([]);
+    const raised = (await runner().tick()).chores;
+    expect(choreFor(db, "merge", "story", story.id)).toBeNull();
+    expect(raised).toEqual([choreFor(db, "refresh", "story", story.id)?.id]);
   });
 
   it("nor a delivered story with no branch at all", async () => {
