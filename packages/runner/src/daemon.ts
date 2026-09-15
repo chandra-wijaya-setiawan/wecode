@@ -698,14 +698,33 @@ export class Runner {
       );
     } catch (err) {
       // Leave no half-merge standing: the next tick, and the chore's worker, both want the
-      // branch as it was.
+      // branch as it was. Whether that worked is read back off the tree rather than off the
+      // abort's exit code — `merge --abort` also fails when there was no merge to abort, and
+      // that tree is not wedged. A tree still holding MERGE_HEAD is, and then the sentence
+      // has to say so: a wedged tree is what the next tick and the chore's worker will find,
+      // and a silent abort left them to discover it.
       await exec("git", ["merge", "--abort"], { cwd: tree }).catch(() => undefined);
-      return { ok: false, why: `${branch} is behind ${base} and will not take it: ${reasonOf(err)}` };
+      const wedged = await this.midMerge(tree);
+      const after = wedged
+        ? `and the merge would not abort: ${tree} is left mid-merge and wants a person`
+        : "no merge is left standing: the tree is as it was";
+      return {
+        ok: false,
+        why: `${branch} is behind ${base} and will not take it: ${reasonOf(err)} — ${after}`,
+      };
     }
     if (!(await this.contains(repo, branch, base))) {
       return { ok: false, why: `${branch} still does not contain ${base} after the merge` };
     }
     return { ok: true };
+  }
+
+  /** Is this tree still in the middle of a merge? `MERGE_HEAD` is git's own record of it,
+   *  and it survives an abort that could not run. */
+  private async midMerge(tree: string): Promise<boolean> {
+    return await exec("git", ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], { cwd: tree })
+      .then(() => true)
+      .catch(() => false);
   }
 
   private async hasCommit(repo: string, ref: string): Promise<boolean> {
