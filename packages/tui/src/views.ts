@@ -15,7 +15,12 @@ export interface View {
   readonly empty: string;
 }
 
-const FILTERS = [
+/** The filters a box may name. This is a fourth copy of words that already exist as the
+ *  `Board` interface, as the object `board()` returns, and twice in views.yaml — so it is
+ *  written as `keyof Board` and nothing else: `satisfies` makes a typo here a build error
+ *  rather than a box that silently keeps no rows. test/filter-names.test.ts closes the
+ *  rest of the circle, against a real board and against the config. */
+export const FILTERS = [
   "projects",
   "running",
   "needs_human",
@@ -24,7 +29,7 @@ const FILTERS = [
   "failed",
   "open",
   "delivered",
-] as const;
+] as const satisfies readonly (keyof Board)[];
 
 /** Every name here has to resolve to a filter the code knows. A typo is a refusal to
  *  start, not a blank box on the one screen an operator watches all day. */
@@ -40,7 +45,7 @@ export function loadViews(path: string = CONFIG): readonly View[] {
   if (views === null || typeof views !== "object") throw new ViewError("no views");
   const defs = views as Record<string, Record<string, unknown>>;
 
-  return (order as string[]).map((name) => {
+  const loaded = (order as string[]).map((name) => {
     const v = defs[name];
     if (v === undefined) throw new ViewError(`page.order names ${name}, which no view declares`);
     const filter = v["filter"];
@@ -55,4 +60,15 @@ export function loadViews(path: string = CONFIG): readonly View[] {
       empty: typeof v["empty"] === "string" ? v["empty"] : "-",
     };
   });
+
+  /** The other direction, once every ordered name has been answered for: a box declared and
+   *  never ordered draws nothing, and nothing says so. Both lists are the same names or the
+   *  file is wrong. */
+  for (const name of Object.keys(defs)) {
+    if (!(order as string[]).includes(name)) {
+      throw new ViewError(`views declares ${name}, which page.order does not name`);
+    }
+  }
+
+  return loaded;
 }
