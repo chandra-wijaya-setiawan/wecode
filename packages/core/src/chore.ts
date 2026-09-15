@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { board as groups, type Board, type Row } from "./board.js";
+import { board as groups, hasTable, type Board, type Row } from "./board.js";
 import type { Budget, Scope } from "./entities.js";
 import { isTerminal, transitionFor } from "./machines.js";
 import type { Candidate } from "./order.js";
@@ -306,6 +306,113 @@ const ATTEMPTED = `EXISTS (SELECT 1 FROM assignment a
                               AND a.phase IN ('pending','running','waiting'))`;
 const attempted = (id: string): string => ATTEMPTED.replace("%ID%", id);
 
+/** How a chore came to be `done`. Two different facts wearing one state.
+ *
+ *  `performed` is a worker's: somebody begun the chore, did the work and proved the check.
+ *  `closed` is the world's: the condition the chore was raised for went away on its own —
+ *  the story landed, the branch stopped conflicting — and nothing was owed any more. Both
+ *  are legitimate ends and both stay on the record, but only the first is work carried out,
+ *  and a count that adds them together is a claim nobody made.
+ *
+ *  It is not a column, because it is not a new fact: the ledger already wrote which verb
+ *  settled the chore — `finish` from `running`, or `close` from wherever it was sitting. */
+export type ChoreSettlement = "performed" | "closed";
+
+const SETTLED_BY: Readonly<Record<string, ChoreSettlement>> = { finish: "performed", close: "closed" };
+
+/** The board's word for each, and the state a settled chore is shown under. `done` keeps
+ *  its meaning — a worker proved it — and a closure says it was a closure. */
+export const SETTLEMENT_STATE: Readonly<Record<ChoreSettlement, string>> = {
+  performed: "done",
+  closed: "closed",
+};
+
+/** What the board says of a chore closed with no reason on it. A closure is always written
+ *  with one, so this is what a pre-`closeChore` row reads as rather than a blank. */
+export const CLOSED_WITHOUT_REASON = "closed · the condition no longer held";
+
+export interface ChoreSettled {
+  readonly id: number;
+  readonly settlement: ChoreSettlement;
+  /** Why this chore is over. A performed chore's is the check it proved; a closed one's is
+   *  the epitaph the runner read the world by, kept on its `chore_refusal` row. */
+  readonly why: string;
+  /** When the verb that settled it was applied. */
+  readonly at: string;
+}
+
+/** How a settled chore was settled, and why — or null if it is not settled at all.
+ *
+ *  Read from the last ledger row that took the chore into `done`, because a chore comes
+ *  back: `reprove` returns it to `planned` and it may be closed this pass having been
+ *  performed the last. The most recent settling verb is the one the row is standing on. */
+export function choreSettled(db: DatabaseSync, id: number): ChoreSettled | null {
+  const chore = choreById(db, id);
+  if (chore === null || chore.state !== "done") return null;
+  const row = db
+    .prepare(
+      `SELECT verb, at FROM ledger
+        WHERE entity = 'chore' AND entity_id = ? AND to_state = 'done'
+        ORDER BY id DESC LIMIT 1`,
+    )
+    .get(id) as { verb: string; at: string } | undefined;
+  if (row === undefined) return null;
+  const settlement = SETTLED_BY[row.verb];
+  if (settlement === undefined) return null;
+  const why = settlement === "performed" ? chore.check : (choreRefusal(db, id)?.why ?? CLOSED_WITHOUT_REASON);
+  return { id, settlement, why, at: row.at };
+}
+
+/** The join every chore row on the board hangs off: a chore names its target, and the
+ *  target's own title is what an operator reads. */
+const CHORE_FROM = `FROM chore c
+         LEFT JOIN story s ON s.id = c.target_id AND c.target_type = 'story'
+         LEFT JOIN project p ON p.id = c.target_id AND c.target_type = 'project'`;
+const CHORE_WHAT = `c.kind || ' ' || c.target_type || ' ' || coalesce(s.title, p.name, c.target_id)`;
+
+/** Every chore that is over, with how it ended and why, in the board's shape.
+ *
+ *  Not folded into `openChores`: an operator scanning the board wants the work still owed
+ *  in one place. But a settled chore does not vanish either — the row is history, and a
+ *  chore that was raised truthfully stays raised — so it is shown here, under the state
+ *  that says which kind of ending it had. */
+export function settledChores(db: DatabaseSync, project: number | null = null): readonly Row[] {
+  const rows = db
+    .prepare(
+      `SELECT c.id AS id, ${CHORE_WHAT} AS what, c."check" AS "check",
+              (SELECT l.verb FROM ledger l
+                WHERE l.entity = 'chore' AND l.entity_id = c.id AND l.to_state = 'done'
+                ORDER BY l.id DESC LIMIT 1) AS verb,
+              ${hasTable(db, "chore_refusal") ? `(SELECT f.why FROM chore_refusal f WHERE f.chore_id = c.id)` : "NULL"} AS why
+         ${CHORE_FROM}
+        WHERE c.state = 'done'
+          AND (:project IS NULL OR c.project_id = :project)
+        ORDER BY c.id`,
+    )
+    .all({ project }) as unknown as {
+      id: number;
+      what: string;
+      check: string;
+      verb: string | null;
+      why: string | null;
+    }[];
+
+  return rows.map((r) => {
+    const settlement = SETTLED_BY[r.verb ?? ""] ?? "performed";
+    return {
+      id: r.id,
+      what: r.what,
+      state: SETTLEMENT_STATE[settlement],
+      detail: settlement === "performed" ? r.check : (r.why ?? CLOSED_WITHOUT_REASON),
+    };
+  });
+}
+
+/** How many chores a worker actually carried out. The count the board reports, and the
+ *  reason `settledChores` distinguishes at all: a closure is an ending, not an effort. */
+export const choresPerformed = (rows: readonly Row[]): number =>
+  rows.filter((r) => r.state === SETTLEMENT_STATE.performed).length;
+
 /** Everything not done, in the board's shape. A chore that is waiting for approval says so
  *  where the reason a task is not running is said: in the detail.
  *
@@ -317,16 +424,14 @@ export function openChores(db: DatabaseSync, project: number | null = null): rea
   const rows = db
     .prepare(
       `SELECT c.id AS id,
-              c.kind || ' ' || c.target_type || ' ' || coalesce(s.title, p.name, c.target_id) AS what,
+              ${CHORE_WHAT} AS what,
               CASE WHEN ${attempted("c.id")} THEN 'running' ELSE c.state END AS state,
               c."check" AS "check",
               c.kind AS kind,
               c.approved_at AS approved_at,
               (SELECT count(*) FROM ledger l
                 WHERE l.entity = 'chore' AND l.entity_id = c.id AND l.verb = 'begin') AS attempts
-         FROM chore c
-         LEFT JOIN story s ON s.id = c.target_id AND c.target_type = 'story'
-         LEFT JOIN project p ON p.id = c.target_id AND c.target_type = 'project'
+         ${CHORE_FROM}
         WHERE c.state <> 'done'
           AND (:project IS NULL OR c.project_id = :project)
         ORDER BY c.id`,
@@ -360,10 +465,22 @@ export function openChores(db: DatabaseSync, project: number | null = null): rea
  *  so every client gets the group without asking for it. */
 export interface ChoreBoard extends Board {
   readonly chores: readonly Row[];
+  /** Chores that are over, each saying whether a worker proved it (`done`) or the world
+   *  moved and it was closed (`closed`). Two endings, one state in the column, and the
+   *  board is where they have to be told apart: `chores_performed` is a claim about work
+   *  that was carried out, so it counts only the first. */
+  readonly settled: readonly Row[];
+  readonly chores_performed: number;
 }
 
 export function board(db: DatabaseSync, project: number | null = null): ChoreBoard {
-  return { ...groups(db, project), chores: openChores(db, project) };
+  const settled = settledChores(db, project);
+  return {
+    ...groups(db, project),
+    chores: openChores(db, project),
+    settled,
+    chores_performed: choresPerformed(settled),
+  };
 }
 
 /** The one wording for a chore nobody has said go to. The board shows it as a chore's
