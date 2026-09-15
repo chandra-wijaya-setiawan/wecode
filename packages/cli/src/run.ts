@@ -62,7 +62,7 @@ function dispatch(argv: readonly string[]): number {
   }
   if (head === "board") return showBoard(rest);
   if (head === "doctor") return doctor(rest);
-  if (head === "init") return init();
+  if (head === "init") return init(rest);
   if (head === "answer") return answer(rest);
   if (head === "show") return show(rest);
   if (head === "land") return land(rest);
@@ -80,12 +80,30 @@ function dispatch(argv: readonly string[]): number {
   return verb(head, rest);
 }
 
-/** `wecode init` — an empty workspace, and nothing else.
+/** `wecode init [name] [--workspace <name>]` — an empty workspace, and nothing else.
  *
  *  A workspace holds projects; onboarding a repository is what puts one in it. This exists
- *  for the case where you want the workspace before you have a repository. */
-function init(): number {
-  const path = DB();
+ *  for the case where you want the workspace before you have a repository.
+ *
+ *  Which workspace it makes is not read off the directory you are standing in. Resolving
+ *  through this repository's pointer made `wecode init` inside an onboarded repo report
+ *  "workspace at …/acme" — it named the workspace you were already in and created nothing.
+ *  A name given here wins; otherwise an explicit database, then an explicit name in the
+ *  environment, then "default". The pointer never decides. */
+function init(args: readonly string[]): number {
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { workspace: { type: "string" } },
+  });
+  const asked = values.workspace ?? positionals[0];
+  const path =
+    asked !== undefined
+      ? databaseOf(asked)
+      : process.env["WECODE_DB"] !== undefined
+        ? resolve(process.env["WECODE_DB"])
+        : databaseOf(process.env["WECODE_WORKSPACE"] ?? "default");
+
   mkdirSync(dirname(path), { recursive: true });
   open(path).close();
   process.stdout.write(`workspace at ${path}\n  wecode onboard   in a repository, to put a project in it\n`);
@@ -739,6 +757,25 @@ function hereProject(): { id: number; name: string } | null {
   );
 }
 
+/** What to say to somebody standing in a directory that is not a project: the command that
+ *  would put one here, and — only when the workspace already holds projects — the ids that
+ *  could be asked for instead. "no project here" alone left the next move to be guessed,
+ *  and the guess was usually that the workspace was broken. */
+function noProjectHere(command: string): string {
+  const rows = db().prepare("SELECT id, name FROM project ORDER BY id").all() as unknown as {
+    id: number;
+    name: string;
+  }[];
+  const shown = rows.slice(0, 5).map((r) => `    #${r.id}  ${r.name}`);
+  const more = rows.length > shown.length ? [`    … and ${rows.length - shown.length} more`] : [];
+  return [
+    // The first clause is kept as it was: another test reads this refusal by that phrase.
+    `no project here — ${resolve(process.cwd())} is not one.`,
+    "  wecode onboard   here, to make this repository one",
+    ...(rows.length === 0 ? [] : [`  ${command} --project <id>   for a project you already have:`, ...shown, ...more]),
+  ].join("\n");
+}
+
 /** `wecode board [--all] [--project N]` — by default, only the project you are standing in.
  *
  *  A board of every project in the workspace cannot answer "what is left here", which is
@@ -795,7 +832,7 @@ function showLessons(args: readonly string[]): number {
   const { values } = parseArgs({ args: [...args], options: { project: { type: "string" } } });
   const chosen = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
   if (chosen === null) {
-    return fail("no project here. wecode lessons --project <id>");
+    return fail(noProjectHere("wecode lessons"));
   }
   if (!Number.isInteger(chosen)) return fail("wecode lessons --project <id>");
 
@@ -1261,7 +1298,7 @@ function usage(): number {
       "",
       "START HERE",
       "  wecode onboard [name] [--workspace <ws>]   learn this repo, join a workspace, write config",
-      "  wecode init                                an empty workspace, before you have a repo",
+      "  wecode init [name]                         an empty workspace, before you have a repo",
       "  wecode board [--all]                       what is running, waiting, queued, failed",
       "  wecode workspaces                          which workspaces exist, and which is current",
       "",
