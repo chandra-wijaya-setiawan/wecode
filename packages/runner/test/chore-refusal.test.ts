@@ -164,7 +164,7 @@ describe("a chore nothing could dispatch", () => {
     expect(whyOf(story.id)).toBe("0 of 1 slots are open");
   });
 
-  it("says there is no branch to merge into yet when the tree cannot be had", async () => {
+  it("quotes what went wrong when the tree cannot be had", async () => {
     theSystemRole();
     const story = anUnmergeableStory();
     // No worker yet, so this pass stops before a tree is ever cut.
@@ -178,7 +178,10 @@ describe("a chore nothing could dispatch", () => {
     aSystemWorker();
     await runner().tick();
 
-    expect(choreRefusal(db, id)?.why).toBe("no branch to merge into yet");
+    // The caught error, not a fixed sentence: it names the path that is in the way.
+    const why = choreRefusal(db, id)?.why;
+    expect(why).toBeDefined();
+    expect(why).toContain(`story-${story.slug}`);
   });
 
   it("keeps `since` while the reason holds, and counts the passes", async () => {
