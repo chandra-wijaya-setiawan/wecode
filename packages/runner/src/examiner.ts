@@ -36,6 +36,32 @@ export const NOT_IN_TREE = "unrunnable: its script is not in this tree";
  *  transition the engine refused is read as a refusal rather than as a silent nothing. */
 export const REFUSED = "refused";
 
+/** Written where the board reads a run's output, ahead of what the script printed, so a
+ *  command that selected nothing is read as a failure with a reason rather than as a pass. */
+export const NO_TEST_MATCHED = "no test matched";
+
+/** What each runner prints when its selection came up empty. Exit code says nothing here:
+ *  `vitest --passWithNoTests`, `jest --passWithNoTests`, `go test ./...` over a package with
+ *  no `_test.go`, and `pytest` on an empty selection all exit 0, so a task_test whose path
+ *  filter has gone stale reads as green forever. Only the banner distinguishes the two.
+ *
+ *  Anchored on the runner's own words, never on a count: "0 passing" is also what a suite
+ *  prints while every test in it errors, and that is already a failure by its exit code. */
+const NO_TESTS: readonly RegExp[] = [
+  /\bno test files found\b/i, // vitest
+  /\bno test(?: suite)?s found\b/i, // jest
+  /\bno tests ran\b/i, // pytest
+  /\bno tests to run\b/i, // go test
+  /\[no test files\]/i, // go test ./...
+  /\brunning 0 tests\b/i, // cargo test
+];
+
+/** True when a command's output says it selected no test at all. A run that matched nothing
+ *  proves nothing, and the one thing it must never do is stand as a pass. */
+export function matchedNoTest(output: string): boolean {
+  return NO_TESTS.some((re) => re.test(output));
+}
+
 const INTERPRETERS = new Set(["bash", "sh", "zsh", "node", "python", "python3", "tsx", "deno"]);
 
 /** The script file an artefact invokes, when it invokes one. `./scripts/x.sh --all` and
@@ -165,12 +191,18 @@ export class Examiner {
         continue;
       }
       const out = await this.runOne(row.artefact, cwd);
+      // A command that exited 0 having selected no test proves nothing about the tree. The
+      // exit code alone cannot tell that apart from a suite that ran and passed, so the
+      // output is read too, and a run that matched nothing fails.
+      const empty = out.ok && matchedNoTest(out.output);
+      const ok = out.ok && !empty;
       const at = now();
+      const body = out.output.slice(-8000);
       this.db
         .prepare(
           `UPDATE ${entity} SET last_run_at = ?, last_output = ?, provenance_sha = ?, updated_at = ? WHERE id = ?`,
         )
-        .run(at, out.output.slice(-8000), provenance, at, row.id);
+        .run(at, empty ? `${NO_TEST_MATCHED}: ${row.artefact}\n${body}` : body, provenance, at, row.id);
       if (print !== null) {
         this.db
           .prepare(
@@ -179,17 +211,17 @@ export class Examiner {
           )
           .run(entity, row.id, print, at);
       }
-      const verdict = this.engine.apply(entity, row.id, out.ok ? "pass" : "fail", "runner");
+      const verdict = this.engine.apply(entity, row.id, ok ? "pass" : "fail", "runner");
       if (!verdict.ok) {
         // The engine's words, not ours: it is the thing that knows why, and a paraphrase
         // here is one more copy of the rules to keep in agreement with them.
         refused.push({ id: row.id, why: verdict.why });
         this.db
           .prepare(`UPDATE ${entity} SET last_output = ?, updated_at = ? WHERE id = ?`)
-          .run(`${REFUSED}: ${verdict.why}\n${out.output.slice(-8000)}`, now(), row.id);
+          .run(`${REFUSED}: ${verdict.why}\n${body}`, now(), row.id);
         continue;
       }
-      (out.ok ? passed : failed).push(row.id);
+      (ok ? passed : failed).push(row.id);
     }
 
     return { passed, failed, skipped, unrunnable, refused };
