@@ -40,24 +40,33 @@ const kindOf = (flags: ts.SymbolFlags): ExportKind => {
 
 /** Reads `file` with the TypeScript compiler and answers what it exports, sorted by name.
  *
+ *  JavaScript is read the same way TypeScript is: `.js`, `.mjs`, `.cjs` and their `x`
+ *  variants go through the same compiler, so a JavaScript module's exports are named by
+ *  the same rules. A kind a reader can only tell from a type annotation — `interface`,
+ *  `type` — simply does not arise there.
+ *
  *  The compiler is what does the reading, so the forms that are hard to see by hand are
  *  covered: `export { a as b }`, `export default`, and `export * from "./other"` — a
  *  re-export is reported under the name this module exports it by, with the kind of the
  *  declaration it ultimately points at.
  *
- *  A file that does not parse is not an error here: the compiler recovers, and whatever
- *  exports it could still see are returned. A file that does not exist has no exports. */
+ *  A file the compiler cannot parse is refused by throwing. Its recovered exports are a
+ *  guess at what the author meant, and a guess reported as a reading is worse than no
+ *  reading: the caller cannot tell the two apart. A file that does not exist has no
+ *  exports, which is not the same thing — nothing was misread. */
 export function readExports(file: string): ExportedSymbol[] {
   const program = ts.createProgram([file], {
     target: ts.ScriptTarget.ES2023,
     module: ts.ModuleKind.NodeNext,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    allowJs: true,
     noResolve: false,
     noEmit: true,
     skipLibCheck: true,
   });
   const source = program.getSourceFile(file);
   if (!source) return [];
+  refuseIfUnparsed(program, source);
 
   const checker = program.getTypeChecker();
   const module = checker.getSymbolAtLocation(source);
@@ -67,6 +76,20 @@ export function readExports(file: string): ExportedSymbol[] {
     .getExportsOfModule(module)
     .map((symbol) => ({ name: symbol.getName(), kind: kindOf(flagsOf(checker, symbol)) }))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/** Throws when the compiler hit a syntax error in `source`, quoting the first one with the
+ *  line it is on. Only syntax is grounds for refusal: a type error means the file was read,
+ *  and what it exports is still plain. */
+function refuseIfUnparsed(program: ts.Program, source: ts.SourceFile): void {
+  const [first] = program.getSyntacticDiagnostics(source);
+  if (!first) return;
+  const line =
+    first.start === undefined
+      ? "?"
+      : String(source.getLineAndCharacterOfPosition(first.start).line + 1);
+  const what = ts.flattenDiagnosticMessageText(first.messageText, " ");
+  throw new Error(`cannot read ${source.fileName}: it does not parse — line ${line}: ${what}`);
 }
 
 /** An `export { x }` or a re-export is an alias, whose own flags say only `Alias`. The
