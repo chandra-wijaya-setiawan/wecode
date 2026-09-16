@@ -11,9 +11,19 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { queries, table } from "./db.js";
 import { currentDatabase } from "./home.js";
 
 const MIGRATIONS = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+
+/** The one row that says which migration the file has reached. Unexported: `index.ts`
+ *  re-exports this module wholesale. */
+const schemaVersion = table<{ version: number }>("schema_version", ["version"]);
+
+/** SQLite's own catalogue, as much of it as this module asks about. Reading it is how a
+ *  file with no schema at all is told from one whose version row is simply missing —
+ *  selecting from a table that is not there is an error, not an empty result. */
+const master = table<{ type: string; name: string }>("sqlite_master", ["type", "name"]);
 
 export class StoreError extends Error {}
 
@@ -272,8 +282,10 @@ export function open(path?: string, options: OpenOptions = {}): DatabaseSync {
     for (const m of migrations()) {
       if (m.version <= found || m.version > wanted) continue;
       db.exec(readFileSync(m.path, "utf8"));
-      db.exec("DELETE FROM schema_version");
-      db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(m.version);
+      // The migration's own text is a file, and DDL has no spelling in the typed layer; the
+      // stamp that records it does, and goes through it — one row, replaced, never appended.
+      queries(db).deleteFrom(schemaVersion).run();
+      queries(db).insertInto(schemaVersion, { version: m.version }).run();
     }
   } catch (err) {
     db.close();
@@ -300,12 +312,15 @@ const readOnlyFailure = (err: unknown): boolean =>
   err instanceof Error && /readonly|read-only|attempt to write/i.test(err.message);
 
 function version(db: DatabaseSync): number | null {
-  const table = db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'")
+  const q = queries(db);
+  const present = q
+    .selectFrom(master)
+    .select(["name"])
+    .where("type", "=", "table")
+    .where("name", "=", schemaVersion.name)
     .get();
-  if (table === undefined) return null;
-  const row = db.prepare("SELECT version FROM schema_version").get() as { version: number } | undefined;
-  return row?.version ?? null;
+  if (present === null) return null;
+  return q.selectFrom(schemaVersion).select(["version"]).get()?.version ?? null;
 }
 
 export function now(): string {

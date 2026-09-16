@@ -2,6 +2,13 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { currentDatabase, delivered as query, open } from "@wecode/core";
+// The dialect is not on core's barrel — `index.ts` re-exports the modules built over it,
+// not the layer itself — so it is reached at its own path.
+import { queries, table } from "@wecode/core/dist/db.js";
+
+/** The one column this command reads for itself: which project the directory it was run in
+ *  belongs to. Declared rather than spelled as SQL so the compiler checks it. */
+const project = table<{ id: number; repo: string }>("project", ["id", "repo"]);
 
 /** `wecode delivered [--all] [--project N] [--json]` — what wecode can already do.
  *
@@ -24,9 +31,7 @@ export function delivered(args: readonly string[]): number {
 
   // Standing in a repository, the question is about this project. Outside every one of
   // them there is no "here", and the answer is the workspace's.
-  const here = db.prepare("SELECT id FROM project WHERE repo = ?").get(resolve(process.cwd())) as
-    | { id: number }
-    | undefined;
+  const here = queries(db).selectFrom(project).select(["id"]).where("repo", "=", resolve(process.cwd())).get();
   const asked = values.project === undefined ? here?.id ?? null : Number(values.project);
   const chosen = values.all === true ? null : asked;
   if (chosen !== null && !Number.isInteger(chosen)) return fail("wecode delivered --project <id>");
