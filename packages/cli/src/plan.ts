@@ -16,6 +16,10 @@ import {
   type RoleConfig,
   type Scope,
 } from "@wecode/core";
+// The dialect is not on core's public surface — `index.ts` re-exports no `db.js`, and this
+// command may not widen it — so it is imported by the path the built package already
+// publishes, which is the same `dist` every other import from core above resolves to.
+import { queries, table, type Dialect } from "@wecode/core/dist/db.js";
 
 // yaml is @wecode/core's dependency, and this package declares none of its own. Resolving it
 // from core's package rather than from here uses the one copy the workspace already has.
@@ -430,6 +434,98 @@ function task(
   return title === null || scope === null || scope.length === 0 ? null : { title, scope, tools, test, role };
 }
 
+// ── the rows this command reads ──────────────────────────────────────────────────────────
+
+/** The columns this command reads, and only those. A narrow declaration is not a second copy
+ *  of the schema: it is the ask, and `typed-plan.test.ts` holds each list against
+ *  `PRAGMA table_info`, so a column renamed out from under it fails a test rather than a
+ *  command. The names are plural because `task`, `requirement` and `criterion` are already
+ *  functions in this module. */
+const projects = table<{ id: number; name: string; repo: string }>("project", ["id", "name", "repo"]);
+
+interface ReleaseRow {
+  id: number;
+  project_id: number;
+  version: string;
+  state: string;
+}
+const releases = table<ReleaseRow>("release", ["id", "project_id", "version", "state"]);
+
+interface EpicRow {
+  id: number;
+  release_id: number;
+  title: string;
+  state: string;
+}
+const epics = table<EpicRow>("epic", ["id", "release_id", "title", "state"]);
+
+interface StoryRow {
+  id: number;
+  epic_id: number;
+  title: string;
+  state: string;
+}
+const stories = table<StoryRow>("story", ["id", "epic_id", "title", "state"]);
+
+interface RequirementRow {
+  id: number;
+  story_id: number;
+  statement: string;
+  state: string;
+}
+const requirements = table<RequirementRow>("requirement", ["id", "story_id", "statement", "state"]);
+
+interface CriteriaRow {
+  id: number;
+  requirement_id: number;
+  statement: string;
+  state: string;
+}
+const criteria = table<CriteriaRow>("acceptance_criteria", ["id", "requirement_id", "statement", "state"]);
+
+/** A test row, of either kind: the two tables carry the same columns this command reads. */
+interface TestRow {
+  id: number;
+  statement: string;
+  state: string;
+}
+const acceptanceTests = table<TestRow>("acceptance_test", ["id", "statement", "state"]);
+const taskTests = table<TestRow>("task_test", ["id", "statement", "state"]);
+
+const taskRows = table<{ id: number; title: string; state: string }>("task", ["id", "title", "state"]);
+
+/** Every entity this command reads back by id. */
+type Entity = Root | "requirement" | "acceptance_criteria" | "acceptance_test" | "task" | "task_test";
+
+/** A row as this command wants it: the label it is named by — a release is its version, the
+ *  rest are titles or statements — and the state it is in. */
+interface NamedRow {
+  readonly label: string;
+  readonly state: string;
+}
+
+const named = <R extends { state: string }>(row: R | null, label: (r: R) => string): NamedRow | null =>
+  row === null ? null : { label: label(row), state: row.state };
+
+/** One closure per entity, replacing the two queries that interpolated a table name and a
+ *  column name into their own SQL. The label column is chosen inside the closure, where the
+ *  row's type still knows that column exists; interpolated, it was checked by nothing. */
+const READ: Record<Entity, (q: Dialect, id: number) => NamedRow | null> = {
+  release: (q, id) =>
+    named(q.selectFrom(releases).select(["version", "state"]).where("id", "=", id).get(), (r) => r.version),
+  epic: (q, id) => named(q.selectFrom(epics).select(["title", "state"]).where("id", "=", id).get(), (r) => r.title),
+  story: (q, id) => named(q.selectFrom(stories).select(["title", "state"]).where("id", "=", id).get(), (r) => r.title),
+  requirement: (q, id) =>
+    named(q.selectFrom(requirements).select(["statement", "state"]).where("id", "=", id).get(), (r) => r.statement),
+  acceptance_criteria: (q, id) =>
+    named(q.selectFrom(criteria).select(["statement", "state"]).where("id", "=", id).get(), (r) => r.statement),
+  acceptance_test: (q, id) =>
+    named(q.selectFrom(acceptanceTests).select(["statement", "state"]).where("id", "=", id).get(), (r) => r.statement),
+  task: (q, id) => named(q.selectFrom(taskRows).select(["title", "state"]).where("id", "=", id).get(), (r) => r.title),
+  task_test: (q, id) =>
+    named(q.selectFrom(taskTests).select(["statement", "state"]).where("id", "=", id).get(), (r) => r.statement),
+};
+
 // ── which parent ─────────────────────────────────────────────────────────────────────────
 
 interface Here {
@@ -437,43 +533,90 @@ interface Here {
   readonly name: string;
 }
 
-/** Whose project a row is in. Ids are global, so every id a file names is asked this. */
-const OWNER: Record<Root, string> = {
-  story:
-    "SELECT p.id AS id, p.name AS name FROM story s JOIN epic e ON e.id = s.epic_id " +
-    "JOIN release r ON r.id = e.release_id JOIN project p ON p.id = r.project_id WHERE s.id = ?",
-  epic:
-    "SELECT p.id AS id, p.name AS name FROM epic e JOIN release r ON r.id = e.release_id " +
-    "JOIN project p ON p.id = r.project_id WHERE e.id = ?",
-  release: "SELECT p.id AS id, p.name AS name FROM release r JOIN project p ON p.id = r.project_id WHERE r.id = ?",
+/** Whose project a row is in, one rung at a time. Ids are global, so every id a file names
+ *  is asked this. The joins three SQL strings spelled are these three walks: the dialect has
+ *  no JOIN, and a missing row anywhere up the chain is null — which is exactly what the join
+ *  did with it, it matched nothing. */
+const projectOfRelease = (q: Dialect, id: number): number | null =>
+  q.selectFrom(releases).select(["project_id"]).where("id", "=", id).get()?.project_id ?? null;
+
+const projectOfEpic = (q: Dialect, id: number): number | null => {
+  const row = q.selectFrom(epics).select(["release_id"]).where("id", "=", id).get();
+  return row === null ? null : projectOfRelease(q, row.release_id);
 };
 
-/** The newest in-progress row of a kind in this project, which a sentence hangs off. */
-const NEWEST: Record<"epic" | "release", string> = {
-  epic:
-    "SELECT e.id AS id FROM epic e JOIN release r ON r.id = e.release_id " +
-    "WHERE r.project_id = ? AND e.state = 'in_progress' ORDER BY e.id DESC LIMIT 1",
-  release: "SELECT id FROM release WHERE project_id = ? AND state = 'in_progress' ORDER BY id DESC LIMIT 1",
+const projectOfStory = (q: Dialect, id: number): number | null => {
+  const row = q.selectFrom(stories).select(["epic_id"]).where("id", "=", id).get();
+  return row === null ? null : projectOfEpic(q, row.epic_id);
 };
+
+/** The walk up from each root. A `Record<Root, TableDef<Row>>` cannot carry this — the three
+ *  tables have three row shapes, and `TableDef<Row>`'s column list makes it invariant in Row
+ *  — so the lookup carries the closure instead, and each column is named where its own row
+ *  type still knows it. */
+const PROJECT_OF: Record<Root, (q: Dialect, id: number) => number | null> = {
+  story: projectOfStory,
+  epic: projectOfEpic,
+  release: projectOfRelease,
+};
+
+const projectHere = (db: DatabaseSync, repo: string): Here | null =>
+  queries(db).selectFrom(projects).select(["id", "name"]).where("repo", "=", repo).get();
 
 /** The same guard `create` has. Ids are global. */
-function owned(db: DatabaseSync, kind: Root, row: number, here: Here | undefined, say: string[]): boolean {
-  const theirs = db.prepare(OWNER[kind]).get(row) as Here | undefined;
-  if (theirs === undefined) {
+function owned(db: DatabaseSync, kind: Root, row: number, here: Here | null, say: string[]): boolean {
+  const q = queries(db);
+  const owner = PROJECT_OF[kind](q, row);
+  const theirs = owner === null ? null : q.selectFrom(projects).select(["id", "name"]).where("id", "=", owner).get();
+  if (theirs === null) {
     say.push(`no ${kind} #${row}`);
     return false;
   }
-  if (here !== undefined && theirs.id !== here.id) {
+  if (here !== null && theirs.id !== here.id) {
     say.push(`${kind} #${row} belongs to project #${theirs.id} ${theirs.name}, but you are in #${here.id} ${here.name}`);
     return false;
   }
   return true;
 }
 
+/** The newest in-progress row of a kind in this project, which a sentence hangs off. Ids
+ *  ascend, so the `ORDER BY id DESC LIMIT 1` is a `Math.max` here — the dialect spells
+ *  neither, and the rows it caps are one project's. */
+function newest(db: DatabaseSync, kind: "epic" | "release", project: number): number | null {
+  const q = queries(db);
+  const ids =
+    kind === "release"
+      ? q
+          .selectFrom(releases)
+          .select(["id"])
+          .where("project_id", "=", project)
+          .where("state", "=", IN_PROGRESS)
+          .all()
+          .map((r) => r.id)
+      : ((): number[] => {
+          const mine = q
+            .selectFrom(releases)
+            .select(["id"])
+            .where("project_id", "=", project)
+            .all()
+            .map((r) => r.id);
+          return q
+            .selectFrom(epics)
+            .select(["id", "release_id"])
+            .where("state", "=", IN_PROGRESS)
+            .all()
+            .filter((e) => mine.includes(e.release_id))
+            .map((e) => e.id);
+        })();
+  return ids.length === 0 ? null : Math.max(...ids);
+}
+
+const IN_PROGRESS = "in_progress";
+
 /** The row the file hangs off: the parent named in the file, then `--epic`, then the newest
  *  in-progress row above it. A root given as an id joins that row instead, and needs none. */
 function parentOf(db: DatabaseSync, p: Plan, flag: string | undefined, say: string[]): number | null {
-  const here = db.prepare("SELECT id, name FROM project WHERE repo = ?").get(resolve(process.cwd())) as Here | undefined;
+  const here = projectHere(db, resolve(process.cwd()));
 
   if (p.join !== null) {
     if (!owned(db, p.root, p.join, here, say)) return null;
@@ -487,7 +630,7 @@ function parentOf(db: DatabaseSync, p: Plan, flag: string | undefined, say: stri
   const kind = ABOVE[p.root];
   // A new release hangs off the project this repository is, and nothing else names it.
   if (kind === null) {
-    if (here === undefined) {
+    if (here === null) {
       say.push("a new release belongs to a project, and this repository is not an onboarded project");
       return null;
     }
@@ -505,59 +648,78 @@ function parentOf(db: DatabaseSync, p: Plan, flag: string | undefined, say: stri
     else {
       // `--epic` names an epic; a new epic wants the release that epic is in.
       if (!owned(db, "epic", n, here, say)) return null;
-      return (db.prepare("SELECT release_id AS id FROM epic WHERE id = ?").get(n) as { id: number }).id;
+      // `owned` has just proved the epic is there, so the row it hangs off is too.
+      const row = queries(db).selectFrom(epics).select(["release_id"]).where("id", "=", n).get();
+      if (row !== null) return row.release_id;
+      say.push(`no epic #${n}`);
+      return null;
     }
   }
 
   if (asked !== null) return owned(db, kind, asked, here, say) ? asked : null;
 
-  if (here === undefined) {
+  if (here === null) {
     say.push(`no ${kind} given, and this repository is not an onboarded project.\n  --epic <id>`);
     return null;
   }
-  const newest = db.prepare(NEWEST[kind]).get(here.id) as { id: number } | undefined;
-  if (newest === undefined) {
+  const latest = newest(db, kind, here.id);
+  if (latest === null) {
     say.push(`no ${kind} given, and project #${here.id} ${here.name} has no in-progress ${kind}.\n  --epic <id>`);
     return null;
   }
-  return newest.id;
+  return latest;
 }
 
 // ── what this project has already said ───────────────────────────────────────────────────
 
-/** The oldest row in this project already carrying a sentence. */
-const SAME: Record<"story" | "criteria", string> = {
-  story:
-    "SELECT s.id AS id FROM story s JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id " +
-    "WHERE r.project_id = ? AND s.title = ? ORDER BY s.id LIMIT 1",
-  criteria:
-    "SELECT c.id AS id FROM acceptance_criteria c JOIN requirement q ON q.id = c.requirement_id " +
-    "JOIN story s ON s.id = q.story_id JOIN epic e ON e.id = s.epic_id JOIN release r ON r.id = e.release_id " +
-    "WHERE r.project_id = ? AND c.statement = ? ORDER BY c.id LIMIT 1",
-};
+/** The oldest of the matching rows. Ids ascend, so `ORDER BY id LIMIT 1` is a `Math.min`. */
+const oldest = (ids: readonly number[]): number | null => (ids.length === 0 ? null : Math.min(...ids));
+
+/** A story in this project already titled this. The sentence narrows the rows first — it is
+ *  the selective half of the old WHERE — and the project each match is in is the walk up. */
+const sameStory = (q: Dialect, project: number, title: string): number | null =>
+  oldest(
+    q
+      .selectFrom(stories)
+      .select(["id", "epic_id"])
+      .where("title", "=", title)
+      .all()
+      .filter((s) => projectOfEpic(q, s.epic_id) === project)
+      .map((s) => s.id),
+  );
+
+const sameCriteria = (q: Dialect, project: number, statement: string): number | null =>
+  oldest(
+    q
+      .selectFrom(criteria)
+      .select(["id", "requirement_id"])
+      .where("statement", "=", statement)
+      .all()
+      .filter((c) => {
+        const r = q.selectFrom(requirements).select(["story_id"]).where("id", "=", c.requirement_id).get();
+        return r !== null && projectOfStory(q, r.story_id) === project;
+      })
+      .map((c) => c.id),
+  );
 
 /** A story or criteria this project has already said. Planning the same sentence twice makes
  *  a second tree nobody asked for and two agents doing one job, so the file is refused by the
  *  id it duplicates — which is also where the work already is. A root joined by id carries no
  *  sentence of its own and duplicates nothing. */
 function duplicated(db: DatabaseSync, top: Level, say: string[]): void {
-  const here = db.prepare("SELECT id FROM project WHERE repo = ?").get(resolve(process.cwd())) as
-    | { id: number }
-    | undefined;
-  if (here === undefined) return;
-
-  const at = (sql: string, text: string): number | null =>
-    (db.prepare(sql).get(here.id, text) as { id: number } | undefined)?.id ?? null;
+  const here = projectHere(db, resolve(process.cwd()));
+  if (here === null) return;
+  const q = queries(db);
 
   const walk = (l: Level): void => {
     if (l.kind === "story" && l.name !== null) {
-      const hit = at(SAME.story, l.name);
+      const hit = sameStory(q, here.id, l.name);
       if (hit !== null) say.push(`story #${hit} already says ${l.name}`);
     }
     for (const c of l.children) walk(c);
     for (const r of l.requirements) {
       for (const c of r.criteria) {
-        const hit = at(SAME.criteria, c.statement);
+        const hit = sameCriteria(q, here.id, c.statement);
         if (hit !== null) say.push(`criteria #${hit} already says ${c.statement}`);
       }
     }
@@ -629,8 +791,7 @@ function begin(db: DatabaseSync, made: Made): void {
    *  anyone ever started it, and a requirement running under a planned story can never be
    *  delivered because the story it would deliver through has not begun. */
   const go = (entity: Root | "requirement" | "acceptance_criteria" | "task", id: number): void => {
-    const row = db.prepare(`SELECT state FROM ${entity} WHERE id = ?`).get(id) as { state: string } | undefined;
-    if (row?.state === "planned") engine.apply(entity, id, "start", "operator");
+    if (READ[entity](queries(db), id)?.state === "planned") engine.apply(entity, id, "start", "operator");
   };
   const deliver = (entity: "acceptance_test" | "task_test", id: number): void => {
     // Refused when the artefact is empty, which is the guard doing its job, not a failure.
@@ -667,33 +828,29 @@ interface Line {
   readonly children: readonly Line[];
 }
 
-/** The column each rung is named by. A release is its version; the rest are titles. */
-const NAMED: Record<Root, string> = { release: "version", epic: "title", story: "title" };
-
-/** What it made, read back off the ledger's rows: ids come back as a shape, not one at a time. */
+/** What it made, read back off the ledger's rows: ids come back as a shape, not one at a time.
+ *  Which column names a rung is `READ`'s business now — a release is its version, the rest
+ *  are titles or statements — so no name is spelled twice here. */
 function shape(db: DatabaseSync, made: Made): Line {
-  const of = (table: string, id: number, label: string, children: readonly Line[] = []): Line => {
-    const row = db.prepare(`SELECT ${label} AS label, state FROM ${table} WHERE id = ?`).get(id) as
-      | { label: string; state: string }
-      | undefined;
+  const q = queries(db);
+  const of = (entity: Entity, id: number, children: readonly Line[] = []): Line => {
+    const row = READ[entity](q, id);
     return { label: row?.label ?? "", id, state: row?.state ?? null, children };
   };
 
   const walk = (l: Made): Line =>
-    of(l.kind, l.id, NAMED[l.kind], [
+    of(l.kind, l.id, [
       ...l.children.map(walk),
       ...l.requirements.map((r) =>
         of(
           "requirement",
           r.id,
-          "statement",
           r.criteria.map((c) =>
-            of("acceptance_criteria", c.id, "statement", [
+            of("acceptance_criteria", c.id, [
               of(
                 "acceptance_test",
                 c.test,
-                "statement",
-                c.tasks.map((t) => of("task", t.id, "title", [of("task_test", t.test, "statement")])),
+                c.tasks.map((t) => of("task", t.id, [of("task_test", t.test)])),
               ),
             ]),
           ),
