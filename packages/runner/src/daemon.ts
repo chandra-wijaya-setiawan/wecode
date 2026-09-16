@@ -23,6 +23,9 @@ import {
   type Scope,
   type Violation,
 } from "@wecode/core";
+// The dialect is core's, but core's barrel does not re-export it — `db.js` is imported by
+// path so that porting this module needs no change to a file outside it.
+import { excluded, queries, table } from "@wecode/core/dist/db.js";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { allocate, candidates as readyCandidates, type Candidate, type Pass } from "./allocator.js";
@@ -34,6 +37,109 @@ import { Examiner, type Refused, type ScriptReport } from "./examiner.js";
 import { Trees } from "./git.js";
 
 const exec = promisify(execFile);
+
+/** The tables this module reads, and only the columns it asks for.
+ *
+ *  Kept in one object rather than as bare consts because `task`, `story`, `chore`, `worker`
+ *  and `test` are all local names in here: a bare `story` const would be shadowed in half
+ *  the methods that need it, and the shadowing would typecheck.
+ *
+ *  A narrow column list is the ask, not a second copy of the schema — `typed-daemon.test.ts`
+ *  holds every list below against `PRAGMA table_info`, so a column renamed out from under
+ *  this module fails a test rather than a tick. */
+interface TaskRow {
+  id: number;
+  slug: string;
+  acceptance_test_id: number;
+  attempts: number;
+  max_retry: number;
+  state: string;
+}
+
+interface AssignmentRow {
+  id: number;
+  objective_type: string;
+  objective_id: number;
+  worker_id: number;
+  worktree: string;
+  phase: string;
+  commit_sha: string | null;
+}
+
+interface TestRow {
+  id: number;
+  parent_id: number;
+  kind: string;
+  artefact: string | null;
+  state: string;
+  red_at_base_sha: string | null;
+  red_at_base_at: string | null;
+  red_at_base_reason: string | null;
+  updated_at: string;
+}
+
+interface StoryRow {
+  id: number;
+  slug: string;
+  epic_id: number;
+  state: string;
+}
+
+interface ScriptRunRow {
+  entity: string;
+  test_id: number;
+  fingerprint: string;
+  ran_at: string;
+}
+
+interface LandedRow {
+  task_id: number;
+  branch: string;
+  sha: string;
+  merged_at: string;
+}
+
+const tbl = {
+  task: table<TaskRow>("task", ["id", "slug", "acceptance_test_id", "attempts", "max_retry", "state"]),
+  assignment: table<AssignmentRow>("assignment", [
+    "id",
+    "objective_type",
+    "objective_id",
+    "worker_id",
+    "worktree",
+    "phase",
+    "commit_sha",
+  ]),
+  test: table<TestRow>("acceptance_test", [
+    "id",
+    "parent_id",
+    "kind",
+    "artefact",
+    "state",
+    "red_at_base_sha",
+    "red_at_base_at",
+    "red_at_base_reason",
+    "updated_at",
+  ]),
+  criteria: table<{ id: number; requirement_id: number }>("acceptance_criteria", ["id", "requirement_id"]),
+  requirement: table<{ id: number; story_id: number }>("requirement", ["id", "story_id"]),
+  story: table<StoryRow>("story", ["id", "slug", "epic_id", "state"]),
+  epic: table<{ id: number; release_id: number }>("epic", ["id", "release_id"]),
+  release: table<{ id: number; project_id: number }>("release", ["id", "project_id"]),
+  project: table<{ id: number; repo: string }>("project", ["id", "repo"]),
+  worker: table<{ id: number; role: string }>("worker", ["id", "role"]),
+  refusal: table<{ task_id: number }>("refusal", ["task_id"]),
+  chore: table<{ id: number; state: string }>("chore", ["id", "state"]),
+  scriptRun: table<ScriptRunRow>("script_run", ["entity", "test_id", "fingerprint", "ran_at"]),
+  landed: table<LandedRow>("landed_branch", ["task_id", "branch", "sha", "merged_at"]),
+};
+
+/** An assignment nobody has finished with, and one that has ended. Two names for one rule
+ *  that used to be spelled out in five query strings. */
+const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
+const ENDED_PHASES: readonly string[] = ["succeeded", "failed"];
+
+const byId = (a: { id: number }, b: { id: number }): number => a.id - b.id;
 
 export interface Tick {
   readonly allocated: Pass;
@@ -107,6 +213,11 @@ export interface Waiting {
  *  queued, or with a worker in the tree right now. `done` and `failed` are both settled —
  *  the repair has had its pass, and the story is judged as it stands. */
 const REFRESH_OPEN = ["planned", "ready", "running"];
+
+/** The `script_run` entity a run at base is recorded under — its own, so it never collides
+ *  with the examiner's verdict rows for the same test. Named once: the insert and the read
+ *  that decides whether the run is owed have to agree, and two literals eventually do not. */
+const BASE_RUN = "acceptance_test@base";
 
 /** One tick's chore work. `failed` carries the reason, because a chore that could not prove
  *  its check leaves a story unmergeable and the reason is the only thing a person can act
@@ -282,14 +393,16 @@ export class Runner {
     // A reason must not outlive the tick it was true in. Anything the pass did not speak
     // about this time round — it started, it finished, it is no longer ready — has no
     // current reason, so it must not still be showing yesterday's.
-    for (const row of this.db.prepare("SELECT task_id FROM refusal").all() as unknown as { task_id: number }[]) {
+    for (const row of queries(this.db).selectFrom(tbl.refusal).select(["task_id"]).all()) {
       if (!decided.has(row.task_id)) clearRefusal(this.db, row.task_id);
     }
     if (pass.created !== null) {
-      const started = this.db.prepare("SELECT objective_id FROM assignment WHERE id = ?").get(pass.created) as
-        | { objective_id: number }
-        | undefined;
-      if (started !== undefined) clearRefusal(this.db, started.objective_id);
+      const started = queries(this.db)
+        .selectFrom(tbl.assignment)
+        .select(["objective_id"])
+        .where("id", "=", pass.created)
+        .get();
+      if (started !== null) clearRefusal(this.db, started.objective_id);
     }
     // A tree cut for a task the allocator then refused is released rather than left behind.
     for (const [id, worktree] of cut) {
@@ -302,9 +415,7 @@ export class Runner {
   }
 
   private assignmentUses(assignment: number, worktree: string): boolean {
-    const row = this.db.prepare("SELECT worktree FROM assignment WHERE id = ?").get(assignment) as
-      | { worktree: string }
-      | undefined;
+    const row = queries(this.db).selectFrom(tbl.assignment).select(["worktree"]).where("id", "=", assignment).get();
     return row?.worktree === worktree;
   }
 
@@ -327,22 +438,56 @@ export class Runner {
   /** A task's slugs and the repository it belongs to. The repo comes from its project, so
    *  one runner serves every project in the workspace. */
   private slugsFor(taskId: number): { task: string; story: string; repo: string } | null {
-    const row = this.db
-      .prepare(
-        `SELECT t.slug AS task, s.slug AS story, p.repo AS repo
-           FROM task t
-           JOIN acceptance_test a ON a.id = t.acceptance_test_id
-           JOIN acceptance_criteria c ON c.id = a.parent_id
-           JOIN requirement r ON r.id = c.requirement_id
-           JOIN story s ON s.id = r.story_id
-           JOIN epic e ON e.id = s.epic_id
-           JOIN release rel ON rel.id = e.release_id
-           JOIN project p ON p.id = rel.project_id
-          WHERE t.id = ?`,
-      )
-      .get(taskId) as { task: string; story: string; repo: string } | undefined;
-    if (row === undefined) return null;
-    return { ...row, repo: this.opts.repoRoot ?? row.repo };
+    const t = queries(this.db).selectFrom(tbl.task).select(["slug", "acceptance_test_id"]).where("id", "=", taskId).get();
+    if (t === null) return null;
+    const story = this.storyOfTest(t.acceptance_test_id);
+    if (story === null) return null;
+    const owner = this.projectOf(story);
+    if (owner === null) return null;
+    return { task: t.slug, story: story.slug, repo: this.opts.repoRoot ?? owner.repo };
+  }
+
+  /** The ERD walked one primary key at a time, which is all those seven-way joins were.
+   *  A missing link is null, and every caller drops the row — exactly what an inner join
+   *  did with it. */
+  private storyOfTest(testId: number): StoryRow | null {
+    const test = queries(this.db).selectFrom(tbl.test).select(["parent_id"]).where("id", "=", testId).get();
+    return test === null ? null : this.storyOfCriteria(test.parent_id);
+  }
+
+  private storyOfCriteria(criteriaId: number): StoryRow | null {
+    const q = queries(this.db);
+    const c = q.selectFrom(tbl.criteria).select(["requirement_id"]).where("id", "=", criteriaId).get();
+    if (c === null) return null;
+    const r = q.selectFrom(tbl.requirement).select(["story_id"]).where("id", "=", c.requirement_id).get();
+    if (r === null) return null;
+    return q.selectFrom(tbl.story).where("id", "=", r.story_id).get();
+  }
+
+  /** The project a story belongs to, and the repository it names. */
+  private projectOf(story: StoryRow): { project: number; repo: string } | null {
+    const q = queries(this.db);
+    const e = q.selectFrom(tbl.epic).select(["release_id"]).where("id", "=", story.epic_id).get();
+    if (e === null) return null;
+    const rel = q.selectFrom(tbl.release).select(["project_id"]).where("id", "=", e.release_id).get();
+    if (rel === null) return null;
+    const p = q.selectFrom(tbl.project).select(["repo"]).where("id", "=", rel.project_id).get();
+    if (p === null) return null;
+    return { project: rel.project_id, repo: p.repo };
+  }
+
+  /** The acceptance_criteria ids under one story: the `requirement → criteria` half of the
+   *  join, as a set, so the tests of a story are picked out by membership. */
+  private criteriaOfStory(storyId: number): Set<number> {
+    const q = queries(this.db);
+    const reqs = new Set(q.selectFrom(tbl.requirement).select(["id"]).where("story_id", "=", storyId).all().map((r) => r.id));
+    return new Set(
+      q
+        .selectFrom(tbl.criteria)
+        .all()
+        .filter((c) => reqs.has(c.requirement_id))
+        .map((c) => c.id),
+    );
   }
 
   private treesFor(repo: string): Trees {
@@ -357,30 +502,40 @@ export class Runner {
     return join(repo, ".wecode", "worktrees");
   }
 
+  /** The lowest-numbered worker of this role with nothing open against it. The dialect
+   *  spells no NOT EXISTS, no ORDER BY and no LIMIT, so the busy set is held here and the
+   *  lowest id is taken in TypeScript — the same answer, off the same two tables. */
   private freeWorker(role: string): number | null {
-    const row = this.db
-      .prepare(
-        `SELECT w.id AS id FROM worker w
-          WHERE w.role = ?
-            AND NOT EXISTS (SELECT 1 FROM assignment a
-                             WHERE a.worker_id = w.id AND a.phase IN ('pending','running','waiting'))
-          ORDER BY w.id LIMIT 1`,
-      )
-      .get(role) as { id: number } | undefined;
-    return row?.id ?? null;
+    const q = queries(this.db);
+    const busy = new Set(
+      q
+        .selectFrom(tbl.assignment)
+        .select(["worker_id", "phase"])
+        .all()
+        .filter((a) => OPEN_PHASES.includes(a.phase))
+        .map((a) => a.worker_id),
+    );
+    const free = q
+      .selectFrom(tbl.worker)
+      .select(["id"])
+      .where("role", "=", role)
+      .all()
+      .map((w) => w.id)
+      .filter((id) => !busy.has(id));
+    return free.length === 0 ? null : Math.min(...free);
   }
 
   /** An attempt that has ended: commit whatever it wrote onto its task branch, then let the
    *  tree go. The branch is the surviving copy; the directory is a checkout held against a
    *  retry nobody has promised. */
   private async settleEnded(): Promise<{ committed: number[]; scripts: ScriptReport }> {
-    const rows = this.db
-      .prepare(
-        `SELECT a.id AS id, a.worktree AS worktree, a.objective_id AS task, a.commit_sha AS sha
-           FROM assignment a
-          WHERE a.objective_type = 'task' AND a.phase IN ('succeeded','failed') AND a.worktree <> ''`,
-      )
-      .all() as unknown as { id: number; worktree: string; task: number; sha: string | null }[];
+    const rows = queries(this.db)
+      .selectFrom(tbl.assignment)
+      .select(["id", "worktree", "objective_id", "phase"])
+      .where("objective_type", "=", "task")
+      .all()
+      .filter((a) => ENDED_PHASES.includes(a.phase) && a.worktree !== "")
+      .map((a) => ({ id: a.id, worktree: a.worktree, task: a.objective_id }));
 
     const committed: number[] = [];
     const passed: number[] = [];
@@ -405,7 +560,7 @@ export class Runner {
         const trees = this.treesFor(slugs.repo);
         const sha = await trees.commitAttempt(row.worktree, `task/${slugs.task}`, `${slugs.task}: attempt`);
         if (sha !== null) {
-          this.db.prepare("UPDATE assignment SET commit_sha = ? WHERE id = ?").run(sha, row.id);
+          queries(this.db).update(tbl.assignment).set({ commit_sha: sha }).where("id", "=", row.id).run();
           committed.push(row.id);
         }
         await trees.release(row.worktree);
@@ -426,37 +581,28 @@ export class Runner {
    *  A dropped task is not here: abandoning one is a decision, and a decision is not
    *  drift. */
   private exhaustedTasks(): Drift[] {
-    const rows = this.db
-      .prepare(
-        `SELECT t.id AS task, t.slug AS slug, t.attempts AS attempts, t.max_retry AS max_retry,
-                s.slug AS story, s.state AS story_state
-           FROM task t
-           JOIN acceptance_test a ON a.id = t.acceptance_test_id
-           JOIN acceptance_criteria c ON c.id = a.parent_id
-           JOIN requirement r ON r.id = c.requirement_id
-           JOIN story s ON s.id = r.story_id
-          WHERE t.state NOT IN ('done', 'dropped')
-            AND t.attempts >= t.max_retry
-            AND s.state NOT IN ('delivered', 'dropped')
-          ORDER BY t.id`,
-      )
-      .all() as unknown as {
-      task: number;
-      slug: string;
-      attempts: number;
-      max_retry: number;
-      story: string;
-      story_state: string;
-    }[];
+    // `attempts >= max_retry` compares two columns, which the dialect does not spell —
+    // both are read and the comparison is made here.
+    const rows = queries(this.db)
+      .selectFrom(tbl.task)
+      .all()
+      .filter((t) => !["done", "dropped"].includes(t.state) && t.attempts >= t.max_retry)
+      .sort(byId);
 
-    return rows.map((row) => ({
-      task: row.task,
-      slug: row.slug,
-      story: row.story,
-      why:
-        `${row.attempts} of ${row.max_retry} attempts used, and story ${row.story} is still ` +
-        `${row.story_state} — wecode task retry ${row.task} --reason "…", or drop it`,
-    }));
+    const drift: Drift[] = [];
+    for (const row of rows) {
+      const story = this.storyOfTest(row.acceptance_test_id);
+      if (story === null || ["delivered", "dropped"].includes(story.state)) continue;
+      drift.push({
+        task: row.id,
+        slug: row.slug,
+        story: story.slug,
+        why:
+          `${row.attempts} of ${row.max_retry} attempts used, and story ${story.slug} is still ` +
+          `${story.state} — wecode task retry ${row.id} --reason "…", or drop it`,
+      });
+    }
+    return drift;
   }
 
   /** A task that has used its attempts stops, and says so. Without this the allocator
@@ -466,9 +612,12 @@ export class Runner {
    *  applies `retry`, because bringing an exhausted task back is a judgement about why it
    *  failed, and the machine has not got one. */
   private enforceRetryLimit(): number[] {
-    const rows = this.db
-      .prepare(`SELECT id FROM task WHERE state = 'ready' AND attempts >= max_retry`)
-      .all() as unknown as { id: number }[];
+    const rows = queries(this.db)
+      .selectFrom(tbl.task)
+      .select(["id", "attempts", "max_retry"])
+      .where("state", "=", "ready")
+      .all()
+      .filter((t) => t.attempts >= t.max_retry);
 
     const stopped: number[] = [];
     for (const row of rows) {
@@ -483,21 +632,27 @@ export class Runner {
    *  proof, and is recorded. Green there is a test that cannot fail, and the reason it
    *  proves nothing is recorded against it instead. */
   private async proveRedAtBase(): Promise<RedAtBase> {
-    const rows = this.db
-      .prepare(
-        `SELECT a.id AS id, a.artefact AS artefact, s.slug AS story, p.repo AS repo
-           FROM acceptance_test a
-           JOIN acceptance_criteria c ON c.id = a.parent_id
-           JOIN requirement r ON r.id = c.requirement_id
-           JOIN story s ON s.id = r.story_id
-           JOIN epic e ON e.id = s.epic_id
-           JOIN release rel ON rel.id = e.release_id
-           JOIN project p ON p.id = rel.project_id
-          WHERE s.state = 'in_progress' AND a.state = 'ready' AND a.kind = 'script'
-            AND a.artefact IS NOT NULL
-            AND a.red_at_base_sha IS NULL`,
-      )
-      .all() as unknown as { id: number; artefact: string; story: string; repo: string }[];
+    // `artefact IS NOT NULL` and `red_at_base_sha IS NULL` are spelled as comparisons with
+    // null, which the dialect compiles to IS / IS NOT rather than to an `= NULL` that never
+    // matches. The story's own state is the one condition that needs the walk up the ERD.
+    const tests = queries(this.db)
+      .selectFrom(tbl.test)
+      .select(["id", "artefact", "parent_id"])
+      .where("state", "=", "ready")
+      .where("kind", "=", "script")
+      .where("artefact", "!=", null)
+      .where("red_at_base_sha", "=", null)
+      .all();
+
+    const rows: { id: number; artefact: string; story: string; repo: string }[] = [];
+    for (const test of tests) {
+      if (test.artefact === null) continue;
+      const story = this.storyOfCriteria(test.parent_id);
+      if (story === null || story.state !== "in_progress") continue;
+      const owner = this.projectOf(story);
+      if (owner === null) continue;
+      rows.push({ id: test.id, artefact: test.artefact, story: story.slug, repo: owner.repo });
+    }
 
     const proven: number[] = [];
     const unproven: number[] = [];
@@ -530,9 +685,12 @@ export class Runner {
   /** The same ledger of finished work the verdicts use, under an entity of its own: one run
    *  per test per base sha, so a tick does only the work that is owed. */
   private ranAtBase(testId: number, base: string, artefact: string): boolean {
-    const row = this.db
-      .prepare("SELECT fingerprint FROM script_run WHERE entity = 'acceptance_test@base' AND test_id = ?")
-      .get(testId) as { fingerprint: string } | undefined;
+    const row = queries(this.db)
+      .selectFrom(tbl.scriptRun)
+      .select(["fingerprint"])
+      .where("entity", "=", BASE_RUN)
+      .where("test_id", "=", testId)
+      .get();
     return row?.fingerprint === `${base}|${artefact}`;
   }
 
@@ -566,25 +724,27 @@ export class Runner {
    *  column and refusing the pass of a test this machine had watched fail. */
   private recordBaseRun(testId: number, base: string, artefact: string, green: boolean): void {
     const at = now();
-    this.db
-      .prepare(
-        `UPDATE acceptance_test
-            SET red_at_base_sha = ?, red_at_base_at = ?, red_at_base_reason = ?, updated_at = ?
-          WHERE id = ?`,
-      )
-      .run(
-        green ? null : base,
-        green ? null : at,
-        green ? "it passes at base, so it cannot fail" : null,
-        at,
-        testId,
-      );
-    this.db
-      .prepare(
-        `INSERT INTO script_run (entity, test_id, fingerprint, ran_at) VALUES ('acceptance_test@base', ?, ?, ?)
-           ON CONFLICT (entity, test_id) DO UPDATE SET fingerprint = excluded.fingerprint, ran_at = excluded.ran_at`,
-      )
-      .run(testId, `${base}|${artefact}`, at);
+    const q = queries(this.db);
+    q.update(tbl.test)
+      .set({
+        red_at_base_sha: green ? null : base,
+        red_at_base_at: green ? null : at,
+        red_at_base_reason: green ? "it passes at base, so it cannot fail" : null,
+        updated_at: at,
+      })
+      .where("id", "=", testId)
+      .run();
+    q.insertInto(tbl.scriptRun, {
+      entity: BASE_RUN,
+      test_id: testId,
+      fingerprint: `${base}|${artefact}`,
+      ran_at: at,
+    })
+      .onConflict(["entity", "test_id"], {
+        fingerprint: excluded<ScriptRunRow>("fingerprint"),
+        ran_at: excluded<ScriptRunRow>("ran_at"),
+      })
+      .run();
   }
 
   /** Acceptance tests, in the story tree, once the story's tasks are finished — and never
@@ -595,19 +755,18 @@ export class Runner {
     readonly behind: readonly Behind[];
     readonly waiting: readonly Waiting[];
   }> {
-    const stories = this.db
-      .prepare(
-        `SELECT DISTINCT s.id AS id, s.slug AS slug, p.repo AS repo
-           FROM story s
-           JOIN epic e2 ON e2.id = s.epic_id
-           JOIN release rel2 ON rel2.id = e2.release_id
-           JOIN project p ON p.id = rel2.project_id
-           JOIN requirement r ON r.story_id = s.id
-           JOIN acceptance_criteria c ON c.requirement_id = r.id
-           JOIN acceptance_test a ON a.parent_id = c.id
-          WHERE s.state = 'in_progress' AND a.state IN ('ready','failed') AND a.kind = 'script'`,
-      )
-      .all() as unknown as { id: number; slug: string; repo: string }[];
+    // DISTINCT has no spelling in the dialect and needs none: the stories are collected
+    // into a Map keyed by id, which is what DISTINCT was for.
+    const found = new Map<number, { id: number; slug: string; repo: string }>();
+    for (const test of queries(this.db).selectFrom(tbl.test).select(["parent_id", "state"]).where("kind", "=", "script").all()) {
+      if (!["ready", "failed"].includes(test.state)) continue;
+      const story = this.storyOfCriteria(test.parent_id);
+      if (story === null || story.state !== "in_progress" || found.has(story.id)) continue;
+      const owner = this.projectOf(story);
+      if (owner === null) continue;
+      found.set(story.id, { id: story.id, slug: story.slug, repo: owner.repo });
+    }
+    const stories = [...found.values()].sort(byId);
 
     const passed: number[] = [];
     const failed: number[] = [];
@@ -766,17 +925,13 @@ export class Runner {
    *  not. Neither is a timer and neither is a guess — this reads the branch against the base
    *  before it says either. */
   private async raiseStoryChores(behind: readonly Behind[] = []): Promise<number[]> {
-    const stories = this.db
-      .prepare(
-        `SELECT s.id AS id, s.slug AS slug, s.state AS state, rel.project_id AS project, p.repo AS repo
-           FROM story s
-           JOIN epic e ON e.id = s.epic_id
-           JOIN release rel ON rel.id = e.release_id
-           JOIN project p ON p.id = rel.project_id
-          WHERE s.state IN ('in_progress', 'on_hold', 'delivered')
-          ORDER BY s.id`,
-      )
-      .all() as unknown as { id: number; slug: string; project: number; repo: string; state: string }[];
+    const stories: { id: number; slug: string; project: number; repo: string; state: string }[] = [];
+    for (const row of queries(this.db).selectFrom(tbl.story).all().sort(byId)) {
+      if (!["in_progress", "on_hold", "delivered"].includes(row.state)) continue;
+      const owner = this.projectOf(row);
+      if (owner === null) continue;
+      stories.push({ id: row.id, slug: row.slug, state: row.state, project: owner.project, repo: owner.repo });
+    }
 
     const open: number[] = [];
     for (const story of stories) {
@@ -931,27 +1086,36 @@ export class Runner {
   }
 
   private endedChoreAttempts(): { id: number; chore: number; worktree: string }[] {
-    return this.db
-      .prepare(
-        `SELECT id, objective_id AS chore, worktree FROM assignment
-          WHERE objective_type = 'chore' AND phase IN ('succeeded','failed') ORDER BY id`,
-      )
-      .all() as unknown as { id: number; chore: number; worktree: string }[];
+    return queries(this.db)
+      .selectFrom(tbl.assignment)
+      .select(["id", "objective_id", "worktree", "phase"])
+      .where("objective_type", "=", "chore")
+      .all()
+      .filter((a) => ENDED_PHASES.includes(a.phase))
+      .sort(byId)
+      .map((a) => ({ id: a.id, chore: a.objective_id, worktree: a.worktree }));
   }
 
   /** Chores with nothing already attempting them. The guard matters: without it a chore
    *  whose `begin` did not land is handed out again next tick while its first assignment
    *  is still running, and then two workers are in one tree. */
   private dispatchableChores(): { id: number }[] {
-    return this.db
-      .prepare(
-        `SELECT id FROM chore c WHERE c.state IN ('planned','ready')
-           AND NOT EXISTS (SELECT 1 FROM assignment a
-                            WHERE a.objective_type = 'chore' AND a.objective_id = c.id
-                              AND a.phase IN ('pending','running','waiting'))
-          ORDER BY id`,
-      )
-      .all() as unknown as { id: number }[];
+    const q = queries(this.db);
+    const attempting = new Set(
+      q
+        .selectFrom(tbl.assignment)
+        .select(["objective_type", "objective_id", "phase"])
+        .where("objective_type", "=", "chore")
+        .all()
+        .filter((a) => OPEN_PHASES.includes(a.phase))
+        .map((a) => a.objective_id),
+    );
+    return q
+      .selectFrom(tbl.chore)
+      .all()
+      .filter((c) => ["planned", "ready"].includes(c.state) && !attempting.has(c.id))
+      .sort(byId)
+      .map((c) => ({ id: c.id }));
   }
 
   /** The attempt: a system worker, in a tree at the chore's target branch, with the role's
@@ -1068,16 +1232,17 @@ export class Runner {
    *  pass. Run, not recorded: a verdict belongs to the test's own pass, and this is only the
    *  chore's check asking whether the merge broke anything. */
   private async suiteRed(target: { slug: string; repo: string; story: number }): Promise<string | null> {
-    const rows = this.db
-      .prepare(
-        `SELECT a.artefact AS artefact
-           FROM acceptance_test a
-           JOIN acceptance_criteria c ON c.id = a.parent_id
-           JOIN requirement r ON r.id = c.requirement_id
-          WHERE r.story_id = ? AND a.kind = 'script' AND a.artefact IS NOT NULL AND a.state <> 'dropped'
-          ORDER BY a.id`,
-      )
-      .all(target.story) as unknown as { artefact: string }[];
+    const under = this.criteriaOfStory(target.story);
+    const rows = queries(this.db)
+      .selectFrom(tbl.test)
+      .select(["id", "artefact", "parent_id", "state"])
+      .where("kind", "=", "script")
+      .where("artefact", "!=", null)
+      .where("state", "!=", "dropped")
+      .all()
+      .filter((t) => under.has(t.parent_id))
+      .sort(byId)
+      .flatMap((t) => (t.artefact === null ? [] : [{ artefact: t.artefact }]));
     if (rows.length === 0) return null;
 
     const tree = await this.treesFor(target.repo).storyTree(
@@ -1099,18 +1264,11 @@ export class Runner {
 
   private storyTargetOf(chore: Chore): { story: number; slug: string; repo: string } | null {
     if (chore.target_type !== "story") return null;
-    const row = this.db
-      .prepare(
-        `SELECT s.id AS story, s.slug AS slug, p.repo AS repo
-           FROM story s
-           JOIN epic e ON e.id = s.epic_id
-           JOIN release rel ON rel.id = e.release_id
-           JOIN project p ON p.id = rel.project_id
-          WHERE s.id = ?`,
-      )
-      .get(chore.target_id) as { story: number; slug: string; repo: string } | undefined;
-    if (row === undefined) return null;
-    return { ...row, repo: this.opts.repoRoot ?? row.repo };
+    const row = queries(this.db).selectFrom(tbl.story).where("id", "=", chore.target_id).get();
+    if (row === null) return null;
+    const owner = this.projectOf(row);
+    if (owner === null) return null;
+    return { story: row.id, slug: row.slug, repo: this.opts.repoRoot ?? owner.repo };
   }
 
   /** The role's scope, out of the file that declares it. Never a literal here: docs/design/18
@@ -1146,10 +1304,11 @@ export class Runner {
   }
 
   private openAssignments(): number {
-    const row = this.db
-      .prepare("SELECT count(*) AS n FROM assignment WHERE phase IN ('pending','running','waiting')")
-      .get() as { n: number };
-    return row.n;
+    return queries(this.db)
+      .selectFrom(tbl.assignment)
+      .select(["phase"])
+      .all()
+      .filter((a) => OPEN_PHASES.includes(a.phase)).length;
   }
 
   /** Would this branch merge into the base, without touching either?
@@ -1177,15 +1336,22 @@ export class Runner {
    *  against the branch tip it merged, so a branch that grows a commit afterwards lands
    *  again and one that has not is left alone. */
   private async landDoneTasks(): Promise<number[]> {
-    const rows = this.db
-      .prepare(
-        `SELECT t.id AS id FROM task t
-          WHERE t.state = 'done'
-            AND EXISTS (SELECT 1 FROM assignment a
-                         WHERE a.objective_type = 'task' AND a.objective_id = t.id
-                           AND a.commit_sha IS NOT NULL)`,
-      )
-      .all() as unknown as { id: number }[];
+    const q = queries(this.db);
+    const committed = new Set(
+      q
+        .selectFrom(tbl.assignment)
+        .select(["objective_id"])
+        .where("objective_type", "=", "task")
+        .where("commit_sha", "!=", null)
+        .all()
+        .map((a) => a.objective_id),
+    );
+    const rows = q
+      .selectFrom(tbl.task)
+      .select(["id"])
+      .where("state", "=", "done")
+      .all()
+      .filter((t) => committed.has(t.id));
 
     const merged: number[] = [];
     for (const row of rows) {
@@ -1200,13 +1366,13 @@ export class Runner {
           slugs.story,
           join(this.worktreeRoot(slugs.repo), `story-${slugs.story}`),
         );
-        this.db
-          .prepare(
-            `INSERT INTO landed_branch (task_id, branch, sha, merged_at) VALUES (?, ?, ?, ?)
-               ON CONFLICT (task_id) DO UPDATE SET branch = excluded.branch, sha = excluded.sha,
-                                                   merged_at = excluded.merged_at`,
-          )
-          .run(row.id, branch, tip ?? "", now());
+        q.insertInto(tbl.landed, { task_id: row.id, branch, sha: tip ?? "", merged_at: now() })
+          .onConflict(["task_id"], {
+            branch: excluded<LandedRow>("branch"),
+            sha: excluded<LandedRow>("sha"),
+            merged_at: excluded<LandedRow>("merged_at"),
+          })
+          .run();
         merged.push(row.id);
       } catch {
         // a conflict a person has to see. Unrecorded, so the next tick tries again.
@@ -1219,9 +1385,7 @@ export class Runner {
    *  second merge of an unchanged branch, and that refusal stays the backstop. */
   private alreadyLanded(taskId: number, branch: string, tip: string | null): boolean {
     if (tip === null) return false;
-    const row = this.db.prepare("SELECT branch, sha FROM landed_branch WHERE task_id = ?").get(taskId) as
-      | { branch: string; sha: string }
-      | undefined;
+    const row = queries(this.db).selectFrom(tbl.landed).select(["branch", "sha"]).where("task_id", "=", taskId).get();
     return row?.branch === branch && row.sha === tip;
   }
 
