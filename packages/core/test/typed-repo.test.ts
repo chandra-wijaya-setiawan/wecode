@@ -231,7 +231,10 @@ describe("the artefact and the task's own columns, through the layer", () => {
 
 describe("setState, through the layer", () => {
   it("writes the state, stamps the row, and appends exactly one ledger line", () => {
-    const before = column("story", "updated_at", tree.story);
+    // back-date the stamp, so "setState re-stamped it" cannot be satisfied by the
+    // fixture's own stamp happening to share a millisecond with this write
+    const before = "1999-12-31T23:59:59.000Z";
+    db.prepare("UPDATE story SET updated_at = ? WHERE id = ?").run(before, tree.story);
 
     repo.setState("story", tree.story, "planned", "ready", "start", "chief");
 
