@@ -1,10 +1,39 @@
 import type { DatabaseSync } from "node:sqlite";
 import { registry } from "./checks.js";
+import { queries, table, type Dialect } from "./db.js";
 import type { GuardRegistry } from "./guards.js";
 import { automaticFrom, check, loadMachines } from "./machines.js";
-import { Repo } from "./repo.js";
+import { Repo, type StateRow } from "./repo.js";
 import { transact } from "./store.js";
 import type { MachineSet, StatefulEntity } from "./types.js";
+
+/** The part of a row settle() reads: what it is, and where it stands. */
+type Node = { id: number; state: string };
+
+const NODE = ["id", "state"] as const;
+
+/** Unexported on purpose: `index.ts` re-exports this module wholesale, and these names are
+ *  other modules' too. */
+const task = table<Node>("task", [...NODE]);
+const criteria = table<Node>("acceptance_criteria", [...NODE]);
+const requirement = table<Node>("requirement", [...NODE]);
+const story = table<Node>("story", [...NODE]);
+const epic = table<Node>("epic", [...NODE]);
+
+/** Which rows settle() sweeps, bottom of the tree upward, and how each is read.
+ *
+ *  The order is the point — a task settling is what lets its criteria settle — and reading
+ *  a table by interpolating the entity name into the query text was the one statement in
+ *  this module the compiler could say nothing about: neither that the table existed nor
+ *  that it kept its state in a column of that name. A closure per entity says the same
+ *  thing in a form where both are checked where the lookup is written. */
+const SWEEP: readonly { readonly entity: StatefulEntity; readonly rows: (q: Dialect) => readonly StateRow[] }[] = [
+  { entity: "task", rows: (q) => q.selectFrom(task).select([...NODE]).all() },
+  { entity: "acceptance_criteria", rows: (q) => q.selectFrom(criteria).select([...NODE]).all() },
+  { entity: "requirement", rows: (q) => q.selectFrom(requirement).select([...NODE]).all() },
+  { entity: "story", rows: (q) => q.selectFrom(story).select([...NODE]).all() },
+  { entity: "epic", rows: (q) => q.selectFrom(epic).select([...NODE]).all() },
+];
 
 export interface Change {
   readonly entity: StatefulEntity;
@@ -25,11 +54,13 @@ export class Engine {
   private readonly repo: Repo;
   private readonly guards: GuardRegistry;
   private readonly machines: MachineSet;
+  private readonly q: Dialect;
 
   constructor(
     private readonly db: DatabaseSync,
     machines: MachineSet = loadMachines(),
   ) {
+    this.q = queries(db);
     this.repo = new Repo(db);
     this.guards = registry(this.repo);
     this.machines = machines;
@@ -73,20 +104,11 @@ export class Engine {
    *  and fires, so nothing waits for an event that already happened. */
   settle(): readonly Change[] {
     const changes: Change[] = [];
-    const order: StatefulEntity[] = [
-      "task",
-      "acceptance_criteria",
-      "requirement",
-      "story",
-      "epic",
-    ];
 
-    for (let pass = 0; pass < order.length; pass++) {
+    for (let pass = 0; pass < SWEEP.length; pass++) {
       let moved = false;
-      for (const entity of order) {
-        const rows = this.db
-          .prepare(`SELECT id, state FROM ${entity}`)
-          .all() as unknown as { id: number; state: string }[];
+      for (const { entity, rows: read } of SWEEP) {
+        const rows = read(this.q);
 
         for (const row of rows) {
           const fired = automaticFrom(this.machines[entity], row.state).find(
