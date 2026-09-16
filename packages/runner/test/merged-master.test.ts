@@ -94,13 +94,19 @@ describe("the second merge of master", () => {
     expect(prompt).toContain("git show deadbee");
   });
 
-  it("keeps both of the foreman's reads: the lesson table and the task's attempts", () => {
+  /** Both sides named by what they do, not by the statements they were once written as.
+   *  The foreman has since been ported onto core's typed query layer: the lesson table is
+   *  the record's, by migration `010-lesson.sql`, and the foreman neither declares it nor
+   *  spells a query against it any more. Asserting the old `CREATE TABLE` text here would
+   *  pin the merge to an implementation the merge was never about — so what is asserted is
+   *  that both reads are still reachable, and that the lesson one goes through core. */
+  it("keeps both of the foreman's reads: the project's lessons and the task's attempts", () => {
     const src = execFileSync("git", ["show", "HEAD:packages/runner/src/foreman.ts"], {
       encoding: "utf8",
     });
     expect(src).toContain("lessonsFor");
     expect(src).toContain("recordLesson");
-    expect(src).toContain("CREATE TABLE IF NOT EXISTS lesson");
+    expect(src).toMatch(/\baddLesson\b/); // core's writer, which owns the table
     expect(src).toContain("historyFor");
     expect(src).toContain("failuresFor");
     expect(src).toContain("function lastLine");
