@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { queries, table, type Dialect } from "./db.js";
 import { ALLOW, refuse, type Guard, type GuardName, type GuardRegistry } from "./guards.js";
 import type { Repo } from "./repo.js";
 import type { StatefulEntity } from "./types.js";
@@ -122,6 +123,19 @@ function allChildrenDropped(repo: Repo): Guard {
  *  only input is the stored row. */
 const dbOf = (repo: Repo): DatabaseSync => (repo as unknown as { db: DatabaseSync }).db;
 
+/** Read through the same typed layer the repository uses, so the columns a guard reaches
+ *  for are checked against the table even though it reached past the accessors. */
+const queriesOf = (repo: Repo): Dialect => queries(dbOf(repo));
+
+/** The part of an acceptance_test a guard reads: what to call it in a refusal, and the base
+ *  it was last seen red at. Unexported — `index.ts` re-exports this module wholesale. */
+const acceptanceTest = table<{
+  id: number;
+  slug: string;
+  statement: string;
+  red_at_base_sha: string | null;
+}>("acceptance_test", ["id", "slug", "statement", "red_at_base_sha"]);
+
 /** Whether a test names something to run. One definition, because two guards ask it and a
  *  copy that drifted would let one of them through. */
 const hasArtefact = (repo: Repo, entity: string, id: number): boolean => {
@@ -174,10 +188,12 @@ export function guards(repo: Repo): Readonly<Record<GuardName, Guard>> {
      *  recorded by whoever watched it happen; this only insists that somebody did. */
     test_has_been_red: ({ entity, id }) => {
       if (entity !== "acceptance_test") return refuse(`${entity} records no red run at its base`);
-      const row = dbOf(repo)
-        .prepare("SELECT slug, statement, red_at_base_sha FROM acceptance_test WHERE id = ?")
-        .get(id) as { slug: string; statement: string; red_at_base_sha: string | null } | undefined;
-      if (row === undefined) return refuse(`no acceptance_test #${id}`);
+      const row = queriesOf(repo)
+        .selectFrom(acceptanceTest)
+        .select(["slug", "statement", "red_at_base_sha"])
+        .where("id", "=", id)
+        .get();
+      if (row === null) return refuse(`no acceptance_test #${id}`);
       return row.red_at_base_sha === null
         ? refuse(
             `acceptance_test ${row.slug} #${id} ("${row.statement}") has never been seen to fail — ` +
