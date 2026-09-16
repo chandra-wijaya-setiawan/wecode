@@ -1,9 +1,121 @@
 import { existsSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
-import { Engine, now, recordScopeRefusal, type Budget } from "@wecode/core";
+import {
+  addLesson,
+  BRIEF_LESSONS,
+  Engine,
+  lessons,
+  now,
+  recordScopeRefusal,
+  type Budget,
+} from "@wecode/core";
+// The dialect is core's, but core's barrel does not re-export it — `db.js` is imported by
+// path so that porting this module needs no change to a file outside it.
+import { queries, table, type Setters } from "@wecode/core/dist/db.js";
 import { hasWriteDenials } from "./adapters/denials.js";
 import { Trees } from "./git.js";
 import type { History, Observation, TestFailure, WorkerAdapter, Work } from "./ports.js";
+
+/** The tables this module reads, and only the columns it asks for.
+ *
+ *  Kept in one object because `task`, `story`, `chore` and `worker` are all names this file
+ *  already uses for other things: a bare const would be shadowed and the shadowing would
+ *  typecheck. `typed-foreman.test.ts` holds every list below against `PRAGMA table_info`,
+ *  so a column renamed out from under this module fails a test rather than a tick.
+ *
+ *  `objective_type` is declared as its union rather than as text, which is what makes a
+ *  misspelt objective a typecheck failure at every place one is compared. */
+type ObjectiveType = "task" | "acceptance_test" | "task_test" | "chore";
+
+interface AssignmentRow {
+  id: number;
+  objective_type: ObjectiveType;
+  objective_id: number;
+  worker_id: number;
+  scope: string;
+  budget: string;
+  worktree: string;
+  phase: string;
+  session: string | null;
+  last_seen: string | null;
+  answer: string | null;
+  answered_by: string | null;
+  reason: string | null;
+  commit_sha: string | null;
+  spent: string | null;
+  kind: string | null;
+  question: string | null;
+  options: string | null;
+  updated_at: string;
+}
+
+interface TaskRow {
+  id: number;
+  title: string;
+  acceptance_test_id: number;
+  attempts: number;
+  updated_at: string;
+}
+
+interface TaskTestRow {
+  id: number;
+  parent_id: number;
+  statement: string;
+  state: string;
+  last_output: string | null;
+}
+
+interface ChoreRow {
+  id: number;
+  kind: string;
+  check: string;
+  target_type: string;
+  target_id: number;
+  project_id: number;
+}
+
+const tbl = {
+  assignment: table<AssignmentRow>("assignment", [
+    "id",
+    "objective_type",
+    "objective_id",
+    "worker_id",
+    "scope",
+    "budget",
+    "worktree",
+    "phase",
+    "session",
+    "last_seen",
+    "answer",
+    "answered_by",
+    "reason",
+    "commit_sha",
+    "spent",
+    "kind",
+    "question",
+    "options",
+    "updated_at",
+  ]),
+  worker: table<{ id: number; kind: string }>("worker", ["id", "kind"]),
+  task: table<TaskRow>("task", ["id", "title", "acceptance_test_id", "attempts", "updated_at"]),
+  taskTest: table<TaskTestRow>("task_test", ["id", "parent_id", "statement", "state", "last_output"]),
+  test: table<{ id: number; parent_id: number; statement: string }>("acceptance_test", [
+    "id",
+    "parent_id",
+    "statement",
+  ]),
+  criteria: table<{ id: number; requirement_id: number }>("acceptance_criteria", ["id", "requirement_id"]),
+  requirement: table<{ id: number; story_id: number }>("requirement", ["id", "story_id"]),
+  story: table<{ id: number; slug: string; epic_id: number }>("story", ["id", "slug", "epic_id"]),
+  epic: table<{ id: number; release_id: number }>("epic", ["id", "release_id"]),
+  release: table<{ id: number; project_id: number }>("release", ["id", "project_id"]),
+  project: table<{ id: number; name: string; repo: string }>("project", ["id", "name", "repo"]),
+  chore: table<ChoreRow>("chore", ["id", "kind", "check", "target_type", "target_id", "project_id"]),
+};
+
+/** An assignment nobody has finished with. One rule, spelled once, applied in memory: the
+ *  dialect has no set-membership operator and an open assignment is a handful of rows. */
+const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
 
 /** Where the assignments being watched live, when the foreman has to ask git something the
  *  record does not hold — the name of the base branch a merge chore's brief has to say. */
@@ -13,18 +125,19 @@ export interface ForemanOptions {
   readonly repoRoot?: string | undefined;
 }
 
-interface OpenRow {
-  id: number;
-  objective_type: "task" | "acceptance_test" | "task_test" | "chore";
-  objective_id: number;
-  scope: string;
-  budget: string;
-  worktree: string;
-  phase: string;
-  session: string | null;
-  last_seen: string | null;
-  answer: string | null;
-}
+type OpenRow = Pick<
+  AssignmentRow,
+  | "id"
+  | "objective_type"
+  | "objective_id"
+  | "scope"
+  | "budget"
+  | "worktree"
+  | "phase"
+  | "session"
+  | "last_seen"
+  | "answer"
+>;
 
 export interface TickReport {
   readonly started: readonly number[];
@@ -45,7 +158,10 @@ export class Foreman {
     private readonly opts: ForemanOptions = {},
   ) {
     this.engine = new Engine(db);
-    this.db.exec(LESSON_TABLE);
+  }
+
+  private get q(): ReturnType<typeof queries> {
+    return queries(this.db);
   }
 
   /** One pass over every open assignment. Level-triggered: it reads state and acts, so a
@@ -134,32 +250,33 @@ export class Foreman {
   }
 
   private phaseOf(id: number): string {
-    const row = this.db.prepare("SELECT phase FROM assignment WHERE id = ?").get(id) as
-      | { phase: string }
-      | undefined;
-    return row?.phase ?? "";
+    return this.q.selectFrom(tbl.assignment).select(["phase"]).where("id", "=", id).get()?.phase ?? "";
   }
 
+  /** Every open assignment, oldest first. The phase filter and the order are applied in
+   *  memory: the dialect spells neither set membership nor an ordering, and the open rows
+   *  are bounded by `max_open` rather than by the size of the record. */
   private open(): OpenRow[] {
-    return this.db
-      .prepare(
-        `SELECT id, objective_type, objective_id, scope, budget, worktree, phase, session, last_seen, answer
-           FROM assignment WHERE phase IN ('pending','running','waiting') ORDER BY id`,
-      )
-      .all() as unknown as OpenRow[];
+    const rows = this.q
+      .selectFrom(tbl.assignment)
+      .select(["id", "objective_type", "objective_id", "scope", "budget", "worktree", "phase", "session", "last_seen", "answer"])
+      .all()
+      .filter((r) => OPEN_PHASES.includes(r.phase));
+    rows.sort((a, b) => a.id - b.id);
+    return rows;
   }
 
+  /** The adapter for this assignment's worker, by the two reads the join was. A worker that
+   *  is not there is null, which is what the inner join did with the row. */
   private adapterFor(row: OpenRow): WorkerAdapter | null {
-    const kind = this.db
-      .prepare(
-        `SELECT w.kind AS kind FROM assignment a JOIN worker w ON w.id = a.worker_id WHERE a.id = ?`,
-      )
-      .get(row.id) as { kind: string } | undefined;
-    return kind === undefined ? null : (this.adapters[kind.kind] ?? null);
+    const a = this.q.selectFrom(tbl.assignment).select(["worker_id"]).where("id", "=", row.id).get();
+    if (a === null) return null;
+    const w = this.q.selectFrom(tbl.worker).select(["kind"]).where("id", "=", a.worker_id).get();
+    return w === null ? null : (this.adapters[w.kind] ?? null);
   }
 
   private async workOf(row: OpenRow): Promise<Work> {
-    const lessons = this.lessonsFor(row.id);
+    const learned = this.lessonsFor(row.id);
     return {
       id: row.id,
       // A chore is an objective like a task is, and the column has always been free text:
@@ -174,35 +291,74 @@ export class Foreman {
       session: row.session,
       // A project with nothing to teach hands over no field at all: an empty list still
       // renders a heading, and a heading nothing follows is how the brief gets skimmed.
-      ...(lessons.length > 0 ? { lessons } : {}),
+      ...(learned.length > 0 ? { lessons: learned } : {}),
       history: this.historyFor(row),
     };
   }
 
-  /** The ten newest lessons of this assignment's project, newest first. */
+  /** The ten newest lessons of this assignment's project, newest first — core's own reader,
+   *  which owns the `lesson` table and the cap a brief carries. */
   private lessonsFor(id: number): string[] {
-    const rows = this.db
-      .prepare(
-        `SELECT text FROM lesson WHERE project_id = (${PROJECT_OF})
-          ORDER BY id DESC LIMIT 10`,
-      )
-      .all(id) as unknown as { text: string }[];
-    return rows.map((r) => r.text);
+    const project = this.projectOf(id);
+    if (project === null) return [];
+    return lessons(this.db, project, BRIEF_LESSONS).map((l) => l.text);
   }
 
   /** What an attempt learned, kept against the project rather than the task: the thing that
    *  bought this — a worktree that could not install — was true of all three tasks that hit
    *  it. The assignment is kept too, so a suspicious lesson can be traced back. */
   private recordLesson(id: number, lesson: string): void {
-    const text = lesson.trim();
-    if (text === "") return;
-    const project = this.db.prepare(`SELECT (${PROJECT_OF}) AS project`).get(id) as
-      | { project: number | null }
-      | undefined;
-    if (project?.project == null) return;
-    this.db
-      .prepare("INSERT INTO lesson (project_id, assignment_id, text, created_at) VALUES (?, ?, ?, ?)")
-      .run(project.project, id, text, now());
+    if (lesson.trim() === "") return;
+    const project = this.projectOf(id);
+    if (project === null) return;
+    addLesson(this.db, project, lesson, id);
+  }
+
+  /** The project an assignment belongs to, by the walk up from whichever objective it has.
+   *  Nothing below a project carries a project_id, so the walk is the only way to know — and
+   *  a chore names its project outright, which is why it never needed the walk.
+   *
+   *  A broken link is null and every caller treats it as "no project", which is what the
+   *  inner joins this replaced did with the row. */
+  private projectOf(id: number): number | null {
+    const a = this.q
+      .selectFrom(tbl.assignment)
+      .select(["objective_type", "objective_id"])
+      .where("id", "=", id)
+      .get();
+    if (a === null) return null;
+    const test = this.testOf(a.objective_type, a.objective_id);
+    return test === null ? null : this.projectOfTest(test);
+  }
+
+  /** The acceptance_test an objective hangs off: itself, the task's, or the task's by way of
+   *  the task_test's parent. A chore has none. */
+  private testOf(type: ObjectiveType, id: number): number | null {
+    if (type === "acceptance_test") return id;
+    if (type === "task") {
+      return this.q.selectFrom(tbl.task).select(["acceptance_test_id"]).where("id", "=", id).get()
+        ?.acceptance_test_id ?? null;
+    }
+    if (type === "task_test") {
+      const tt = this.q.selectFrom(tbl.taskTest).select(["parent_id"]).where("id", "=", id).get();
+      return tt === null ? null : this.testOf("task", tt.parent_id);
+    }
+    return null;
+  }
+
+  private projectOfTest(testId: number): number | null {
+    const q = this.q;
+    const x = q.selectFrom(tbl.test).select(["parent_id"]).where("id", "=", testId).get();
+    if (x === null) return null;
+    const c = q.selectFrom(tbl.criteria).select(["requirement_id"]).where("id", "=", x.parent_id).get();
+    if (c === null) return null;
+    const r = q.selectFrom(tbl.requirement).select(["story_id"]).where("id", "=", c.requirement_id).get();
+    if (r === null) return null;
+    const s = q.selectFrom(tbl.story).select(["epic_id"]).where("id", "=", r.story_id).get();
+    if (s === null) return null;
+    const e = q.selectFrom(tbl.epic).select(["release_id"]).where("id", "=", s.epic_id).get();
+    if (e === null) return null;
+    return q.selectFrom(tbl.release).select(["project_id"]).where("id", "=", e.release_id).get()?.project_id ?? null;
   }
 
   /** What the last attempt at this task left on the branch.
@@ -212,19 +368,20 @@ export class Foreman {
    *  crosses between two sessions that share no memory. */
   private historyFor(row: OpenRow): History | null {
     if (row.objective_type !== "task") return null;
-    const t = this.db.prepare("SELECT attempts FROM task WHERE id = ?").get(row.objective_id) as
-      | { attempts: number }
-      | undefined;
-    const attempts = t?.attempts ?? 0;
+    const attempts =
+      this.q.selectFrom(tbl.task).select(["attempts"]).where("id", "=", row.objective_id).get()?.attempts ?? 0;
     if (attempts < 1) return null;
 
-    const prev = this.db
-      .prepare(
-        `SELECT reason, commit_sha FROM assignment
-          WHERE objective_type = 'task' AND objective_id = ? AND id <> ?
-          ORDER BY id DESC LIMIT 1`,
-      )
-      .get(row.objective_id, row.id) as { reason: string | null; commit_sha: string | null } | undefined;
+    // The newest earlier assignment against this task, picked in memory: the dialect spells
+    // no ordering, and an id is monotonic so the highest is the latest.
+    const prev = this.q
+      .selectFrom(tbl.assignment)
+      .select(["id", "reason", "commit_sha"])
+      .where("objective_type", "=", "task")
+      .where("objective_id", "=", row.objective_id)
+      .all()
+      .filter((a) => a.id !== row.id)
+      .sort((a, b) => b.id - a.id)[0];
 
     return {
       attempts,
@@ -237,23 +394,30 @@ export class Foreman {
   /** Every task_test that is failing, reduced to the last thing it actually said. A test
    *  with nothing to say is still worth naming: the statement is the requirement. */
   private failuresFor(task_id: number): TestFailure[] {
-    const rows = this.db
-      .prepare(
-        `SELECT statement, last_output FROM task_test
-          WHERE parent_id = ? AND state = 'failed' ORDER BY id`,
-      )
-      .all(task_id) as unknown as { statement: string; last_output: string | null }[];
-    return rows.map((r) => ({ statement: r.statement, line: lastLine(r.last_output) }));
+    return this.q
+      .selectFrom(tbl.taskTest)
+      .select(["id", "statement", "last_output"])
+      .where("parent_id", "=", task_id)
+      .where("state", "=", "failed")
+      .all()
+      .sort((a, b) => a.id - b.id)
+      .map((r) => ({ statement: r.statement, line: lastLine(r.last_output) }));
   }
 
+  /** Each objective says what the work is in a column of its own — a task in its title, a
+   *  test in its statement — so the dispatch is a branch per objective rather than a table
+   *  name and a column name pasted into one query. */
   private async instructionFor(row: OpenRow): Promise<string> {
     if (row.objective_type === "chore") return await this.briefFor(row.objective_id);
-    const table = row.objective_type;
-    const col = table === "task" ? "title" : "statement";
-    const r = this.db.prepare(`SELECT ${col} AS text FROM ${table} WHERE id = ?`).get(row.objective_id) as
-      | { text: string }
-      | undefined;
-    return r?.text ?? "";
+    if (row.objective_type === "task") {
+      return this.q.selectFrom(tbl.task).select(["title"]).where("id", "=", row.objective_id).get()?.title ?? "";
+    }
+    if (row.objective_type === "acceptance_test") {
+      return this.q.selectFrom(tbl.test).select(["statement"]).where("id", "=", row.objective_id).get()?.statement ?? "";
+    }
+    return (
+      this.q.selectFrom(tbl.taskTest).select(["statement"]).where("id", "=", row.objective_id).get()?.statement ?? ""
+    );
   }
 
   /** A chore's brief: what the work is for, and what its check is.
@@ -266,17 +430,17 @@ export class Foreman {
    *  commands for opposite reasons, and a worker told the wrong reason resolves conflicts
    *  the wrong way. */
   private async briefFor(id: number): Promise<string> {
-    const row = this.db
-      .prepare(
-        `SELECT c.kind AS kind, c."check" AS "check", c.target_type AS target_type,
-                coalesce(s.slug, p.name, c.target_id) AS target, p.repo AS repo
-           FROM chore c
-           JOIN project p ON p.id = c.project_id
-           LEFT JOIN story s ON s.id = c.target_id AND c.target_type = 'story'
-          WHERE c.id = ?`,
-      )
-      .get(id) as { kind: string; check: string; target_type: string; target: string; repo: string } | undefined;
-    if (row === undefined) return "";
+    const row = this.q.selectFrom(tbl.chore).where("id", "=", id).get();
+    if (row === null) return "";
+    // The project was an inner join and the story an outer one: no project, no brief, and a
+    // chore whose target is not a story falls back to the project's name.
+    const project = this.q.selectFrom(tbl.project).select(["name", "repo"]).where("id", "=", row.project_id).get();
+    if (project === null) return "";
+    const story =
+      row.target_type === "story"
+        ? this.q.selectFrom(tbl.story).select(["slug"]).where("id", "=", row.target_id).get()
+        : null;
+    const target = story?.slug ?? project.name ?? String(row.target_id);
 
     const write = CHORE_BRIEFS[row.kind] ?? anyChore;
     return [
@@ -284,9 +448,9 @@ export class Foreman {
         kind: row.kind,
         check: row.check,
         target_type: row.target_type,
-        target: row.target,
-        branch: `story/${row.target}`,
-        base: await this.baseOf(row.repo),
+        target,
+        branch: `story/${target}`,
+        base: await this.baseOf(project.repo),
       }),
       NO_TESTS,
     ].join("\n");
@@ -323,37 +487,42 @@ export class Foreman {
       this.engine.apply("assignment", id, "start", "foreman");
     }
 
+    // Every branch below writes the same three columns, so they are written once here.
+    const write = (sets: Setters<AssignmentRow>): void => {
+      this.q
+        .update(tbl.assignment)
+        .set({ ...sets, last_seen: at, spent, updated_at: at })
+        .where("id", "=", id)
+        .run();
+    };
+
     if (seen.phase === "running") {
-      this.db
-        .prepare("UPDATE assignment SET session = ?, last_seen = ?, spent = ?, updated_at = ? WHERE id = ?")
-        .run(seen.session, at, spent, at, id);
+      write({ session: seen.session });
       return this.phaseOf(id) === "running";
     }
 
     if (seen.phase === "waiting") {
-      this.db
-        .prepare(
-          `UPDATE assignment SET session = ?, last_seen = ?, spent = ?, kind = ?, question = ?, options = ?,
-                                 answer = NULL, answered_by = NULL, updated_at = ? WHERE id = ?`,
-        )
-        .run(seen.session, at, spent, seen.kind, seen.question, JSON.stringify(seen.options), at, id);
+      write({
+        session: seen.session,
+        kind: seen.kind,
+        question: seen.question,
+        options: JSON.stringify(seen.options),
+        answer: null,
+        answered_by: null,
+      });
       return this.engine.apply("assignment", id, "ask", "foreman").ok;
     }
 
     if (seen.phase === "succeeded") {
-      this.db
-        .prepare(
-          "UPDATE assignment SET session = coalesce(?, session), last_seen = ?, spent = ?, commit_sha = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(seen.session, at, spent, seen.commit, at, id);
+      // `coalesce(?, session)` was what kept a session the adapter did not name: an
+      // adapter that says nothing leaves the column alone rather than clearing it.
+      write({ ...(seen.session === null ? {} : { session: seen.session }), commit_sha: seen.commit });
       const ok = this.engine.apply("assignment", id, "finish", "foreman").ok;
       if (ok) this.countAttempt(id);
       return ok;
     }
 
-    this.db
-      .prepare("UPDATE assignment SET last_seen = ?, spent = ?, reason = ?, updated_at = ? WHERE id = ?")
-      .run(at, spent, seen.reason, at, id);
+    write({ reason: seen.reason });
     const out = this.engine.apply("assignment", id, "fail", "foreman").ok;
     if (out) this.countAttempt(id);
     return out;
@@ -365,12 +534,21 @@ export class Foreman {
    *  that — so counting only failures lets a task be retried forever. One attempt does not
    *  fail a task; the retry limit does. Counting is the foreman's, deciding is not. */
   private countAttempt(id: number): void {
-    this.db
-      .prepare(
-        `UPDATE task SET attempts = attempts + 1, updated_at = ?
-          WHERE id = (SELECT objective_id FROM assignment WHERE id = ? AND objective_type = 'task')`,
-      )
-      .run(now(), id);
+    const a = this.q
+      .selectFrom(tbl.assignment)
+      .select(["objective_type", "objective_id"])
+      .where("id", "=", id)
+      .get();
+    if (a === null || a.objective_type !== "task") return;
+    // Read then write, because the dialect assigns values and not expressions. Safe where
+    // the increment was: one runner holds the lease, and this is inside its tick.
+    const t = this.q.selectFrom(tbl.task).select(["attempts"]).where("id", "=", a.objective_id).get();
+    if (t === null) return;
+    this.q
+      .update(tbl.task)
+      .set({ attempts: t.attempts + 1, updated_at: now() })
+      .where("id", "=", a.objective_id)
+      .run();
   }
 }
 
@@ -441,40 +619,6 @@ const CHORE_BRIEFS: Readonly<Record<string, (c: BriefContext) => string[]>> = {
 const anyChore = (c: BriefContext): string[] => [
   `${c.kind} ${c.target_type} ${c.target}. The check: ${c.check}.`,
 ];
-
-/** A lesson is a note about a world that changes, not part of the record of the work, so it
- *  is nullable everywhere it touches one and deleting it costs nothing. */
-const LESSON_TABLE = `
-CREATE TABLE IF NOT EXISTS lesson (
-  id            INTEGER PRIMARY KEY,
-  project_id    INTEGER NOT NULL REFERENCES project(id),
-  assignment_id INTEGER NOT NULL REFERENCES assignment(id),
-  text          TEXT NOT NULL,
-  created_at    TEXT NOT NULL
-)`;
-
-/** An assignment's project, by the walk up from whichever of the three objectives it has.
- *  Nothing below a project carries a project_id, so the walk is the only way to know. */
-const upFromTest = (test: string): string =>
-  `SELECT r.project_id
-     FROM acceptance_test x
-     JOIN acceptance_criteria c ON c.id = x.parent_id
-     JOIN requirement q ON q.id = c.requirement_id
-     JOIN story s ON s.id = q.story_id
-     JOIN epic e ON e.id = s.epic_id
-     JOIN release r ON r.id = e.release_id
-    WHERE x.id = ${test}`;
-const testOfTask = (task: string): string =>
-  `(SELECT t.acceptance_test_id FROM task t WHERE t.id = ${task})`;
-const taskOfTaskTest = (id: string): string =>
-  `(SELECT tt.parent_id FROM task_test tt WHERE tt.id = ${id})`;
-
-const PROJECT_OF = `SELECT CASE a.objective_type
-    WHEN 'task' THEN (${upFromTest(testOfTask("a.objective_id"))})
-    WHEN 'acceptance_test' THEN (${upFromTest("a.objective_id")})
-    WHEN 'task_test' THEN (${upFromTest(testOfTask(taskOfTaskTest("a.objective_id")))})
-  END
-  FROM assignment a WHERE a.id = ?`;
 
 /** The last line that said anything. Runners end in blank lines and trailing newlines, and
  *  the sentence that matters is the one before them. */
