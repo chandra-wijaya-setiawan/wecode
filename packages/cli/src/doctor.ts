@@ -7,69 +7,191 @@ import {
   keepUnlanded,
   now,
   storyBranch,
+  transact,
   REACHED_INSIDE_ANOTHER_MERGE,
   type Ancestry,
   type RecordNode,
   type Snapshot,
   type Violation,
 } from "@wecode/core";
+/** The typed layer is core's, and core's public surface does not carry it, so the one
+ *  import in the cli that needs the dialect names the module it lives in. */
+import { excluded, queries, table, type Dialect } from "@wecode/core/dist/db.js";
 
-/** Where each entity's row lives and what its parent key is called. The one place in the
- *  doctor that knows the shape of the tables; the invariants themselves see only the
- *  flattened nodes. */
-const TABLES: readonly { entity: RecordNode["entity"]; fk: string; extra?: string }[] = [
-  { entity: "release", fk: "NULL" },
-  { entity: "epic", fk: "release_id" },
-  { entity: "story", fk: "epic_id" },
-  { entity: "requirement", fk: "story_id" },
-  { entity: "acceptance_criteria", fk: "requirement_id" },
-  { entity: "acceptance_test", fk: "parent_id", extra: ", red_at_base_sha" },
-  { entity: "task", fk: "acceptance_test_id", extra: ", role" },
-  { entity: "task_test", fk: "parent_id" },
+/** The columns the doctor reads, and only those. Declared per table rather than spelled as
+ *  `SELECT id, slug, state, ${fk} AS parent_id` over a table name held in a string: the old
+ *  shape put an identifier the compiler never saw into the SQL text, and `typed-doctor.test.ts`
+ *  holds each list below against `PRAGMA table_info`. */
+interface Named {
+  id: number;
+  slug: string;
+  state: string;
+}
+const release = table<Named>("release", ["id", "slug", "state"]);
+
+interface EpicRow extends Named {
+  release_id: number;
+}
+const epic = table<EpicRow>("epic", ["id", "slug", "state", "release_id"]);
+
+interface StoryRow extends Named {
+  epic_id: number;
+}
+const story = table<StoryRow>("story", ["id", "slug", "state", "epic_id"]);
+
+interface RequirementRow extends Named {
+  story_id: number;
+}
+const requirement = table<RequirementRow>("requirement", ["id", "slug", "state", "story_id"]);
+
+interface CriteriaRow extends Named {
+  requirement_id: number;
+}
+const criteria = table<CriteriaRow>("acceptance_criteria", ["id", "slug", "state", "requirement_id"]);
+
+interface AcceptanceTestRow extends Named {
+  parent_id: number;
+  red_at_base_sha: string | null;
+}
+const acceptanceTest = table<AcceptanceTestRow>("acceptance_test", [
+  "id",
+  "slug",
+  "state",
+  "parent_id",
+  "red_at_base_sha",
+]);
+
+interface TaskRow extends Named {
+  acceptance_test_id: number;
+  role: string;
+}
+const task = table<TaskRow>("task", ["id", "slug", "state", "acceptance_test_id", "role"]);
+
+interface TaskTestRow extends Named {
+  parent_id: number;
+}
+const taskTest = table<TaskTestRow>("task_test", ["id", "slug", "state", "parent_id"]);
+
+const worker = table<{ id: number; slug: string; role: string }>("worker", ["id", "slug", "role"]);
+const schemaVersion = table<{ version: number }>("schema_version", ["version"]);
+const project = table<{ id: number; repo: string }>("project", ["id", "repo"]);
+
+interface LandedRow {
+  task_id: number;
+  branch: string;
+  sha: string;
+  merged_at: string;
+}
+const landedBranch = table<LandedRow>("landed_branch", ["task_id", "branch", "sha", "merged_at"]);
+
+interface LedgerRow {
+  entity: string;
+  entity_id: number;
+  verb: string;
+  from_state: string;
+  to_state: string;
+  actor: string;
+  at: string;
+}
+const ledger = table<LedgerRow>("ledger", ["entity", "entity_id", "verb", "from_state", "to_state", "actor", "at"]);
+
+/** sqlite's own catalogue, read like any other table. */
+const master = table<{ type: string; name: string }>("sqlite_master", ["type", "name"]);
+
+/** One node per row, flattened: whatever foreign key the table carries becomes `parent_id`,
+ *  which is the only thing the invariants know about parentage. The dialect spells no
+ *  aliases, so the renaming happens here in TypeScript — and a column that is not in the
+ *  table above can no longer reach the query at all.
+ *
+ *  Each entry carries the closure that reads its own table rather than a table name: a
+ *  `Record<entity, TableDef<Row>>` cannot be written, because `columns: (keyof Row)[]` makes
+ *  `TableDef` invariant in `Row`. */
+type Node = Omit<RecordNode, "entity">;
+
+const NODES: readonly { entity: RecordNode["entity"]; rows: (q: Dialect) => readonly Node[] }[] = [
+  // A release's parent is a project, which the invariants do not check: it is a root here.
+  { entity: "release", rows: (q) => q.selectFrom(release).all().map((r) => ({ ...r, parent_id: null })) },
+  { entity: "epic", rows: (q) => q.selectFrom(epic).all().map(({ release_id, ...r }) => ({ ...r, parent_id: release_id })) },
+  { entity: "story", rows: (q) => q.selectFrom(story).all().map(({ epic_id, ...r }) => ({ ...r, parent_id: epic_id })) },
+  {
+    entity: "requirement",
+    rows: (q) => q.selectFrom(requirement).all().map(({ story_id, ...r }) => ({ ...r, parent_id: story_id })),
+  },
+  {
+    entity: "acceptance_criteria",
+    rows: (q) => q.selectFrom(criteria).all().map(({ requirement_id, ...r }) => ({ ...r, parent_id: requirement_id })),
+  },
+  { entity: "acceptance_test", rows: (q) => q.selectFrom(acceptanceTest).all() },
+  {
+    entity: "task",
+    rows: (q) => q.selectFrom(task).all().map(({ acceptance_test_id, ...r }) => ({ ...r, parent_id: acceptance_test_id })),
+  },
+  { entity: "task_test", rows: (q) => q.selectFrom(taskTest).all() },
 ];
 
 /** A workspace that has never landed anything has no `landed_branch` table beside the
  *  record, and that is not drift — it is a record with nothing observed against it. */
 const hasTable = (db: DatabaseSync, name: string): boolean =>
-  db.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?").get(name) !== undefined;
+  queries(db)
+    .selectFrom(master)
+    .select(["type"])
+    .where("name", "=", name)
+    .all()
+    .some((r) => r.type === "table" || r.type === "view");
+
+/** The story each task sits under: the four-table join, held as three Maps and walked in
+ *  TypeScript, because the dialect spells no JOIN. A task whose chain is broken is absent
+ *  from the result, which is what the join did with it too — it dropped the row. */
+function storiesByTask(q: Dialect): Map<number, number> {
+  const ofTest = new Map(q.selectFrom(acceptanceTest).select(["id", "parent_id"]).all().map((r) => [r.id, r.parent_id]));
+  const ofCriteria = new Map(
+    q.selectFrom(criteria).select(["id", "requirement_id"]).all().map((r) => [r.id, r.requirement_id]),
+  );
+  const ofRequirement = new Map(
+    q.selectFrom(requirement).select(["id", "story_id"]).all().map((r) => [r.id, r.story_id]),
+  );
+  const found = new Map<number, number>();
+  for (const t of q.selectFrom(task).select(["id", "acceptance_test_id"]).all()) {
+    const c = ofTest.get(t.acceptance_test_id);
+    const r = c === undefined ? undefined : ofCriteria.get(c);
+    const s = r === undefined ? undefined : ofRequirement.get(r);
+    if (s !== undefined) found.set(t.id, s);
+  }
+  return found;
+}
 
 /** The story a task belongs to, landed: `landed_branch` is the lander's own table, keyed by
  *  task, so a story is landed when something under it is recorded as merged. That sha is
  *  what `delivered_story_has_landed` reads off the story node. */
 function landedShas(db: DatabaseSync): Map<number, string> {
   if (!hasTable(db, "landed_branch")) return new Map();
-  const rows = db
-    .prepare(
-      `SELECT q.story_id AS story_id, b.sha AS sha
-         FROM landed_branch b
-         JOIN task t ON t.id = b.task_id
-         JOIN acceptance_test a ON a.id = t.acceptance_test_id
-         JOIN acceptance_criteria c ON c.id = a.parent_id
-         JOIN requirement q ON q.id = c.requirement_id`,
-    )
-    .all() as unknown as { story_id: number; sha: string }[];
-  return new Map(rows.map((r) => [r.story_id, r.sha]));
+  const q = queries(db);
+  const of = storiesByTask(q);
+  const shas = new Map<number, string>();
+  for (const b of q.selectFrom(landedBranch).select(["task_id", "sha"]).all()) {
+    const s = of.get(b.task_id);
+    if (s !== undefined) shas.set(s, b.sha);
+  }
+  return shas;
 }
 
-/** One plain object, no live handle: everything the invariants are allowed to see. */
+const byId = <T extends { id: number }>(rows: readonly T[]): readonly T[] => [...rows].sort((a, b) => a.id - b.id);
+
+/** One plain object, no live handle: everything the invariants are allowed to see.
+ *
+ *  Ordered here rather than in SQL — the dialect spells no ORDER BY — and the order is the
+ *  one the invariants report in, so it is applied to every table the same way. */
 export function snapshot(db: DatabaseSync): Snapshot {
+  const q = queries(db);
   const landed = landedShas(db);
-  const nodes = TABLES.flatMap(({ entity, fk, extra }) => {
-    const rows = db
-      .prepare(`SELECT id, slug, state, ${fk} AS parent_id${extra ?? ""} FROM ${entity} ORDER BY id`)
-      .all() as unknown as Omit<RecordNode, "entity">[];
+  const nodes = NODES.flatMap(({ entity, rows }) =>
     // The table it came from is what the entity is; sqlite does not carry it on the row.
-    return rows.map((n) =>
+    byId(rows(q)).map((n) =>
       entity === "story" ? { ...n, entity, landed_sha: landed.get(n.id) ?? null } : { ...n, entity },
-    );
-  });
-  const workers = db.prepare("SELECT slug, role FROM worker ORDER BY id").all() as unknown as {
-    slug: string;
-    role: string;
-  }[];
-  const version = hasTable(db, "schema_version")
-    ? (db.prepare("SELECT version FROM schema_version").get() as { version: number } | undefined)
-    : undefined;
+    ),
+  );
+  const workers = byId(q.selectFrom(worker).all()).map((w) => ({ slug: w.slug, role: w.role }));
+  const version = hasTable(db, "schema_version") ? q.selectFrom(schemaVersion).get() : null;
   return { nodes, workers, schema_version: version?.version ?? 0 };
 }
 
@@ -131,8 +253,8 @@ function healed(h: HealReport): string {
 /** The repository the record names. `wecode land` merges into the branch you have checked
  *  out, so the commit a heal is looking for is on this repository's HEAD. */
 function repoOf(db: DatabaseSync): string {
-  const row = db.prepare("SELECT repo FROM project ORDER BY id").get() as { repo: string } | undefined;
-  return row?.repo ?? process.cwd();
+  const rows = byId(queries(db).selectFrom(project).all());
+  return rows[0]?.repo ?? process.cwd();
 }
 
 const gitIn =
@@ -349,16 +471,31 @@ export function healLandedMarkers(
 /** The ledger line for a story that is in the base with nothing to name. Said once: a
  *  second heal of the same story would be the same sentence again, and the fact it records
  *  is git's, not the record's. */
-function writeReached(db: DatabaseSync, story: number): void {
-  const said = db
-    .prepare("SELECT 1 FROM ledger WHERE entity = 'story' AND entity_id = ? AND verb = 'heal' AND to_state = ?")
-    .get(story, REACHED_INSIDE_ANOTHER_MERGE);
-  if (said !== undefined) return;
-  db.prepare(
-    `INSERT INTO ledger (entity, entity_id, verb, from_state, to_state, actor, at)
-     VALUES ('story', ?, 'heal', ?, ?, 'doctor', ?)`,
-  ).run(story, `no landed marker`, REACHED_INSIDE_ANOTHER_MERGE, now());
+function writeReached(db: DatabaseSync, id: number): void {
+  const q = queries(db);
+  const said = q
+    .selectFrom(ledger)
+    .select(["entity_id"])
+    .where("entity", "=", "story")
+    .where("entity_id", "=", id)
+    .where("verb", "=", "heal")
+    .where("to_state", "=", REACHED_INSIDE_ANOTHER_MERGE)
+    .get();
+  if (said !== null) return;
+  q.insertInto(ledger, healLine(id, REACHED_INSIDE_ANOTHER_MERGE, now())).run();
 }
+
+/** The doctor's own ledger line. One shape for both heals: what it was — no marker — and
+ *  what it became, whichever of the two it became. */
+const healLine = (id: number, to: string, at: string): LedgerRow => ({
+  entity: "story",
+  entity_id: id,
+  verb: "heal",
+  from_state: `no landed marker`,
+  to_state: to,
+  actor: "doctor",
+  at,
+});
 
 /** Commits in the base whose subject is exactly `land story/<slug>`. `--grep` narrows, the
  *  comparison decides: a grep is a substring match, and `land story/a` is a substring of
@@ -384,23 +521,17 @@ function emptyStory(db: DatabaseSync, story: number): string | null {
   return tasksOf(db, story).length === 0 ? "no task under the story to carry the marker" : null;
 }
 
-function tasksOf(db: DatabaseSync, story: number): readonly number[] {
-  const rows = db
-    .prepare(
-      `SELECT t.id AS id FROM task t
-         JOIN acceptance_test a ON a.id = t.acceptance_test_id
-         JOIN acceptance_criteria c ON c.id = a.parent_id
-         JOIN requirement q ON q.id = c.requirement_id
-        WHERE q.story_id = ?`,
-    )
-    .all(story) as unknown as { id: number }[];
-  return rows.map((r) => r.id);
+function tasksOf(db: DatabaseSync, id: number): readonly number[] {
+  return [...storiesByTask(queries(db))].filter(([, s]) => s === id).map(([t]) => t);
 }
 
 /** The marker the lander writes, written the same way, plus the line that says it was the
  *  doctor who wrote it and what it read the sha off. One transaction: a marker with no
  *  ledger line behind it is exactly the unexplained fix 19 forbids. */
-function writeMarker(db: DatabaseSync, story: number, slug: string, sha: string): void {
+function writeMarker(db: DatabaseSync, id: number, slug: string, sha: string): void {
+  // The one statement left in raw SQL, and it is not a query: the dialect compiles selects
+  // and writes, and has no vocabulary for schema. A table that has to exist before it can
+  // be written to has nothing to typecheck against either.
   db.exec(
     `CREATE TABLE IF NOT EXISTS landed_branch (
        task_id   INTEGER PRIMARY KEY,
@@ -410,21 +541,17 @@ function writeMarker(db: DatabaseSync, story: number, slug: string, sha: string)
      )`,
   );
   const at = now();
-  db.exec("BEGIN");
-  try {
-    const insert = db.prepare(
-      `INSERT INTO landed_branch (task_id, branch, sha, merged_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT (task_id) DO UPDATE SET branch = excluded.branch, sha = excluded.sha,
-                                             merged_at = excluded.merged_at`,
-    );
-    for (const task of tasksOf(db, story)) insert.run(task, `story/${slug}`, sha, at);
-    db.prepare(
-      `INSERT INTO ledger (entity, entity_id, verb, from_state, to_state, actor, at)
-       VALUES ('story', ?, 'heal', ?, ?, 'doctor', ?)`,
-    ).run(story, `no landed marker`, `landed_sha ${sha} from 'land story/${slug}'`, at);
-    db.exec("COMMIT");
-  } catch (err) {
-    db.exec("ROLLBACK");
-    throw err;
-  }
+  transact(db, () => {
+    const q = queries(db);
+    for (const t of tasksOf(db, id)) {
+      q.insertInto(landedBranch, { task_id: t, branch: storyBranch(slug), sha, merged_at: at })
+        .onConflict(["task_id"], {
+          branch: excluded<LandedRow>("branch"),
+          sha: excluded<LandedRow>("sha"),
+          merged_at: excluded<LandedRow>("merged_at"),
+        })
+        .run();
+    }
+    q.insertInto(ledger, healLine(id, `landed_sha ${sha} from 'land story/${slug}'`, at)).run();
+  });
 }
