@@ -33,6 +33,8 @@ import {
   type WorkerKind,
   writeProjectConfig,
 } from "@wecode/core";
+// The typed query layer is not on `@wecode/core`'s index, so it is reached by its own path.
+import { excluded, queries, table, type Dialect, type TableDef, type Value } from "@wecode/core/dist/db.js";
 import { plan } from "./plan.js";
 import { doctor } from "./doctor.js";
 import { delivered as deliveredStories } from "./delivered.js";
@@ -130,17 +132,16 @@ function answer(args: readonly string[]): number {
   const text = args.slice(1).join(" ");
   if (!Number.isInteger(id) || text === "") return fail('wecode answer <assignment> "<text>"');
 
-  const conn = db();
-  const row = conn.prepare("SELECT phase, kind FROM assignment WHERE id = ?").get(id) as
-    | { phase: string; kind: string | null }
-    | undefined;
-  if (row === undefined) return fail(`no assignment #${id}`);
+  const q = queries(db());
+  const row = q.selectFrom(assignment).select(["phase"]).where("id", "=", id).get();
+  if (row === null) return fail(`no assignment #${id}`);
   if (row.phase !== "waiting") return fail(`assignment #${id} is ${row.phase}, and is not waiting on anybody`);
 
   const who = process.env["WECODE_ACTOR"] ?? "operator";
-  conn
-    .prepare("UPDATE assignment SET answer = ?, answered_by = ?, updated_at = ? WHERE id = ?")
-    .run(text, who, new Date().toISOString(), id);
+  q.update(assignment)
+    .set({ answer: text, answered_by: who, updated_at: new Date().toISOString() })
+    .where("id", "=", id)
+    .run();
   process.stdout.write(`assignment #${id} answered by ${who}\n`);
   return 0;
 }
@@ -160,31 +161,28 @@ function watch(args: readonly string[]): number {
       once: { type: "boolean" },
     },
   });
-  const conn = db();
-  const project = values.project === undefined ? null : Number(values.project);
+  const q = queries(db());
+  const narrow = values.project === undefined ? null : Number(values.project);
 
+  // The dialect has no `max(id)` and no LIMIT, so the ledger's high-water mark is the
+  // largest of the ids it hands back. Only the id column crosses.
   let cursor =
     values.since === undefined
-      ? ((conn.prepare("SELECT coalesce(max(id), 0) AS n FROM ledger").get() as { n: number }).n)
+      ? q.selectFrom(ledger).select(["id"]).all().reduce((n, r) => Math.max(n, r.id), 0)
       : Number(values.since);
 
   const tick = (): void => {
-    const rows = conn
-      .prepare("SELECT id, entity, entity_id, verb, from_state, to_state, actor, at FROM ledger WHERE id > ? ORDER BY id")
-      .all(cursor) as unknown as {
-      id: number;
-      entity: string;
-      entity_id: number;
-      verb: string;
-      from_state: string;
-      to_state: string;
-      actor: string;
-      at: string;
-    }[];
+    // Nor an ORDER BY: the ledger is append-only and read by id, so the ordering the lines
+    // are printed in is done here rather than in SQL.
+    const rows = q
+      .selectFrom(ledger)
+      .where("id", ">", cursor)
+      .all()
+      .sort((a, b) => a.id - b.id);
 
     for (const r of rows) {
       cursor = r.id;
-      if (project !== null && projectOf(r.entity, r.entity_id)?.id !== project) continue;
+      if (narrow !== null && projectOf(r.entity, r.entity_id)?.id !== narrow) continue;
       process.stdout.write(
         values.json === true
           ? `${JSON.stringify(r)}\n`
@@ -237,12 +235,16 @@ function wait(args: readonly string[]): number {
   const machine = loadMachines()[entity];
   const settled = new Set([...machine.terminal, ...(good[entity] ?? [])]);
 
-  const conn = db();
-  const col = entity === "assignment" ? "phase" : "state";
+  // Which column holds the state is the entity's business, not this command's: it used to
+  // be `entity === "assignment" ? "phase" : "state"` spliced into the SQL beside the table
+  // name, and both are now the entity's own typed read.
+  const read = ENTITIES[entity]?.state;
+  if (read === undefined || read === null) return fail(`${entity} has no states to wait on`);
+
+  const q = queries(db());
   const deadline = values.timeout === undefined ? null : Date.now() + Number(values.timeout) * 1000;
 
-  const look = (): string | null =>
-    (conn.prepare(`SELECT ${col} AS s FROM ${entity} WHERE id = ?`).get(id) as { s: string } | undefined)?.s ?? null;
+  const look = (): string | null => read(q, id);
 
   if (look() === null) return fail(`no ${entity} #${id}`);
 
@@ -290,7 +292,7 @@ function showTree(args: readonly string[]): number {
     n.children.forEach((c, i) => walk(c, next, i === n.children.length - 1, false));
   };
 
-  for (const project of nodes) walk(project, "", true, true);
+  for (const root of nodes) walk(root, "", true, true);
   return 0;
 }
 
@@ -314,9 +316,11 @@ function workspaces(): number {
 
 function projectCount(path: string): number {
   const conn = open(path);
-  const row = conn.prepare("SELECT count(*) AS n FROM project").get() as { n: number };
+  // No `count(*)` in the dialect. One column of every row is what a count over a table this
+  // size costs anyway, and it is a number nothing has to be cast to.
+  const n = queries(conn).selectFrom(project).select(["id"]).all().length;
   conn.close();
-  return row.n;
+  return n;
 }
 
 /** `wecode onboard [name]` — what happens when wecode meets a repository.
@@ -390,10 +394,11 @@ function onboard(args: readonly string[]): number {
   // many repositories they have.
   write(join(workspaceDir(wsName), "budget.yaml"), BUDGET);
   const conn = open(path);
+  const q = queries(conn);
   const make = new Maker(conn);
 
-  const workspace =
-    (conn.prepare("SELECT id FROM workspace WHERE name = ?").get(wsName) as { id: number } | undefined)?.id ??
+  const wsId =
+    q.selectFrom(workspace).select(["id"]).where("name", "=", wsName).get()?.id ??
     make.workspace(wsName, workspaceDir(wsName));
 
   // Roles without workers is a board nothing can be dispatched from: the runner refuses
@@ -401,18 +406,18 @@ function onboard(args: readonly string[]): number {
   // worker is a thing you make. So onboarding makes one per agent role, named after it.
   const hired = hire(conn, make, join(config, "roles.yaml"));
 
-  const existing = conn.prepare("SELECT id FROM project WHERE repo = ?").get(root) as { id: number } | undefined;
-  if (existing !== undefined) {
+  const existing = q.selectFrom(project).select(["id"]).where("repo", "=", root).get();
+  if (existing !== null) {
     process.stdout.write(
       `project #${existing.id} is already onboarded here\n${workerLines(hired).join("\n")}${hired.length > 0 ? "\n" : ""}`,
     );
     return 0;
   }
 
-  const project = make.project(workspace, name, root);
-  const release = make.release(project, "0.0.1");
-  new Engine(conn).apply("project", project, "start", "operator");
-  new Engine(conn).apply("release", release, "start", "operator");
+  const projectId = make.project(wsId, name, root);
+  const releaseId = make.release(projectId, "0.0.1");
+  new Engine(conn).apply("project", projectId, "start", "operator");
+  new Engine(conn).apply("release", releaseId, "start", "operator");
 
   process.stdout.write(
     [
@@ -422,10 +427,10 @@ function onboard(args: readonly string[]): number {
       `source      ${learned.source.join(", ")}`,
       "",
       `workspace   ${wsName}  (${path})`,
-      `project #${project}  release #${release}`,
+      `project #${projectId}  release #${releaseId}`,
       ...workerLines(hired),
       "",
-      "next: wecode epic create --parent " + String(release) + ' "<what this release is for>"',
+      "next: wecode epic create --parent " + String(releaseId) + ' "<what this release is for>"',
       "",
     ]
       .filter((l) => l !== null)
@@ -445,13 +450,14 @@ interface Hired {
  *  wecode does not get to hire those. */
 function hire(conn: ReturnType<typeof open>, make: Maker, rolesFile: string): Hired[] {
   const hired: Hired[] = [];
-  for (const role of Object.values(loadRoles(rolesFile).roles)) {
-    if (role.worker_kind !== "agent") continue;
-    const had = conn.prepare("SELECT id FROM worker WHERE role = ?").get(role.name) as { id: number } | undefined;
+  const q = queries(conn);
+  for (const want of Object.values(loadRoles(rolesFile).roles)) {
+    if (want.worker_kind !== "agent") continue;
+    const had = q.selectFrom(worker).select(["id"]).where("role", "=", want.name).get();
     hired.push(
-      had === undefined
-        ? { id: make.worker(role.name, role.name, "agent"), role: role.name, fresh: true }
-        : { id: had.id, role: role.name, fresh: false },
+      had === null
+        ? { id: make.worker(want.name, want.name, "agent"), role: want.name, fresh: true }
+        : { id: had.id, role: want.name, fresh: false },
     );
   }
   return hired;
@@ -497,15 +503,13 @@ function land(args: readonly string[]): number {
   if (!Number.isInteger(id)) return fail("wecode land <story>");
 
   const conn = db();
-  const story = conn.prepare("SELECT slug, state FROM story WHERE id = ?").get(id) as
-    | { slug: string; state: string }
-    | undefined;
-  if (story === undefined) return fail(`no story #${id}`);
-  if (story.state !== "delivered") {
-    return fail(`story #${id} is ${story.state}. Only a delivered story lands.`);
+  const found = queries(conn).selectFrom(story).select(["slug", "state"]).where("id", "=", id).get();
+  if (found === null) return fail(`no story #${id}`);
+  if (found.state !== "delivered") {
+    return fail(`story #${id} is ${found.state}. Only a delivered story lands.`);
   }
 
-  const branch = `story/${story.slug}`;
+  const branch = `story/${found.slug}`;
   const base = headBranch();
 
   // The landing commit is the operator's, so it needs the operator's identity. wecode signs
@@ -621,7 +625,8 @@ function recordLanding(
   sha: string,
 ): void {
   // The runner owns this table and creates it on its first merge; a repository landed by
-  // hand may never have run a tick.
+  // hand may never have run a tick. DDL is the one statement here that is not a query, and
+  // the dialect compiles queries — so this stays as schema text, and is the only SQL left.
   conn.exec(
     `CREATE TABLE IF NOT EXISTS landed_branch (
        task_id   INTEGER PRIMARY KEY,
@@ -630,24 +635,39 @@ function recordLanding(
        merged_at TEXT NOT NULL
      )`,
   );
-  const tasks = conn
-    .prepare(
-      `SELECT t.id AS id FROM task t
-         JOIN acceptance_test a ON a.id = t.acceptance_test_id
-         JOIN acceptance_criteria c ON c.id = a.parent_id
-         JOIN requirement q ON q.id = c.requirement_id
-        WHERE q.story_id = ?`,
-    )
-    .all(storyId) as unknown as { id: number }[];
+  // The four-table join the SQL spelled, composed instead: the dialect has neither JOIN nor
+  // IN, and it is one link of the tree per step — requirement to criteria to acceptance_test
+  // to task — which is the same walk `projectOf` makes in the other direction.
+  const q = queries(conn);
+  const reqs = new Set(
+    q.selectFrom(requirement).select(["id"]).where("story_id", "=", storyId).all().map((r) => r.id),
+  );
+  const crits = new Set(
+    q.selectFrom(criteria).select(["id", "requirement_id"]).all()
+      .filter((r) => reqs.has(r.requirement_id))
+      .map((r) => r.id),
+  );
+  const tests = new Set(
+    q.selectFrom(acceptanceTest).select(["id", "parent_id"]).all()
+      .filter((r) => crits.has(r.parent_id))
+      .map((r) => r.id),
+  );
+  const tasks = q
+    .selectFrom(task)
+    .select(["id", "acceptance_test_id"])
+    .all()
+    .filter((r) => tests.has(r.acceptance_test_id))
+    .map((r) => r.id);
+
   const at = new Date().toISOString();
-  for (const t of tasks) {
-    conn
-      .prepare(
-        `INSERT INTO landed_branch (task_id, branch, sha, merged_at) VALUES (?, ?, ?, ?)
-           ON CONFLICT (task_id) DO UPDATE SET branch = excluded.branch, sha = excluded.sha,
-                                               merged_at = excluded.merged_at`,
-      )
-      .run(t.id, branch, sha, at);
+  for (const taskId of tasks) {
+    q.insertInto(landedBranch, { task_id: taskId, branch, sha, merged_at: at })
+      .onConflict(["task_id"], {
+        branch: excluded<LandedRow>("branch"),
+        sha: excluded<LandedRow>("sha"),
+        merged_at: excluded<LandedRow>("merged_at"),
+      })
+      .run();
   }
 }
 
@@ -678,23 +698,282 @@ function gitConfig(key: string): string {
   }
 }
 
+// ─── the record, in tables rather than in strings ────────────────────────────────────────
+//
+// `repo.ts` declares only the columns it speaks about; this client cannot, because `show`
+// prints a whole record and the SQL it replaces was `SELECT *`. So these lists are the
+// schema, which makes them a second copy of it — and a second copy with no check between it
+// and the first is the defect. `typed-run.test.ts` holds every list below against
+// `PRAGMA table_info`, name for name and in order, so a column added on either side fails.
+
+type WorkspaceRow = { id: number; slug: string; name: string; path: string; created_at: string; updated_at: string };
+type ProjectRow = {
+  id: number;
+  slug: string;
+  workspace_id: number;
+  name: string;
+  repo: string;
+  objective: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
+};
+type ReleaseRow = {
+  id: number;
+  slug: string;
+  project_id: number;
+  version: string;
+  released_at: string | null;
+  state: string;
+  created_at: string;
+  updated_at: string;
+};
+type EpicRow = { id: number; slug: string; release_id: number; title: string; state: string; created_at: string; updated_at: string };
+type StoryRow = { id: number; slug: string; epic_id: number; title: string; state: string; created_at: string; updated_at: string };
+type RequirementRow = {
+  id: number;
+  slug: string;
+  story_id: number;
+  statement: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
+};
+type CriteriaRow = {
+  id: number;
+  slug: string;
+  requirement_id: number;
+  statement: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
+};
+/** Both test tables carry the same columns bar the extra three an acceptance_test earns by
+ *  being the thing that must have been seen to fail at the base. */
+type TestRow = {
+  id: number;
+  slug: string;
+  parent_id: number;
+  statement: string;
+  kind: string;
+  artefact: string | null;
+  last_run_at: string | null;
+  last_output: string | null;
+  state: string;
+  created_at: string;
+  updated_at: string;
+  script_path: string | null;
+  provenance_sha: string | null;
+};
+type AcceptanceTestRow = TestRow & {
+  red_at_base_sha: string | null;
+  red_at_base_at: string | null;
+  red_at_base_reason: string | null;
+};
+type TaskRow = {
+  id: number;
+  slug: string;
+  acceptance_test_id: number;
+  title: string;
+  scope: string;
+  role: string;
+  budget: string;
+  attempts: number;
+  max_retry: number;
+  state: string;
+  created_at: string;
+  updated_at: string;
+};
+type RoleRow = {
+  id: number;
+  slug: string;
+  name: string;
+  scope: string;
+  worker_kind: string;
+  harness: string | null;
+  created_at: string;
+  updated_at: string;
+};
+type WorkerRow = { id: number; slug: string; name: string; role: string; kind: string; created_at: string; updated_at: string };
+type AssignmentRow = {
+  id: number;
+  slug: string;
+  objective_type: string;
+  objective_id: number;
+  worker_id: number;
+  scope: string;
+  budget: string;
+  worktree: string;
+  phase: string;
+  reason: string | null;
+  kind: string | null;
+  question: string | null;
+  options: string | null;
+  answer: string | null;
+  answered_by: string | null;
+  session: string | null;
+  last_seen: string | null;
+  spent: string;
+  commit_sha: string | null;
+  created_at: string;
+  updated_at: string;
+};
+type LedgerRow = {
+  id: number;
+  entity: string;
+  entity_id: number;
+  verb: string;
+  from_state: string;
+  to_state: string;
+  actor: string;
+  at: string;
+};
+/** The runner's table, written here too because this is the path that actually merges. */
+type LandedRow = { task_id: number; branch: string; sha: string; merged_at: string };
+
+const workspace = table<WorkspaceRow>("workspace", ["id", "slug", "name", "path", "created_at", "updated_at"]);
+const project = table<ProjectRow>("project", [
+  "id", "slug", "workspace_id", "name", "repo", "objective", "state", "created_at", "updated_at",
+]);
+const release = table<ReleaseRow>("release", [
+  "id", "slug", "project_id", "version", "released_at", "state", "created_at", "updated_at",
+]);
+const epic = table<EpicRow>("epic", ["id", "slug", "release_id", "title", "state", "created_at", "updated_at"]);
+const story = table<StoryRow>("story", ["id", "slug", "epic_id", "title", "state", "created_at", "updated_at"]);
+const requirement = table<RequirementRow>("requirement", [
+  "id", "slug", "story_id", "statement", "state", "created_at", "updated_at",
+]);
+const criteria = table<CriteriaRow>("acceptance_criteria", [
+  "id", "slug", "requirement_id", "statement", "state", "created_at", "updated_at",
+]);
+const TEST_COLUMNS = [
+  "id", "slug", "parent_id", "statement", "kind", "artefact", "last_run_at", "last_output",
+  "state", "created_at", "updated_at", "script_path",
+] as const;
+// The order is the migrations' order: 005 added script_path, 006 the three red-at-base
+// columns, 013 provenance_sha — and `show` prints columns in the order they are declared.
+const acceptanceTest = table<AcceptanceTestRow>("acceptance_test", [
+  ...TEST_COLUMNS, "red_at_base_sha", "red_at_base_at", "red_at_base_reason", "provenance_sha",
+]);
+const taskTest = table<TestRow>("task_test", [...TEST_COLUMNS, "provenance_sha"]);
+const task = table<TaskRow>("task", [
+  "id", "slug", "acceptance_test_id", "title", "scope", "role", "budget", "attempts", "max_retry",
+  "state", "created_at", "updated_at",
+]);
+const role = table<RoleRow>("role", ["id", "slug", "name", "scope", "worker_kind", "harness", "created_at", "updated_at"]);
+const worker = table<WorkerRow>("worker", ["id", "slug", "name", "role", "kind", "created_at", "updated_at"]);
+const assignment = table<AssignmentRow>("assignment", [
+  "id", "slug", "objective_type", "objective_id", "worker_id", "scope", "budget", "worktree",
+  "phase", "reason", "kind", "question", "options", "answer", "answered_by", "session",
+  "last_seen", "spent", "commit_sha", "created_at", "updated_at",
+]);
+const ledger = table<LedgerRow>("ledger", [
+  "id", "entity", "entity_id", "verb", "from_state", "to_state", "actor", "at",
+]);
+const landedBranch = table<LandedRow>("landed_branch", ["task_id", "branch", "sha", "merged_at"]);
+
+/** Every list above, for the test that holds them against the database. Only the names and
+ *  the order escape: `TableDef<Row>` is invariant in `Row`, so a list of differently-shaped
+ *  tables has no useful element type — but `{ name, columns: readonly string[] }` is what
+ *  the check needs and every `TableDef` already is one. */
+export const DECLARED: readonly { readonly name: string; readonly columns: readonly string[] }[] = [
+  workspace, project, release, epic, story, requirement, criteria, acceptanceTest, taskTest,
+  task, role, worker, assignment, ledger,
+];
+
+/** A row this client can be handed by name: it has an id, and every column holds something
+ *  SQLite stores. The index signature is what lets one whole record be printed without
+ *  knowing which entity it is. */
+type Shape = { id: number } & Record<string, Value>;
+
+/** What `show`, `wait`, `where` and the missing-id answer ask of one entity.
+ *
+ *  The shape of the tree is still written down once, as it was — but each row carries the
+ *  typed query rather than a table name and a column name spliced into SQL text. The column
+ *  is checked against the table it narrows where the lookup is written, which is the whole
+ *  point of the port: a `Record<string, TableDef<Shape>>` cannot work, because `TableDef`'s
+ *  `columns: (keyof Row)[]` makes it invariant in `Row`. */
+interface Kin {
+  /** The entity this hangs off, or null for the ones that hang off nothing. */
+  readonly parent: string | null;
+  /** Every row's id and the words that name it. */
+  readonly names: (q: Dialect) => { id: number; label: string }[];
+  /** The words that name one row. */
+  readonly name: (q: Dialect, id: number) => string | null;
+  /** One whole record, in the order the columns are declared above. */
+  readonly row: (q: Dialect, id: number) => Record<string, Value> | null;
+  /** The parent's id, for walking up to the project. */
+  readonly up: ((q: Dialect, id: number) => number | null) | null;
+  /** The state it is in — an assignment keeps it in `phase` — or null when it has none. */
+  readonly state: ((q: Dialect, id: number) => string | null) | null;
+}
+
+function kin<Row extends Shape>(
+  def: TableDef<Row>,
+  label: keyof Row & string,
+  opts: {
+    readonly parent?: { readonly table: string; readonly fk: keyof Row & string };
+    readonly state?: keyof Row & string;
+  } = {},
+): Kin {
+  const { parent, state } = opts;
+  const one = <K extends keyof Row & string>(q: Dialect, col: K, id: number): Row[K] | null => {
+    const row = q.selectFrom(def).select([col]).where("id", "=", id).get();
+    return row === null ? null : row[col];
+  };
+  return {
+    parent: parent?.table ?? null,
+    names: (q) =>
+      q
+        .selectFrom(def)
+        .select(["id", label])
+        .all()
+        .map((r) => ({ id: r.id, label: String(r[label]) })),
+    name: (q, id) => {
+      const got = one(q, label, id);
+      return got === null ? null : String(got);
+    },
+    row: (q, id) => q.selectFrom(def).where("id", "=", id).get(),
+    up:
+      parent === undefined
+        ? null
+        : (q, id) => {
+            const got = one(q, parent.fk, id);
+            return typeof got === "number" ? got : null;
+          },
+    state:
+      state === undefined
+        ? null
+        : (q, id) => {
+            const got = one(q, state, id);
+            return typeof got === "string" ? got : null;
+          },
+  };
+}
+
 /** Which table each entity is, what names one, and the row it hangs off. The one place
  *  the shape of the tree is written down in this client — `where`, `show` and the missing-id
  *  answer all read it rather than each carrying their own copy. */
-const ENTITIES: Readonly<Record<string, { label: string; parent?: { table: string; fk: string } }>> = {
-  workspace: { label: "name" },
-  project: { label: "name", parent: { table: "workspace", fk: "workspace_id" } },
-  release: { label: "version", parent: { table: "project", fk: "project_id" } },
-  epic: { label: "title", parent: { table: "release", fk: "release_id" } },
-  story: { label: "title", parent: { table: "epic", fk: "epic_id" } },
-  requirement: { label: "statement", parent: { table: "story", fk: "story_id" } },
-  acceptance_criteria: { label: "statement", parent: { table: "requirement", fk: "requirement_id" } },
-  acceptance_test: { label: "statement", parent: { table: "acceptance_criteria", fk: "parent_id" } },
-  task: { label: "title", parent: { table: "acceptance_test", fk: "acceptance_test_id" } },
-  task_test: { label: "statement", parent: { table: "task", fk: "parent_id" } },
-  assignment: { label: "slug" },
-  role: { label: "name" },
-  worker: { label: "name" },
+const ENTITIES: Readonly<Record<string, Kin>> = {
+  workspace: kin(workspace, "name"),
+  project: kin(project, "name", { parent: { table: "workspace", fk: "workspace_id" }, state: "state" }),
+  release: kin(release, "version", { parent: { table: "project", fk: "project_id" }, state: "state" }),
+  epic: kin(epic, "title", { parent: { table: "release", fk: "release_id" }, state: "state" }),
+  story: kin(story, "title", { parent: { table: "epic", fk: "epic_id" }, state: "state" }),
+  requirement: kin(requirement, "statement", { parent: { table: "story", fk: "story_id" }, state: "state" }),
+  acceptance_criteria: kin(criteria, "statement", {
+    parent: { table: "requirement", fk: "requirement_id" },
+    state: "state",
+  }),
+  acceptance_test: kin(acceptanceTest, "statement", {
+    parent: { table: "acceptance_criteria", fk: "parent_id" },
+    state: "state",
+  }),
+  task: kin(task, "title", { parent: { table: "acceptance_test", fk: "acceptance_test_id" }, state: "state" }),
+  task_test: kin(taskTest, "statement", { parent: { table: "task", fk: "parent_id" }, state: "state" }),
+  assignment: kin(assignment, "slug", { state: "phase" }),
+  role: kin(role, "name"),
+  worker: kin(worker, "name"),
 };
 
 /** `wecode show <entity> <id>` — one record, whatever state it is in, and where it lives.
@@ -707,12 +986,13 @@ function show(args: readonly string[]): number {
   const [entity, raw] = args;
   const id = Number(raw);
   if (entity === undefined || !Number.isInteger(id)) return fail("wecode show <entity> <id>");
-  if (ENTITIES[entity] === undefined) {
+  const kind = ENTITIES[entity];
+  if (kind === undefined) {
     return fail(`no entity called ${entity}. There is ${Object.keys(ENTITIES).join(", ")}`);
   }
-  const conn = db();
-  const row = conn.prepare(`SELECT * FROM ${entity} WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
-  if (row === undefined) return fail(instead(conn, entity, id));
+  const q = queries(db());
+  const row = kind.row(q, id);
+  if (row === null) return fail(instead(q, entity, id));
   for (const [k, v] of Object.entries(row)) {
     if (v === null || v === "") continue;
     process.stdout.write(`${k.padEnd(18)} ${String(v)}\n`);
@@ -723,11 +1003,10 @@ function show(args: readonly string[]): number {
 }
 
 /** What to say about an id that is not there: the ids of that entity that are. */
-function instead(conn: ReturnType<typeof db>, entity: string, id: number): string {
-  const label = ENTITIES[entity]?.label ?? "slug";
-  const rows = conn
-    .prepare(`SELECT id, ${label} AS label FROM ${entity} ORDER BY id`)
-    .all() as unknown as { id: number; label: string }[];
+function instead(q: Dialect, entity: string, id: number): string {
+  // No ORDER BY in the dialect, and the ids are what the answer is about, so they are sorted
+  // here. `show` has already refused a word that is not an entity.
+  const rows = (ENTITIES[entity]?.names(q) ?? []).sort((a, b) => a.id - b.id);
   if (rows.length === 0) return `no ${entity} #${id}, and no ${entity} at all yet.`;
   const shown = rows.slice(0, 20).map((r) => `  #${r.id}  ${String(r.label)}`);
   const more = rows.length > shown.length ? [`  … and ${rows.length - shown.length} more`] : [];
@@ -750,11 +1029,11 @@ class Missing extends Error {}
 
 /** The project this repository is, or null when you are standing outside all of them. */
 function hereProject(): { id: number; name: string } | null {
-  return (
-    (db().prepare("SELECT id, name FROM project WHERE repo = ?").get(resolve(process.cwd())) as
-      | { id: number; name: string }
-      | undefined) ?? null
-  );
+  return queries(db())
+    .selectFrom(project)
+    .select(["id", "name"])
+    .where("repo", "=", resolve(process.cwd()))
+    .get();
 }
 
 /** What to say to somebody standing in a directory that is not a project: the command that
@@ -762,10 +1041,11 @@ function hereProject(): { id: number; name: string } | null {
  *  could be asked for instead. "no project here" alone left the next move to be guessed,
  *  and the guess was usually that the workspace was broken. */
 function noProjectHere(command: string): string {
-  const rows = db().prepare("SELECT id, name FROM project ORDER BY id").all() as unknown as {
-    id: number;
-    name: string;
-  }[];
+  const rows = queries(db())
+    .selectFrom(project)
+    .select(["id", "name"])
+    .all()
+    .sort((a, b) => a.id - b.id);
   const shown = rows.slice(0, 5).map((r) => `    #${r.id}  ${r.name}`);
   const more = rows.length > shown.length ? [`    … and ${rows.length - shown.length} more`] : [];
   return [
@@ -853,10 +1133,8 @@ function showLessons(args: readonly string[]): number {
 /** The assignment a lesson came from, so a suspicious one can be traced back to the attempt
  *  that wrote it. The foreign key is what makes the row certain to be there. */
 function assignmentName(conn: ReturnType<typeof open>, id: number): string {
-  const row = conn.prepare("SELECT slug FROM assignment WHERE id = ?").get(id) as
-    | { slug: string }
-    | undefined;
-  return row === undefined ? `assignment #${id}` : `${row.slug} #${id}`;
+  const row = queries(conn).selectFrom(assignment).select(["slug"]).where("id", "=", id).get();
+  return row === null ? `assignment #${id}` : `${row.slug} #${id}`;
 }
 
 function age(at: string): string {
@@ -930,16 +1208,15 @@ function retry(args: readonly string[]): number {
   if (wrong !== null) return fail(wrong);
 
   const conn = db();
-  const before = conn.prepare("SELECT attempts, max_retry FROM task WHERE id = ?").get(id) as
-    | { attempts: number; max_retry: number }
-    | undefined;
-  if (before === undefined) return fail(`no task #${id}`);
+  const q = queries(conn);
+  const before = q.selectFrom(task).select(["attempts", "max_retry"]).where("id", "=", id).get();
+  if (before === null) return fail(`no task #${id}`);
 
   const who = process.env["WECODE_ACTOR"] ?? "operator";
   const out = new Engine(conn).apply("task", id, "retry", `${who}: ${reason}`);
   if (!out.ok) return fail(out.why);
   // After the transition: a refused retry must not leave the counter reset behind it.
-  conn.prepare("UPDATE task SET attempts = 0, updated_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+  q.update(task).set({ attempts: 0, updated_at: new Date().toISOString() }).where("id", "=", id).run();
 
   for (const c of out.changes) {
     process.stdout.write(`${c.entity} #${c.id}  ${c.from} → ${c.to}${c.automatic ? "  (cascade)" : ""}\n`);
@@ -967,7 +1244,7 @@ function scope(entity: string, args: readonly string[]): number {
   const list = (v: string | undefined): string[] =>
     v === undefined || v === "" ? [] : v.split(",").map((s) => s.trim()).filter((s) => s !== "");
 
-  const learned = project();
+  const learned = projectConfig();
   const write =
     values.write === undefined && learned !== null ? [...learned.source, ...learned.tests] : list(values.write);
   const tools = values.tools === undefined ? ["bash", "read", "edit", "write"] : list(values.tools);
@@ -1189,44 +1466,38 @@ function create(entity: string, args: readonly string[]): number {
  *  learned from the repository. Retyping it into every test is how they drift. */
 function artefactOr(given: string | undefined): string | null {
   if (given !== undefined) return given;
-  return project()?.test ?? null;
+  return projectConfig()?.test ?? null;
 }
 
-function project(): ReturnType<typeof readProjectConfig> {
+function projectConfig(): ReturnType<typeof readProjectConfig> {
   return readProjectConfig(resolve(process.cwd(), "config/project.yaml"));
 }
 
 /** The project a row belongs to, by walking the tree up one link at a time. Null for the
  *  entities that hang off no project at all — a worker, a role, the workspace itself. */
 function projectOf(entity: string, id: number): { id: number; name: string; repo: string } | null {
-  const conn = db();
+  const q = queries(db());
   let here = entity;
   let at = id;
   // The chain is nine deep at most; the bound stops a cycle in bad data spinning forever.
   for (let step = 0; step <= Object.keys(ENTITIES).length; step += 1) {
     if (here === "project") {
-      return (
-        (conn.prepare("SELECT id, name, repo FROM project WHERE id = ?").get(at) as
-          | { id: number; name: string; repo: string }
-          | undefined) ?? null
-      );
+      return q.selectFrom(project).select(["id", "name", "repo"]).where("id", "=", at).get();
     }
-    const up = ENTITIES[here]?.parent;
-    if (up === undefined) return null;
-    const row = conn.prepare(`SELECT ${up.fk} AS pid FROM ${here} WHERE id = ?`).get(at) as
-      | { pid: number }
-      | undefined;
-    if (row === undefined) return null;
-    here = up.table;
-    at = row.pid;
+    const kind = ENTITIES[here];
+    if (kind === undefined || kind.up === null || kind.parent === null) return null;
+    const pid = kind.up(q, at);
+    if (pid === null) return null;
+    here = kind.parent;
+    at = pid;
   }
   return null;
 }
 
 /** Refuse a parent whose project is not the one this repository is. */
 function crossesProject(entity: string, parent: number): string | null {
-  const parentEntity = ENTITIES[entity]?.parent?.table;
-  if (parentEntity === undefined || parentEntity === "project") return null;
+  const parentEntity = ENTITIES[entity]?.parent;
+  if (parentEntity === undefined || parentEntity === null || parentEntity === "project") return null;
   return elsewhere(parentEntity, parent);
 }
 
@@ -1236,10 +1507,8 @@ function elsewhere(entity: string, id: number): string | null {
   if (theirs === null) return null;
 
   const here = resolve(process.cwd());
-  const mine = db().prepare("SELECT id, name FROM project WHERE repo = ?").get(here) as
-    | { id: number; name: string }
-    | undefined;
-  if (mine === undefined || mine.id === theirs.id) return null;
+  const mine = queries(db()).selectFrom(project).select(["id", "name"]).where("repo", "=", here).get();
+  if (mine === null || mine.id === theirs.id) return null;
 
   return (
     `${entity} #${id} belongs to project #${theirs.id} ${theirs.name} (${theirs.repo}),\n` +
@@ -1251,18 +1520,20 @@ function elsewhere(entity: string, id: number): string | null {
 
 /** The parent this row hangs off, named. */
 function where(entity: string, id: number): string {
-  const up = ENTITIES[entity]?.parent;
-  const column = up === undefined ? undefined : ENTITIES[up.table]?.label;
-  if (up === undefined || column === undefined) return "";
+  const kind = ENTITIES[entity];
+  if (kind === undefined || kind.up === null || kind.parent === null) return "";
+  const up = ENTITIES[kind.parent];
+  if (up === undefined) return "";
   try {
-    const row = db()
-      .prepare(
-        `SELECT p.id AS id, p.${column} AS label FROM ${entity} c JOIN ${up.table} p ON p.id = c.${up.fk} WHERE c.id = ?`,
-      )
-      .get(id) as { id: number; label: string } | undefined;
-    if (row === undefined) return "";
-    const label = row.label.length > 44 ? `${row.label.slice(0, 43)}…` : row.label;
-    return `   under ${up.table} #${row.id}  ${label}`;
+    // The join the SQL spelled, as its two halves: the child names its parent's id, and the
+    // parent names itself. Each half is checked against the table it reads.
+    const q = queries(db());
+    const pid = kind.up(q, id);
+    if (pid === null) return "";
+    const named = up.name(q, pid);
+    if (named === null) return "";
+    const label = named.length > 44 ? `${named.slice(0, 43)}…` : named;
+    return `   under ${kind.parent} #${pid}  ${label}`;
   } catch {
     return "";
   }
