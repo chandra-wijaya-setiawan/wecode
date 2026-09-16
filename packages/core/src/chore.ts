@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { board as groups, hasTable, type Board, type Row } from "./board.js";
+import { excluded, queries, table } from "./db.js";
 import type { Budget, Scope } from "./entities.js";
 import { isTerminal, transitionFor } from "./machines.js";
 import type { Candidate } from "./order.js";
@@ -110,11 +111,174 @@ export interface ChoreSpec {
   readonly check: string;
 }
 
-/** `check` is a SQL keyword; every read of the column quotes it and renames it. */
-const COLUMNS =
-  `id, slug, kind, project_id, target_type, target_id, "check" AS "check", state, approved_at, approved_by`;
+/** The tables this module touches, declared once. `check` needs no special handling here —
+ *  the dialect quotes every identifier it writes, so the SQL keyword that had to be spelled
+ *  `"check" AS "check"` in every statement is now just a column name.
+ *
+ *  `kind` and `target_type` are declared as their unions rather than as `string`: the column
+ *  holds nothing else, `CHORE_KIND_DEFS[chore.kind]` has always assumed so, and declaring it
+ *  means a `where("kind", "=", "merg")` is a typecheck failure rather than a query that
+ *  matches nothing. `typed-chore.test.ts` holds each column list against `PRAGMA table_info`.
+ *
+ *  `id` is optional because the same declaration is the insert's shape, and a chore's id is
+ *  SQLite's to give. Every read goes through `whole`, which insists on it. */
+interface ChoreRow {
+  id?: number;
+  slug: string;
+  kind: ChoreKind;
+  project_id: number;
+  target_type: ChoreTarget;
+  target_id: number;
+  check: string;
+  state: string;
+  approved_at: string | null;
+  approved_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+const chore = table<ChoreRow>("chore", [
+  "id",
+  "slug",
+  "kind",
+  "project_id",
+  "target_type",
+  "target_id",
+  "check",
+  "state",
+  "approved_at",
+  "approved_by",
+  "created_at",
+  "updated_at",
+]);
+
+interface LedgerRow {
+  id?: number;
+  entity: string;
+  entity_id: number;
+  verb: string;
+  from_state: string;
+  to_state: string;
+  actor: string;
+  at: string;
+}
+const ledger = table<LedgerRow>("ledger", [
+  "id",
+  "entity",
+  "entity_id",
+  "verb",
+  "from_state",
+  "to_state",
+  "actor",
+  "at",
+]);
+
+interface RefusalRow {
+  chore_id: number;
+  why: string;
+  at: string;
+  since: string;
+  passes: number;
+}
+const refusal = table<RefusalRow>("chore_refusal", ["chore_id", "why", "at", "since", "passes"]);
+
+const assignment = table<{ objective_type: string; objective_id: number; phase: string }>("assignment", [
+  "objective_type",
+  "objective_id",
+  "phase",
+]);
+
+/** The target's own title, which used to arrive through two outer joins. */
+const story = table<{ id: number; title: string }>("story", ["id", "title"]);
+const project = table<{ id: number; name: string }>("project", ["id", "name"]);
+
+/** What a chore row is read as: the record's columns, minus the stamps nobody outside asks
+ *  for. One list, so the shape of `Chore` and the columns fetched cannot drift. */
+const FIELDS = [
+  "id",
+  "slug",
+  "kind",
+  "project_id",
+  "target_type",
+  "target_id",
+  "check",
+  "state",
+  "approved_at",
+  "approved_by",
+] as const;
+
+type ChoreFields = Pick<ChoreRow, (typeof FIELDS)[number]>;
+
+/** A row's id, insisted on rather than assumed. The column is `INTEGER PRIMARY KEY` and
+ *  cannot be null, so this never fires — but it is what makes an optional `id` on the
+ *  declaration safe, instead of a cast that says "trust me" over every read. */
+const rowid = (r: { readonly id?: number }): number => {
+  if (r.id === undefined) throw new ChoreError("a row came back from the database without its id");
+  return r.id;
+};
+
+const whole = (r: ChoreFields | null): Chore | null => (r === null ? null : { ...r, id: rowid(r) });
+
+/** An assignment nobody has finished with. order.ts holds the same list for the same
+ *  reason; the two meet in the same three names until one module can import the other
+ *  without a cycle. */
+const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
 
 const slugOf = (s: ChoreSpec): string => `${s.kind}-${s.target_type}-${s.target_id}`;
+
+/** Every ledger row this chore has, oldest first. Its verbs are the only record of how many
+ *  attempts a chore has had and of which verb settled it, and both answers come from one
+ *  read rather than from a count and a sort-and-cap the dialect cannot spell. */
+const ledgerFor = (db: DatabaseSync, id: number): readonly LedgerRow[] =>
+  queries(db)
+    .selectFrom(ledger)
+    .where("entity", "=", "chore")
+    .where("entity_id", "=", id)
+    .all()
+    .sort((a, b) => rowid(a) - rowid(b));
+
+/** Chore ids something is attempting right now. */
+const attemptedIds = (db: DatabaseSync): ReadonlySet<number> =>
+  new Set(
+    queries(db)
+      .selectFrom(assignment)
+      .where("objective_type", "=", "chore")
+      .all()
+      .filter((a) => OPEN_PHASES.includes(a.phase))
+      .map((a) => a.objective_id),
+  );
+
+/** How many times a worker has begun each chore, from the ledger. One read for the whole
+ *  board, where each row used to carry its own correlated subquery. */
+const beginsPerChore = (db: DatabaseSync): ReadonlyMap<number, number> => {
+  const counted = new Map<number, number>();
+  for (const l of queries(db).selectFrom(ledger).where("entity", "=", "chore").where("verb", "=", "begin").all()) {
+    counted.set(l.entity_id, (counted.get(l.entity_id) ?? 0) + 1);
+  }
+  return counted;
+};
+
+/** The chores of one state, or of every project when `project` is null — the two shapes the
+ *  `:project IS NULL OR project_id = :project` clause had, told apart here. */
+function choresWhere(db: DatabaseSync, state: string, op: "=" | "!=", project: number | null): readonly Chore[] {
+  const base = queries(db).selectFrom(chore).select(FIELDS).where("state", op, state);
+  const q = project === null ? base : base.where("project_id", "=", project);
+  return q
+    .all()
+    .map((r) => ({ ...r, id: rowid(r) }))
+    .sort((a, b) => a.id - b.id);
+}
+
+/** What an operator reads for a chore's target: the story's title, the project's name, or
+ *  the bare id when the row the chore names is not there. */
+function whatOf(db: DatabaseSync): (c: Chore) => string {
+  const q = queries(db);
+  const titles = new Map(q.selectFrom(story).all().map((s) => [s.id, s.title]));
+  const names = new Map(q.selectFrom(project).all().map((p) => [p.id, p.name]));
+  return (c) => {
+    const named = c.target_type === "story" ? titles.get(c.target_id) : names.get(c.target_id);
+    return `${c.kind} ${c.target_type} ${named ?? c.target_id}`;
+  };
+}
 
 /** The chore for this condition, creating it if it is not there yet.
  *
@@ -136,11 +300,28 @@ export function ensureChore(db: DatabaseSync, spec: ChoreSpec, by = "runner"): C
   }
 
   const at = now();
-  db.prepare(
-    `INSERT INTO chore (slug, kind, project_id, target_type, target_id, "check", state, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (kind, target_type, target_id) DO NOTHING`,
-  ).run(slugOf(spec), spec.kind, spec.project_id, spec.target_type, spec.target_id, spec.check, CHORE_MACHINE.initial, at, at);
+  // On a clash the dialect writes over the row it found rather than ignoring it, so the
+  // loser of the race writes the
+  // slug it was already going to write: the slug is derived from the conflict key itself, so
+  // `slug = excluded.slug` leaves the row it found exactly as it was. What the clause is for
+  // is unchanged — two runners reading one condition in the same tick make one chore, and
+  // neither of them raises.
+  queries(db)
+    .insertInto(chore, {
+      slug: slugOf(spec),
+      kind: spec.kind,
+      project_id: spec.project_id,
+      target_type: spec.target_type,
+      target_id: spec.target_id,
+      check: spec.check,
+      state: CHORE_MACHINE.initial,
+      approved_at: null,
+      approved_by: null,
+      created_at: at,
+      updated_at: at,
+    })
+    .onConflict(["kind", "target_type", "target_id"], { slug: excluded<ChoreRow>("slug") })
+    .run();
 
   const made = choreFor(db, spec.kind, spec.target_type, spec.target_id);
   if (made === null) throw new ChoreError(`chore ${slugOf(spec)} was neither created nor found`);
@@ -153,14 +334,19 @@ export function choreFor(
   target_type: ChoreTarget,
   target_id: number,
 ): Chore | null {
-  const row = db
-    .prepare(`SELECT ${COLUMNS} FROM chore WHERE kind = ? AND target_type = ? AND target_id = ?`)
-    .get(kind, target_type, target_id) as Chore | undefined;
-  return row ?? null;
+  return whole(
+    queries(db)
+      .selectFrom(chore)
+      .select(FIELDS)
+      .where("kind", "=", kind)
+      .where("target_type", "=", target_type)
+      .where("target_id", "=", target_id)
+      .get(),
+  );
 }
 
 export function choreById(db: DatabaseSync, id: number): Chore | null {
-  return (db.prepare(`SELECT ${COLUMNS} FROM chore WHERE id = ?`).get(id) as Chore | undefined) ?? null;
+  return whole(queries(db).selectFrom(chore).select(FIELDS).where("id", "=", id).get());
 }
 
 export type ChoreOutcome =
@@ -170,14 +356,14 @@ export type ChoreOutcome =
 /** A person says go. Recorded rather than acted on: approving a chore does not start it,
  *  it only removes the reason it may not be started. */
 export function approveChore(db: DatabaseSync, id: number, by: string): ChoreOutcome {
-  const chore = choreById(db, id);
-  if (chore === null) return { ok: false, why: `no chore #${id}` };
-  if (!CHORE_KIND_DEFS[chore.kind].needs_approval) {
-    return { ok: false, why: `a ${chore.kind} chore does not wait for approval` };
+  const row = choreById(db, id);
+  if (row === null) return { ok: false, why: `no chore #${id}` };
+  if (!CHORE_KIND_DEFS[row.kind].needs_approval) {
+    return { ok: false, why: `a ${row.kind} chore does not wait for approval` };
   }
   const at = now();
-  db.prepare("UPDATE chore SET approved_at = ?, approved_by = ?, updated_at = ? WHERE id = ?").run(at, by, at, id);
-  return { ok: true, from: chore.state, to: chore.state };
+  queries(db).update(chore).set({ approved_at: at, approved_by: by, updated_at: at }).where("id", "=", id).run();
+  return { ok: true, from: row.state, to: row.state };
 }
 
 /** Apply a verb to a chore, and append it to the ledger.
@@ -186,10 +372,10 @@ export function approveChore(db: DatabaseSync, id: number, by: string): ChoreOut
  *  cascade into one another, and a chore has no parent to settle. The machine is still
  *  read the same way — a verb that is not legal here is refused with what is. */
 export function applyChore(db: DatabaseSync, id: number, verb: string, actor: string): ChoreOutcome {
-  const chore = choreById(db, id);
-  if (chore === null) return { ok: false, why: `no chore #${id}` };
+  const row = choreById(db, id);
+  if (row === null) return { ok: false, why: `no chore #${id}` };
 
-  const from = chore.state;
+  const from = row.state;
   const transition = transitionFor(CHORE_MACHINE, from, verb);
   if (transition === undefined) {
     if (isTerminal(CHORE_MACHINE, from)) return { ok: false, why: `${from} is terminal; nothing may be done to it` };
@@ -199,17 +385,23 @@ export function applyChore(db: DatabaseSync, id: number, verb: string, actor: st
 
   // The one guard a chore has. A chore nobody approved is not a chore nobody may see: it
   // sits on the board in `planned`, saying what it is waiting for.
-  if (verb === "start" && CHORE_KIND_DEFS[chore.kind].needs_approval && chore.approved_at === null) {
-    return { ok: false, why: `a ${chore.kind} chore needs approval before it starts` };
+  if (verb === "start" && CHORE_KIND_DEFS[row.kind].needs_approval && row.approved_at === null) {
+    return { ok: false, why: `a ${row.kind} chore needs approval before it starts` };
   }
 
   const at = now();
   transact(db, () => {
-    db.prepare("UPDATE chore SET state = ?, updated_at = ? WHERE id = ?").run(transition.to, at, id);
-    db.prepare(
-      `INSERT INTO ledger (entity, entity_id, verb, from_state, to_state, actor, at)
-       VALUES ('chore', ?, ?, ?, ?, ?, ?)`,
-    ).run(id, verb, from, transition.to, actor, at);
+    const q = queries(db);
+    q.update(chore).set({ state: transition.to, updated_at: at }).where("id", "=", id).run();
+    q.insertInto(ledger, {
+      entity: "chore",
+      entity_id: id,
+      verb,
+      from_state: from,
+      to_state: transition.to,
+      actor,
+      at,
+    }).run();
   });
   return { ok: true, from, to: transition.to };
 }
@@ -227,12 +419,10 @@ export interface ChoreAttempts {
  *  resets a chore — wecode raises it and wecode judges it — so the count that matters is
  *  the one already written down: one `begin` row per attempt, in the order they happened. */
 export function choreAttempts(db: DatabaseSync, id: number): ChoreAttempts | null {
-  const chore = choreById(db, id);
-  if (chore === null) return null;
-  const row = db
-    .prepare("SELECT count(*) AS n FROM ledger WHERE entity = 'chore' AND entity_id = ? AND verb = 'begin'")
-    .get(id) as { n: number };
-  return { attempts: row.n, max_retry: CHORE_KIND_DEFS[chore.kind].max_retry };
+  const row = choreById(db, id);
+  if (row === null) return null;
+  const attempts = ledgerFor(db, id).filter((l) => l.verb === "begin").length;
+  return { attempts, max_retry: CHORE_KIND_DEFS[row.kind].max_retry };
 }
 
 /** Put a settled chore back to `planned`, because the condition that made it is true again.
@@ -246,10 +436,10 @@ export function choreAttempts(db: DatabaseSync, id: number): ChoreAttempts | nul
  *  is the point of reraising rather than deleting the row and letting `ensureChore` insert
  *  a fresh one, which would lose every attempt and read as if this were the first time. */
 export function reraiseChore(db: DatabaseSync, id: number, by = "runner"): ChoreOutcome {
-  const chore = choreById(db, id);
-  if (chore === null) return { ok: false, why: `no chore #${id}` };
-  if (chore.state !== "failed" && chore.state !== "done") {
-    return { ok: false, why: `a ${chore.state} chore is not waiting to be raised again` };
+  const row = choreById(db, id);
+  if (row === null) return { ok: false, why: `no chore #${id}` };
+  if (row.state !== "failed" && row.state !== "done") {
+    return { ok: false, why: `a ${row.state} chore is not waiting to be raised again` };
   }
 
   const tries = choreAttempts(db, id);
@@ -277,8 +467,7 @@ export function reraiseChore(db: DatabaseSync, id: number, by = "runner"): Chore
  *  The reason is kept where a chore's other free text about itself is kept — `chore_refusal`,
  *  one row per chore — so `choreRefusal(db, id)` reads why a closed chore was closed. */
 export function closeChore(db: DatabaseSync, id: number, why: string, by = "runner"): ChoreOutcome {
-  const chore = choreById(db, id);
-  if (chore === null) return { ok: false, why: `no chore #${id}` };
+  if (choreById(db, id) === null) return { ok: false, why: `no chore #${id}` };
 
   const out = applyChore(db, id, CLOSE, by);
   // Unguarded on purpose: this is not "passed over", it is the epitaph, and it has to stand
@@ -298,13 +487,24 @@ const attemptDetail = (t: ChoreAttempts, check: string): string =>
       ? `${outOfAttempts(t)} · ${check}`
       : `attempt ${t.attempts + 1} of ${t.max_retry} · ${check}`;
 
-/** Something is attempting this chore right now. The one wording of it, because three
- *  places ask — the board's state, the candidate list, and whether a refusal may be
- *  written — and three copies of a phase list is how they come to disagree. */
-const ATTEMPTED = `EXISTS (SELECT 1 FROM assignment a
-                            WHERE a.objective_type = 'chore' AND a.objective_id = %ID%
-                              AND a.phase IN ('pending','running','waiting'))`;
-const attempted = (id: string): string => ATTEMPTED.replace("%ID%", id);
+/** The last ledger row that took each chore into `done`, which is the verb that settled it.
+ *  A chore comes back — `reprove` returns it to `planned` — so it is the most recent one,
+ *  taken by id in TypeScript, because the dialect can neither sort nor cap. */
+function settlingVerbs(db: DatabaseSync): ReadonlyMap<number, LedgerRow> {
+  const last = new Map<number, LedgerRow>();
+  for (const l of queries(db).selectFrom(ledger).where("entity", "=", "chore").where("to_state", "=", "done").all()) {
+    const seen = last.get(l.entity_id);
+    if (seen === undefined || rowid(l) > rowid(seen)) last.set(l.entity_id, l);
+  }
+  return last;
+}
+
+/** The sentence on each chore's refusal row. Guarded, because a workspace whose migrations
+ *  stopped before 009 has no such table and the board still has to render. */
+const refusalWhys = (db: DatabaseSync): ReadonlyMap<number, string> =>
+  !hasTable(db, "chore_refusal")
+    ? new Map<number, string>()
+    : new Map(queries(db).selectFrom(refusal).all().map((r) => [r.chore_id, r.why]));
 
 /** How a chore came to be `done`. Two different facts wearing one state.
  *
@@ -347,28 +547,17 @@ export interface ChoreSettled {
  *  back: `reprove` returns it to `planned` and it may be closed this pass having been
  *  performed the last. The most recent settling verb is the one the row is standing on. */
 export function choreSettled(db: DatabaseSync, id: number): ChoreSettled | null {
-  const chore = choreById(db, id);
-  if (chore === null || chore.state !== "done") return null;
-  const row = db
-    .prepare(
-      `SELECT verb, at FROM ledger
-        WHERE entity = 'chore' AND entity_id = ? AND to_state = 'done'
-        ORDER BY id DESC LIMIT 1`,
-    )
-    .get(id) as { verb: string; at: string } | undefined;
-  if (row === undefined) return null;
-  const settlement = SETTLED_BY[row.verb];
+  const row = choreById(db, id);
+  if (row === null || row.state !== "done") return null;
+  const settled = ledgerFor(db, id)
+    .filter((l) => l.to_state === "done")
+    .at(-1);
+  if (settled === undefined) return null;
+  const settlement = SETTLED_BY[settled.verb];
   if (settlement === undefined) return null;
-  const why = settlement === "performed" ? chore.check : (choreRefusal(db, id)?.why ?? CLOSED_WITHOUT_REASON);
-  return { id, settlement, why, at: row.at };
+  const why = settlement === "performed" ? row.check : (choreRefusal(db, id)?.why ?? CLOSED_WITHOUT_REASON);
+  return { id, settlement, why, at: settled.at };
 }
-
-/** The join every chore row on the board hangs off: a chore names its target, and the
- *  target's own title is what an operator reads. */
-const CHORE_FROM = `FROM chore c
-         LEFT JOIN story s ON s.id = c.target_id AND c.target_type = 'story'
-         LEFT JOIN project p ON p.id = c.target_id AND c.target_type = 'project'`;
-const CHORE_WHAT = `c.kind || ' ' || c.target_type || ' ' || coalesce(s.title, p.name, c.target_id)`;
 
 /** Every chore that is over, with how it ended and why, in the board's shape.
  *
@@ -377,33 +566,18 @@ const CHORE_WHAT = `c.kind || ' ' || c.target_type || ' ' || coalesce(s.title, p
  *  chore that was raised truthfully stays raised — so it is shown here, under the state
  *  that says which kind of ending it had. */
 export function settledChores(db: DatabaseSync, project: number | null = null): readonly Row[] {
-  const rows = db
-    .prepare(
-      `SELECT c.id AS id, ${CHORE_WHAT} AS what, c."check" AS "check",
-              (SELECT l.verb FROM ledger l
-                WHERE l.entity = 'chore' AND l.entity_id = c.id AND l.to_state = 'done'
-                ORDER BY l.id DESC LIMIT 1) AS verb,
-              ${hasTable(db, "chore_refusal") ? `(SELECT f.why FROM chore_refusal f WHERE f.chore_id = c.id)` : "NULL"} AS why
-         ${CHORE_FROM}
-        WHERE c.state = 'done'
-          AND (:project IS NULL OR c.project_id = :project)
-        ORDER BY c.id`,
-    )
-    .all({ project }) as unknown as {
-      id: number;
-      what: string;
-      check: string;
-      verb: string | null;
-      why: string | null;
-    }[];
+  const rows = choresWhere(db, "done", "=", project);
+  const what = whatOf(db);
+  const verbs = settlingVerbs(db);
+  const whys = refusalWhys(db);
 
   return rows.map((r) => {
-    const settlement = SETTLED_BY[r.verb ?? ""] ?? "performed";
+    const settlement = SETTLED_BY[verbs.get(r.id)?.verb ?? ""] ?? "performed";
     return {
       id: r.id,
-      what: r.what,
+      what: what(r),
       state: SETTLEMENT_STATE[settlement],
-      detail: settlement === "performed" ? r.check : (r.why ?? CLOSED_WITHOUT_REASON),
+      detail: settlement === "performed" ? r.check : (whys.get(r.id) ?? CLOSED_WITHOUT_REASON),
     };
   });
 }
@@ -421,40 +595,24 @@ export const choresPerformed = (rows: readonly Row[]): number =>
  *  chore 2 as `planned` while assignment 271 ran it, because the row and the assignment
  *  were two answers to one question. There is one answer, and the assignment gives it. */
 export function openChores(db: DatabaseSync, project: number | null = null): readonly Row[] {
-  const rows = db
-    .prepare(
-      `SELECT c.id AS id,
-              ${CHORE_WHAT} AS what,
-              CASE WHEN ${attempted("c.id")} THEN 'running' ELSE c.state END AS state,
-              c."check" AS "check",
-              c.kind AS kind,
-              c.approved_at AS approved_at,
-              (SELECT count(*) FROM ledger l
-                WHERE l.entity = 'chore' AND l.entity_id = c.id AND l.verb = 'begin') AS attempts
-         ${CHORE_FROM}
-        WHERE c.state <> 'done'
-          AND (:project IS NULL OR c.project_id = :project)
-        ORDER BY c.id`,
-    )
-    .all({ project }) as unknown as {
-      id: number;
-      what: string;
-      state: string;
-      check: string;
-      kind: ChoreKind;
-      approved_at: string | null;
-      attempts: number;
-    }[];
+  const rows = choresWhere(db, "done", "!=", project);
+  const what = whatOf(db);
+  const attempting = attemptedIds(db);
+  const begun = beginsPerChore(db);
 
-  return rows.map((r) => ({
-    id: r.id,
-    what: r.what,
-    state: r.state,
-    detail:
-      r.state === "planned" && CHORE_KIND_DEFS[r.kind].needs_approval && r.approved_at === null
-        ? WAITING_FOR_APPROVAL
-        : attemptDetail({ attempts: r.attempts, max_retry: CHORE_KIND_DEFS[r.kind].max_retry }, r.check),
-  }));
+  return rows.map((r) => {
+    const state = attempting.has(r.id) ? "running" : r.state;
+    const attempts = begun.get(r.id) ?? 0;
+    return {
+      id: r.id,
+      what: what(r),
+      state,
+      detail:
+        state === "planned" && CHORE_KIND_DEFS[r.kind].needs_approval && r.approved_at === null
+          ? WAITING_FOR_APPROVAL
+          : attemptDetail({ attempts, max_retry: CHORE_KIND_DEFS[r.kind].max_retry }, r.check),
+    };
+  });
 }
 
 /** The board, with the work wecode owes itself on it.
@@ -518,31 +676,17 @@ export function choreCandidates(
 ): { readonly candidates: readonly Candidate[]; readonly refused: readonly Refusal[] } {
   if (roles === undefined) return { candidates: [], refused: [] };
 
-  const rows = db
-    .prepare(
-      `SELECT c.id AS id, c.kind AS kind, c.target_type AS target_type, c.target_id AS target_id,
-              c.state AS state, c.approved_at AS approved_at,
-              (SELECT count(*) FROM ledger l
-                WHERE l.entity = 'chore' AND l.entity_id = c.id AND l.verb = 'begin') AS attempts
-         FROM chore c
-        WHERE c.state NOT IN ('done','running')
-          AND NOT ${attempted("c.id")}
-        ORDER BY c.id`,
-    )
-    .all() as unknown as {
-    id: number;
-    kind: ChoreKind;
-    target_type: ChoreTarget;
-    target_id: number;
-    state: string;
-    approved_at: string | null;
-    attempts: number;
-  }[];
+  // `NOT IN ('done','running')` and the `NOT EXISTS` are two set differences, taken here:
+  // `done` is excluded by the query, and the other two by the sets the board reads anyway.
+  const attempting = attemptedIds(db);
+  const begun = beginsPerChore(db);
+  const rows = choresWhere(db, "done", "!=", null).filter((c) => c.state !== "running" && !attempting.has(c.id));
 
   const candidates: Candidate[] = [];
   const refused: Refusal[] = [];
   for (const r of rows) {
-    const tries = { attempts: r.attempts, max_retry: CHORE_KIND_DEFS[r.kind].max_retry };
+    const attempts = begun.get(r.id) ?? 0;
+    const tries = { attempts, max_retry: CHORE_KIND_DEFS[r.kind].max_retry };
     // A chore that has failed its check as often as its kind allows is not handed out
     // again. It stays on the board saying so, which is the doctor's to name.
     if (tries.attempts >= tries.max_retry) {
@@ -562,7 +706,7 @@ export function choreCandidates(
       role: CHORE_KIND_DEFS[r.kind].role,
       scope: role.scope,
       budget: role.budget,
-      attempts: r.attempts,
+      attempts,
     });
   }
   return { candidates, refused };
@@ -588,26 +732,41 @@ export function recordChoreRefusal(db: DatabaseSync, why: string, choreId: numbe
  *  chore was closed survives an assignment still standing open against it, which is exactly
  *  the shape a chore left `planned` by a failed `begin` is in. */
 function writeChoreRefusal(db: DatabaseSync, why: string, choreId: number): void {
-  const at = now();
-  db.prepare(
-    `INSERT INTO chore_refusal (chore_id, why, at, since, passes) VALUES (?, ?, ?, ?, 1)
-     ON CONFLICT (chore_id) DO UPDATE SET
-       why    = excluded.why,
-       at     = excluded.at,
-       since  = CASE WHEN chore_refusal.why = excluded.why THEN chore_refusal.since ELSE excluded.since END,
-       passes = CASE WHEN chore_refusal.why = excluded.why THEN chore_refusal.passes + 1 ELSE 1 END`,
-  ).run(choreId, why, at, at);
+  // The upsert's two `CASE WHEN … = excluded.why` arms are the rule — the same sentence
+  // keeps its `since` and counts a pass, a new one starts over — and the dialect spells no
+  // CASE, so the rule is read and applied here. In a transaction, because the read of the
+  // row and the write over it were one statement and must stay one act.
+  transact(db, () => {
+    const at = now();
+    const seen = choreRefusal(db, choreId);
+    const q = queries(db);
+    if (seen === null) {
+      q.insertInto(refusal, { chore_id: choreId, why, at, since: at, passes: 1 }).run();
+      return;
+    }
+    const same = seen.why === why;
+    q.update(refusal)
+      .set({ why, at, since: same ? seen.since : at, passes: same ? seen.passes + 1 : 1 })
+      .where("chore_id", "=", choreId)
+      .run();
+  });
 }
 
 export function clearChoreRefusal(db: DatabaseSync, choreId: number): void {
-  db.prepare("DELETE FROM chore_refusal WHERE chore_id = ?").run(choreId);
+  queries(db).deleteFrom(refusal).where("chore_id", "=", choreId).run();
 }
 
-/** Is anything attempting this chore? The row `openChores` reads, asked one chore at a
- *  time, so the state the board shows and the guard on a refusal are the same question. */
+/** Is anything attempting this chore? The same question the board asks of every chore,
+ *  asked of one, so the state the board shows and the guard on a refusal cannot differ. */
 export function isAttempted(db: DatabaseSync, choreId: number): boolean {
-  const row = db.prepare(`SELECT ${attempted("?")} AS yes`).get(choreId) as { yes: number };
-  return row.yes === 1;
+  return (
+    queries(db)
+      .selectFrom(assignment)
+      .where("objective_type", "=", "chore")
+      .where("objective_id", "=", choreId)
+      .all()
+      .filter((a) => OPEN_PHASES.includes(a.phase)).length > 0
+  );
 }
 
 export interface ChoreRefusal extends Refusal {
@@ -617,8 +776,8 @@ export interface ChoreRefusal extends Refusal {
 }
 
 export function choreRefusal(db: DatabaseSync, choreId: number): ChoreRefusal | null {
-  const row = db
-    .prepare(`SELECT chore_id AS id, why, at, since, passes FROM chore_refusal WHERE chore_id = ?`)
-    .get(choreId) as ChoreRefusal | undefined;
-  return row ?? null;
+  const row = queries(db).selectFrom(refusal).where("chore_id", "=", choreId).get();
+  // `chore_id AS id`, in TypeScript: a Refusal is an id and a sentence whatever table the
+  // sentence is kept in, and the rename is the only reason this is not the row itself.
+  return row === null ? null : { id: row.chore_id, why: row.why, at: row.at, since: row.since, passes: row.passes };
 }
