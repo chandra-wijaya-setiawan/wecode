@@ -54,7 +54,7 @@ components:
     layer: data
     component: true
     owns: opening the database, the numbered migrations, transactions, and reading and writing rows
-    modules: [store]
+    modules: [store, db]
 
   files:
     package: core
