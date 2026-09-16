@@ -4,6 +4,9 @@ import { isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
 import { Engine, now } from "@wecode/core";
+// Core's dialect, by the path core builds it to: it is deliberately not on core's barrel,
+// and reaching it here widens nothing for anybody else. See the same note in doctor.ts.
+import { excluded, queries, table, type Setters, type TableDef } from "@wecode/core/dist/db.js";
 
 const exec = promisify(execFile);
 
@@ -93,6 +96,67 @@ interface Row {
   readonly state: string;
 }
 
+/** Which table a test is in. The examiner does the same thing to both, which is why one
+ *  row shape below covers them: a `task_test` and an `acceptance_test` are examined
+ *  identically and differ only in what they prove. */
+export type TestEntity = "task_test" | "acceptance_test";
+
+/** The columns this module reads and writes on either test table. Both carry all of them,
+ *  so one declaration serves both and `Record<TestEntity, TableDef<TestRow>>` is a lookup
+ *  rather than a cast — the shape is the same, so nothing is being asserted away. */
+interface TestRow {
+  id: number;
+  parent_id: number;
+  kind: string;
+  artefact: string | null;
+  state: string;
+  last_run_at: string | null;
+  last_output: string | null;
+  provenance_sha: string | null;
+  updated_at: string;
+}
+
+const TEST_COLUMNS = [
+  "id",
+  "parent_id",
+  "kind",
+  "artefact",
+  "state",
+  "last_run_at",
+  "last_output",
+  "provenance_sha",
+  "updated_at",
+] as const;
+
+const TESTS: Record<TestEntity, TableDef<TestRow>> = {
+  task_test: table<TestRow>("task_test", TEST_COLUMNS),
+  acceptance_test: table<TestRow>("acceptance_test", TEST_COLUMNS),
+};
+
+const requirement = table<{ id: number; story_id: number }>("requirement", ["id", "story_id"]);
+const criteria = table<{ id: number; requirement_id: number }>("acceptance_criteria", ["id", "requirement_id"]);
+const task = table<{ id: number; acceptance_test_id: number; state: string }>("task", [
+  "id",
+  "acceptance_test_id",
+  "state",
+]);
+
+interface ScriptRunRow {
+  entity: string;
+  test_id: number;
+  fingerprint: string;
+  ran_at: string;
+}
+const scriptRun = table<ScriptRunRow>("script_run", ["entity", "test_id", "fingerprint", "ran_at"]);
+
+/** A test a pass may still reach a verdict on. `ready` has none yet and `failed` may be
+ *  fixed; anything else is settled. */
+const RUNNABLE: readonly string[] = ["ready", "failed"];
+
+/** A task nobody is waiting on any more. The dialect spells no `IN`, and the set belonged
+ *  here anyway: it is one rule, said once. */
+const SETTLED: readonly string[] = ["done", "dropped"];
+
 /** A deterministic test needs no agent: run the command, read the exit code, record the
  *  verdict. No session, no tokens, no scope to negotiate.
  *
@@ -130,34 +194,58 @@ export class Examiner {
 
   /** The ready script task_tests of one task, in that task's attempt tree. */
   async runTaskTests(taskId: number, cwd: string, against: RunAgainst = {}): Promise<ScriptReport> {
-    const rows = this.db
-      .prepare(
-        `SELECT id, artefact, state FROM task_test
-          WHERE parent_id = ? AND state IN ('ready','failed') AND kind = 'script' AND artefact IS NOT NULL`,
-      )
-      .all(taskId) as unknown as Row[];
-    return this.runAll("task_test", rows, cwd, against);
+    return this.runAll("task_test", this.runnable("task_test", (r) => r.parent_id === taskId), cwd, against);
   }
 
   /** Every acceptance_test whose tasks are all finished, in the story tree it belongs to. */
   async runAcceptanceTests(storyId: number, cwd: string, against: RunAgainst = {}): Promise<ScriptReport> {
-    const rows = this.db
-      .prepare(
-        `SELECT a.id AS id, a.artefact AS artefact, a.state AS state
-           FROM acceptance_test a
-           JOIN acceptance_criteria c ON c.id = a.parent_id
-           JOIN requirement r ON r.id = c.requirement_id
-          WHERE r.story_id = ?
-            AND a.state IN ('ready','failed') AND a.kind = 'script' AND a.artefact IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM task t WHERE t.acceptance_test_id = a.id
-                             AND t.state NOT IN ('done','dropped'))`,
-      )
-      .all(storyId) as unknown as Row[];
+    const q = queries(this.db);
+    // The join and the NOT EXISTS, composed here: the dialect has neither, and both are set
+    // membership once the rows are in hand.
+    const requirements = new Set(q.selectFrom(requirement).select(["id"]).where("story_id", "=", storyId).all().map((r) => r.id));
+    const mine = new Set(
+      q
+        .selectFrom(criteria)
+        .all()
+        .filter((c) => requirements.has(c.requirement_id))
+        .map((c) => c.id),
+    );
+    const unfinished = new Set(
+      q
+        .selectFrom(task)
+        .all()
+        .filter((t) => !SETTLED.includes(t.state))
+        .map((t) => t.acceptance_test_id),
+    );
+    const rows = this.runnable("acceptance_test", (r) => mine.has(r.parent_id) && !unfinished.has(r.id));
     return this.runAll("acceptance_test", rows, cwd, against);
   }
 
+  /** The script tests of one table that this pass may still judge, narrowed by whose they
+   *  are. `state IN (…)` and `artefact IS NOT NULL` are read off the rows rather than
+   *  spelled in the query, and the id order is applied here because the dialect has none. */
+  private runnable(entity: TestEntity, mine: (r: { id: number; parent_id: number }) => boolean): readonly Row[] {
+    return queries(this.db)
+      .selectFrom(TESTS[entity])
+      .select(["id", "parent_id", "artefact", "state"])
+      .where("kind", "=", "script")
+      .all()
+      .flatMap((r) =>
+        r.artefact !== null && RUNNABLE.includes(r.state) && mine(r)
+          ? [{ id: r.id, artefact: r.artefact, state: r.state }]
+          : [],
+      )
+      .sort((a, b) => a.id - b.id);
+  }
+
+  /** Every write this module makes to a test row goes through here, so the table and the
+   *  columns are checked against the same declaration the reads use. */
+  private stamp(entity: TestEntity, id: number, sets: Setters<TestRow>): void {
+    queries(this.db).update(TESTS[entity]).set(sets).where("id", "=", id).run();
+  }
+
   private async runAll(
-    entity: "task_test" | "acceptance_test",
+    entity: TestEntity,
     rows: readonly Row[],
     cwd: string,
     against: RunAgainst,
@@ -179,9 +267,7 @@ export class Examiner {
         // No script, no evidence. A verdict here would say the code is broken when all that
         // is missing is the test itself, so the test is left exactly as it stands.
         const at = now();
-        this.db
-          .prepare(`UPDATE ${entity} SET last_output = ?, updated_at = ? WHERE id = ?`)
-          .run(`${NOT_IN_TREE}: ${script}`, at, row.id);
+        this.stamp(entity, row.id, { last_output: `${NOT_IN_TREE}: ${script}`, updated_at: at });
         unrunnable.push(row.id);
         continue;
       }
@@ -198,27 +284,27 @@ export class Examiner {
       const ok = out.ok && !empty;
       const at = now();
       const body = out.output.slice(-8000);
-      this.db
-        .prepare(
-          `UPDATE ${entity} SET last_run_at = ?, last_output = ?, provenance_sha = ?, updated_at = ? WHERE id = ?`,
-        )
-        .run(at, empty ? `${NO_TEST_MATCHED}: ${row.artefact}\n${body}` : body, provenance, at, row.id);
+      this.stamp(entity, row.id, {
+        last_run_at: at,
+        last_output: empty ? `${NO_TEST_MATCHED}: ${row.artefact}\n${body}` : body,
+        provenance_sha: provenance,
+        updated_at: at,
+      });
       if (print !== null) {
-        this.db
-          .prepare(
-            `INSERT INTO script_run (entity, test_id, fingerprint, ran_at) VALUES (?, ?, ?, ?)
-               ON CONFLICT (entity, test_id) DO UPDATE SET fingerprint = excluded.fingerprint, ran_at = excluded.ran_at`,
-          )
-          .run(entity, row.id, print, at);
+        queries(this.db)
+          .insertInto(scriptRun, { entity, test_id: row.id, fingerprint: print, ran_at: at })
+          .onConflict(["entity", "test_id"], {
+            fingerprint: excluded<ScriptRunRow>("fingerprint"),
+            ran_at: excluded<ScriptRunRow>("ran_at"),
+          })
+          .run();
       }
       const verdict = this.engine.apply(entity, row.id, ok ? "pass" : "fail", "runner");
       if (!verdict.ok) {
         // The engine's words, not ours: it is the thing that knows why, and a paraphrase
         // here is one more copy of the rules to keep in agreement with them.
         refused.push({ id: row.id, why: verdict.why });
-        this.db
-          .prepare(`UPDATE ${entity} SET last_output = ?, updated_at = ? WHERE id = ?`)
-          .run(`${REFUSED}: ${verdict.why}\n${body}`, now(), row.id);
+        this.stamp(entity, row.id, { last_output: `${REFUSED}: ${verdict.why}\n${body}`, updated_at: now() });
         continue;
       }
       (ok ? passed : failed).push(row.id);
@@ -230,12 +316,15 @@ export class Examiner {
   /** True when this test already has a verdict reached against this exact fingerprint.
    *  A test still in `ready` has no verdict to stand on, and an unreadable tip is no proof
    *  of anything, so both run. */
-  private stands(entity: string, row: Row, print: string | null): boolean {
+  private stands(entity: TestEntity, row: Row, print: string | null): boolean {
     if (print === null || row.state === "ready") return false;
-    const seen = this.db
-      .prepare("SELECT fingerprint FROM script_run WHERE entity = ? AND test_id = ?")
-      .get(entity, row.id) as { fingerprint: string } | undefined;
-    return seen?.fingerprint === print;
+    const seen = queries(this.db)
+      .selectFrom(scriptRun)
+      .select(["fingerprint"])
+      .where("entity", "=", entity)
+      .where("test_id", "=", row.id)
+      .get();
+    return seen !== null && seen.fingerprint === print;
   }
 
   /** The git tree sha of the sources this run saw — `git rev-parse HEAD:.`. A commit sha
