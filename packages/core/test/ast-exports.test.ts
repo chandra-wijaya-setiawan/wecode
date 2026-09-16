@@ -84,8 +84,8 @@ describe("readExports", () => {
     expect(readExports(join(tmp("wecode-ast-"), "missing.ts"))).toEqual([]);
   });
 
-  it("still reports the exports it can see in a file that does not parse", () => {
+  it("refuses a file that does not parse rather than reporting the exports it can see", () => {
     const file = module({ "a.ts": `export const good = 1;\nfunction broken( {` });
-    expect(readExports(file).map((e) => e.name)).toContain("good");
+    expect(() => readExports(file)).toThrow(/does not parse/);
   });
 });
