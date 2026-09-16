@@ -3,6 +3,7 @@ import { hostname } from "node:os";
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { excluded, queries, table } from "./db.js";
 import { now, transact } from "./store.js";
 
 /** How many missed intervals make a holder dead rather than slow. One is a slow disk. */
@@ -31,7 +32,11 @@ export function runnerId(pid: number = process.pid): string {
   return `${hostname()}/${pid}`;
 }
 
-interface LeaseRow {
+/** The `runner_lease` table as `004-runner-lease.sql` and `012-runner-build.sql` declare it.
+ *  One row, held by id 1. `typed-queries.test.ts` holds this against `PRAGMA table_info`,
+ *  so the declaration cannot drift from the table without a test saying so. */
+export interface RunnerLeaseRow {
+  id: number;
   holder: string;
   interval_ms: number;
   taken_at: string;
@@ -40,13 +45,23 @@ interface LeaseRow {
   build_behind: number | null;
 }
 
+export const runnerLease = table<RunnerLeaseRow>("runner_lease", [
+  "id",
+  "holder",
+  "interval_ms",
+  "taken_at",
+  "heartbeat",
+  "build_sha",
+  "build_behind",
+]);
+
 export function readLease(db: DatabaseSync): Lease | null {
-  const row = db
-    .prepare(
-      "SELECT holder, interval_ms, taken_at, heartbeat, build_sha, build_behind FROM runner_lease WHERE id = 1",
-    )
-    .get() as LeaseRow | undefined;
-  if (row === undefined) return null;
+  const row = queries(db)
+    .selectFrom(runnerLease)
+    .select(["holder", "interval_ms", "taken_at", "heartbeat", "build_sha", "build_behind"])
+    .where("id", "=", 1)
+    .get();
+  if (row === null) return null;
   return {
     holder: row.holder,
     intervalMs: row.interval_ms,
@@ -125,13 +140,27 @@ export function takeLease(
       return { ok: false, held, ageMs: leaseAgeMs(held, at) } as const;
     }
     const taken: Lease = { holder, intervalMs, takenAt: at, heartbeat: at, ...(build === null ? {} : { buildSha: build }) };
-    db.prepare(
-      "INSERT INTO runner_lease (id, holder, interval_ms, taken_at, heartbeat, build_sha, build_behind) " +
-        "VALUES (1,?,?,?,?,?,NULL) " +
-        "ON CONFLICT(id) DO UPDATE SET holder = excluded.holder, interval_ms = excluded.interval_ms, " +
-        "taken_at = excluded.taken_at, heartbeat = excluded.heartbeat, build_sha = excluded.build_sha, " +
-        "build_behind = NULL",
-    ).run(holder, intervalMs, at, at, build);
+    queries(db)
+      .insertInto(runnerLease, {
+        id: 1,
+        holder,
+        interval_ms: intervalMs,
+        taken_at: at,
+        heartbeat: at,
+        build_sha: build,
+        // A new holder has measured nothing yet, so the drift the last one measured must go
+        // with it rather than be read as this build's.
+        build_behind: null,
+      })
+      .onConflict(["id"], {
+        holder: excluded<RunnerLeaseRow>("holder"),
+        interval_ms: excluded<RunnerLeaseRow>("interval_ms"),
+        taken_at: excluded<RunnerLeaseRow>("taken_at"),
+        heartbeat: excluded<RunnerLeaseRow>("heartbeat"),
+        build_sha: excluded<RunnerLeaseRow>("build_sha"),
+        build_behind: null,
+      })
+      .run();
     return { ok: true, lease: taken } as const;
   });
 }
@@ -140,20 +169,27 @@ export function takeLease(
  *  holder may write it: it is a claim about that process, and a runner that has lost the
  *  lease is no longer describing the process that holds it. */
 export function recordBuildDrift(db: DatabaseSync, holder: string, behind: number | null): void {
-  db.prepare("UPDATE runner_lease SET build_behind = ? WHERE id = 1 AND holder = ?").run(behind, holder);
+  queries(db).update(runnerLease).set({ build_behind: behind }).where("id", "=", 1).where("holder", "=", holder).run();
 }
 
 /** Renew on every tick. False means the lease was taken from under this holder — it went
  *  stale and someone else has it — and the caller is no longer the runner of record. */
 export function renewLease(db: DatabaseSync, holder: string, at: string = now()): boolean {
-  db.prepare("UPDATE runner_lease SET heartbeat = ? WHERE id = 1 AND holder = ?").run(at, holder);
-  return readLease(db)?.holder === holder;
+  // The row the UPDATE wrote is the answer: no row matched means the holder of record is
+  // someone else, and there is no need to read the lease back to find that out.
+  const written = queries(db)
+    .update(runnerLease)
+    .set({ heartbeat: at })
+    .where("id", "=", 1)
+    .where("holder", "=", holder)
+    .run();
+  return written.changes > 0;
 }
 
 /** Give it back on the way out, so the next runner does not wait out three intervals for a
  *  runner that is already gone. Releasing someone else's lease does nothing. */
 export function releaseLease(db: DatabaseSync, holder: string): void {
-  db.prepare("DELETE FROM runner_lease WHERE id = 1 AND holder = ?").run(holder);
+  queries(db).deleteFrom(runnerLease).where("id", "=", 1).where("holder", "=", holder).run();
 }
 
 /** What a refused runner is told: who has it, and how long since that holder was alive. */
