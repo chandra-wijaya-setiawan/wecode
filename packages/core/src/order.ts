@@ -3,8 +3,51 @@
 import type { Refusal } from "./types.js";
 import type { DatabaseSync } from "node:sqlite";
 import { CHORE_KIND_DEFS, choreCandidates, clearChoreRefusal, recordChoreRefusal, type ChoreKind } from "./chore.js";
+import { queries, table } from "./db.js";
 import type { Budget, Scope } from "./entities.js";
 import type { RoleConfig } from "./roles.js";
+
+/** The columns this module reads, and only those. A narrow declaration is not a second copy
+ *  of the schema: it is the ask, and `typed-order.test.ts` holds each list against
+ *  `PRAGMA table_info` so a column that is renamed out from under it fails a test. */
+interface TaskRow {
+  id: number;
+  title: string;
+  role: string;
+  scope: string;
+  budget: string;
+  attempts: number;
+  state: string;
+}
+const task = table<TaskRow>("task", ["id", "title", "role", "scope", "budget", "attempts", "state"]);
+
+interface AssignmentRow {
+  objective_type: string;
+  objective_id: number;
+  worker_id: number;
+  scope: string;
+  phase: string;
+}
+const assignment = table<AssignmentRow>("assignment", ["objective_type", "objective_id", "worker_id", "scope", "phase"]);
+
+const chore = table<{ id: number; kind: string }>("chore", ["id", "kind"]);
+const worker = table<{ id: number; role: string }>("worker", ["id", "role"]);
+
+/** An assignment nobody has finished with. The dialect spells no `IN`, so the set is held
+ *  here and matched in TypeScript — which is where it belonged anyway: three phase names
+ *  repeated in four SQL strings were four copies of one rule. */
+const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
+
+const openAssignments = (db: DatabaseSync): readonly AssignmentRow[] =>
+  queries(db)
+    .selectFrom(assignment)
+    .all()
+    .filter((a) => OPEN_PHASES.includes(a.phase));
+
+/** A row per id, for the lookups that used to be joins. Undefined for an objective whose
+ *  row is gone, which is what the join did with it too: it dropped the assignment. */
+const byId = <T, V>(rows: readonly T[], id: (r: T) => number, value: (r: T) => V): Map<number, V> =>
+  new Map(rows.map((r) => [id(r), value(r)]));
 
 /** What kind of thing an assignment would point at. A candidate that does not say is a
  *  task: every candidate was one before chores could be chosen, and an id alone does not
@@ -70,70 +113,66 @@ export function collides(a: readonly string[], b: readonly string[]): boolean {
   );
 }
 
-/** Ready tasks with no assignment attempting them, in id order. */
+/** Ready tasks with no assignment attempting them, in id order.
+ *
+ *  The exclusion is a set difference rather than a `NOT EXISTS`, and the order is applied
+ *  here rather than in the query: the dialect spells neither, and both are cheap on a list
+ *  the allocator is about to walk one at a time anyway. */
 export function readyCandidates(db: DatabaseSync): readonly Candidate[] {
-  const rows = db
-    .prepare(
-      `SELECT t.id, t.title, t.role, t.scope, t.budget, t.attempts
-         FROM task t
-        WHERE t.state = 'ready'
-          AND NOT EXISTS (
-            SELECT 1 FROM assignment a
-             WHERE a.objective_type = 'task' AND a.objective_id = t.id
-               AND a.phase IN ('pending','running','waiting'))
-        ORDER BY t.id`,
-    )
-    .all() as unknown as {
-    id: number;
-    title: string;
-    role: string;
-    scope: string;
-    budget: string;
-    attempts: number;
-  }[];
+  const attempted = new Set(
+    openAssignments(db)
+      .filter((a) => a.objective_type === "task")
+      .map((a) => a.objective_id),
+  );
 
-  return rows.map((r) => ({
-    id: r.id,
-    title: r.title,
-    role: r.role,
-    scope: JSON.parse(r.scope) as Scope,
-    budget: JSON.parse(r.budget) as Budget,
-    attempts: r.attempts,
-  }));
+  return queries(db)
+    .selectFrom(task)
+    .select(["id", "title", "role", "scope", "budget", "attempts"])
+    .where("state", "=", "ready")
+    .all()
+    .filter((r) => !attempted.has(r.id))
+    .sort((a, b) => a.id - b.id)
+    .map((r) => ({
+      id: r.id,
+      title: r.title,
+      role: r.role,
+      scope: JSON.parse(r.scope) as Scope,
+      budget: JSON.parse(r.budget) as Budget,
+      attempts: r.attempts,
+    }));
 }
 
 /** What the open assignments hold right now. */
 export function currentLoad(db: DatabaseSync, capPerRole: Readonly<Record<string, number>>): Load {
-  const scopes = db
-    .prepare(`SELECT scope FROM assignment WHERE phase IN ('pending','running','waiting')`)
-    .all() as unknown as { scope: string }[];
-  const roles = db
-    .prepare(
-      `SELECT t.role AS role, count(*) AS n
-         FROM assignment a JOIN task t ON t.id = a.objective_id
-        WHERE a.objective_type = 'task' AND a.phase IN ('pending','running','waiting')
-        GROUP BY t.role`,
-    )
-    .all() as unknown as { role: string; n: number }[];
-  // A chore holds its role's slot too. The role is the kind's, not a column, so the count
-  // comes back per kind and is folded onto roles here.
-  const kinds = db
-    .prepare(
-      `SELECT c.kind AS kind, count(*) AS n
-         FROM assignment a JOIN chore c ON c.id = a.objective_id
-        WHERE a.objective_type = 'chore' AND a.phase IN ('pending','running','waiting')
-        GROUP BY c.kind`,
-    )
-    .all() as unknown as { kind: ChoreKind; n: number }[];
+  const open = openAssignments(db);
+  const q = queries(db);
+  const roleOf = byId(
+    q.selectFrom(task).select(["id", "role"]).all(),
+    (t) => t.id,
+    (t) => t.role,
+  );
+  // A chore holds its role's slot too. The role is the kind's, not a column, so it is
+  // reached through the kind and folded onto the same tally as a task's role.
+  const kindOfChore = byId(
+    q.selectFrom(chore).all(),
+    (c) => c.id,
+    (c) => c.kind as ChoreKind,
+  );
 
-  const openPerRole: Record<string, number> = Object.fromEntries(roles.map((r) => [r.role, r.n]));
-  for (const k of kinds) {
-    const role = CHORE_KIND_DEFS[k.kind].role;
-    openPerRole[role] = (openPerRole[role] ?? 0) + k.n;
+  const openPerRole: Record<string, number> = {};
+  const count = (role: string | undefined): void => {
+    if (role !== undefined) openPerRole[role] = (openPerRole[role] ?? 0) + 1;
+  };
+  for (const a of open) {
+    if (a.objective_type === "task") count(roleOf.get(a.objective_id));
+    else if (a.objective_type === "chore") {
+      const kind = kindOfChore.get(a.objective_id);
+      count(kind === undefined ? undefined : CHORE_KIND_DEFS[kind].role);
+    }
   }
 
   return {
-    held: scopes.flatMap((r) => (JSON.parse(r.scope) as Scope).write),
+    held: open.flatMap((a) => (JSON.parse(a.scope) as Scope).write),
     openPerRole,
     capPerRole,
     freePerRole: freeWorkers(db),
@@ -141,17 +180,15 @@ export function currentLoad(db: DatabaseSync, capPerRole: Readonly<Record<string
 }
 
 /** Workers with nothing open, per role. One definition of *free*: holding no assignment in
- *  a phase that has not ended. */
+ *  a phase that has not ended. A role with nobody free is absent rather than zero, as the
+ *  grouped count it replaces was — every reader treats a missing role as none. */
 export function freeWorkers(db: DatabaseSync): Readonly<Record<string, number>> {
-  const rows = db
-    .prepare(
-      `SELECT w.role AS role, count(*) AS n FROM worker w
-        WHERE NOT EXISTS (SELECT 1 FROM assignment a
-                           WHERE a.worker_id = w.id AND a.phase IN ('pending','running','waiting'))
-        GROUP BY w.role`,
-    )
-    .all() as unknown as { role: string; n: number }[];
-  return Object.fromEntries(rows.map((r) => [r.role, r.n]));
+  const busy = new Set(openAssignments(db).map((a) => a.worker_id));
+  const free: Record<string, number> = {};
+  for (const w of queries(db).selectFrom(worker).all()) {
+    if (!busy.has(w.id)) free[w.role] = (free[w.role] ?? 0) + 1;
+  }
+  return free;
 }
 
 /** Who could run, and the reason for each one who could not. Pure: the caller supplies
