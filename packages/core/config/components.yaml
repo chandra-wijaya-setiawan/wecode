@@ -126,6 +126,13 @@ components:
     owns: every verb, as a command. The only way an agent reaches wecode
     modules: [bin, delivered, doctor, index, plan, run]
 
+  repo-explorer:
+    package: explorer
+    layer: service
+    component: true
+    owns: the questions wecode asks about a repository — what a file defines and exports, what it imports, who references a symbol, and the evidence of what a module is for. The index behind it is an adapter, replaceable without a caller noticing
+    modules: [index]
+
   tui:
     package: tui
     layer: client
