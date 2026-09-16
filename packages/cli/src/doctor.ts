@@ -18,10 +18,10 @@ import {
  *  import in the cli that needs the dialect names the module it lives in. */
 import { excluded, queries, table, type Dialect } from "@wecode/core/dist/db.js";
 
-/** The columns the doctor reads, and only those. Declared per table rather than spelled as
- *  `SELECT id, slug, state, ${fk} AS parent_id` over a table name held in a string: the old
- *  shape put an identifier the compiler never saw into the SQL text, and `typed-doctor.test.ts`
- *  holds each list below against `PRAGMA table_info`. */
+/** The columns the doctor reads, and only those. Declared per table rather than built by
+ *  interpolating a table name and a foreign-key name into a query string, which is what the
+ *  old shape did: it put an identifier the compiler never saw into the statement it ran.
+ *  `typed-doctor.test.ts` holds each list below against `PRAGMA table_info`. */
 interface Named {
   id: number;
   slug: string;
@@ -139,9 +139,10 @@ const hasTable = (db: DatabaseSync, name: string): boolean =>
     .all()
     .some((r) => r.type === "table" || r.type === "view");
 
-/** The story each task sits under: the four-table join, held as three Maps and walked in
- *  TypeScript, because the dialect spells no JOIN. A task whose chain is broken is absent
- *  from the result, which is what the join did with it too — it dropped the row. */
+/** The story each task sits under: what was one four-table query, held as three Maps and
+ *  walked in TypeScript, because the dialect composes single-table reads only. A task whose
+ *  chain is broken is absent from the result, which is what the old query did with it too —
+ *  it dropped the row. */
 function storiesByTask(q: Dialect): Map<number, number> {
   const ofTest = new Map(q.selectFrom(acceptanceTest).select(["id", "parent_id"]).all().map((r) => [r.id, r.parent_id]));
   const ofCriteria = new Map(
@@ -179,8 +180,8 @@ const byId = <T extends { id: number }>(rows: readonly T[]): readonly T[] => [..
 
 /** One plain object, no live handle: everything the invariants are allowed to see.
  *
- *  Ordered here rather than in SQL — the dialect spells no ORDER BY — and the order is the
- *  one the invariants report in, so it is applied to every table the same way. */
+ *  Sorted here rather than by the database — the dialect has no vocabulary for sorting — and
+ *  the order is the one the invariants report in, so it is applied to every table alike. */
 export function snapshot(db: DatabaseSync): Snapshot {
   const q = queries(db);
   const landed = landedShas(db);

@@ -83,10 +83,13 @@ describe("the doctor module, ported onto the typed layer", () => {
   });
 
   it("leaves no query text either — the only SQL left is the one table it has to create", () => {
-    // The comments still talk about the joins and the ORDER BY that are gone, which is what
-    // they are for; it is the code that must have no SQL left in it.
-    const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-    expect(code.match(/\b(SELECT|INSERT INTO|UPDATE|DELETE FROM|JOIN|GROUP BY|ORDER BY|LIMIT|BEGIN|COMMIT)\b/g)).toBeNull();
+    // Held against the whole file, comments included, rather than against a comment-stripped
+    // copy. A doc comment that quotes the statement it replaced would pass the weaker form
+    // while leaving the query's text in the module for the next reader to copy back out; the
+    // comments here describe the old shape in prose instead, so the strong form is available.
+    expect(
+      source.match(/\b(SELECT|INSERT INTO|UPDATE|DELETE FROM|JOIN|GROUP BY|ORDER BY|LIMIT|BEGIN|COMMIT)\b/g),
+    ).toBeNull();
     // DDL is the exception, and it is one statement: the dialect compiles queries and has no
     // vocabulary for schema, so a table that must exist before it can be written to is
     // created in SQL. Nothing about it is a query, and nothing in it is a value.
