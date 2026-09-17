@@ -33,7 +33,7 @@ components:
     layer: gate
     component: true
     owns: the entities, their state machines as data, and one named guard per constrained transition
-    modules: [types, entities, machines, guards, checks, invariants, land]
+    modules: [types, entities, machines, guards, checks, invariants, land, facade, facade-gen]
 
   views:
     package: core
