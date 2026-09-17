@@ -105,20 +105,44 @@ export class Trees {
    *  task merges, and a slug can be started again after a drop, so "it already exists" is
    *  not the same as "it is cut from the story". Reusing a tip the story has left behind
    *  gives the assignment a tree without its siblings' work in it, and merging that back
-   *  later re-proposes the old base as a change. So: descendant of the story, reuse it;
-   *  behind the story with nothing of its own, move it to the tip; anything else and it
-   *  carries commits — an attempt — that only a person can decide to lose. */
+   *  later re-proposes the old base as a change.
+   *
+   *  So: descendant of the story, reuse it; behind the story with nothing of its own, move
+   *  it to the tip. Diverged — it carries commits the story does not — used to refuse, and
+   *  a refusal here stalls the queue: nothing else can dispatch that task, and the branch
+   *  the operator has to inspect is the one thing the refusal will not name durably. Tagged
+   *  instead. The tip becomes an `attempt/<slug>/<n>` tag, which is a ref, so the commits
+   *  stay reachable and survive the `branch -f` that follows. No attempt is lost and the
+   *  next assignment cuts from the story tip. */
   private async recut(branch: string, story: string): Promise<void> {
     const tip = await git(this.repo, ["rev-parse", `refs/heads/${branch}`]);
     const storyTip = await git(this.repo, ["rev-parse", `refs/heads/${story}`]);
     if (await this.isAncestor(this.repo, storyTip, tip)) return;
-    if (!(await this.isAncestor(this.repo, tip, storyTip))) {
-      throw new GitError(
-        `taskBranch refused ${branch}: its tip ${tip} is not a descendant of ${story} ` +
-          `${storyTip}, and it carries commits ${story} does not — re-cutting it would lose them`,
-      );
-    }
+    if (!(await this.isAncestor(this.repo, tip, storyTip))) await this.tagAttempt(branch, tip);
     await git(this.repo, ["branch", "-f", branch, storyTip]);
+  }
+
+  /** Numbered, never reused: attempt 1 is the first tip that was set aside, and the number
+   *  is the order they were set aside in. Read off the tags that exist rather than counted
+   *  anywhere, because the tags are the only record that outlives the branch. */
+  async tagAttempt(branch: string, sha: string): Promise<string> {
+    const existing = await this.attemptTags(branch);
+    const next =
+      existing.reduce((max, t) => Math.max(max, Number(t.slice(t.lastIndexOf("/") + 1)) || 0), 0) + 1;
+    const tag = `attempt/${branch.replace(/^task\//, "")}/${next}`;
+    await git(this.repo, ["tag", tag, sha]);
+    return tag;
+  }
+
+  /** Every tip set aside for this task branch, oldest first. */
+  async attemptTags(branch: string): Promise<readonly string[]> {
+    const prefix = `attempt/${branch.replace(/^task\//, "")}/`;
+    const out = await git(this.repo, ["tag", "--list", `${prefix}*`]).catch(() => "");
+    return out === ""
+      ? []
+      : out
+          .split("\n")
+          .sort((a, b) => Number(a.slice(prefix.length)) - Number(b.slice(prefix.length)));
   }
 
   /** A fresh tree at the task branch tip. A retry is an agent with no memory; it must not
