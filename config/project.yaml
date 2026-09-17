@@ -13,3 +13,16 @@ tests:
   - test/**
   - tests/**
   - packages/*/test/**
+# Each package's outward surface: the modules whose exports the repository publishes instead
+# of importing. Declared here rather than guessed from a filename, because which module is a
+# package's entry point is a fact about the packaging. The tree half of the doctor exempts
+# these files, and every name they publish, from the unimported-export invariant.
+surface:
+  - packages/core/src/index.ts
+  - packages/explorer/src/index.ts
+  - packages/runner/src/index.ts
+  - packages/runner/src/bin.ts
+  - packages/cli/src/index.ts
+  - packages/cli/src/bin.ts
+  - packages/tui/src/index.ts
+  - packages/tui/src/bin.tsx

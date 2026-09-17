@@ -18,7 +18,7 @@ import {
  *  import in the cli that needs the dialect names the module it lives in. */
 import { excluded, queries, table, type Dialect } from "@wecode/core/dist/db.js";
 import { openCodegraph, type RepoIndex } from "@wecode/explorer";
-import { checkTree } from "./unimported.js";
+import { checkTree, TREE_INVARIANTS } from "./unimported.js";
 
 /** The columns the doctor reads, and only those. Declared per table rather than built by
  *  interpolating a table name and a foreign-key name into a query string, which is what the
@@ -244,12 +244,82 @@ export function doctor(args: readonly string[], open: (root: string) => RepoInde
     db.close();
   }
 
+  // The roll-call is opt-in for the same reason the silence below is the default: the tick
+  // runs this every time and does not need a list of things that held. A person asking
+  // `--checks` is asking the opposite question — not "what is broken" but "what was even
+  // looked at" — so it prints every check, and marks the ones that did not run and why.
+  if (args.includes("--checks")) {
+    const say = (tree: readonly Violation[] | null): void => {
+      process.stdout.write(rollCall(roll(violations, world, tree)));
+    };
+    // With `--tree` the tree half's answer is still in flight, and a roll-call printed
+    // before it landed would have to guess. It waits instead; nothing else here does.
+    if (args.includes("--tree")) examining = examining.then((found) => (say(found), found));
+    else say(null);
+  }
+
   // A record that holds says nothing at all. A doctor that printed "all well" would be
   // noise on every tick of the thing that runs it.
   if (violations.length === 0) return 0;
 
   process.stdout.write(report(violations, world.reachable ? [] : gitAnswered()));
   return 1;
+}
+
+/** A check this pass knows about, and what became of it. `skipped` is the sentence saying
+ *  why it did not run, and null when it did: the two are not the same fact as "found
+ *  nothing", and a roll-call that printed `ok` against a check nobody ran would be the
+ *  silent worst case the report already refuses elsewhere. */
+export interface Reported {
+  readonly name: string;
+  readonly skipped: string | null;
+  /** How many entities it accused. Zero when it ran and held, and zero when it did not run. */
+  readonly found: number;
+}
+
+/** Why a check went unrun. Two reasons only, because there are two halves that can be
+ *  missing: the world the git-answered check asks, and the index the tree half needs. */
+const NO_REPOSITORY = "no repository to ask";
+const TREE_NOT_ASKED = "the tree half was not asked for — --tree";
+
+/** Every check a pass knows, record half and tree half alike, in the order they are run.
+ *
+ *  `tree` is the tree half's violations, or null when that half did not run — null is the
+ *  absence of a pass and not an empty one, which is exactly the distinction being reported. */
+export function roll(
+  record: readonly Violation[],
+  world: World,
+  tree: readonly Violation[] | null,
+): readonly Reported[] {
+  const count = (found: readonly Violation[], name: string): number =>
+    found.filter((v) => v.invariant === name).length;
+  return [
+    ...checksOf().map((c) => ({
+      name: c.name,
+      skipped: c.world && !world.reachable ? NO_REPOSITORY : null,
+      found: count(record, c.name),
+    })),
+    ...TREE_INVARIANTS.map((i) => ({
+      name: i.name,
+      skipped: tree === null ? TREE_NOT_ASKED : null,
+      found: tree === null ? 0 : count(tree, i.name),
+    })),
+  ];
+}
+
+/** The roll-call, said out loud. Every check on its own line, whatever it did — the point
+ *  of the thing is that a check nobody ran is visible, and silence cannot say that. */
+export function rollCall(rows: readonly Reported[]): string {
+  const said = (r: Reported): string =>
+    r.skipped !== null
+      ? `not run — ${r.skipped}`
+      : r.found === 0
+        ? "held"
+        : `broken by ${r.found === 1 ? "1 entity" : `${r.found} entities`}`;
+  const lines = rows.map((r) => `  ${r.name} — ${said(r)}`);
+  const unrun = rows.filter((r) => r.skipped !== null).length;
+  const ran = rows.length - unrun;
+  return [`${rows.length} checks — ${ran} run, ${unrun} not run`, ...lines, "", ""].join("\n");
 }
 
 /** The files whose exports are the repository's outward surface, as `--entry=<path>`, once
