@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { Engine, type Change } from "./apply.js";
+import type { Actor } from "./facade-gen.js";
 import { Verbs } from "./facade.js";
 import type { MachineSet, Refusal } from "./types.js";
 
@@ -44,7 +45,7 @@ function inOuterTransaction(db: DatabaseSync): DatabaseSync {
 export function bulkDrop(
   db: DatabaseSync,
   ids: readonly number[],
-  actor: string,
+  actor: Actor,
   machines?: MachineSet,
 ): BulkOutcome {
   const engine =
