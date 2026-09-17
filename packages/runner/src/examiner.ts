@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
+import { parse } from "yaml";
 import { Engine, now } from "@wecode/core";
 // Core's dialect, by the path core builds it to: it is deliberately not on core's barrel,
 // and reaching it here widens nothing for anybody else. See the same note in doctor.ts.
@@ -42,6 +43,34 @@ export const REFUSED = "refused";
 /** Written where the board reads a run's output, ahead of what the script printed, so a
  *  command that selected nothing is read as a failure with a reason rather than as a pass. */
 export const NO_TEST_MATCHED = "no test matched";
+
+/** Written where the board reads a run's output when the tree could not be made runnable.
+ *  A fresh worktree has no dependencies installed and nothing built, and a suite run in one
+ *  dies on the first import — which is a fact about the tree, never about the work. */
+export const UNPREPARED = "unrunnable: the tree could not be prepared";
+
+/** Where the command that makes a tree runnable is written, relative to the tree it
+ *  prepares. It is the project's own onboarding config, so the person who owns the build
+ *  changes the build without opening a `.ts`, and a tree with no `prepare:` is simply run
+ *  as it stands. */
+export const PROJECT_CONFIG = "config/project.yaml";
+
+/** The command that prepares a tree before anything is proved in it, or null when the tree
+ *  names none. Read off the tree being examined rather than off the runner's own checkout:
+ *  a task_test runs in the attempt's worktree, and it is that worktree that must be built. */
+export function prepareCommandOf(cwd: string): string | null {
+  const path = resolve(cwd, PROJECT_CONFIG);
+  if (!existsSync(path)) return null;
+  try {
+    const raw: unknown = parse(readFileSync(path, "utf8"));
+    const command = (raw as Record<string, unknown> | null)?.["prepare"];
+    return typeof command === "string" && command.trim() !== "" ? command : null;
+  } catch {
+    // An unreadable config is not a build failure. Nothing is prepared and the tests run
+    // as they always did, rather than every test in the tree going unrunnable over a typo.
+    return null;
+  }
+}
 
 /** What each runner prints when its selection came up empty. Exit code says nothing here:
  *  `vitest --passWithNoTests`, `jest --passWithNoTests`, `go test ./...` over a package with
@@ -173,6 +202,10 @@ const SETTLED: readonly string[] = ["done", "dropped"];
  *  and a standing verdict is left alone until one of the three moves. */
 export class Examiner {
   private readonly engine: Engine;
+  /** What preparing each tree came to, by tree and tip. Installing and building is the
+   *  slowest thing this module does and the answer cannot change under an unmoved tip, so
+   *  it is done once and remembered — including when it failed. */
+  private readonly prepared = new Map<string, string | null>();
 
   constructor(
     private readonly db: DatabaseSync,
@@ -257,6 +290,20 @@ export class Examiner {
     const unrunnable: number[] = [];
     const refused: Refused[] = [];
     const tip = await this.tip(cwd);
+    // The tree is made runnable before a word of it is proved. A suite that dies on a
+    // missing dependency exits non-zero exactly as a broken one does, so without this the
+    // first test in a fresh worktree fails for the tree it was handed.
+    const unprepared = await this.readyTree(cwd, tip);
+    if (unprepared !== null) {
+      const at = now();
+      for (const row of rows) {
+        // No verdict, either way: an unbuilt tree proves nothing, so every test is left
+        // exactly as it stands, with the build's own output as the reason.
+        this.stamp(entity, row.id, { last_output: `${UNPREPARED}\n${unprepared}`, updated_at: at });
+        unrunnable.push(row.id);
+      }
+      return { passed, failed, skipped, unrunnable, refused };
+    }
     // Stamped beside every verdict this pass takes: what the test was run against, not just
     // when. A pass that cannot say which sources it proves is a pass nobody can check.
     const provenance = await this.treeSha(cwd);
@@ -311,6 +358,24 @@ export class Examiner {
     }
 
     return { passed, failed, skipped, unrunnable, refused };
+  }
+
+  /** Makes a tree runnable, and answers with why it could not be — null when it is ready,
+   *  whether that took a build or no command at all.
+   *
+   *  Not named for what it does, because `typed-runner-doctor` reads every runner module
+   *  for a bare `prepare(` and means `db.prepare` by it. One name here is the cheaper of
+   *  the two costs. */
+  private async readyTree(cwd: string, tip: string | null): Promise<string | null> {
+    const command = prepareCommandOf(cwd);
+    if (command === null) return null;
+    const key = `${cwd}|${tip ?? ""}|${command}`;
+    const seen = this.prepared.get(key);
+    if (seen !== undefined) return seen;
+    const out = await this.runOne(command, cwd);
+    const why = out.ok ? null : out.output.slice(-8000);
+    this.prepared.set(key, why);
+    return why;
   }
 
   /** True when this test already has a verdict reached against this exact fingerprint.
