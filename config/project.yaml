@@ -1,5 +1,10 @@
 stack: pnpm
-test: pnpm install && pnpm -r build && pnpm typecheck && pnpm exec vitest run
+# What makes a fresh worktree runnable. Every attempt is cut as a new worktree, which has no
+# node_modules and no dist, so a suite run in one dies on its first import. The examiner runs
+# this once per tree per tip, before it proves anything, which is why `test` no longer carries
+# it: install and build are named here, once.
+prepare: pnpm install && pnpm -r build
+test: pnpm typecheck && pnpm exec vitest run
 typecheck: pnpm typecheck
 source:
   - src/**
