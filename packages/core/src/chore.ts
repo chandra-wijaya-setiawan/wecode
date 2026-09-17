@@ -94,17 +94,28 @@ export const CHORE_MACHINE: Machine = {
   ],
 };
 
+/** Every verb the chore machine has, declared beside it. `facade.ts` is generated from
+ *  machines.yaml and chore is not in there (see CHORE_MACHINE above), so chore carries its
+ *  own typed surface — `ChoreVerbs` below — and this is the list both are held against.
+ *  `chore-verbs-cover-the-machine` in the facade test fails if a transition is added here
+ *  and not there. */
+export const CHORE_VERBS = ["start", "begin", "finish", "fail", "retry", "reprove", "close"] as const;
+export type ChoreVerb = (typeof CHORE_VERBS)[number];
+
+/** The one verb a guard in this module names, spelled as the machine spells it. */
+const START: ChoreVerb = "start";
+
 /** The edge back. `retry` is a person's — it puts a failed chore straight in the queue.
  *  `reprove` is wecode's: it returns the chore to `planned`, where a raised chore starts,
  *  so a kind that waits for approval waits for it again rather than inheriting the go that
  *  was given to the attempt that failed. */
-export const REPROVE = "reprove";
+export const REPROVE: ChoreVerb = "reprove";
 
 /** The edge out, and wecode's alone: the condition the chore was raised for is no longer
  *  true, so the chore is over whether or not anybody ever performed it. `running` is left
  *  out on purpose — a worker is in a tree on it, and `finish` or `fail` is that attempt's
  *  to say. */
-export const CLOSE = "close";
+export const CLOSE: ChoreVerb = "close";
 
 export interface Chore {
   readonly id: number;
@@ -401,7 +412,7 @@ export function applyChore(db: DatabaseSync, id: number, verb: string, actor: st
 
   // The one guard a chore has. A chore nobody approved is not a chore nobody may see: it
   // sits on the board in `planned`, saying what it is waiting for.
-  if (verb === "start" && CHORE_KIND_DEFS[row.kind].needs_approval && row.approved_at === null) {
+  if (verb === START && CHORE_KIND_DEFS[row.kind].needs_approval && row.approved_at === null) {
     return { ok: false, why: `a ${row.kind} chore needs approval before it starts` };
   }
 
@@ -420,6 +431,52 @@ export function applyChore(db: DatabaseSync, id: number, verb: string, actor: st
     }).run();
   });
   return { ok: true, from, to: transition.to };
+}
+
+/** Chore's own typed facade: one method per verb the chore machine has.
+ *
+ *  `applyChore` still takes a string, because a caller that reads a verb off a board or a
+ *  command line has a string and nothing better; these are for the callers that know which
+ *  verb they mean, and they mean it in the compiler's hearing. It adds no behaviour — every
+ *  method is the same `applyChore`, so the same guard refuses it and the same ledger row is
+ *  written. */
+export class ChoreVerbs {
+  constructor(private readonly db: DatabaseSync) {}
+
+  /** chore: planned → ready */
+  start(id: number, actor: string): ChoreOutcome {
+    return applyChore(this.db, id, START, actor);
+  }
+
+  /** chore: ready → running */
+  begin(id: number, actor: string): ChoreOutcome {
+    return applyChore(this.db, id, "begin", actor);
+  }
+
+  /** chore: running → done */
+  finish(id: number, actor: string): ChoreOutcome {
+    return applyChore(this.db, id, "finish", actor);
+  }
+
+  /** chore: running → failed */
+  fail(id: number, actor: string): ChoreOutcome {
+    return applyChore(this.db, id, "fail", actor);
+  }
+
+  /** chore: failed → ready */
+  retry(id: number, actor: string): ChoreOutcome {
+    return applyChore(this.db, id, "retry", actor);
+  }
+
+  /** chore: failed, done → planned */
+  reprove(id: number, actor: string): ChoreOutcome {
+    return applyChore(this.db, id, REPROVE, actor);
+  }
+
+  /** chore: planned, ready, failed → done */
+  close(id: number, actor: string): ChoreOutcome {
+    return applyChore(this.db, id, CLOSE, actor);
+  }
 }
 
 export interface ChoreAttempts {
@@ -462,7 +519,7 @@ export function reraiseChore(db: DatabaseSync, id: number, by = "runner"): Chore
   if (tries !== null && tries.attempts >= tries.max_retry) {
     return { ok: false, why: outOfAttempts(tries) };
   }
-  const out = applyChore(db, id, REPROVE, by);
+  const out = new ChoreVerbs(db).reprove(id, by);
   // Whatever was last said about why this chore was not being handed out is about a world
   // that has moved on. The reason it is back is the ledger row this just wrote.
   if (out.ok) clearChoreRefusal(db, id);
@@ -485,7 +542,7 @@ export function reraiseChore(db: DatabaseSync, id: number, by = "runner"): Chore
 export function closeChore(db: DatabaseSync, id: number, why: string, by = "runner"): ChoreOutcome {
   if (choreById(db, id) === null) return { ok: false, why: `no chore #${id}` };
 
-  const out = applyChore(db, id, CLOSE, by);
+  const out = new ChoreVerbs(db).close(id, by);
   // Unguarded on purpose: this is not "passed over", it is the epitaph, and it has to stand
   // even when an assignment is still open on the chore. See `writeChoreRefusal`.
   if (out.ok) writeChoreRefusal(db, why, id);

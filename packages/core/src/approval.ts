@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { Engine } from "./apply.js";
 import { Maker } from "./create.js";
+import { Verbs } from "./facade.js";
 import { queries, table } from "./db.js";
 import type { ObjectiveType } from "./entities.js";
 import { transact } from "./store.js";
@@ -180,7 +181,7 @@ export function raiseApproval(db: DatabaseSync, spec: ApprovalSpec, engine: Engi
       .where("id", "=", id)
       .run();
 
-    const raised = engine.apply("assignment", id, "raise", "wecode");
+    const raised = new Verbs(engine).raiseAssignment(id, "wecode");
     if (!raised.ok) throw new ApprovalError(`approval #${id} could not be raised: ${raised.why}`);
 
     const row = rowOf(db, id);
@@ -222,9 +223,15 @@ export function answerApproval(db: DatabaseSync, id: number, answer: string, by:
   return transact(db, () => {
     queries(db).update(assignments).set({ answer, answered_by: by }).where("id", "=", id).run();
 
-    for (const verb of ["answer", "finish"] as const) {
-      const moved = engine.apply("assignment", id, verb, by);
-      if (!moved.ok) throw new ApprovalError(`approval #${id} could not be ${verb}ed: ${moved.why}`);
+    // Two facade methods rather than a loop over two verb strings: the pair is the whole of
+    // what this transaction asks of the machine, and each name is checked where it is read.
+    const verbs = new Verbs(engine);
+    for (const step of [
+      { said: "answered", move: () => verbs.answerAssignment(id, by) },
+      { said: "finished", move: () => verbs.finishAssignment(id, by) },
+    ]) {
+      const moved = step.move();
+      if (!moved.ok) throw new ApprovalError(`approval #${id} could not be ${step.said}: ${moved.why}`);
     }
 
     const after = rowOf(db, id);
