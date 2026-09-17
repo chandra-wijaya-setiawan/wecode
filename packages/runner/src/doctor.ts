@@ -1,6 +1,7 @@
 import {
   INVARIANTS,
   keepUnlanded,
+  noWorkerFree,
   now,
   REACHED_INSIDE_ANOTHER_MERGE,
   storyBranch,
@@ -35,6 +36,46 @@ export interface Invariant {
   readonly name: string;
   readonly check: (s: Snapshot) => readonly Violation[];
 }
+
+/** A ready task no pass can dispatch, and the refusal that explains it.
+ *
+ *  The allocator refuses a task it cannot place with `no worker free for role <role>`, and
+ *  clears that reason on the next tick. When the workforce holds nobody of the role at all
+ *  the sentence is true again every pass and for ever: the task sits `ready` for ever,
+ *  refused for ever, and the refusal reads like a queue rather than a stop. `system` is the
+ *  live case — `config/roles.yaml` declares the role and no worker holds it.
+ *
+ *  Pure over the snapshot, because the record already says both halves: the task's role, and
+ *  every worker's. So this is an invariant like any other. It is the runner's rather than
+ *  core's only because core's set is what `wecode doctor` and the tick share verbatim, and
+ *  the parity of those two is checked against that set exactly. */
+export const READY_TASK_CHECK = "ready_task_can_be_dispatched";
+
+export const readyTaskCanBeDispatched: Invariant = {
+  name: READY_TASK_CHECK,
+  check: (s: Snapshot): readonly Violation[] => {
+    const staffed = new Set(s.workers.map((w) => w.role));
+    return s.nodes
+      .filter((n) => n.entity === "task" && n.state === "ready" && !staffed.has(n.role ?? ""))
+      .map((n) => ({
+        invariant: READY_TASK_CHECK,
+        entity: n.entity,
+        id: n.id,
+        slug: n.slug,
+        // The allocator's own words, so the report and the board say the same thing, and
+        // then the part the allocator cannot know: nothing about the next pass is different.
+        detail:
+          `ready, and every pass refuses it — ${noWorkerFree(n.role ?? "")}, and no worker ` +
+          `holds role ${n.role || "(none)"} at all: hire one, or give the task a role somebody holds`,
+      }));
+  },
+};
+
+/** The set the tick runs: core's, plus the checks that are the runner's own.
+ *
+ *  `runChecks` and `checksOf` still default to core's set, which is the one the command and
+ *  the tick are held to agreeing on. A caller that passes its own set gets exactly it. */
+export const RUNNER_INVARIANTS: readonly Invariant[] = [...INVARIANTS, readyTaskCanBeDispatched];
 
 /** The columns this module reads, and only those. A narrow declaration is not a second copy
  *  of the schema: it is the ask, and `typed-runner-doctor.test.ts` holds each list against
@@ -276,9 +317,10 @@ export function snapshot(db: DatabaseSync): Snapshot {
 export class Doctor {
   constructor(
     private readonly db: DatabaseSync,
-    /** Defaults to core's set. A caller passes its own only to test the boundary itself:
-     *  the point being proven is that one bad check cannot take the tick with it. */
-    private readonly invariants: readonly Invariant[] = INVARIANTS,
+    /** Defaults to the tick's set: core's, plus the runner's own. A caller passes its own
+     *  only to test the boundary itself: the point being proven is that one bad check
+     *  cannot take the tick with it. */
+    private readonly invariants: readonly Invariant[] = RUNNER_INVARIANTS,
     /** How the ancestry question gets asked. The runner is the half that may read the
      *  world, so `delivered_story_has_landed` is only ever reported here after git has
      *  been asked whether the branch is in the base. */
