@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { Engine, type Change } from "./apply.js";
+import { Verbs } from "./facade.js";
 import type { MachineSet, Refusal } from "./types.js";
 
 export type BulkOutcome =
@@ -31,10 +32,15 @@ function inOuterTransaction(db: DatabaseSync): DatabaseSync {
 
 /** Drop every task in `ids`, or none of them.
  *
- *  Each id goes through the engine's drop verb one at a time, so every guard and every
+ *  Each id goes through the facade's drop verb one at a time, so every guard and every
  *  cascade runs exactly as it would for a single drop — this writes no state itself. The
  *  whole list shares one transaction: if any id refuses, nothing is written and the
- *  refusals come back verbatim, because a half-applied bulk action is worse than none. */
+ *  refusals come back verbatim, because a half-applied bulk action is worse than none.
+ *
+ *  `dropTask` rather than `apply("task", id, "drop")`: the entity and the verb are the two
+ *  things this module must not get wrong, and spelled as a method the compiler holds them.
+ *  The asking half stays on `engine.may` — the facade offers verbs to invoke, not questions,
+ *  and a bulk that is already refusing only wants to know. */
 export function bulkDrop(
   db: DatabaseSync,
   ids: readonly number[],
@@ -45,6 +51,7 @@ export function bulkDrop(
     machines === undefined
       ? new Engine(inOuterTransaction(db))
       : new Engine(inOuterTransaction(db), machines);
+  const verbs = new Verbs(engine);
 
   const changes: Change[] = [];
   const refusals: Refusal[] = [];
@@ -54,7 +61,7 @@ export function bulkDrop(
     for (const id of ids) {
       // Once one id has refused nothing will be written, so the rest are asked rather than
       // applied: the caller still learns every offender, not just the first.
-      const r = refusals.length === 0 ? engine.apply("task", id, "drop", actor) : engine.may("task", id, "drop");
+      const r = refusals.length === 0 ? verbs.dropTask(id, actor) : engine.may("task", id, "drop");
       if (r.ok) changes.push(...r.changes);
       else refusals.push({ id, why: r.why });
     }
