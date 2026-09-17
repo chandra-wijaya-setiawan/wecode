@@ -13,6 +13,11 @@ function module(files: Record<string, string>): string {
   return join(dir, first as string);
 }
 
+/** Every case here builds a ts-morph project, which costs about a second on a quiet machine
+ *  and the best part of five on a busy one — close enough to vitest's 5s default to fail for
+ *  load rather than for the code. Ten seconds is roughly ten times the measured cost. */
+const TIMEOUT = 10_000;
+
 const kinds = (exports: ExportedSymbol[]): Record<string, string> =>
   Object.fromEntries(exports.map((e) => [e.name, e.kind]));
 
@@ -39,22 +44,22 @@ describe("readExports", () => {
       value: "variable",
       Space: "namespace",
     });
-  });
+  }, TIMEOUT);
 
   it("leaves what is not exported out", () => {
     const file = module({ "a.ts": `const hidden = 1; export const shown = 2;` });
     expect(readExports(file)).toEqual([{ name: "shown", kind: "variable" }]);
-  });
+  }, TIMEOUT);
 
   it("reports an export list under the name it is exported by, with the kind of the declaration", () => {
     const file = module({ "a.ts": `function impl() {} export { impl as renamed };` });
     expect(readExports(file)).toEqual([{ name: "renamed", kind: "function" }]);
-  });
+  }, TIMEOUT);
 
   it("calls a default export `default`", () => {
     const file = module({ "a.ts": `export default class Thing {}` });
     expect(readExports(file)).toEqual([{ name: "default", kind: "class" }]);
-  });
+  }, TIMEOUT);
 
   it("follows a star re-export to the kinds in the other file", () => {
     const file = module({
@@ -67,25 +72,25 @@ describe("readExports", () => {
       borrowed: "function",
       Shape: "interface",
     });
-  });
+  }, TIMEOUT);
 
   it("calls an arrow held in a const a variable, because that is the declaration", () => {
     const file = module({ "a.ts": `export const go = () => 1;` });
     expect(readExports(file)).toEqual([{ name: "go", kind: "variable" }]);
-  });
+  }, TIMEOUT);
 
   it("sorts by name, so two reads of the same file agree", () => {
     const file = module({ "a.ts": `export const b = 1; export const a = 2; export const c = 3;` });
     expect(readExports(file).map((e) => e.name)).toEqual(["a", "b", "c"]);
-  });
+  }, TIMEOUT);
 
   it("has nothing to report for a script with no exports, and for a file that is not there", () => {
     expect(readExports(module({ "a.ts": `const x = 1;` }))).toEqual([]);
     expect(readExports(join(tmp("wecode-ast-"), "missing.ts"))).toEqual([]);
-  });
+  }, TIMEOUT);
 
   it("refuses a file that does not parse rather than reporting the exports it can see", () => {
     const file = module({ "a.ts": `export const good = 1;\nfunction broken( {` });
     expect(() => readExports(file)).toThrow(/does not parse/);
-  });
+  }, TIMEOUT);
 });
