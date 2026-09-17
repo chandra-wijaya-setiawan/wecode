@@ -6,6 +6,7 @@ import { parseArgs } from "node:util";
 import {
   Engine,
   Maker,
+  OPERATOR,
   currentDatabase,
   loadRoles,
   open,
@@ -834,17 +835,17 @@ function create(db: DatabaseSync, top: Level, parent: number): Made {
  *  a refusal at runtime. One method per rung says the same thing where the compiler can see
  *  it, in the shape `READ` above already uses for the same reason. */
 const START: Record<Root | "requirement" | "acceptance_criteria" | "task", (v: Verbs, id: number) => Outcome> = {
-  release: (v, id) => v.startRelease(id, "operator"),
-  epic: (v, id) => v.startEpic(id, "operator"),
-  story: (v, id) => v.startStory(id, "operator"),
-  requirement: (v, id) => v.startRequirement(id, "operator"),
-  acceptance_criteria: (v, id) => v.startAcceptanceCriteria(id, "operator"),
-  task: (v, id) => v.startTask(id, "operator"),
+  release: (v, id) => v.startRelease(id, OPERATOR),
+  epic: (v, id) => v.startEpic(id, OPERATOR),
+  story: (v, id) => v.startStory(id, OPERATOR),
+  requirement: (v, id) => v.startRequirement(id, OPERATOR),
+  acceptance_criteria: (v, id) => v.startAcceptanceCriteria(id, OPERATOR),
+  task: (v, id) => v.startTask(id, OPERATOR),
 };
 
 const DELIVER: Record<"acceptance_test" | "task_test", (v: Verbs, id: number) => Outcome> = {
-  acceptance_test: (v, id) => v.deliverAcceptanceTest(id, "operator"),
-  task_test: (v, id) => v.deliverTaskTest(id, "operator"),
+  acceptance_test: (v, id) => v.deliverAcceptanceTest(id, OPERATOR),
+  task_test: (v, id) => v.deliverTaskTest(id, OPERATOR),
 };
 
 /** Delivers each test whose artefact resolves, and starts everything it created. A chain
