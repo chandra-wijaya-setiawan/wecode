@@ -30,8 +30,33 @@ export interface Tree {
   readonly files: readonly string[];
   /** The files whose exports are the repository's outward surface — a package entry point,
    *  a binary. Nothing inside the tree imports them by name and that is not drift, so they
-   *  are named rather than guessed at from a filename. */
+   *  are named rather than guessed at from a filename. Declared in `config/project.yaml`
+   *  and read by `declaredSurface` below. */
   readonly surface: ReadonlySet<string>;
+}
+
+/** The surface, as `config/project.yaml` declares it.
+ *
+ *  Configuration rather than code because the surface is data about the packaging, owned by
+ *  whoever decides what each package publishes — a list in a `.ts` would make them open a
+ *  module to add an entry point, and at handover they will not.
+ *
+ *  Read by hand rather than through a yaml parser: the cli package depends on core and the
+ *  explorer and on nothing else, and a flat sequence of scalars under one key is the whole
+ *  grammar this needs. A key nowhere in the file yields an empty surface, which reports the
+ *  entry points rather than hiding drift. */
+export function declaredSurface(config: string, key = "surface"): ReadonlySet<string> {
+  const lines = config.split("\n");
+  const at = lines.findIndex((l) => l.trimEnd() === `${key}:`);
+  if (at === -1) return new Set();
+  const files = new Set<string>();
+  for (const line of lines.slice(at + 1)) {
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    const item = /^\s+-\s*(\S+)\s*$/.exec(line);
+    if (item === null) break;
+    files.add((item[1] ?? "").replace(/^["']|["']$/g, ""));
+  }
+  return files;
 }
 
 /** Who brings a name in. Two facts, because a whole-module import takes everything and has
@@ -40,6 +65,9 @@ export interface Tree {
 interface Brought {
   readonly byName: ReadonlyMap<string, ReadonlySet<string>>;
   readonly whole: ReadonlySet<string>;
+  /** Who reaches whom: a file, and the files it resolves an import to. The import graph,
+   *  kept from the same pass, so reachability costs no extra question of the port. */
+  readonly edges: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 /** Every export nothing imports, sorted by file and then by name.
@@ -52,6 +80,13 @@ interface Brought {
  *  that looked unused — which is the only place this check is allowed to be wrong. */
 export async function unimportedExports(tree: Tree): Promise<readonly Violation[]> {
   const brought = await broughtIn(tree);
+  // A name the surface publishes, declared in a file the surface reaches, is reachable from
+  // the declaration and so is not drift — whether the re-export chain that carries it out
+  // looks like an import to the index or not. Both halves are needed: the name alone would
+  // acquit any namesake anywhere in the tree, and reachability alone would acquit every
+  // internal helper behind an entry point.
+  const surfaced = await published(tree);
+  const reachable = reachedBy(tree.surface, brought.edges);
   const found: Violation[] = [];
   for (const file of [...tree.files].sort()) {
     if (tree.surface.has(file) || brought.whole.has(file)) continue;
@@ -59,6 +94,7 @@ export async function unimportedExports(tree: Tree): Promise<readonly Violation[
     const taken = brought.byName.get(file) ?? new Set<string>();
     for (const name of [...offered].sort()) {
       if (taken.has(name)) continue;
+      if (surfaced.has(name) && reachable.has(file)) continue;
       if (await referencedElsewhere(tree.index, file, name)) continue;
       found.push({
         invariant: UNIMPORTED_EXPORT,
@@ -78,12 +114,16 @@ export async function unimportedExports(tree: Tree): Promise<readonly Violation[
 async function broughtIn(tree: Tree): Promise<Brought> {
   const byName = new Map<string, Set<string>>();
   const whole = new Set<string>();
+  const edges = new Map<string, Set<string>>();
   for (const file of tree.files) {
     const reading = await held(tree.index, file);
     if (reading === null) continue;
     for (const i of reading.imports) {
       const target = i.resolved;
       if (target === null || target === file) continue;
+      const out = edges.get(file) ?? new Set<string>();
+      out.add(target);
+      edges.set(file, out);
       if (takesEverything(i)) {
         whole.add(target);
         continue;
@@ -93,7 +133,29 @@ async function broughtIn(tree: Tree): Promise<Brought> {
       byName.set(target, named);
     }
   }
-  return { byName, whole };
+  return { byName, whole, edges };
+}
+
+/** Every file the declared surface reaches, the surface included. A module the surface never
+ *  reaches, however it was reached otherwise, is not behind an entry point. */
+function reachedBy(surface: ReadonlySet<string>, edges: ReadonlyMap<string, ReadonlySet<string>>): Set<string> {
+  const seen = new Set<string>();
+  const queue = [...surface];
+  while (queue.length > 0) {
+    const file = queue.shift() as string;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    queue.push(...(edges.get(file) ?? []));
+  }
+  return seen;
+}
+
+/** Every name the declared surface offers, its re-exports included — what the repository
+ *  publishes. A name here is answered for by the declaration, wherever it is declared. */
+async function published(tree: Tree): Promise<Set<string>> {
+  const names = new Set<string>();
+  for (const file of tree.surface) for (const name of await offers(tree.index, file)) names.add(name);
+  return names;
 }
 
 /** A namespace or star import names no export, so every export of the module it reached is
