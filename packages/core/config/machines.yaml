@@ -108,6 +108,10 @@ assignment:
   terminal: [succeeded, failed]
   transitions:
     - { verb: start,  from: [pending],                    to: running }
+    # An approval is raised for a person, so it never runs: nobody is working, and the
+    # question is the whole assignment. `ask` cannot serve — it presumes an agent got to
+    # `running` first.
+    - { verb: raise,  from: [pending],                    to: waiting }
     - { verb: ask,    from: [running],                    to: waiting }
     - { verb: answer, from: [waiting],                    to: running, guard: answer_is_permitted }
     - { verb: finish, from: [running],                    to: succeeded }
