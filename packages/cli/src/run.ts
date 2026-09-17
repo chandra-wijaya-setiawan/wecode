@@ -2,6 +2,10 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+// The landing rules are a module of their own in core, deliberately outside the barrel: no
+// git, no clock, no filesystem, so the command half and the runner half can be held to the
+// same words. Addressed through the package's build output, the way its barrel is.
+import { type BaseState, refuseDirtyBase, reportAbort, reportLeftover } from "@wecode/core/dist/land.js";
 import {
   board,
   Engine,
@@ -553,13 +557,11 @@ function land(args: readonly string[]): number {
 
   let sha: string;
   try {
-    // Tracked changes only. An untracked file does not affect a merge, and git refuses on
-    // its own if one would be overwritten — refusing here as well blocked a landing over
-    // wecode's own config directory.
-    const dirty = execFileSync("git", ["status", "--porcelain", "-uno"], { encoding: "utf8" }).trim();
-    if (dirty !== "") {
-      return fail(`your working tree has changes. Commit or stash them first:\n${dirty}`);
-    }
+    // A dirty base is refused by name, not by a general "your tree has changes": the merge
+    // would commit the operator's unrelated edits inside the landing commit, and the rule
+    // that says so lives in core so the runner half can be held to the same words.
+    const filthy = refuseDirtyBase(baseState(base));
+    if (filthy !== null) return fail(filthy);
     // A delivered story whose branch is gone has nothing to merge, and calling that a
     // landing is the reported defect. It is a failure, not a quiet success: the work is
     // somewhere else, or nowhere.
@@ -585,11 +587,7 @@ function land(args: readonly string[]): number {
       const why = conflicted.length > 0
         ? `${branch} conflicts with your branch in:\n${conflicted.map((f) => `  ${f}`).join("\n")}`
         : `${branch} would not merge:\n${((err as { stderr?: string }).stderr ?? (err as Error).message).trim()}`;
-      return fail(
-        `${why}\n` +
-          "  the merge was aborted, so your tree is as you left it and the story has not landed.\n" +
-          `  the story needs a merge chore: rebase or merge your branch into ${branch}, redeliver, then land again.`,
-      );
+      return fail(`${why}\n${reportAbort(baseState(base), branch)}`);
     }
     sha = headSha();
     if (sha === before) {
@@ -602,7 +600,27 @@ function land(args: readonly string[]): number {
 
   recordLanding(conn, id, branch, sha);
   process.stdout.write(`${branch} landed on ${base}: ${sha.slice(0, 12)}\n`);
-  return 0;
+  // The landing is recorded either way — it happened — but a base left dirty by the merge
+  // (a hook that writes, a merge driver that stages) is the next operator's mystery, so it
+  // is said out loud and the command does not report success.
+  const left = reportLeftover(baseState(base));
+  return left === null ? 0 : fail(`${branch} landed, but the base was not left clean.\n${left}`);
+}
+
+/** The base checkout as the rule in core wants to see it. Read twice per landing: once
+ *  before the merge and once after, because the whole promise is about the difference. */
+function baseState(base: string): BaseState {
+  const here = gitSay(["rev-parse", "--show-toplevel"]);
+  const gitDir = gitSay(["rev-parse", "--git-dir"]);
+  return {
+    here,
+    base,
+    // Tracked changes only. An untracked file does not affect a merge, and git refuses on
+    // its own if one would be overwritten — counting them here blocked a landing over
+    // wecode's own config directory.
+    dirty: gitSay(["status", "--porcelain", "-uno"]).split("\n").filter((l) => l !== ""),
+    merging: gitDir !== "" && existsSync(join(gitDir, "MERGE_HEAD")),
+  };
 }
 
 /** Why nothing happened. Same two reasons, and the same words, as the runner's own
