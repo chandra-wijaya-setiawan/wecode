@@ -2,6 +2,7 @@ import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Budget } from "@wecode/core";
+import { DEFAULT_BUDGET, THINKING_TOKENS, type Effort } from "../budget.js";
 import type { Observation, WorkerAdapter, Work } from "../ports.js";
 import { denialsIn, type WriteDenials } from "./denials.js";
 
@@ -24,6 +25,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
      *  so the choice is always this adapter's or the assignment's — never whatever the
      *  harness would have inferred from the machine it woke up on. */
     private readonly model = DEFAULT_MODEL,
+    /** How hard the worker is told to think. Stated on every spawn for the same reason the
+     *  model is: an effort nobody named is the machine's, and then the attempt's outcome
+     *  says nothing about the work. */
+    private readonly effort: Effort = DEFAULT_BUDGET.effort,
   ) {}
 
   /** Sessions this adapter has started and not yet seen finish. The runner is one long
@@ -110,7 +115,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
     }
     if (work.session === null) return;
     await new Promise<void>((resolve) => {
-      const p = spawnProcess(this.bin, ["stop", work.session as string], { stdio: "ignore" });
+      const p = spawnProcess(this.bin, ["stop", work.session as string], {
+        stdio: "ignore",
+        env: environmentFor(work, this.effort),
+      });
       p.on("close", () => resolve());
       p.on("error", () => resolve());
     });
@@ -190,6 +198,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
     const child = spawnProcess(this.bin, ["--model", work.model ?? this.model, ...args], {
       cwd: work.worktree,
       stdio: ["ignore", "pipe", "pipe"],
+      env: environmentFor(work, this.effort),
     });
     const session: Session = { child, id: work.session, spent: zero(), ended: null, last: "" };
     this.live.set(work.id, session);
@@ -276,6 +285,60 @@ const zero = (): Budget => ({ tokens: 0, seconds: 0 });
  *  needs core, so until it exists this constant is the declared fallback — explicit, in
  *  one place, and not the environment's. */
 export const DEFAULT_MODEL = "claude-opus-5";
+
+/** The only variables a worker inherits from whatever started the runner.
+ *
+ *  Everything else the child would have got by default — a settings path, a model, a
+ *  thinking budget, a half-finished login, an editor, a repo's own tooling switches — is
+ *  the daemon's shell leaking into the attempt, and the reason one assignment behaved
+ *  differently on two machines. A name here is a claim that the harness cannot start
+ *  without it (reaching the API, or finding a binary); the rest is built below. */
+export const INHERITED: readonly string[] = [
+  // Finding and running the harness at all.
+  "PATH",
+  "HOME",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+  // Reaching Anthropic: credentials, endpoint, and the network in between.
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "NODE_EXTRA_CA_CERTS",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+];
+
+/** The environment one session is given, built rather than inherited.
+ *
+ *  Exported because it is the claim the test reads: what is in it, and — the part that
+ *  matters — that nothing else is. */
+export function environmentFor(
+  work: Work,
+  effort: Effort,
+  ambient: Readonly<Record<string, string | undefined>> = process.env,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of INHERITED) {
+    const value = ambient[name];
+    if (value !== undefined) env[name] = value;
+  }
+  // Stated, not inherited: how hard to think, and which assignment is thinking. The second
+  // is what makes a stray process on the machine attributable to a row in the record.
+  env["MAX_THINKING_TOKENS"] = String(THINKING_TOKENS[effort]);
+  env["WECODE_ASSIGNMENT"] = String(work.id);
+  env["WECODE_WORKTREE"] = work.worktree;
+  return env;
+}
 
 /** The asking half of a lesson. One line, because a lesson that needs a paragraph is a
  *  design document — see docs/design/17. */
