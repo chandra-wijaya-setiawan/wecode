@@ -81,8 +81,15 @@ components:
     package: runner
     layer: service
     component: true
-    owns: takes an assignment and makes it real — the session, the tree it runs in, and what the last attempt left
-    modules: [foreman, git, ports]
+    owns: takes an assignment and makes it real — the session it runs in, and what the last attempt left
+    modules: [foreman, ports]
+
+  trees:
+    package: runner
+    layer: service
+    component: true
+    owns: every branch and every worktree — cutting one, moving one, merging one into another, and taking one away. The only module in the runner that changes a ref or a checkout
+    modules: [git]
 
   examiner:
     package: runner
