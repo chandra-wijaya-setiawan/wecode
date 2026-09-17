@@ -6,7 +6,15 @@ import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 import { INVARIANTS, Maker, open, type Snapshot, type Violation } from "@wecode/core";
 import { DEFAULT_BUDGET, Runner, type RunnerOptions } from "../src/index.js";
-import { Doctor, violations, type Invariant } from "../src/doctor.js";
+import {
+  checksOf,
+  Doctor,
+  READY_TASK_CHECK,
+  readyTaskCanBeDispatched,
+  RUNNER_INVARIANTS,
+  violations,
+  type Invariant,
+} from "../src/doctor.js";
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -223,5 +231,86 @@ describe("the doctor outside a tick", () => {
       "delivered_story_has_landed",
     ]);
     expect(found[1]?.id).toBe(story);
+  });
+});
+
+/** docs/design/19. The one check the runner adds to core's set, read on its own.
+ *
+ *  Pure over the snapshot, so it is proven over one: `stalled-task.test.ts` is the same
+ *  sentence proven through a whole tick, and this is the sentence itself. */
+describe("the check for a ready task no pass can dispatch", () => {
+  const snapshotOf = (tasks: readonly { id: number; state: string; role?: string }[], roles: readonly string[]): Snapshot => ({
+    nodes: tasks.map((t) => ({
+      entity: "task" as const,
+      id: t.id,
+      slug: `task-${t.id}`,
+      state: t.state,
+      parent_id: 1,
+      ...(t.role === undefined ? {} : { role: t.role }),
+    })),
+    workers: roles.map((role, i) => ({ slug: `w-${i}`, role })),
+  });
+
+  it("names the task, with the allocator's refusal and the part it cannot know", () => {
+    const found = readyTaskCanBeDispatched.check(snapshotOf([{ id: 7, state: "ready", role: "system" }], ["engineer"]));
+
+    expect(found).toEqual([
+      {
+        invariant: READY_TASK_CHECK,
+        entity: "task",
+        id: 7,
+        slug: "task-7",
+        detail:
+          "ready, and every pass refuses it — no worker free for role system, and no worker " +
+          "holds role system at all: hire one, or give the task a role somebody holds",
+      },
+    ]);
+  });
+
+  /** `task_may_be_attempted` refuses a task with no role at `start`, so the record should
+   *  not hold one — but a guard is a gate and not a repair, and a report that said nothing
+   *  at all about a roleless ready task would be the quietest drift of the lot. */
+  it("has words for a ready task carrying no role at all", () => {
+    const found = readyTaskCanBeDispatched.check(snapshotOf([{ id: 7, state: "ready" }], ["engineer"]));
+
+    expect(found[0]?.detail).toContain("no worker free for role (none), and no worker holds role (none) at all");
+  });
+
+  it("is quiet when somebody holds the role, however busy they are", () => {
+    // The snapshot does not say who is free, and must not: *busy* is this minute's answer
+    // and *nobody holds it* is the record's.
+    expect(readyTaskCanBeDispatched.check(snapshotOf([{ id: 7, state: "ready", role: "system" }], ["system"]))).toEqual(
+      [],
+    );
+  });
+
+  it("is quiet for a task that is not ready", () => {
+    for (const state of ["planned", "done", "failed", "dropped"]) {
+      expect(readyTaskCanBeDispatched.check(snapshotOf([{ id: 7, state, role: "system" }], [])), state).toEqual([]);
+    }
+  });
+
+  it("is one line per task, in the order the snapshot was read", () => {
+    const found = readyTaskCanBeDispatched.check(
+      snapshotOf(
+        [
+          { id: 4, state: "ready", role: "system" },
+          { id: 5, state: "ready", role: "engineer" },
+          { id: 6, state: "ready", role: "scribe" },
+        ],
+        ["engineer"],
+      ),
+    );
+
+    expect(found.map((v) => v.id)).toEqual([4, 6]);
+  });
+
+  /** The set the tick runs is core's plus this; the set the command and the tick are held
+   *  to agreeing on is core's alone. `packages/cli/test/doctor-parity.test.ts` reads the
+   *  second one, and this is the same fact said from this side. */
+  it("is in the runner's set, and not in the set the two halves share", () => {
+    expect(RUNNER_INVARIANTS.map((i) => i.name)).toEqual([...INVARIANTS.map((i) => i.name), READY_TASK_CHECK]);
+    expect(INVARIANTS.map((i) => i.name)).not.toContain(READY_TASK_CHECK);
+    expect(checksOf().map((c) => c.name)).not.toContain(READY_TASK_CHECK);
   });
 });
