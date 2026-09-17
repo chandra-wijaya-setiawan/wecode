@@ -21,7 +21,7 @@ export class ChoreError extends Error {}
  *  This table and CHORE_MACHINE below belong in packages/core/config/machines.yaml with
  *  every other machine. They are literals here only because loadMachines() rejects any
  *  top-level key that is not in STATEFUL, and types.ts is outside this task's scope. */
-export const CHORE_KINDS = ["merge", "refresh", "sweep"] as const;
+export const CHORE_KINDS = ["merge", "refresh", "land", "sweep"] as const;
 export type ChoreKind = (typeof CHORE_KINDS)[number];
 
 export interface ChoreKindDef {
@@ -34,18 +34,34 @@ export interface ChoreKindDef {
    *  being raised again. A task's ceiling is a column because a person may raise one task's
    *  and not another's; a chore's belongs to the kind, because nobody creates a chore. */
   readonly max_retry: number;
+  /** Who makes the attempt. `worker` is the ordinary shape — an assignment, a tree, a
+   *  session — and `runner` is the kind wecode performs itself, because the work is a git
+   *  merge nobody needs an agent's judgement for and the tree it happens in is not one an
+   *  agent may be put in. A `runner` kind is never a candidate: handing it to a worker
+   *  would cut a story tree for a merge that cannot be made there. */
+  readonly performer: "worker" | "runner";
 }
+
+/** A kind whose attempts are wecode's own. Asked rather than compared, so the rule reads
+ *  the same at the three places that need it. */
+export const performedByTheRunner = (kind: ChoreKind): boolean => CHORE_KIND_DEFS[kind].performer === "runner";
 
 /** `merge` needs no approval: wecode has already tried the deterministic merge and it
  *  failed, so the chore is the retry, and asking would only add a person to a queue.
  *  `refresh` is the same shape the other way round — the base has moved and a story tree
  *  in flight is behind it, wecode has already tried the merge, and the chore is the retry.
+ *  `land` is the third of that family and the same rule again: a delivered story reaching
+ *  the base is a merge the gate has already permitted, so the runner makes it inline and
+ *  the chore is what is left when it could not — the reason, on the board, with the
+ *  attempts behind it. Asking a person first would be asking them to approve the merge they
+ *  already approved by delivering the story.
  *  `sweep` rewrites work that is already on the record, which is not wecode's to decide
  *  alone — and neither is `heal`, when it arrives. */
 export const CHORE_KIND_DEFS: Readonly<Record<ChoreKind, ChoreKindDef>> = {
-  merge: { role: "system", needs_approval: false, max_retry: 3 },
-  refresh: { role: "system", needs_approval: false, max_retry: 3 },
-  sweep: { role: "system", needs_approval: true, max_retry: 3 },
+  merge: { role: "system", needs_approval: false, max_retry: 3, performer: "worker" },
+  refresh: { role: "system", needs_approval: false, max_retry: 3, performer: "worker" },
+  land: { role: "system", needs_approval: false, max_retry: 3, performer: "runner" },
+  sweep: { role: "system", needs_approval: true, max_retry: 3, performer: "worker" },
 };
 
 /** What a chore is about. A chore always serves a project; `project` is a target only when
@@ -685,6 +701,11 @@ export function choreCandidates(
   const candidates: Candidate[] = [];
   const refused: Refusal[] = [];
   for (const r of rows) {
+    // A kind wecode performs itself is neither offered nor refused here. Not offered,
+    // because there is no worker to offer it to; not refused, because a refusal is a
+    // sentence about this pass and would write over the reason the chore is actually
+    // carrying — the conflict its last attempt hit. It stays on the board saying that.
+    if (performedByTheRunner(r.kind)) continue;
     const attempts = begun.get(r.id) ?? 0;
     const tries = { attempts, max_retry: CHORE_KIND_DEFS[r.kind].max_retry };
     // A chore that has failed its check as often as its kind allows is not handed out
