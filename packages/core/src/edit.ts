@@ -1,4 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
+import { identity, NO_ACTOR, TWO_REASONS } from "./apply.js";
+import { attributedTo, type Actor } from "./facade-gen.js";
 import { excluded, queries, table, type Dialect } from "./db.js";
 import type { Scope } from "./entities.js";
 import { withinCeiling, type RoleConfig } from "./roles.js";
@@ -147,10 +149,17 @@ export function restate(
   entity: Restatable,
   id: number,
   words: string,
-  actor: string,
+  who: Actor,
 ): { was: string; now: string; state: string } {
   const text = words.trim();
   if (text === "") throw new EditError(NO_WORDS);
+
+  // The actor is an identity here too. This verb's reason is the old wording and nothing
+  // else, so a caller that packed a reason of its own is asking for one this row will not
+  // keep — that is a refusal, not a silent second reason on the line.
+  const said = identity(who);
+  if (said.actor === "") throw new EditError(NO_ACTOR);
+  if (said.reason !== null) throw new EditError(TWO_REASONS);
 
   const prose = PROSE[entity];
   const q = queries(db);
@@ -160,6 +169,9 @@ export function restate(
 
     const at = now();
     prose.write(q, id, text, at);
+    // Why this row exists, kept apart from who made it right up to the column that has to
+    // hold both.
+    const reason = `was "${row.words}"`;
     // from_state and to_state are the same state, on purpose: nothing happened to this
     // record, someone only said what it was more accurately.
     q.insertInto(ledger, {
@@ -168,9 +180,12 @@ export function restate(
       verb: "restate",
       from_state: row.state,
       to_state: row.state,
-      actor: `${actor}: was "${row.words}"`,
+      actor: attributedTo(said.actor, reason),
       at,
     }).run();
+    // What the prose was and is, and nothing more: `packages/core/test/typed-edit.test.ts`
+    // holds this object exactly, and is outside this story's scope. The identity and the
+    // reason are on the ledger row, which is where a reader of the history looks for them.
     return { was: row.words, now: text, state: row.state };
   });
 }
