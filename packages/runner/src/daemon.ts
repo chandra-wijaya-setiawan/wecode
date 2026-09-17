@@ -3,8 +3,10 @@ import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import {
   applyChore,
+  choreAttempts,
   choreById,
   CHORE_KIND_DEFS,
+  performedByTheRunner,
   clearChoreRefusal,
   clearRefusal,
   choreFor,
@@ -17,8 +19,10 @@ import {
   now,
   recordChoreRefusal,
   recordRefusal,
+  reraiseChore,
   type Budget,
   type Chore,
+  type ChoreKind,
   type RoleConfig,
   type Scope,
   type Violation,
@@ -35,6 +39,7 @@ import type { WorkerAdapter } from "./ports.js";
 import { Doctor, type Invariant } from "./doctor.js";
 import { Examiner, type Refused, type ScriptReport } from "./examiner.js";
 import { Trees } from "./git.js";
+import { attemptLanding, isLanded, LAND_CHECK } from "./land-chore.js";
 
 const exec = promisify(execFile);
 
@@ -129,7 +134,7 @@ const tbl = {
   project: table<{ id: number; repo: string }>("project", ["id", "repo"]),
   worker: table<{ id: number; role: string }>("worker", ["id", "role"]),
   refusal: table<{ task_id: number }>("refusal", ["task_id"]),
-  chore: table<{ id: number; state: string }>("chore", ["id", "state"]),
+  chore: table<{ id: number; state: string; kind: ChoreKind }>("chore", ["id", "state", "kind"]),
   scriptRun: table<ScriptRunRow>("script_run", ["entity", "test_id", "fingerprint", "ran_at"]),
   landed: table<LandedRow>("landed_branch", ["task_id", "branch", "sha", "merged_at"]),
 };
@@ -147,6 +152,10 @@ export interface Tick {
   readonly scripts: ScriptReport;
   readonly committed: readonly number[];
   readonly merged: readonly number[];
+  /** Stories this tick put in the base branch, with the commit the base became. Empty is
+   *  the ordinary answer: a story lands once, and every tick after that reads it as already
+   *  there rather than landing it again. */
+  readonly landed: readonly Landed[];
   /** Tasks that ran out of attempts on this tick. */
   readonly exhausted: readonly number[];
   /** Chores wecode owes itself, as of this tick. Every open one, not only the new ones:
@@ -171,6 +180,14 @@ export interface Tick {
   /** What the invariant set found this tick. Recorded as well as returned, so a view reads
    *  the table rather than running the pass again. Empty is the healthy answer. */
   readonly doctor: readonly Violation[];
+}
+
+/** A story that reached the base branch on this tick, and the commit the base became.
+ *  A sha, not a boolean: docs/design/14 — it says whether it landed, as what, and whether
+ *  the base is still that. */
+export interface Landed {
+  readonly story: number;
+  readonly sha: string;
 }
 
 /** An exhausted task, and the story left waiting on it. Named, because the cost is the
@@ -310,7 +327,12 @@ export class Runner {
    *  tree, after the tasks it depends on have merged. */
   async tick(): Promise<Tick> {
     this.rolesByRepo.clear();
-    // First, because the point of it is that it happens before the work does.
+    // First of all, and on the record the last tick left behind: a landing moves the base
+    // branch, and everything below reads the base — the run at base, the story trees, the
+    // chores' checks. A story delivered on this tick is landed on the next one, so no pass
+    // in a tick is ever judged against a base that moved underneath it mid-pass.
+    const landing = await this.landDeliveredStories();
+    // First of the work, because the point of it is that it happens before the work does.
     const redAtBase = await this.proveRedAtBase();
     const allocated = await this.allocateOne();
     const foreman = await this.foreman.tick();
@@ -346,9 +368,10 @@ export class Runner {
       foreman,
       committed: settled.committed,
       merged,
+      landed: landing.landed,
       exhausted,
       performed,
-      chores: chores.filter((id) => !performed.done.includes(id)),
+      chores: [...chores, ...landing.chores].filter((id) => !performed.done.includes(id)),
       drift,
       redAtBase,
       behind: acceptance.behind,
@@ -1046,6 +1069,131 @@ export class Runner {
     return !(await this.contains(repo, branch, base));
   }
 
+  /** docs/design/14. A delivered story reaches the base branch without a person merging it.
+   *
+   *  Rung 1 of the three: the runner attempts the merge inline, and clean is the common case
+   *  that costs nothing — nothing on the board, nothing in the chore table, one line in the
+   *  tick saying the base moved and as what. `land` printed by hand in one checkout was the
+   *  only way a story reached master, so a story delivered on Friday sat there until somebody
+   *  remembered it.
+   *
+   *  When the attempt cannot be made, the chore is the record of it: raised on the refusal
+   *  rather than on the condition, because a chore raised for work wecode is about to do
+   *  itself is a row that is planned and done in the same tick and tells nobody anything.
+   *  What the operator needs on the board is the landing that did *not* happen, with the
+   *  reason and the attempts behind it.
+   *
+   *  Three conditions are silence rather than a landing, and each is a different fact: a
+   *  story with no branch has nothing to land, a base that already contains the branch is
+   *  landed already — and a branch that will not merge owes a `merge` chore, which the pass
+   *  above has just raised. Landing never queues behind itself: it is attempted every tick
+   *  and the graph is what says whether it is owed, so nothing here is a timer or a memo. */
+  private async landDeliveredStories(): Promise<{ landed: Landed[]; chores: number[] }> {
+    const landed: Landed[] = [];
+    const chores: number[] = [];
+
+    for (const row of queries(this.db).selectFrom(tbl.story).all().sort(byId)) {
+      if (row.state !== "delivered") continue;
+      const owner = this.projectOf(row);
+      if (owner === null) continue;
+      const repo = this.opts.repoRoot ?? owner.repo;
+      const base = await this.treesFor(repo)
+        .integrationBranch()
+        .catch(() => null);
+      if (base === null) continue;
+      const branch = `story/${row.slug}`;
+      if (branch === base || !(await this.hasCommit(repo, branch))) continue;
+      if (!this.gateHasPermitted(row.id)) continue;
+
+      const raised = choreFor(this.db, "land", "story", row.id);
+      if (await isLanded(repo, base, branch)) {
+        // The other half of the same rule. The story is in the base, so nothing is owed, and
+        // a chore still open for it is a stale claim rather than work.
+        if (raised !== null && raised.state !== "done") {
+          closeChore(this.db, raised.id, `${base} already contains ${branch}`, "runner");
+        }
+        continue;
+      }
+      if (!(await this.mergesCleanly(repo, base, branch))) continue;
+
+      // An attempt is a `begin` on the record, so a chore that has used its attempts is not
+      // attempted again behind the board's back: it stays there saying so.
+      if (raised !== null && !this.beginLandChore(raised.id)) {
+        chores.push(raised.id);
+        continue;
+      }
+      const attempt = await attemptLanding({
+        repo,
+        base,
+        branch,
+        tree: join(this.worktreeRoot(repo), `land-${row.slug}`),
+      });
+      if (attempt.kind === "landed") {
+        landed.push({ story: row.id, sha: attempt.sha });
+        // Proved, not reported: the chore is finished because the base contains the branch
+        // when this asks the graph, never because the merge exited zero.
+        if (raised !== null && (await isLanded(repo, base, branch))) {
+          applyChore(this.db, raised.id, "finish", "runner");
+        }
+        continue;
+      }
+      if (attempt.kind === "nothing") continue;
+
+      const chore =
+        raised ??
+        ensureChore(this.db, {
+          project_id: owner.project,
+          kind: "land",
+          target_type: "story",
+          target_id: row.id,
+          check: LAND_CHECK,
+        });
+      // The first refusal raises the chore and is itself its first attempt, so the board
+      // reads `attempt 2 of 3` on the tick after — the count is of landings tried, and one
+      // has been.
+      if (raised === null) this.beginLandChore(chore.id);
+      if (applyChore(this.db, chore.id, "fail", "runner").ok) recordChoreRefusal(this.db, attempt.why, chore.id);
+      chores.push(chore.id);
+    }
+    return { landed, chores };
+  }
+
+  /** Has the gate already permitted this merge?
+   *
+   *  The invariant behind the unattended landing is that wecode performs the merges the gate
+   *  permits — not that it merges whatever is called delivered. The gate's word is the
+   *  acceptance tests: every one under the story passed, and there is at least one. A story
+   *  with none proves nothing, which is 19's own language for it, and landing it unattended
+   *  would put work in the base that nothing ever judged.
+   *
+   *  `dropped` tests are left out rather than counted against it: an abandoned test is a
+   *  decision somebody made, and the criterion it hung off is the thing that has to be
+   *  satisfied some other way. A story where every test is dropped therefore has none that
+   *  passed, and does not land. */
+  private gateHasPermitted(storyId: number): boolean {
+    const under = this.criteriaOfStory(storyId);
+    const tests = queries(this.db)
+      .selectFrom(tbl.test)
+      .select(["id", "parent_id", "state"])
+      .all()
+      .filter((t) => under.has(t.parent_id) && t.state !== "dropped");
+    return tests.length > 0 && tests.every((t) => t.state === "passed");
+  }
+
+  /** Bring a `land` chore to `running` for this tick's attempt, or say there is not one to
+   *  be had. `reraiseChore` is the ceiling: it refuses a chore that has used its attempts,
+   *  and that refusal is what stops the runner retrying a landing for ever. */
+  private beginLandChore(id: number): boolean {
+    const found = choreById(this.db, id);
+    if (found === null) return false;
+    if ((found.state === "failed" || found.state === "done") && !reraiseChore(this.db, id, "runner").ok) return false;
+    const planned = choreById(this.db, id);
+    if (planned?.state === "planned" && !applyChore(this.db, id, "start", "runner").ok) return false;
+    const ready = choreById(this.db, id);
+    if (ready?.state === "running") return true;
+    return applyChore(this.db, id, "begin", "runner").ok;
+  }
+
   /** docs/design/18. The other half of a chore: judge the attempt that has ended, then hand
    *  the next one out.
    *
@@ -1110,10 +1258,15 @@ export class Runner {
         .filter((a) => OPEN_PHASES.includes(a.phase))
         .map((a) => a.objective_id),
     );
+    // A kind wecode performs itself is never handed to a worker. `land` is one: its merge
+    // is into the base branch, and the only tree an agent may be dispatched into is the
+    // story tree, where that merge cannot be made at all. `landDeliveredStories` is where
+    // its attempts happen, and the reason it is still open is already on its own row.
     return q
       .selectFrom(tbl.chore)
       .all()
       .filter((c) => ["planned", "ready"].includes(c.state) && !attempting.has(c.id))
+      .filter((c) => !performedByTheRunner(c.kind))
       .sort(byId)
       .map((c) => ({ id: c.id }));
   }
@@ -1201,6 +1354,21 @@ export class Runner {
    *  and "the base merges into the story branch" — but one graph answers both: once the
    *  base is an ancestor of the branch there is nothing left to conflict. */
   private async proveChore(chore: Chore): Promise<{ ok: true } | { ok: false; why: string }> {
+    if (chore.kind === "land") {
+      // The landing's check is the mirror of the merge's: the *base* contains the branch.
+      // Nothing dispatches a `land` chore, so being asked here at all means an assignment
+      // outlived the rule — and the answer is still the graph's, not the assignment's.
+      const target = this.storyTargetOf(chore);
+      if (target === null) return { ok: false, why: "its target story is not on the record" };
+      const branch = `story/${target.slug}`;
+      const base = await this.treesFor(target.repo)
+        .integrationBranch()
+        .catch(() => null);
+      if (base === null) return { ok: false, why: "there is no base branch to land on" };
+      return (await isLanded(target.repo, base, branch))
+        ? { ok: true }
+        : { ok: false, why: `${base} does not contain ${branch}: the landing was not made` };
+    }
     if (chore.kind !== "merge" && chore.kind !== "refresh") {
       return { ok: false, why: `nothing here knows how to prove a ${chore.kind} chore` };
     }
