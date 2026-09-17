@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@lzehrung/codegraph-core": "^2.3.27",
-    "@wecode/core": "workspace:*"
+    "@wecode/core": "workspace:*",
+    "smol-toml": "^1.8.0"
   }
 }
