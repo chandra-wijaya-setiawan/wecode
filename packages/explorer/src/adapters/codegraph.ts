@@ -38,7 +38,13 @@ import {
  *  to trust. An index is cheap to throw away — the caller opens another one when it wants
  *  to see the tree again. */
 export class CodegraphIndex implements RepoIndex {
-  constructor(readonly root: string) {}
+  /** `load` is how codegraph itself arrives. It is a parameter so a test can answer with a
+   *  hand-built index and prove the translation over a real tree in an installation where
+   *  the library will not load; nothing outside this package passes it. */
+  constructor(
+    readonly root: string,
+    private readonly load: Load = () => import("@lzehrung/codegraph-core"),
+  ) {}
 
   /** The build, kept as its promise rather than its result: two questions asked before the
    *  first build finishes must join that build, not start a second one. */
@@ -55,7 +61,7 @@ export class CodegraphIndex implements RepoIndex {
     );
     return {
       file: here,
-      defines: ownDeclarations(module.locals)
+      defines: this.declarationsIn(module)
         .map((local) => this.definitionOf(here, local, exported))
         .sort(byName),
       imports: module.imports.map((binding) => this.importOf(binding)).sort(byName),
@@ -64,7 +70,7 @@ export class CodegraphIndex implements RepoIndex {
 
   async usesOf(file: string, symbol: string): Promise<readonly Use[]> {
     const { lib, index, module } = await this.moduleFor(file);
-    const declared = ownDeclarations(module.locals).filter((l) => l.localName === symbol);
+    const declared = this.declarationsIn(module).filter((l) => l.localName === symbol);
     if (declared.length === 0) throw new UnknownSymbol(this.relative(module.file), symbol);
 
     const sites = new Map<string, Use>();
@@ -120,10 +126,22 @@ export class CodegraphIndex implements RepoIndex {
       const from = index.modules.get(entry.fromModule);
       names.push(...(from === undefined ? ["*"] : this.exportedNames(index, from, seen)));
     }
-    for (const local of ownDeclarations(module.locals)) {
+    for (const local of this.declarationsIn(module)) {
       if (this.declaredExport(here, local)) names.push(local.localName);
     }
     return [...new Set(names)];
+  }
+
+  /** What the module declares at its top level, which is what "what a file defines" asks
+   *  about. Two things are dropped, because codegraph's locals are every name the file
+   *  binds: a name bound inside another declaration, which its range gives away, and a
+   *  name bound inside a bare block — a loop variable, a `catch` binding, a `const` in an
+   *  `if` — which no declaration encloses and only the source line gives away. */
+  private declarationsIn(module: ModuleIndex): SymbolDef[] {
+    const here = this.relative(module.file);
+    return ownDeclarations(module.locals).filter((local) =>
+      isTopLevel(this.prefixOf(here, local)),
+    );
   }
 
   private definitionOf(file: string, local: SymbolDef, exported: ReadonlySet<string>): Definition {
@@ -197,7 +215,7 @@ export class CodegraphIndex implements RepoIndex {
 
   private async built(): Promise<Snapshot> {
     this.snapshot ??= (async () => {
-      const lib = await import("@lzehrung/codegraph-core");
+      const lib = await this.load();
       const index = await lib.buildProjectIndex(this.root);
       return {
         lib,
@@ -223,6 +241,8 @@ export function openCodegraph(root: string): RepoIndex {
 
 /** Codegraph itself, one build of the tree, and its modules by the path the port names
  *  them with. The library travels with the snapshot because it arrived with it. */
+export type Load = () => Promise<typeof import("@lzehrung/codegraph-core")>;
+
 type Snapshot = {
   readonly lib: typeof import("@lzehrung/codegraph-core");
   readonly index: ProjectIndex;
@@ -245,6 +265,25 @@ export const KINDS: Readonly<Record<string, SymbolKind>> = {
  *  the declaration's own line says which. */
 export const refine = (kind: SymbolKind, prefix: string): SymbolKind =>
   kind === "type" && /\binterface\s+$/.test(prefix) ? "interface" : kind;
+
+/** Whether what the source writes before a declaration's name is all a statement at the
+ *  top of a file can write: an optional `export`, the modifiers, the declaring keyword,
+ *  and the opening of a destructuring pattern. Anything else in front of the name — an
+ *  indent, a `{`, a call, an `=>` — means the name is bound inside something, and a name
+ *  bound inside something is not what the file defines.
+ *
+ *  The empty prefix passes: a declaration whose name opens its own line, and a line the
+ *  adapter could not read, both arrive that way, and reporting a declaration the index
+ *  found is the safer of the two mistakes.
+ *
+ *  A top-level destructuring spread over lines — a name on a continuation line, indented,
+ *  with its `const` a line above — is the one true declaration this drops. It is rarer
+ *  than the block-scoped locals it keeps out, and a reader asking what a file defines is
+ *  worse served by the loop variables. */
+export const isTopLevel = (prefix: string): boolean => TOP_LEVEL.test(prefix);
+
+const TOP_LEVEL =
+  /^(?!\s)(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\s*\*?\s*|class\s+|const\s+|let\s+|var\s+|interface\s+|type\s+|enum\s+|namespace\s+|module\s+)?[[{,\s]*$/;
 
 export const isDeclaredExport = (prefix: string): boolean =>
   /^\s*export\s+(?:declare\s+)?(?:interface|type)\s+$/.test(prefix);
