@@ -181,6 +181,9 @@ importers:
       '@wecode/core':
         specifier: workspace:*
         version: link:../core
+      '@wecode/explorer':
+        specifier: workspace:*
+        version: link:../explorer
 
   packages/core:
     dependencies:
