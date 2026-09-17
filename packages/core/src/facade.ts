@@ -1,8 +1,9 @@
 // Generated from packages/core/config/machines.yaml by facade-gen.ts. Do not edit:
 // facade.test.ts regenerates this file and fails on any difference.
 //
-// One method per transition an actor may invoke. An automatic transition gets none —
-// nobody invokes it, so the facade offers no way to spell it.
+// One method per transition an actor may invoke, on Verbs. One per transition that fires
+// on its own guard, on Completions — a class apart, because delivering a story is the
+// tree's own doing and asking for it by hand is not the same act.
 
 import type { Engine, Outcome } from "./apply.js";
 import type { FacadeTransition } from "./facade-gen.js";
@@ -249,57 +250,92 @@ export class Verbs {
   }
 }
 
+/** Every transition that fires on its own guard, one method each.
+ *
+ *  Nobody needs these: the cascade and settle() fire them as soon as the guard holds. They
+ *  exist because the engine has always let a name off the command line through — asking for
+ *  `story deliver` runs the same guard, which refuses unless the story was deliverable
+ *  anyway. Spelled here, that surface is a method the compiler resolves. */
+export class Completions {
+  constructor(private readonly engine: Engine) {}
+
+  /** epic: in_progress → delivered */
+  deliverEpic(id: number, actor: string): Outcome {
+    return this.engine.apply("epic", id, "deliver", actor);
+  }
+
+  /** story: in_progress → delivered */
+  deliverStory(id: number, actor: string): Outcome {
+    return this.engine.apply("story", id, "deliver", actor);
+  }
+
+  /** requirement: in_progress → met */
+  meetRequirement(id: number, actor: string): Outcome {
+    return this.engine.apply("requirement", id, "meet", actor);
+  }
+
+  /** acceptance_criteria: in_progress → accepted */
+  acceptAcceptanceCriteria(id: number, actor: string): Outcome {
+    return this.engine.apply("acceptance_criteria", id, "accept", actor);
+  }
+
+  /** task: ready → done */
+  finishTask(id: number, actor: string): Outcome {
+    return this.engine.apply("task", id, "finish", actor);
+  }
+}
+
 /** The machine table as the facade read it. Held against machines.yaml by a test, so a
  *  transition added to the config and not to the facade is a red test, not a gap. */
 export const TRANSITIONS: readonly FacadeTransition[] = [
-  { entity: "project", verb: "start", from: ["planned"], to: "in_progress", method: "startProject" },
-  { entity: "project", verb: "hold", from: ["in_progress"], to: "on_hold", method: "holdProject" },
-  { entity: "project", verb: "reopen", from: ["on_hold", "dropped"], to: "in_progress", method: "reopenProject" },
-  { entity: "project", verb: "drop", from: ["planned", "in_progress", "on_hold"], to: "dropped", method: "dropProject" },
-  { entity: "release", verb: "start", from: ["planned"], to: "in_progress", method: "startRelease" },
-  { entity: "release", verb: "release", from: ["in_progress"], to: "released", method: "releaseRelease" },
-  { entity: "release", verb: "reopen", from: ["dropped"], to: "in_progress", method: "reopenRelease" },
-  { entity: "release", verb: "drop", from: ["planned", "in_progress"], to: "dropped", method: "dropRelease" },
-  { entity: "epic", verb: "start", from: ["planned"], to: "in_progress", method: "startEpic" },
-  { entity: "epic", verb: "hold", from: ["in_progress"], to: "on_hold", method: "holdEpic" },
-  { entity: "epic", verb: "reopen", from: ["on_hold", "delivered", "dropped"], to: "in_progress", method: "reopenEpic" },
-  { entity: "epic", verb: "deliver", from: ["in_progress"], to: "delivered", method: null },
-  { entity: "epic", verb: "drop", from: ["planned", "in_progress", "on_hold"], to: "dropped", method: "dropEpic" },
-  { entity: "story", verb: "start", from: ["planned"], to: "in_progress", method: "startStory" },
-  { entity: "story", verb: "hold", from: ["in_progress"], to: "on_hold", method: "holdStory" },
-  { entity: "story", verb: "reopen", from: ["on_hold", "delivered", "dropped"], to: "in_progress", method: "reopenStory" },
-  { entity: "story", verb: "deliver", from: ["in_progress"], to: "delivered", method: null },
-  { entity: "story", verb: "drop", from: ["planned", "in_progress", "on_hold"], to: "dropped", method: "dropStory" },
-  { entity: "requirement", verb: "start", from: ["planned"], to: "in_progress", method: "startRequirement" },
-  { entity: "requirement", verb: "hold", from: ["in_progress"], to: "on_hold", method: "holdRequirement" },
-  { entity: "requirement", verb: "reopen", from: ["on_hold", "met", "dropped"], to: "in_progress", method: "reopenRequirement" },
-  { entity: "requirement", verb: "meet", from: ["in_progress"], to: "met", method: null },
-  { entity: "requirement", verb: "drop", from: ["planned", "in_progress", "on_hold"], to: "dropped", method: "dropRequirement" },
-  { entity: "acceptance_criteria", verb: "start", from: ["planned"], to: "in_progress", method: "startAcceptanceCriteria" },
-  { entity: "acceptance_criteria", verb: "accept", from: ["in_progress"], to: "accepted", method: null },
-  { entity: "acceptance_criteria", verb: "reopen", from: ["accepted", "dropped"], to: "in_progress", method: "reopenAcceptanceCriteria" },
-  { entity: "acceptance_criteria", verb: "drop", from: ["planned", "in_progress"], to: "dropped", method: "dropAcceptanceCriteria" },
-  { entity: "acceptance_test", verb: "deliver", from: ["planned"], to: "ready", method: "deliverAcceptanceTest" },
-  { entity: "acceptance_test", verb: "pass", from: ["ready", "failed"], to: "passed", method: "passAcceptanceTest" },
-  { entity: "acceptance_test", verb: "fail", from: ["ready", "failed"], to: "failed", method: "failAcceptanceTest" },
-  { entity: "acceptance_test", verb: "reprove", from: ["failed"], to: "ready", method: "reproveAcceptanceTest" },
-  { entity: "acceptance_test", verb: "invalidate", from: ["passed"], to: "ready", method: "invalidateAcceptanceTest" },
-  { entity: "acceptance_test", verb: "drop", from: ["planned", "ready", "failed"], to: "dropped", method: "dropAcceptanceTest" },
-  { entity: "task_test", verb: "deliver", from: ["planned"], to: "ready", method: "deliverTaskTest" },
-  { entity: "task_test", verb: "pass", from: ["ready", "failed"], to: "passed", method: "passTaskTest" },
-  { entity: "task_test", verb: "fail", from: ["ready", "failed"], to: "failed", method: "failTaskTest" },
-  { entity: "task_test", verb: "reprove", from: ["failed"], to: "ready", method: "reproveTaskTest" },
-  { entity: "task_test", verb: "invalidate", from: ["passed"], to: "ready", method: "invalidateTaskTest" },
-  { entity: "task_test", verb: "drop", from: ["planned", "ready", "failed"], to: "dropped", method: "dropTaskTest" },
-  { entity: "task", verb: "start", from: ["planned"], to: "ready", method: "startTask" },
-  { entity: "task", verb: "finish", from: ["ready"], to: "done", method: null },
-  { entity: "task", verb: "give_up", from: ["ready"], to: "failed", method: "giveUpTask" },
-  { entity: "task", verb: "retry", from: ["failed"], to: "ready", method: "retryTask" },
-  { entity: "task", verb: "drop", from: ["planned", "ready", "failed"], to: "dropped", method: "dropTask" },
-  { entity: "assignment", verb: "start", from: ["pending"], to: "running", method: "startAssignment" },
-  { entity: "assignment", verb: "raise", from: ["pending"], to: "waiting", method: "raiseAssignment" },
-  { entity: "assignment", verb: "ask", from: ["running"], to: "waiting", method: "askAssignment" },
-  { entity: "assignment", verb: "answer", from: ["waiting"], to: "running", method: "answerAssignment" },
-  { entity: "assignment", verb: "finish", from: ["running"], to: "succeeded", method: "finishAssignment" },
-  { entity: "assignment", verb: "fail", from: ["pending", "running", "waiting"], to: "failed", method: "failAssignment" },
+  { entity: "project", verb: "start", from: ["planned"], to: "in_progress", method: "startProject", completion: null },
+  { entity: "project", verb: "hold", from: ["in_progress"], to: "on_hold", method: "holdProject", completion: null },
+  { entity: "project", verb: "reopen", from: ["on_hold", "dropped"], to: "in_progress", method: "reopenProject", completion: null },
+  { entity: "project", verb: "drop", from: ["planned", "in_progress", "on_hold"], to: "dropped", method: "dropProject", completion: null },
+  { entity: "release", verb: "start", from: ["planned"], to: "in_progress", method: "startRelease", completion: null },
+  { entity: "release", verb: "release", from: ["in_progress"], to: "released", method: "releaseRelease", completion: null },
+  { entity: "release", verb: "reopen", from: ["dropped"], to: "in_progress", method: "reopenRelease", completion: null },
+  { entity: "release", verb: "drop", from: ["planned", "in_progress"], to: "dropped", method: "dropRelease", completion: null },
+  { entity: "epic", verb: "start", from: ["planned"], to: "in_progress", method: "startEpic", completion: null },
+  { entity: "epic", verb: "hold", from: ["in_progress"], to: "on_hold", method: "holdEpic", completion: null },
+  { entity: "epic", verb: "reopen", from: ["on_hold", "delivered", "dropped"], to: "in_progress", method: "reopenEpic", completion: null },
+  { entity: "epic", verb: "deliver", from: ["in_progress"], to: "delivered", method: null, completion: "deliverEpic" },
+  { entity: "epic", verb: "drop", from: ["planned", "in_progress", "on_hold"], to: "dropped", method: "dropEpic", completion: null },
+  { entity: "story", verb: "start", from: ["planned"], to: "in_progress", method: "startStory", completion: null },
+  { entity: "story", verb: "hold", from: ["in_progress"], to: "on_hold", method: "holdStory", completion: null },
+  { entity: "story", verb: "reopen", from: ["on_hold", "delivered", "dropped"], to: "in_progress", method: "reopenStory", completion: null },
+  { entity: "story", verb: "deliver", from: ["in_progress"], to: "delivered", method: null, completion: "deliverStory" },
+  { entity: "story", verb: "drop", from: ["planned", "in_progress", "on_hold"], to: "dropped", method: "dropStory", completion: null },
+  { entity: "requirement", verb: "start", from: ["planned"], to: "in_progress", method: "startRequirement", completion: null },
+  { entity: "requirement", verb: "hold", from: ["in_progress"], to: "on_hold", method: "holdRequirement", completion: null },
+  { entity: "requirement", verb: "reopen", from: ["on_hold", "met", "dropped"], to: "in_progress", method: "reopenRequirement", completion: null },
+  { entity: "requirement", verb: "meet", from: ["in_progress"], to: "met", method: null, completion: "meetRequirement" },
+  { entity: "requirement", verb: "drop", from: ["planned", "in_progress", "on_hold"], to: "dropped", method: "dropRequirement", completion: null },
+  { entity: "acceptance_criteria", verb: "start", from: ["planned"], to: "in_progress", method: "startAcceptanceCriteria", completion: null },
+  { entity: "acceptance_criteria", verb: "accept", from: ["in_progress"], to: "accepted", method: null, completion: "acceptAcceptanceCriteria" },
+  { entity: "acceptance_criteria", verb: "reopen", from: ["accepted", "dropped"], to: "in_progress", method: "reopenAcceptanceCriteria", completion: null },
+  { entity: "acceptance_criteria", verb: "drop", from: ["planned", "in_progress"], to: "dropped", method: "dropAcceptanceCriteria", completion: null },
+  { entity: "acceptance_test", verb: "deliver", from: ["planned"], to: "ready", method: "deliverAcceptanceTest", completion: null },
+  { entity: "acceptance_test", verb: "pass", from: ["ready", "failed"], to: "passed", method: "passAcceptanceTest", completion: null },
+  { entity: "acceptance_test", verb: "fail", from: ["ready", "failed"], to: "failed", method: "failAcceptanceTest", completion: null },
+  { entity: "acceptance_test", verb: "reprove", from: ["failed"], to: "ready", method: "reproveAcceptanceTest", completion: null },
+  { entity: "acceptance_test", verb: "invalidate", from: ["passed"], to: "ready", method: "invalidateAcceptanceTest", completion: null },
+  { entity: "acceptance_test", verb: "drop", from: ["planned", "ready", "failed"], to: "dropped", method: "dropAcceptanceTest", completion: null },
+  { entity: "task_test", verb: "deliver", from: ["planned"], to: "ready", method: "deliverTaskTest", completion: null },
+  { entity: "task_test", verb: "pass", from: ["ready", "failed"], to: "passed", method: "passTaskTest", completion: null },
+  { entity: "task_test", verb: "fail", from: ["ready", "failed"], to: "failed", method: "failTaskTest", completion: null },
+  { entity: "task_test", verb: "reprove", from: ["failed"], to: "ready", method: "reproveTaskTest", completion: null },
+  { entity: "task_test", verb: "invalidate", from: ["passed"], to: "ready", method: "invalidateTaskTest", completion: null },
+  { entity: "task_test", verb: "drop", from: ["planned", "ready", "failed"], to: "dropped", method: "dropTaskTest", completion: null },
+  { entity: "task", verb: "start", from: ["planned"], to: "ready", method: "startTask", completion: null },
+  { entity: "task", verb: "finish", from: ["ready"], to: "done", method: null, completion: "finishTask" },
+  { entity: "task", verb: "give_up", from: ["ready"], to: "failed", method: "giveUpTask", completion: null },
+  { entity: "task", verb: "retry", from: ["failed"], to: "ready", method: "retryTask", completion: null },
+  { entity: "task", verb: "drop", from: ["planned", "ready", "failed"], to: "dropped", method: "dropTask", completion: null },
+  { entity: "assignment", verb: "start", from: ["pending"], to: "running", method: "startAssignment", completion: null },
+  { entity: "assignment", verb: "raise", from: ["pending"], to: "waiting", method: "raiseAssignment", completion: null },
+  { entity: "assignment", verb: "ask", from: ["running"], to: "waiting", method: "askAssignment", completion: null },
+  { entity: "assignment", verb: "answer", from: ["waiting"], to: "running", method: "answerAssignment", completion: null },
+  { entity: "assignment", verb: "finish", from: ["running"], to: "succeeded", method: "finishAssignment", completion: null },
+  { entity: "assignment", verb: "fail", from: ["pending", "running", "waiting"], to: "failed", method: "failAssignment", completion: null },
 ];

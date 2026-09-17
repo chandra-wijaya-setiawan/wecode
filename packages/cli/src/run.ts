@@ -7,9 +7,13 @@ import { parseArgs } from "node:util";
 // same words. Addressed through the package's build output, the way its barrel is.
 import { type BaseState, refuseDirtyBase, reportAbort, reportLeftover } from "@wecode/core/dist/land.js";
 import {
+  actorOf,
+  attributedTo,
   board,
+  Completions,
   Engine,
   Maker,
+  OPERATOR,
   detect,
   currentDatabase,
   databaseOf,
@@ -34,6 +38,7 @@ import {
   STATEFUL,
   TRANSITIONS,
   Verbs,
+  type Actor,
   type Outcome,
   type StatefulEntity,
   type TestKind,
@@ -168,7 +173,7 @@ function answer(args: readonly string[]): number {
   if (row === null) return fail(`no assignment #${id}`);
   if (row.phase !== "waiting") return fail(`assignment #${id} is ${row.phase}, and is not waiting on anybody`);
 
-  const who = process.env["WECODE_ACTOR"] ?? "operator";
+  const who = whoIsAsking();
   q.update(assignment)
     .set({ answer: text, answered_by: who, updated_at: new Date().toISOString() })
     .where("id", "=", id)
@@ -448,8 +453,8 @@ function onboard(args: readonly string[]): number {
   const projectId = make.project(wsId, name, root);
   const releaseId = make.release(projectId, "0.0.1");
   const started = new Verbs(new Engine(conn));
-  started.startProject(projectId, "operator");
-  started.startRelease(releaseId, "operator");
+  started.startProject(projectId, OPERATOR);
+  started.startRelease(releaseId, OPERATOR);
 
   process.stdout.write(
     [
@@ -1202,28 +1207,43 @@ function lesson(args: readonly string[]): number {
   return 0;
 }
 
-/** One invocation of the facade: every method on `Verbs` takes an id and an actor and
- *  answers an Outcome, so a verb resolved off the command line has this one shape. */
-type Invocation = (id: number, actor: string) => Outcome;
+/** One invocation of the facade: every method on `Verbs` and on `Completions` takes an id
+ *  and an actor and answers an Outcome, so a verb resolved off the command line has this
+ *  one shape. */
+type Invocation = (id: number, actor: Actor) => Outcome;
 
-/** The facade method the command line's `<entity> <verb>` names, or null when the facade
- *  offers none.
+/** Who the command is attributed to: the environment's actor, or the person at the terminal.
+ *  One place, so no command invents a second spelling of the same identity — and a blank
+ *  `WECODE_ACTOR` is nobody rather than an empty name on the ledger. */
+const whoIsAsking = (): Actor => actorOf(process.env["WECODE_ACTOR"]) ?? OPERATOR;
+
+/** The facade method the command line's `<entity> <verb>` names, or null when no row of the
+ *  machine table names that verb at all.
  *
  *  The machine table is not copied here. `TRANSITIONS` is generated beside `Verbs` from the
  *  same config and carries each row's method name, so the lookup resolves a name it was
  *  given rather than one this file spells — a verb renamed in machines.yaml regenerates
- *  both sides and this keeps working, and one removed resolves to null.
+ *  both sides and this keeps working.
  *
- *  Null has two causes and they are not the same. A verb nobody ever declared is a typo,
- *  and a completion verb — `story deliver`, `task finish` — is declared but automatic, so
- *  the facade gives no way to spell it. Neither is answered here: both go back to the
- *  engine, which is what has always decided what the cli says about them. */
-function invocation(verbs: Verbs, entity: StatefulEntity, name: string): Invocation | null {
+ *  A declared verb resolves either way: an actor's verb to a `Verbs` method, a completion
+ *  verb — `story deliver`, `task finish` — to a `Completions` one. The engine judged both
+ *  before and judges both now, through the same guard; what is gone is the string call that
+ *  reached them. Null is left for one thing only, a verb nobody declared. */
+function invocation(
+  verbs: Verbs,
+  completions: Completions,
+  entity: StatefulEntity,
+  name: string,
+): Invocation | null {
   const row = TRANSITIONS.find((t) => t.entity === entity && t.verb === name);
-  if (row === undefined || row.method === null) return null;
-  // Generated names, held against `Verbs` by facade.test.ts, so the descriptor is there.
-  const method = Object.getOwnPropertyDescriptor(Verbs.prototype, row.method)?.value as Invocation | undefined;
-  return method === undefined ? null : (id, actor) => method.call(verbs, id, actor);
+  if (row === undefined) return null;
+  // Generated names, held against the two classes by facade.test.ts, so one descriptor is
+  // there: `method` and `completion` are never both null and never both set.
+  const on = row.method === null ? Completions.prototype : Verbs.prototype;
+  const found = Object.getOwnPropertyDescriptor(on, row.method ?? (row.completion as string));
+  const method = found?.value as Invocation | undefined;
+  const self = row.method === null ? completions : verbs;
+  return method === undefined ? null : (id, actor) => method.call(self, id, actor);
 }
 
 /** `wecode <entity> <verb> [id|args]` — the surface in docs/design/06. */
@@ -1244,9 +1264,11 @@ function verb(entity: string, rest: readonly string[]): number {
   const id = Number(args[0]);
   if (!Number.isInteger(id)) return fail(`wecode ${entity} ${name} <id>`);
 
-  const actor = process.env["WECODE_ACTOR"] ?? "operator";
+  const actor = whoIsAsking();
   const engine = new Engine(db());
-  const invoke = invocation(new Verbs(engine), entity, name);
+  const invoke = invocation(new Verbs(engine), new Completions(engine), entity, name);
+  // Only a verb no row of the machine table declares is left to the string call, and the
+  // engine answers it with the same sentence it always did.
   const out = invoke === null ? engine.apply(entity, id, name, actor) : invoke(id, actor);
   if (!out.ok) return fail(out.why);
 
@@ -1284,8 +1306,8 @@ function retry(args: readonly string[]): number {
   const before = q.selectFrom(task).select(["attempts", "max_retry"]).where("id", "=", id).get();
   if (before === null) return fail(`no task #${id}`);
 
-  const who = process.env["WECODE_ACTOR"] ?? "operator";
-  const out = new Verbs(new Engine(conn)).retryTask(id, `${who}: ${reason}`);
+  const who = whoIsAsking();
+  const out = new Verbs(new Engine(conn)).retryTask(id, attributedTo(who, reason));
   if (!out.ok) return fail(out.why);
   // After the transition: a refused retry must not leave the counter reset behind it.
   q.update(task).set({ attempts: 0, updated_at: new Date().toISOString() }).where("id", "=", id).run();
@@ -1408,7 +1430,7 @@ function restateVerb(entity: string, args: readonly string[]): number {
   if (wrong !== null) return fail(wrong);
 
   try {
-    const who = process.env["WECODE_ACTOR"] ?? "operator";
+    const who = whoIsAsking();
     const said = restate(db(), entity, id, values.to, who);
     process.stdout.write(`${entity} #${id} restated  was "${said.was}"  now "${said.now}"\n`);
     return 0;
