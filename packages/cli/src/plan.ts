@@ -20,6 +20,8 @@ import {
 // command may not widen it — so it is imported by the path the built package already
 // publishes, which is the same `dist` every other import from core above resolves to.
 import { queries, table, type Dialect } from "@wecode/core/dist/db.js";
+import { openCodegraph, type RepoIndex } from "@wecode/explorer";
+import { promised, proposeScope, type Promised, type Proposal } from "./scope-proposal.js";
 
 // yaml is @wecode/core's dependency, and this package declares none of its own. Resolving it
 // from core's package rather than from here uses the one copy the workspace already has.
@@ -29,7 +31,7 @@ const { parse } = createRequire(new URL("../node_modules/@wecode/core/package.js
 
 /** `wecode plan <file.yaml>` — docs/design/13. A whole story as one document: checked
  *  whole, created whole, started, and printed back as a shape. */
-export function plan(args: readonly string[]): number {
+export function plan(args: readonly string[], openIndex: (root: string) => RepoIndex = openCodegraph): number {
   // Before parseArgs, which would call --help an unknown option and throw past this command.
   // The file's shape is the one thing a newcomer cannot guess, so --help is the schema itself.
   if (args.some((a) => a === "--help" || a === "-h")) {
@@ -39,10 +41,15 @@ export function plan(args: readonly string[]): number {
   const { values, positionals } = parseArgs({
     args: [...args],
     allowPositionals: true,
-    options: { epic: { type: "string" }, "dry-run": { type: "boolean" } },
+    options: {
+      epic: { type: "string" },
+      "dry-run": { type: "boolean" },
+      "propose-scope": { type: "boolean" },
+      root: { type: "string" },
+    },
   });
   const file = positionals[0];
-  if (file === undefined) return fail("wecode plan <file.yaml> [--epic <id>] [--dry-run]");
+  if (file === undefined) return fail("wecode plan <file.yaml> [--epic <id>] [--dry-run] [--propose-scope]");
   if (!existsSync(file)) return fail(`no such file: ${file}`);
 
   const path = currentDatabase();
@@ -70,6 +77,11 @@ export function plan(args: readonly string[]): number {
 
   if (said.length > 0 || shaped === null || shaped.top === null || parent === null) {
     return fail([`${file} is not a plan yet:`, ...said.map((s) => `  ${s}`)].join("\n"));
+  }
+
+  // Before --dry-run, which would print the shape of a story nobody has a scope for yet.
+  if (values["propose-scope"] === true) {
+    return proposing(shaped.top as Level, resolve(values.root ?? process.cwd()), openIndex);
   }
 
   if (values["dry-run"] === true) {
@@ -116,6 +128,10 @@ interface Task {
   readonly tools: readonly string[];
   readonly test: string | null;
   readonly role: string;
+  /** The symbols the task says it will deliver, `file:symbol` each. Kept but never created
+   *  from: a promise is what `--propose-scope` asks the tree about, and a scope is still
+   *  written by a person. */
+  readonly promises: readonly Promised[];
 }
 interface Criteria {
   readonly statement: string;
@@ -155,7 +171,7 @@ const BELOW = { story: null, epic: "story", release: "epic" } as const;
 const KEYS = {
   requirement: ["statement", "criteria"],
   criteria: ["statement", "test", "tasks"],
-  task: ["title", "scope", "test", "role"],
+  task: ["title", "scope", "test", "role", "promises"],
 } as const;
 
 const DEFAULT_TOOLS = ["bash", "read", "edit", "write"] as const;
@@ -175,7 +191,10 @@ function help(): string {
     ["task", KEYS.task.join(", ")],
   ];
   return [
+    // The first line is the usage `plan-help.test.ts` pins; a flag that creates nothing
+    // goes under it rather than into it.
     "wecode plan <file.yaml> [--epic <id>] [--dry-run]",
+    "wecode plan <file.yaml> --propose-scope [--root <dir>]",
     "",
     "A whole story as one document: checked whole, created whole, and started.",
     "An unknown key is an error — a typo that silently plans nothing is worse.",
@@ -190,6 +209,7 @@ function help(): string {
     "          tasks:",
     "            - title: render the list",
     '              scope: ["src/**", "test/**"]     # optional; project source + tests otherwise',
+    '              promises: ["src/list.ts:renderList"]  # optional; --propose-scope asks the tree about these',
     "              test: pnpm test list             # optional",
     "              role: engineer                   # optional; engineer otherwise",
     "",
@@ -199,6 +219,9 @@ function help(): string {
     `A criteria naming no test of its own gets an extra ${AUTHORS} task that writes one.`,
     `A task's tools come from its role, or ${DEFAULT_TOOLS.join(", ")} when there are no roles.`,
     `An epic holds ${CHILDREN.epic}, a release holds ${CHILDREN.release}; only the root joins an existing row by id.`,
+    "",
+    "--propose-scope creates nothing. It asks the repository index where each promised symbol",
+    "lives and who uses it, and prints the scope those promises ask for, per task, to paste.",
     "",
   ].join("\n");
 }
@@ -230,6 +253,22 @@ function optional(v: unknown, where: string, say: string[]): string | null {
     return null;
   }
   return v.trim();
+}
+
+/** The symbols a task promises. A spec that is not `file:symbol` is refused by name: a
+ *  promise nobody can check against the tree is worse than no promise. */
+function promise(v: unknown, where: string, say: string[]): readonly Promised[] {
+  const out: Promised[] = [];
+  for (const spec of list(v, where, say)) {
+    if (typeof spec !== "string") {
+      say.push(`${where}: expected file:symbol, not ${typeof spec}`);
+      continue;
+    }
+    const one = promised(spec);
+    if (one === null) say.push(`${where}: ${spec} is not file:symbol`);
+    else out.push(one);
+  }
+  return out;
 }
 
 function list(v: unknown, where: string, say: string[]): unknown[] {
@@ -391,6 +430,7 @@ function authoringTask(statement: string, config: ProjectConfig | null, roles: R
     tools: [...def.scope.tools],
     test: config?.test ?? null,
     role: AUTHORS,
+    promises: [],
   };
 }
 
@@ -431,7 +471,11 @@ function task(
     if (!within.ok) say.push(`${where}: ${within.why}`);
   }
 
-  return title === null || scope === null || scope.length === 0 ? null : { title, scope, tools, test, role };
+  const promises = promise(m["promises"], `${where}: promises`, say);
+
+  return title === null || scope === null || scope.length === 0
+    ? null
+    : { title, scope, tools, test, role, promises };
 }
 
 // ── the rows this command reads ──────────────────────────────────────────────────────────
@@ -889,6 +933,84 @@ function preview(top: Level, parent: number): Line {
   // A root joined by id is printed as the row it is, with what this file would hang off it.
   const root = walk(top, top.id === null);
   return top.id === null ? root : { ...root, label: `${top.kind} #${top.id}   joined`, id: null };
+}
+
+// ── the scope the promises ask for ───────────────────────────────────────────────────────
+
+/** The one answer this command does not have by the time it returns.
+ *
+ *  A repository index builds a snapshot before it can answer anything, so the proposal is
+ *  async and `plan()` is not — bin.ts assigns what dispatch returns straight to
+ *  process.exitCode, and a promise is not an exit code. So the proposal settles the exit
+ *  code itself; node does not exit while that promise is outstanding. A caller who needs
+ *  the answer rather than the printing awaits `proposedScope()`. */
+let pending: Promise<number> = Promise.resolve(0);
+
+/** What the last `wecode plan --propose-scope` answered, once it has. Zero when none has
+ *  been asked. */
+export const proposedScope = (): Promise<number> => pending;
+
+function proposing(top: Level, root: string, openIndex: (root: string) => RepoIndex): number {
+  const promising = [...tasksOf(top)].filter((t) => t.promises.length > 0);
+  if (promising.length === 0) {
+    return fail(
+      [
+        "no task in this plan promises a symbol, so there is nothing to propose a scope from.",
+        '  promises: ["packages/tui/src/list.ts:renderList"]   on a task, and ask again',
+      ].join("\n"),
+    );
+  }
+  pending = propose(promising, root, openIndex).then((code) => {
+    if (code !== 0) process.exitCode = code;
+    return code;
+  });
+  return 0;
+}
+
+/** Every promising task's scope, asked of the tree and printed for a person to paste.
+ *  Nothing is written: a scope is the operator's to widen or narrow, and a command that
+ *  edited one from a promise would be the agent setting its own ceiling. */
+async function propose(tasks: readonly Task[], root: string, openIndex: (root: string) => RepoIndex): Promise<number> {
+  let index: RepoIndex;
+  try {
+    index = openIndex(root);
+  } catch (err) {
+    return fail(`${root}: ${(err as Error).message}`);
+  }
+  const out: string[] = [`the scope these promises ask for, in ${root}`];
+  for (const task of tasks) {
+    try {
+      out.push(...proposal(task, await proposeScope(index, task.promises)));
+    } catch (err) {
+      // A broken index, which reads as itself. UnknownFile and UnknownSymbol never get
+      // here — a promised module the index does not hold is an answer, not a failure.
+      return fail((err as Error).message);
+    }
+  }
+  process.stdout.write(`${[...out, "", "nothing created — a proposed scope is pasted by a person, never written"].join("\n")}\n`);
+  return 0;
+}
+
+/** One task's proposal: the line to paste, then why each path of it is there. The reasons
+ *  are under the scope rather than instead of it, because the paste is the point and the
+ *  reasons are what a person disagrees with. */
+function proposal(task: Task, p: Proposal): readonly string[] {
+  const width = p.write.reduce((w, path) => Math.max(w, path.length), 0);
+  return [
+    "",
+    `  ${task.title}`,
+    `    scope: [${p.write.map((path) => `"${path}"`).join(", ")}]`,
+    "",
+    ...p.because.map((b) => `      ${b.path.padEnd(width)}   ${b.why}`),
+  ];
+}
+
+/** Every task the plan holds, in the order the file writes them. */
+function* tasksOf(level: Level): Generator<Task> {
+  for (const child of level.children) yield* tasksOf(child);
+  for (const requirement of level.requirements) {
+    for (const criteria of requirement.criteria) yield* criteria.tasks;
+  }
 }
 
 function render(root: Line): string {
