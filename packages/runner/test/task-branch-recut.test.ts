@@ -50,10 +50,12 @@ describe("a task branch is re-cut when the story has moved past it", () => {
     run(repo, "branch", "task/send-mail", orphan);
     run(repo, "checkout", "-q", "main");
 
-    await expect(trees.taskBranch("password-reset", "send-mail")).rejects.toThrow(
-      /not a descendant of story\/password-reset/,
+    expect(await trees.taskBranch("password-reset", "send-mail")).toBe("task/send-mail");
+    expect(run(repo, "rev-parse", "task/send-mail")).toBe(
+      run(repo, "rev-parse", "story/password-reset"),
     );
-    expect(run(repo, "rev-parse", "task/send-mail")).toBe(orphan);
+    // The unrelated tip is not this story's work, but it is still someone's commit.
+    expect(run(repo, "rev-parse", "attempt/send-mail/1")).toBe(orphan);
   });
 
   it("leaves a branch that is already at, or ahead of, the story tip alone", async () => {
@@ -69,18 +71,17 @@ describe("a task branch is re-cut when the story has moved past it", () => {
     expect(run(repo, "rev-parse", task)).toBe(attempt);
   });
 
-  it("refuses rather than losing an attempt when both branches have moved", async () => {
+  it("tags the attempt and re-cuts when both branches have moved", async () => {
     const task = await trees.taskBranch("password-reset", "send-mail");
     run(repo, "checkout", "-q", task);
     const attempt = commit("attempt");
     run(repo, "checkout", "-q", "story/password-reset");
-    commit("sibling");
+    const sibling = commit("sibling");
     run(repo, "checkout", "-q", "main");
 
-    await expect(trees.taskBranch("password-reset", "send-mail")).rejects.toThrow(
-      /re-cutting it would lose them/,
-    );
-    expect(run(repo, "rev-parse", task)).toBe(attempt);
+    expect(await trees.taskBranch("password-reset", "send-mail")).toBe(task);
+    expect(run(repo, "rev-parse", task)).toBe(sibling);
+    expect(run(repo, "rev-parse", "attempt/send-mail/1")).toBe(attempt);
   });
 
   it("cuts an assignment's tree from the re-cut tip, not the stale one", async () => {
