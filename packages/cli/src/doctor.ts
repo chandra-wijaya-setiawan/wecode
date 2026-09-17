@@ -17,6 +17,8 @@ import {
 /** The typed layer is core's, and core's public surface does not carry it, so the one
  *  import in the cli that needs the dialect names the module it lives in. */
 import { excluded, queries, table, type Dialect } from "@wecode/core/dist/db.js";
+import { openCodegraph, type RepoIndex } from "@wecode/explorer";
+import { checkTree } from "./unimported.js";
 
 /** The columns the doctor reads, and only those. Declared per table rather than built by
  *  interpolating a table name and a foreign-key name into a query string, which is what the
@@ -209,8 +211,15 @@ export function snapshot(db: DatabaseSync): Snapshot {
  *  with no repository to hand is not an error — every other check still reports, and the
  *  output says which check went unanswered rather than passing its worst case off as a fact.
  *
+ *  `wecode doctor --tree` — and also the invariants about the source, read through the
+ *  repo-explorer port. That half is asked of an index, which builds a snapshot of the
+ *  checkout before it can answer anything, so it cannot be answered inside a function that
+ *  returns a number. It runs alongside, prints for itself, and settles its own exit code;
+ *  a caller who needs the answer rather than the side effect awaits `examined()`. It is
+ *  opt-in because indexing a repository costs seconds and the tick runs this every time.
+ *
  *  Non-zero when anything is still broken, so a script can gate on it. */
-export function doctor(args: readonly string[]): number {
+export function doctor(args: readonly string[], open: (root: string) => RepoIndex = openCodegraph): number {
   const heal = args.includes("--heal");
   const path = args.find((a) => !a.startsWith("--")) ?? currentDatabase();
   if (!existsSync(path)) {
@@ -222,7 +231,9 @@ export function doctor(args: readonly string[]): number {
   let violations: readonly Violation[];
   let world: World;
   try {
-    world = worldOf(gitIn(repoOf(db)));
+    const repo = repoOf(db);
+    world = worldOf(gitIn(repo));
+    if (args.includes("--tree")) examine(repo, entryPoints(args), open);
     violations = runChecks(snapshot(db), world);
     if (heal) {
       process.stdout.write(healed(healLandedMarkers(db, violations, gitIn(repoOf(db)))));
@@ -237,9 +248,45 @@ export function doctor(args: readonly string[]): number {
   // noise on every tick of the thing that runs it.
   if (violations.length === 0) return 0;
 
-  process.stdout.write(report(violations, world));
+  process.stdout.write(report(violations, world.reachable ? [] : gitAnswered()));
   return 1;
 }
+
+/** The files whose exports are the repository's outward surface, as `--entry=<path>`, once
+ *  per file. Named by the person running the check rather than guessed at from a filename:
+ *  which modules are a package's surface is a fact about the packaging, and a doctor that
+ *  decided it by pattern would be inventing the answer it then grades against. */
+const entryPoints = (args: readonly string[]): ReadonlySet<string> =>
+  new Set(args.filter((a) => a.startsWith("--entry=")).map((a) => a.slice("--entry=".length)));
+
+/** The tree half, running beside the record half.
+ *
+ *  Nothing is awaited here: `run()` is not async, so the answer arrives through this
+ *  promise and the pass puts its own verdict on `process.exitCode`. Node does not exit
+ *  while the promise is live, so the report is printed either way. */
+let examining: Promise<readonly Violation[]> = Promise.resolve([]);
+
+function examine(repo: string, surface: ReadonlySet<string>, open: (root: string) => RepoIndex): void {
+  examining = (async () => {
+    const found = await checkTree({ index: open(repo), files: tracked(gitIn(repo)), surface });
+    if (found.length > 0) {
+      process.stdout.write(report(found, []));
+      process.exitCode = 1;
+    }
+    return found;
+  })();
+}
+
+/** What the last `wecode doctor --tree` found, once it has. Empty when none was asked. */
+export const examined = (): Promise<readonly Violation[]> => examining;
+
+/** Every file the repository tracks. Asked of git rather than of the filesystem, so what
+ *  is checked is what is committed — and not filtered by extension here, because whether a
+ *  file is a module is the index's answer and it gives it by not holding one. */
+const tracked = (git: Git): readonly string[] =>
+  git(["ls-files"])
+    .split("\n")
+    .filter((l) => l !== "");
 
 /** What was written, said out loud. The ledger has the same lines; this is for the person
  *  standing at the terminal, who should not have to query to find out what just changed. */
@@ -263,13 +310,20 @@ const gitIn =
   (args: readonly string[]): string =>
     execFileSync("git", [...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
 
+/** The checks that cannot be answered from the record alone. */
+const gitAnswered = (): readonly string[] => checksOf().filter((c) => c.world).map((c) => c.name);
+
 /** Grouped by invariant, because the invariant is the sentence that was broken and the
  *  entities are the evidence for it. Ungrouped, the same drift on forty rows reads as
- *  forty problems. */
-function report(violations: readonly Violation[], world: World): string {
+ *  forty problems.
+ *
+ *  `unanswered` is the checks this pass could not run at all. It is an argument rather
+ *  than something worked out here, because the tree half runs no git-answered check and a
+ *  footnote about one would be about a pass that did not happen. */
+function report(violations: readonly Violation[], unanswered: readonly string[]): string {
   const groups = new Map<string, Violation[]>();
   for (const v of violations) groups.set(v.invariant, [...(groups.get(v.invariant) ?? []), v]);
-  const needsGit = new Set(checksOf().filter((c) => c.world).map((c) => c.name));
+  const needsGit = new Set(gitAnswered());
 
   const lines: string[] = [];
   for (const [name, found] of groups) {
@@ -289,8 +343,8 @@ function report(violations: readonly Violation[], world: World): string {
   // No repository to hand is not an error — the rest of the pass is above. It is only the
   // git-answered checks that are unproven here, and saying so is cheaper than a reader
   // believing an accusation nothing confirmed.
-  if (!world.reachable) {
-    lines.push(`no repository to ask — unanswered: ${[...needsGit].join(", ")}`);
+  if (unanswered.length > 0) {
+    lines.push(`no repository to ask — unanswered: ${unanswered.join(", ")}`);
   }
   lines.push("");
   return lines.join("\n");
