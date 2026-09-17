@@ -10,7 +10,12 @@ roles:
   engineer:
     worker_kind: agent
     scope:
-      write: ["packages/*/src/**", "packages/*/test/**", "packages/*/config/**", "src/**", "tests/**"]
+      # `packages/*/sql/**` is the schema: a migration is source like any other module, and a
+      # story that adds a column cannot be done without it. Pinned by
+      # packages/core/test/ceilings-cover-the-schema.test.ts, which refuses any source
+      # directory this list cannot reach.
+      write:
+        ["packages/*/src/**", "packages/*/test/**", "packages/*/config/**", "packages/*/sql/**", "src/**", "tests/**"]
       tools: ["bash", "read", "edit", "write"]
 
   # docs/design/18. The role a chore runs under, and the only one that may write anywhere:
