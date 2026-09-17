@@ -33,6 +33,15 @@ export interface Work {
   readonly worktree: string;
   /** Set when a killed attempt is being continued rather than restarted. */
   readonly session: string | null;
+  /** Which model the harness is to run this assignment on.
+   *
+   *  The assignment names it so nothing depends on where the runner happens to be
+   *  standing: a harness left to pick for itself reads an environment — a config file in
+   *  somebody's home directory, a variable inherited from the shell that started the
+   *  daemon — and the same assignment then runs on a different model on a different
+   *  machine, which makes an attempt's outcome unattributable. Absent when the record does
+   *  not name one; an adapter then uses its own declared default, never the environment's. */
+  readonly model?: string;
   /** What earlier attempts on this project learned, newest first and capped at ten. Absent
    *  when the project has none — an empty heading teaches the next agent nothing and costs
    *  it the attention the real lines need. See docs/design/17. */
