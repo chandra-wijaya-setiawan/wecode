@@ -37,6 +37,7 @@ import {
 import { excluded, queries, table, type Dialect, type TableDef, type Value } from "@wecode/core/dist/db.js";
 import { plan } from "./plan.js";
 import { doctor } from "./doctor.js";
+import { explore } from "./explore.js";
 import { delivered as deliveredStories } from "./delivered.js";
 
 const DB = (): string => currentDatabase();
@@ -70,6 +71,7 @@ function dispatch(argv: readonly string[]): number {
   if (head === "land") return land(rest);
   if (head === "onboard") return onboard(rest);
   if (head === "plan") return plan(rest);
+  if (head === "explore") return exploring(rest);
   if (head === "workspaces") return workspaces();
   if (head === "tree") return showTree(rest);
   if (head === "watch") return watch(rest);
@@ -81,6 +83,28 @@ function dispatch(argv: readonly string[]): number {
   if (head === "lesson") return lesson(rest);
   return verb(head, rest);
 }
+
+/** The one command whose answer is not known by the time dispatch returns.
+ *
+ *  A repository index builds a snapshot before it can answer anything, so `explore` is
+ *  async and `run()` is not — bin.ts assigns what run() returns straight to
+ *  process.exitCode, and a promise is not an exit code. So the command settles the exit
+ *  code itself once the index has answered; node does not exit while that promise is
+ *  outstanding, and nothing after it here overwrites a non-zero one.
+ *
+ *  A caller who needs the answer rather than the side effect awaits `answered()`. */
+let pending: Promise<number> = Promise.resolve(0);
+
+function exploring(args: readonly string[]): number {
+  pending = explore(args).then((code) => {
+    if (code !== 0) process.exitCode = code;
+    return code;
+  });
+  return 0;
+}
+
+/** What the last `wecode explore` answered, once it has. Zero when none has been asked. */
+export const answered = (): Promise<number> => pending;
 
 /** `wecode init [name] [--workspace <name>]` — an empty workspace, and nothing else.
  *
@@ -1593,6 +1617,7 @@ function usage(): number {
       "  wecode wait <entity> <id>                  block until it settles; the exit code is the answer",
       "  wecode <entity> --help                     that entity's states and verbs",
       "  wecode delivered [--all] [--project N]     what wecode can already do (--json)",
+      "  wecode explore read|uses|purpose <file>    what is in this repository, asked of an index",
       "  wecode lessons [--project N]               what earlier attempts here learned",
       "  wecode lesson drop <id>                    a wrong lesson is worse than none",
       "  wecode doctor                              one pass of the invariants; non-zero if any is broken",

@@ -9,7 +9,8 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@wecode/core": "workspace:*"
+    "@wecode/core": "workspace:*",
+    "@wecode/explorer": "workspace:*"
   },
   "bin": {
     "wecode": "./dist/bin.js"
