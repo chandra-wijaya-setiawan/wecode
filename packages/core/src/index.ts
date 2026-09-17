@@ -12,6 +12,7 @@ export * from "./roles.js";
 // chore.ts composes, so the work wecode owes itself is on it without every client asking.
 export { type Board, type Row, clearRefusal, lastLine, openAssignments, recordRefusal } from "./board.js";
 export * from "./chore.js";
+export * from "./approval.js";
 export * from "./edit.js";
 export * from "./stacks.js";
 export * from "./home.js";
