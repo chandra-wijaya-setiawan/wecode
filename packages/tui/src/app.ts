@@ -2,15 +2,21 @@
  *  a key does to what is on screen, and screens.ts is what that looks like. */
 import type { DatabaseSync } from "node:sqlite";
 import {
+  actorOf,
+  answerApproval,
+  approvalById,
+  ApprovalError,
   board,
   Engine,
   loadMachines,
+  OPERATOR,
   Repo,
   tree,
   TRANSITIONS,
   Verbs,
   type Board,
   type MachineSet,
+  type Approval,
   type Node,
   type Outcome,
   type StatefulEntity,
@@ -70,6 +76,11 @@ const METHODS: ReadonlyMap<string, keyof Verbs> = new Map(
   ),
 );
 
+/** Who the cockpit answers an approval as. The same variable the cli reads, defaulting to
+ *  the same name, so one person is one identity whichever way in they took. The name still
+ *  has to be a human worker's: core refuses an answer given on somebody else's behalf. */
+const whoAnswers = (): string => actorOf(process.env["WECODE_ACTOR"]) ?? OPERATOR;
+
 const keyOf = (v: View): string | undefined => {
   const k = (v as { key?: unknown }).key;
   return typeof k === "string" && k.length === 1 ? k : undefined;
@@ -111,7 +122,7 @@ export class App {
    *  folding is not a descent, so it must not cost an esc to undo. */
   private expanded: ReadonlySet<string> = new Set();
   /** What the last key armed: v waits for a box's letter, a waits for a verb's. */
-  private armed: null | "view" | "verb" = null;
+  private armed: null | "view" | "verb" | "answer" = null;
 
   constructor(db: DatabaseSync, views: readonly View[], machines: MachineSet = loadMachines()) {
     this.db = db;
@@ -174,6 +185,10 @@ export class App {
     if (this.armed === "verb") {
       this.armed = null;
       return this.pick(k);
+    }
+    if (this.armed === "answer") {
+      this.armed = null;
+      return this.say(k);
     }
     if (ENTER.includes(k)) return this.descend();
     if (k === "esc" || k === ESC) return this.pop();
@@ -249,7 +264,57 @@ export class App {
     this.status = view.title;
   }
 
+  /** The approval under the cursor, if the row is one and it is still waiting. An
+   *  assignment an agent raised for itself is not one: only a question asked of a person
+   *  carries options a key could pick. */
+  private approvalHere(): Approval | null {
+    const item = this.current();
+    if (item === null || item.entity !== "assignment") return null;
+    const approval = approvalById(this.db, item.row.id);
+    return approval !== null && approval.phase === "waiting" ? approval : null;
+  }
+
+  /** `a` on a waiting approval offers its answers rather than the machine's verbs. Both
+   *  routes end in `waiting → running`, but only this one writes down what was said and
+   *  who said it, and the bare verb would leave the question standing. */
+  private armAnswer(approval: Approval): void {
+    const options = approval.options;
+    if (options === null) {
+      this.status = `assignment #${approval.id} asks an open question, and a key is not an answer to one`;
+      return;
+    }
+    this.armed = "answer";
+    this.status = `answer? ${options.map((o) => `${o[0]} ${o}`).join("  ")}`;
+  }
+
+  /** Answer the approval under the cursor with the option that letter names, in the
+   *  answerer's own name. A letter two options share is refused: an answer is a decision
+   *  the record keeps, and guessing which one was meant is not available. */
+  private say(k: string): void {
+    const approval = this.approvalHere();
+    const match = (approval?.options ?? []).filter((o) => o.startsWith(k));
+    if (approval === null || match.length === 0) {
+      this.status = `no answer on ${k}`;
+      return;
+    }
+    if (match.length > 1) {
+      this.status = `${k} is ambiguous: ${match.join(", ")}`;
+      return;
+    }
+    const said = match[0] as string;
+    const by = whoAnswers();
+    try {
+      answerApproval(this.db, approval.id, said, by);
+      this.status = `assignment #${approval.id} answered ${said} by ${by}`;
+    } catch (e) {
+      this.status = e instanceof ApprovalError ? e.message : String(e);
+    }
+    this.refresh();
+  }
+
   private armVerb(): void {
+    const approval = this.approvalHere();
+    if (approval !== null) return this.armAnswer(approval);
     const verbs = this.verbs();
     if (verbs.length === 0) {
       this.status = "nothing may be done to this row";

@@ -45,6 +45,22 @@ export interface ApprovalSpec {
   readonly options?: readonly string[] | null;
 }
 
+/** What the question is about, read off the objective the approval hangs on.
+ *
+ *  A person answering "ship the reset mail to production?" is answering about something,
+ *  and `task #12` is not that something. The evidence is the objective in the words it
+ *  already carries — a task's title, a test's statement — and the state it is in, so the
+ *  answer is given to the work rather than to a number. */
+export interface Evidence {
+  readonly type: ObjectiveType;
+  readonly id: number;
+  /** What the objective says it is: a task's title, a test's statement. */
+  readonly statement: string;
+  /** Where the objective has got to, now — an approval read a week later is read against
+   *  the work as it stands, not as it stood when the question was asked. */
+  readonly state: string;
+}
+
 export interface Approval {
   readonly id: number;
   readonly objective_type: string;
@@ -56,6 +72,9 @@ export interface Approval {
   readonly options: readonly string[] | null;
   readonly answer: string | null;
   readonly answered_by: string | null;
+  /** Null only where the objective has been deleted under a question already raised: a
+   *  board that throws is no board, so the approval is still readable without it. */
+  readonly evidence: Evidence | null;
 }
 
 interface ApprovalRow {
@@ -99,7 +118,35 @@ const optionsOf = (stored: string | null): readonly string[] | null => {
   return Array.isArray(parsed) && parsed.every((o) => typeof o === "string") ? (parsed as string[]) : null;
 };
 
-const shape = (row: ApprovalRow): Approval => ({
+/** The three objective kinds an assignment may hang on, and the column each one keeps its
+ *  words in. `task` says `title` and the two test tables say `statement`; that difference
+ *  is the schema's, and it is spelled once here rather than at every call site. */
+const titled = table<{ id: number; title: string; state: string }>("task", ["id", "title", "state"]);
+const stated = (name: string) =>
+  table<{ id: number; statement: string; state: string }>(name, ["id", "statement", "state"]);
+
+type Said = { statement: string; state: string } | null;
+
+const objectives: { readonly [K in ObjectiveType]: (db: DatabaseSync, id: number) => Said } = {
+  task: (db, id) => {
+    const row = queries(db).selectFrom(titled).where("id", "=", id).get();
+    return row === null ? null : { statement: row.title, state: row.state };
+  },
+  acceptance_test: (db, id) => queries(db).selectFrom(stated("acceptance_test")).where("id", "=", id).get(),
+  task_test: (db, id) => queries(db).selectFrom(stated("task_test")).where("id", "=", id).get(),
+};
+
+/** What an approval about this objective would be evidenced by, or nothing if there is no
+ *  such objective to ask about. An `objective_type` outside the three kinds is nothing
+ *  either: a row hand-written with a fourth kind has no evidence, it does not throw. */
+export function evidenceFor(db: DatabaseSync, type: string, id: number): Evidence | null {
+  const look = objectives[type as ObjectiveType] as ((db: DatabaseSync, id: number) => Said) | undefined;
+  if (look === undefined) return null;
+  const said = look(db, id);
+  return said === null ? null : { type: type as ObjectiveType, id, statement: said.statement, state: said.state };
+}
+
+const shape = (db: DatabaseSync, row: ApprovalRow): Approval => ({
   id: row.id,
   objective_type: row.objective_type,
   objective_id: row.objective_id,
@@ -110,6 +157,7 @@ const shape = (row: ApprovalRow): Approval => ({
   options: optionsOf(row.options),
   answer: row.answer,
   answered_by: row.answered_by,
+  evidence: evidenceFor(db, row.objective_type, row.objective_id),
 });
 
 const rowOf = (db: DatabaseSync, id: number): ApprovalRow | null =>
@@ -118,7 +166,7 @@ const rowOf = (db: DatabaseSync, id: number): ApprovalRow | null =>
 /** One approval, or nothing. An assignment that is not an approval is not one of these. */
 export function approvalById(db: DatabaseSync, id: number): Approval | null {
   const row = rowOf(db, id);
-  return row === null || row.kind !== APPROVAL_KIND ? null : shape(row);
+  return row === null || row.kind !== APPROVAL_KIND ? null : shape(db, row);
 }
 
 /** Every approval still waiting on somebody, oldest first. The same rows the board's
@@ -129,7 +177,7 @@ export function waitingApprovals(db: DatabaseSync): readonly Approval[] {
     .all()
     .filter((a) => a.kind === APPROVAL_KIND && a.phase === "waiting")
     .sort((a, b) => a.id - b.id)
-    .map(shape);
+    .map((row) => shape(db, row));
 }
 
 /** The worker, if there is one. */
@@ -153,6 +201,13 @@ export function raiseApproval(db: DatabaseSync, spec: ApprovalSpec, engine: Engi
   const options = spec.options ?? null;
   if (options !== null && options.length === 0) {
     throw new ApprovalError("an approval with options must offer at least one. Pass no options for an open question.");
+  }
+
+  if (evidenceFor(db, spec.objective_type, spec.objective_id) === null) {
+    throw new ApprovalError(
+      `there is no ${spec.objective_type} #${spec.objective_id} to ask about. An approval is answered ` +
+        "against the work it hangs on, so it is raised on an objective that exists.",
+    );
   }
 
   const worker = workerById(db, spec.worker_id);
@@ -186,7 +241,7 @@ export function raiseApproval(db: DatabaseSync, spec: ApprovalSpec, engine: Engi
 
     const row = rowOf(db, id);
     if (row === null) throw new ApprovalError(`approval #${id} was written and could not be read back`);
-    return shape(row);
+    return shape(db, row);
   });
 }
 
@@ -236,6 +291,6 @@ export function answerApproval(db: DatabaseSync, id: number, answer: string, by:
 
     const after = rowOf(db, id);
     if (after === null) throw new ApprovalError(`approval #${id} was answered and could not be read back`);
-    return shape(after);
+    return shape(db, after);
   });
 }
