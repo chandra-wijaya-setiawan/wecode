@@ -103,7 +103,7 @@ components:
     layer: service
     component: true
     owns: one per kind of worker — the only thing that knows the difference
-    modules: [adapters/claude-code, adapters/denials]
+    modules: [adapters/claude-code, adapters/script, adapters/denials]
 
   doctor:
     package: runner
