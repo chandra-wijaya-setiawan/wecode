@@ -124,7 +124,7 @@ components:
     layer: client
     component: true
     owns: every verb, as a command. The only way an agent reaches wecode
-    modules: [bin, delivered, doctor, explore, index, plan, run, unimported]
+    modules: [bin, delivered, doctor, explore, index, plan, run, scope-proposal, unimported]
 
   repo-explorer:
     package: explorer
