@@ -7,6 +7,7 @@ import {
   lessons,
   now,
   recordScopeRefusal,
+  Verbs,
   type Budget,
 } from "@wecode/core";
 // The dialect is core's, but core's barrel does not re-export it — `db.js` is imported by
@@ -149,7 +150,10 @@ export interface TickReport {
  *  resumes it. It decides nothing about the work — only whether an attempt exists and how
  *  it is going. */
 export class Foreman {
-  private readonly engine: Engine;
+  /** The record's verbs, one method per transition. The engine is behind it, but nothing
+   *  here names a verb as a string: an assignment moved by a misspelt word is a tick that
+   *  silently does nothing, and the facade makes it a typecheck failure instead. */
+  private readonly verbs: Verbs;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -157,7 +161,7 @@ export class Foreman {
     private readonly deadlineSeconds = 3600,
     private readonly opts: ForemanOptions = {},
   ) {
-    this.engine = new Engine(db);
+    this.verbs = new Verbs(new Engine(db));
   }
 
   private get q(): ReturnType<typeof queries> {
@@ -190,7 +194,7 @@ export class Foreman {
           // The answer moves it back to running before anything the worker then does is
           // recorded — otherwise a session that finishes immediately would try to reach
           // succeeded from waiting, which no transition allows.
-          if (!this.engine.apply("assignment", row.id, "answer", "operator").ok) continue;
+          if (!this.verbs.answerAssignment(row.id, "operator").ok) continue;
           seen = await adapter.answer(work, row.answer);
         } else {
           // Poll first, judge the deadline after. An assignment the adapter has never heard
@@ -484,7 +488,7 @@ export class Foreman {
     // from pending, so the start is recorded first: the record must be able to say the
     // attempt ran, even when it ran for one second.
     if (seen.phase !== "failed" && this.phaseOf(id) === "pending") {
-      this.engine.apply("assignment", id, "start", "foreman");
+      this.verbs.startAssignment(id, "foreman");
     }
 
     // Every branch below writes the same three columns, so they are written once here.
@@ -510,20 +514,20 @@ export class Foreman {
         answer: null,
         answered_by: null,
       });
-      return this.engine.apply("assignment", id, "ask", "foreman").ok;
+      return this.verbs.askAssignment(id, "foreman").ok;
     }
 
     if (seen.phase === "succeeded") {
       // `coalesce(?, session)` was what kept a session the adapter did not name: an
       // adapter that says nothing leaves the column alone rather than clearing it.
       write({ ...(seen.session === null ? {} : { session: seen.session }), commit_sha: seen.commit });
-      const ok = this.engine.apply("assignment", id, "finish", "foreman").ok;
+      const ok = this.verbs.finishAssignment(id, "foreman").ok;
       if (ok) this.countAttempt(id);
       return ok;
     }
 
     write({ reason: seen.reason });
-    const out = this.engine.apply("assignment", id, "fail", "foreman").ok;
+    const out = this.verbs.failAssignment(id, "foreman").ok;
     if (out) this.countAttempt(id);
     return out;
   }
