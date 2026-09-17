@@ -20,6 +20,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
      *  answer — an agent that stops to ask permission has burned an attempt and proved
      *  nothing. Never `bypassPermissions`: the tool list is still a list. */
     private readonly permissionMode = "acceptEdits",
+    /** The model an assignment that names none is run on. Every spawn passes `--model`,
+     *  so the choice is always this adapter's or the assignment's — never whatever the
+     *  harness would have inferred from the machine it woke up on. */
+    private readonly model = DEFAULT_MODEL,
   ) {}
 
   /** Sessions this adapter has started and not yet seen finish. The runner is one long
@@ -180,7 +184,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
     mkdirSync(this.logDir, { recursive: true });
     const log = join(this.logDir, `assignment-${work.id}.jsonl`);
 
-    const child = spawnProcess(this.bin, [...args], {
+    // Here rather than in each caller: every session this adapter starts goes through
+    // this one spawn, so naming the model here is the whole guarantee that none of them
+    // is left to the environment.
+    const child = spawnProcess(this.bin, ["--model", work.model ?? this.model, ...args], {
       cwd: work.worktree,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -260,6 +267,15 @@ interface Session {
 }
 
 const zero = (): Budget => ({ tokens: 0, seconds: 0 });
+
+/** The model used when the assignment does not name one.
+ *
+ *  A literal here, and the one thing in this file that ought not to be: which model a role
+ *  works on is the operator's to set, so it belongs beside the role's scope and budget in
+ *  config/roles.yaml, carried onto the assignment and read off `work.model`. That path
+ *  needs core, so until it exists this constant is the declared fallback — explicit, in
+ *  one place, and not the environment's. */
+export const DEFAULT_MODEL = "claude-opus-5";
 
 /** The asking half of a lesson. One line, because a lesson that needs a paragraph is a
  *  design document — see docs/design/17. */
