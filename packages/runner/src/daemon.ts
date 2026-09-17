@@ -20,6 +20,7 @@ import {
   recordChoreRefusal,
   recordRefusal,
   reraiseChore,
+  Verbs,
   type Budget,
   type Chore,
   type ChoreKind,
@@ -291,6 +292,9 @@ export class Runner {
   private readonly foreman: Foreman;
   private readonly examiner: Examiner;
   private readonly engine: Engine;
+  /** The record's verbs, one method per transition. `engine` survives beside it only for
+   *  `settle()`, which is not a transition anybody invokes. */
+  private readonly verbs: Verbs;
   private readonly doctor: Doctor;
   /** One per repository. A workspace holds many projects, and each has its own branches. */
   private readonly treesByRepo = new Map<string, Trees>();
@@ -308,6 +312,7 @@ export class Runner {
     });
     this.examiner = new Examiner(db);
     this.engine = new Engine(db);
+    this.verbs = new Verbs(this.engine);
     this.doctor = new Doctor(db, opts.invariants);
     // A merge is not derivable from the record: a done task with a commit stays done and
     // committed forever, so without this landDoneTasks re-merges it on every tick and every
@@ -644,7 +649,7 @@ export class Runner {
 
     const stopped: number[] = [];
     for (const row of rows) {
-      if (this.engine.apply("task", row.id, "give_up", "runner").ok) stopped.push(row.id);
+      if (this.verbs.giveUpTask(row.id, "runner").ok) stopped.push(row.id);
     }
     return stopped;
   }

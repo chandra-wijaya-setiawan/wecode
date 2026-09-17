@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
 import { parse } from "yaml";
-import { Engine, now } from "@wecode/core";
+import { Engine, Verbs, now, type Outcome } from "@wecode/core";
 // Core's dialect, by the path core builds it to: it is deliberately not on core's barrel,
 // and reaching it here widens nothing for anybody else. See the same note in doctor.ts.
 import { excluded, queries, table, type Setters, type TableDef } from "@wecode/core/dist/db.js";
@@ -162,6 +162,21 @@ const TESTS: Record<TestEntity, TableDef<TestRow>> = {
   acceptance_test: table<TestRow>("acceptance_test", TEST_COLUMNS),
 };
 
+/** The two verdicts, one facade method each. The entity is a value here — chosen at run
+ *  time from which table the row came out of — so the method is looked up rather than
+ *  spelled, and the lookup is total over `TestEntity`: a third test table would not
+ *  compile until it named its own pass and fail. */
+const VERDICT: Record<TestEntity, Record<"pass" | "fail", (verbs: Verbs, id: number, actor: string) => Outcome>> = {
+  task_test: {
+    pass: (verbs, id, actor) => verbs.passTaskTest(id, actor),
+    fail: (verbs, id, actor) => verbs.failTaskTest(id, actor),
+  },
+  acceptance_test: {
+    pass: (verbs, id, actor) => verbs.passAcceptanceTest(id, actor),
+    fail: (verbs, id, actor) => verbs.failAcceptanceTest(id, actor),
+  },
+};
+
 const requirement = table<{ id: number; story_id: number }>("requirement", ["id", "story_id"]);
 const criteria = table<{ id: number; requirement_id: number }>("acceptance_criteria", ["id", "requirement_id"]);
 const task = table<{ id: number; acceptance_test_id: number; state: string }>("task", [
@@ -201,7 +216,10 @@ const SETTLED: readonly string[] = ["done", "dropped"];
  *  hung. So each run records a fingerprint of the tree tip, the attempt and the artefact,
  *  and a standing verdict is left alone until one of the three moves. */
 export class Examiner {
-  private readonly engine: Engine;
+  /** The record's verbs, one method per transition. Not the engine: a verb spelled as a
+   *  string is a transition the compiler cannot see, and this module's two are chosen at
+   *  run time, which is exactly where a typo would survive to the tick. */
+  private readonly verbs: Verbs;
   /** What preparing each tree came to, by tree and tip. Installing and building is the
    *  slowest thing this module does and the answer cannot change under an unmoved tip, so
    *  it is done once and remembered — including when it failed. */
@@ -211,7 +229,7 @@ export class Examiner {
     private readonly db: DatabaseSync,
     private readonly timeoutMs = 10 * 60 * 1000,
   ) {
-    this.engine = new Engine(db);
+    this.verbs = new Verbs(new Engine(db));
     // Runner-owned, beside the record rather than in it: the ledger says what is true of the
     // work, this says only what this machine has already done.
     db.exec(
@@ -346,7 +364,7 @@ export class Examiner {
           })
           .run();
       }
-      const verdict = this.engine.apply(entity, row.id, ok ? "pass" : "fail", "runner");
+      const verdict = VERDICT[entity][ok ? "pass" : "fail"](this.verbs, row.id, "runner");
       if (!verdict.ok) {
         // The engine's words, not ours: it is the thing that knows why, and a paraphrase
         // here is one more copy of the rules to keep in agreement with them.
