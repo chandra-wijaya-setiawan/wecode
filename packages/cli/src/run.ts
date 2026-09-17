@@ -28,6 +28,9 @@ import {
   setScriptPath,
   setTaskScope,
   STATEFUL,
+  TRANSITIONS,
+  Verbs,
+  type Outcome,
   type StatefulEntity,
   type TestKind,
   type WorkerKind,
@@ -440,8 +443,9 @@ function onboard(args: readonly string[]): number {
 
   const projectId = make.project(wsId, name, root);
   const releaseId = make.release(projectId, "0.0.1");
-  new Engine(conn).apply("project", projectId, "start", "operator");
-  new Engine(conn).apply("release", releaseId, "start", "operator");
+  const started = new Verbs(new Engine(conn));
+  started.startProject(projectId, "operator");
+  started.startRelease(releaseId, "operator");
 
   process.stdout.write(
     [
@@ -1180,6 +1184,30 @@ function lesson(args: readonly string[]): number {
   return 0;
 }
 
+/** One invocation of the facade: every method on `Verbs` takes an id and an actor and
+ *  answers an Outcome, so a verb resolved off the command line has this one shape. */
+type Invocation = (id: number, actor: string) => Outcome;
+
+/** The facade method the command line's `<entity> <verb>` names, or null when the facade
+ *  offers none.
+ *
+ *  The machine table is not copied here. `TRANSITIONS` is generated beside `Verbs` from the
+ *  same config and carries each row's method name, so the lookup resolves a name it was
+ *  given rather than one this file spells — a verb renamed in machines.yaml regenerates
+ *  both sides and this keeps working, and one removed resolves to null.
+ *
+ *  Null has two causes and they are not the same. A verb nobody ever declared is a typo,
+ *  and a completion verb — `story deliver`, `task finish` — is declared but automatic, so
+ *  the facade gives no way to spell it. Neither is answered here: both go back to the
+ *  engine, which is what has always decided what the cli says about them. */
+function invocation(verbs: Verbs, entity: StatefulEntity, name: string): Invocation | null {
+  const row = TRANSITIONS.find((t) => t.entity === entity && t.verb === name);
+  if (row === undefined || row.method === null) return null;
+  // Generated names, held against `Verbs` by facade.test.ts, so the descriptor is there.
+  const method = Object.getOwnPropertyDescriptor(Verbs.prototype, row.method)?.value as Invocation | undefined;
+  return method === undefined ? null : (id, actor) => method.call(verbs, id, actor);
+}
+
 /** `wecode <entity> <verb> [id|args]` — the surface in docs/design/06. */
 function verb(entity: string, rest: readonly string[]): number {
   const [name, ...args] = rest;
@@ -1199,7 +1227,9 @@ function verb(entity: string, rest: readonly string[]): number {
   if (!Number.isInteger(id)) return fail(`wecode ${entity} ${name} <id>`);
 
   const actor = process.env["WECODE_ACTOR"] ?? "operator";
-  const out = new Engine(db()).apply(entity, id, name, actor);
+  const engine = new Engine(db());
+  const invoke = invocation(new Verbs(engine), entity, name);
+  const out = invoke === null ? engine.apply(entity, id, name, actor) : invoke(id, actor);
   if (!out.ok) return fail(out.why);
 
   for (const c of out.changes) {
@@ -1237,7 +1267,7 @@ function retry(args: readonly string[]): number {
   if (before === null) return fail(`no task #${id}`);
 
   const who = process.env["WECODE_ACTOR"] ?? "operator";
-  const out = new Engine(conn).apply("task", id, "retry", `${who}: ${reason}`);
+  const out = new Verbs(new Engine(conn)).retryTask(id, `${who}: ${reason}`);
   if (!out.ok) return fail(out.why);
   // After the transition: a refused retry must not leave the counter reset behind it.
   q.update(task).set({ attempts: 0, updated_at: new Date().toISOString() }).where("id", "=", id).run();

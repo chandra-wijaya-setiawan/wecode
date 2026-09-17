@@ -11,7 +11,9 @@ import {
   open,
   readProjectConfig,
   transact,
+  Verbs,
   withinCeiling,
+  type Outcome,
   type ProjectConfig,
   type RoleConfig,
   type Scope,
@@ -826,20 +828,39 @@ function create(db: DatabaseSync, top: Level, parent: number): Made {
   return walk(top, parent);
 }
 
+/** The start each rung of the tree gets, and the deliver each test gets, as the facade
+ *  spells them. `engine.apply("requirement", id, "start", …)` was checked by nothing: the
+ *  entity and the verb were strings, and a verb that no longer existed on that machine was
+ *  a refusal at runtime. One method per rung says the same thing where the compiler can see
+ *  it, in the shape `READ` above already uses for the same reason. */
+const START: Record<Root | "requirement" | "acceptance_criteria" | "task", (v: Verbs, id: number) => Outcome> = {
+  release: (v, id) => v.startRelease(id, "operator"),
+  epic: (v, id) => v.startEpic(id, "operator"),
+  story: (v, id) => v.startStory(id, "operator"),
+  requirement: (v, id) => v.startRequirement(id, "operator"),
+  acceptance_criteria: (v, id) => v.startAcceptanceCriteria(id, "operator"),
+  task: (v, id) => v.startTask(id, "operator"),
+};
+
+const DELIVER: Record<"acceptance_test" | "task_test", (v: Verbs, id: number) => Outcome> = {
+  acceptance_test: (v, id) => v.deliverAcceptanceTest(id, "operator"),
+  task_test: (v, id) => v.deliverTaskTest(id, "operator"),
+};
+
 /** Delivers each test whose artefact resolves, and starts everything it created. A chain
  *  that needs six `start` commands afterwards is the same ceremony moved. */
 function begin(db: DatabaseSync, made: Made): void {
-  const engine = new Engine(db);
+  const verbs = new Verbs(new Engine(db));
   /** Starts a row still sitting in planned, and leaves one genuinely underway alone. The row
    *  a file joined by id may be either: joining #107 says where this work hangs, not that
    *  anyone ever started it, and a requirement running under a planned story can never be
    *  delivered because the story it would deliver through has not begun. */
   const go = (entity: Root | "requirement" | "acceptance_criteria" | "task", id: number): void => {
-    if (READ[entity](queries(db), id)?.state === "planned") engine.apply(entity, id, "start", "operator");
+    if (READ[entity](queries(db), id)?.state === "planned") START[entity](verbs, id);
   };
   const deliver = (entity: "acceptance_test" | "task_test", id: number): void => {
     // Refused when the artefact is empty, which is the guard doing its job, not a failure.
-    engine.apply(entity, id, "deliver", "operator");
+    DELIVER[entity](verbs, id);
   };
 
   // Ancestors first: a child started under a parent still in planned is the bug this order
