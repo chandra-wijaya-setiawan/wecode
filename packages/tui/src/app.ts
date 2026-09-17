@@ -7,9 +7,12 @@ import {
   loadMachines,
   Repo,
   tree,
+  TRANSITIONS,
+  Verbs,
   type Board,
   type MachineSet,
   type Node,
+  type Outcome,
   type StatefulEntity,
 } from "@wecode/core";
 import type { Row } from "./list.js";
@@ -58,6 +61,15 @@ const ENTITY: Readonly<Record<keyof Board, StatefulEntity | null>> = {
 const ESC = String.fromCharCode(27);
 const ENTER = ["enter", "\r", "\n"];
 
+/** The facade's methods, by the entity and verb each one invokes. Automatic transitions are
+ *  absent, because the facade has no method for one — the cockpit can only offer a verb it
+ *  can name a method for, so `a` cannot arm something no actor may invoke. */
+const METHODS: ReadonlyMap<string, keyof Verbs> = new Map(
+  TRANSITIONS.flatMap((t) =>
+    t.method === null ? [] : [[`${t.entity}.${t.verb}`, t.method as keyof Verbs] as const],
+  ),
+);
+
 const keyOf = (v: View): string | undefined => {
   const k = (v as { key?: unknown }).key;
   return typeof k === "string" && k.length === 1 ? k : undefined;
@@ -86,8 +98,9 @@ export class App {
   quit = false;
 
   private readonly db: DatabaseSync;
-  private readonly engine: Engine;
-  private readonly machines: MachineSet;
+  /** The only way this screen changes the record. Every verb it offers is one of these
+   *  methods, so a transition the machine table does not declare cannot be spelled here. */
+  private readonly facade: Verbs;
   private readonly repo: Repo;
   private readonly keys: ReadonlyMap<string, View>;
   private frames: Frame[] = [{ screen: { kind: "dashboard" }, cursor: 0 }];
@@ -103,8 +116,7 @@ export class App {
   constructor(db: DatabaseSync, views: readonly View[], machines: MachineSet = loadMachines()) {
     this.db = db;
     this.views = views;
-    this.machines = machines;
-    this.engine = new Engine(db, machines);
+    this.facade = new Verbs(new Engine(db, machines));
     this.repo = new Repo(db);
     this.keys = boxKeys(views);
     this.refresh();
@@ -142,17 +154,16 @@ export class App {
     return this.snapshot ?? board(this.db);
   }
 
-  /** The verbs the row under the cursor may take, read off its machine. Automatic
+  /** The verbs the row under the cursor may take, read off the facade. Automatic
    *  transitions are absent: no actor invokes them, so offering one would be a lie. */
   verbs(): string[] {
     const item = this.current();
     if (item === null || item.entity === null) return [];
     const state = this.repo.stateOf(item.entity, item.row.id);
     if (state === null) return [];
-    const legal = this.machines[item.entity].transitions.filter(
-      (t) => t.automatic !== true && t.from.includes(state),
-    );
-    return [...new Set(legal.map((t) => t.verb))];
+    return TRANSITIONS.filter(
+      (t) => t.entity === item.entity && t.method !== null && t.from.includes(state),
+    ).map((t) => t.verb);
   }
 
   key(k: string): void {
@@ -262,11 +273,19 @@ export class App {
       return;
     }
     const verb = match[0] as string;
-    const out = this.engine.apply(item.entity, item.row.id, verb, "operator");
+    const out = this.invoke(item.entity, verb, item.row.id);
     this.refresh();
     this.status = out.ok
       ? `${item.entity} #${item.row.id} ${verb} → ${out.changes[0]?.to ?? ""}`
       : out.why;
+  }
+
+  /** The facade method for a verb the row may take. `verbs()` reads the same table, so a
+   *  verb that reaches here always has one. */
+  private invoke(entity: StatefulEntity, verb: string, id: number): Outcome {
+    const method = METHODS.get(`${entity}.${verb}`);
+    if (method === undefined) throw new Error(`no facade method for ${entity}.${verb}`);
+    return this.facade[method](id, "operator");
   }
 
   private descend(): void {
