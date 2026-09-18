@@ -128,6 +128,22 @@ const matches = (node: Node, q: string): boolean => {
     .every((word) => label.includes(word));
 };
 
+/** The forest a query leaves: every row that answers it, and the rows above those, and
+ *  nothing else. A search is a filter rather than a jump — a tree that still held the
+ *  hundred rows you were not looking for would leave you reading it to find the one you
+ *  were. The rows under a match go with it: what is under a match is what folding is for.
+ *  A query nothing answers prunes to nothing, and `matching` leaves the tree as it was. */
+const matching = (forest: readonly Node[], query: string): readonly Node[] => {
+  const prune = (nodes: readonly Node[]): Node[] =>
+    nodes.flatMap((n) => {
+      if (matches(n, query)) return [n];
+      const under = prune(n.children);
+      return under.length === 0 ? [] : [{ ...n, children: under }];
+    });
+  const pruned = prune(forest);
+  return pruned.length === 0 ? forest : pruned;
+};
+
 /** The facade's methods, by the entity and verb each one invokes. Automatic transitions are
  *  absent, because the facade has no method for one — the cockpit can only offer a verb it
  *  can name a method for, so `a` cannot arm something no actor may invoke. */
@@ -311,7 +327,8 @@ export class App {
    *  the outline does — folding, the rows, the fold keys — reads it through here, so the
    *  narrowing cannot apply to the rows and not to the folding. */
   private outlineForest(): readonly Node[] {
-    return this.scope === "open" ? openWork(this.forest) : this.forest;
+    const scoped = this.scope === "open" ? openWork(this.forest) : this.forest;
+    return this.query === "" ? scoped : matching(scoped, this.query);
   }
 
   /** The outline opens folded to the level its config names, and in the scope it names.
@@ -357,9 +374,9 @@ export class App {
     return this.query;
   }
 
-  /** Start typing a search. The tree is the one screen a filter cannot serve: a box keeps
-   *  rows by their state, and what you have is a number off another screen or two words out
-   *  of a title. */
+  /** Start typing a search. A box keeps rows by their state; what you have in hand is a
+   *  number off another screen or two words out of a title, and what you want back is the
+   *  tree with only those rows in it. */
   private armSearch(): void {
     if (this.screen.kind !== "outline") {
       this.status = `/ searches the outline — v ${OUTLINE.key}`;
@@ -393,11 +410,13 @@ export class App {
     this.prompt();
   }
 
-  /** Commit a query: reveal every row that answers it and land on the first.
+  /** Commit a query: filter the tree down to the rows that answer it and land on the first.
    *
-   *  Revealing is the point. A match under a folded parent that stayed folded would be a
-   *  search that told you the row exists and not where, which is the one thing the outline
-   *  is for. */
+   *  Filtering is the point. A search that only moved the cursor left the other hundred rows
+   *  on screen, so finding the second match meant reading past them; the outline is for
+   *  seeing where a row hangs, and the rows above a match are the only ones that say so.
+   *  Those ancestors are also expanded, because a match kept behind a fold is a search that
+   *  told you the row exists and not where. */
   private seek(query: string): void {
     this.query = query;
     if (query === "") {
