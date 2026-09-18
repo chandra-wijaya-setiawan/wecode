@@ -76,7 +76,10 @@ export function plan(args: readonly string[], openIndex: (root: string) => RepoI
   const said: string[] = [];
   const shaped = read(doc, config, roles, said);
   const parent = shaped === null ? null : parentOf(db, shaped, values.epic, said);
-  if (shaped !== null && shaped.top !== null) duplicated(db, shaped.top, said);
+  if (shaped !== null && shaped.top !== null) {
+    duplicated(db, shaped.top, said);
+    joined(db, shaped.top, said);
+  }
 
   if (said.length > 0 || shaped === null || shaped.top === null || parent === null) {
     return fail([`${file} is not a plan yet:`, ...said.map((s) => `  ${s}`)].join("\n"));
@@ -142,7 +145,10 @@ interface Criteria {
   readonly tasks: readonly Task[];
 }
 interface Requirement {
-  readonly statement: string;
+  /** The existing requirement this one joins, when the file named an id instead of a
+   *  sentence. The criteria under it are created there rather than under a new row. */
+  readonly id: number | null;
+  readonly statement: string | null;
   readonly criteria: readonly Criteria[];
 }
 /** One rung of the ladder the file describes. A release holds epics, an epic holds stories,
@@ -172,7 +178,7 @@ const CHILDREN: Record<Root, string> = { story: "requirements", epic: "stories",
 const BELOW = { story: null, epic: "story", release: "epic" } as const;
 
 const KEYS = {
-  requirement: ["statement", "criteria"],
+  requirement: ["requirement", "statement", "criteria"],
   criteria: ["statement", "test", "tasks"],
   task: ["title", "scope", "test", "role", "promises"],
 } as const;
@@ -205,6 +211,7 @@ function help(): string {
     "  story: the cockpit is one reusable list      # or an id, to join that story",
     "  epic: 3                                      # optional; --epic <id> or the newest in-progress otherwise",
     "  requirements:                                # required, at least one",
+    "    - requirement: 12                          # or an id, to hang new criteria off that requirement",
     "    - statement: a person sees one list",
     "      criteria:",
     "        - statement: the list renders at three sizes",
@@ -222,6 +229,7 @@ function help(): string {
     "A test naming a file is refused unless that file exists or some task's scope writes it.",
     `A criteria naming no test of its own gets an extra ${AUTHORS} task that writes one.`,
     `A task's tools come from its role, or ${DEFAULT_TOOLS.join(", ")} when there are no roles.`,
+    "A requirement given as an id joins that requirement, which must be one of the joined story's.",
     `An epic holds ${CHILDREN.epic}, a release holds ${CHILDREN.release}; only the root joins an existing row by id.`,
     "",
     "--propose-scope creates nothing. It asks the repository index where each promised symbol",
@@ -391,11 +399,26 @@ function requirement(
 ): Requirement | null {
   const m = mapping(v, where, KEYS.requirement, say);
   if (m === null) return null;
-  const statement = required(m, "statement", where, say);
+
+  // A requirement given as an id is one the ledger already holds, and the criteria under it
+  // are new children of that row. A sentence there would say the same requirement twice.
+  const joined = id(m["requirement"]);
+  if (m["requirement"] !== undefined && joined === null) say.push(`${where}: requirement must be an id`);
+  if (joined !== null && m["statement"] !== undefined) {
+    say.push(`${where}: requirement #${joined} already exists, so statement must not be given too`);
+  }
+  const statement = joined === null ? required(m, "statement", where, say) : null;
+
   const criteria = list(m["criteria"], `${where}: criteria`, say)
     .map((c, i) => criterion(c, `${where}, criteria ${i + 1}`, config, roles, say))
     .filter((c) => c !== null);
-  return statement === null ? null : { statement, criteria };
+  // A joined requirement is named to hang criteria off; naming one and hanging nothing off
+  // it creates nothing at all, which is a typo rather than a plan.
+  if (joined !== null && criteria.length === 0) {
+    say.push(`${where}: requirement #${joined} is joined to hang criteria off, and there are none`);
+  }
+
+  return joined === null && statement === null ? null : { id: joined, statement, criteria };
 }
 
 /** The files a test command names: a word carrying a slash whose last segment has an
@@ -869,6 +892,29 @@ function duplicated(db: DatabaseSync, top: Level, say: string[]): void {
   walk(top);
 }
 
+/** Every requirement the file joined by id, held against the ledger: the row is there, and
+ *  it is one of the rows of the very story this file joined. Criteria hung off a requirement
+ *  under some other story would be work filed where nobody is looking for it, and off a
+ *  requirement of a story this file is only now making is impossible — that story has no
+ *  rows yet, so the id can only be someone else's. */
+function joined(db: DatabaseSync, top: Level, say: string[]): void {
+  const q = queries(db);
+  const walk = (l: Level): void => {
+    for (const r of l.requirements) {
+      if (r.id === null) continue;
+      const row = q.selectFrom(requirements).select(["story_id"]).where("id", "=", r.id).get();
+      if (row === null) say.push(`no requirement #${r.id}`);
+      else if (l.id === null) {
+        say.push(`requirement #${r.id} is under story #${row.story_id}, and this file makes a new story — join that story by id to hang criteria off it`);
+      } else if (row.story_id !== l.id) {
+        say.push(`requirement #${r.id} belongs to story #${row.story_id}, but this file joined story #${l.id}`);
+      }
+    }
+    for (const c of l.children) walk(c);
+  };
+  walk(top);
+}
+
 // ── creating ─────────────────────────────────────────────────────────────────────────────
 
 interface MadeTask {
@@ -905,7 +951,7 @@ function create(db: DatabaseSync, top: Level, parent: number): Made {
   const walk = (l: Level, under: number): Made => {
     const id = row(l, under);
     const requirements = l.requirements.map((r) => {
-      const requirement = make.requirement(id, r.statement);
+      const requirement = r.id ?? make.requirement(id, r.statement ?? "");
       const criteria = r.criteria.map((c) => {
         const criterion = make.criteria(requirement, c.statement);
         const test = make.acceptanceTest(criterion, c.statement, "script", c.test);
@@ -1032,7 +1078,7 @@ function preview(top: Level, parent: number): Line {
       ...l.children.map((c) => walk(c, false)),
       ...l.requirements.map((r) =>
         line(
-          r.statement,
+          r.id === null ? (r.statement ?? "") : `requirement #${r.id}   joined`,
           r.criteria.map((c) =>
             line(c.statement, [
               line(
