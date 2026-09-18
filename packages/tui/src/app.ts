@@ -71,7 +71,11 @@ export type Screen =
   | { readonly kind: "dashboard" }
   | { readonly kind: "box"; readonly view: View }
   | { readonly kind: "outline" }
-  | { readonly kind: "node"; readonly entity: StatefulEntity; readonly id: number };
+  | { readonly kind: "node"; readonly entity: StatefulEntity; readonly id: number }
+  /** An assignment, drawn from the board row it was opened from. An assignment hangs off
+   *  the tree rather than in it — `tree()` walks project → task_test and stops — so the
+   *  row the board built is the whole of what this screen knows, and it carries it. */
+  | { readonly kind: "assignment"; readonly id: number; readonly row: Row };
 
 /** A screen and where the cursor was on it, so esc comes back to the row you left. */
 interface Frame {
@@ -216,6 +220,9 @@ export class App {
   /** The only way this screen changes the record. Every verb it offers is one of these
    *  methods, so a transition the machine table does not declare cannot be spelled here. */
   private readonly facade: Verbs;
+  /** The same engine the facade calls, kept only to ask. Nothing here applies through it:
+   *  `may` is a question, and every answer that writes goes through `facade`. */
+  private readonly engine: Engine;
   private readonly repo: Repo;
   private readonly keys: ReadonlyMap<string, View>;
   private frames: Frame[] = [{ screen: { kind: "dashboard" }, cursor: 0 }];
@@ -241,7 +248,8 @@ export class App {
   constructor(db: DatabaseSync, views: readonly View[], machines: MachineSet = loadMachines()) {
     this.db = db;
     this.views = views;
-    this.facade = new Verbs(new Engine(db, machines));
+    this.engine = new Engine(db, machines);
+    this.facade = new Verbs(this.engine);
     this.repo = new Repo(db);
     this.keys = boxKeys(views);
     this.refresh();
@@ -289,6 +297,45 @@ export class App {
     return TRANSITIONS.filter(
       (t) => t.entity === item.entity && t.method !== null && t.from.includes(state),
     ).map((t) => t.verb);
+  }
+
+  /** Of those verbs, the ones the engine would let through now. The machine's table says
+   *  which verbs the state has; only the guards know whether this row satisfies them, and a
+   *  verb offered that the engine will refuse is a keystroke whose only outcome is the
+   *  refusal. Asked, never applied: `may` writes nothing. */
+  offered(): string[] {
+    const item = this.current();
+    if (item === null || item.entity === null) return [];
+    const entity = item.entity;
+    return this.verbs().filter((v) => this.engine.may(entity, item.row.id, v).ok);
+  }
+
+  /** Why the engine refuses a verb the row's state otherwise allows, or null if it does
+   *  not. The words are the guard's own, so the cockpit's refusal and the facade's are the
+   *  same sentence. */
+  private refusal(entity: StatefulEntity, id: number, verb: string): string | null {
+    const out = this.engine.may(entity, id, verb);
+    return out.ok ? null : out.why;
+  }
+
+  /** The attempts a task has had and the wall they run into, as rows to read under the
+   *  record's summary. A task nobody has attempted yet has no attempts to list, so it gets
+   *  none: the count is evidence of how a task got where it is, and zero is not evidence.
+   *
+   *  They carry no entity, so `a` offers nothing on them and `enter` opens nothing: an
+   *  attempt count is a fact about the task above, not a row of its own. */
+  private evidence(screen: Screen & { kind: "node" }): Item[] {
+    if (screen.entity !== "task") return [];
+    const tries = this.repo.taskRetry(screen.id);
+    if (tries === null || tries.attempts === 0) return [];
+    const { attempts, max_retry } = tries;
+    const left = max_retry - attempts;
+    const wall =
+      left <= 0 ? "out of attempts — retry, or drop it" : `${left} left before it gives up`;
+    return [
+      `${attempts} of ${max_retry} attempts used`,
+      wall,
+    ].map((what) => ({ entity: null, row: { id: screen.id, what, state: "", detail: "" } }));
   }
 
   key(k: string): void {
@@ -641,9 +688,15 @@ export class App {
   private armVerb(): void {
     const approval = this.approvalHere();
     if (approval !== null) return this.armAnswer(approval);
-    const verbs = this.verbs();
+    const verbs = this.offered();
     if (verbs.length === 0) {
-      this.status = "nothing may be done to this row";
+      // Which guard stood in the way, where one did. "nothing may be done" is true either
+      // way, but a row whose one verb is held back by a wall should say so.
+      const item = this.current();
+      const held = this.verbs()
+        .flatMap((v) => (item?.entity == null ? [] : [this.refusal(item.entity, item.row.id, v)]))
+        .filter((why): why is string => why !== null);
+      this.status = held[0] ?? "nothing may be done to this row";
       return;
     }
     this.armed = "verb";
@@ -654,9 +707,18 @@ export class App {
    *  state change is not a keystroke you can take back. */
   private pick(k: string): void {
     const item = this.current();
-    const match = this.verbs().filter((v) => v.startsWith(k));
-    if (item === null || item.entity === null || match.length === 0) {
+    const match = this.offered().filter((v) => v.startsWith(k));
+    if (item === null || item.entity === null) {
       this.status = `no verb on ${k}`;
+      return;
+    }
+    if (match.length === 0) {
+      // A verb the state has but the guards hold back: the letter is not nothing, so the
+      // wall gets named rather than the key denied. Ambiguity among those is not worth
+      // untangling — every one of them is refused.
+      const held = this.verbs().filter((v) => v.startsWith(k));
+      const why = held.length === 0 ? null : this.refusal(item.entity, item.row.id, held[0] as string);
+      this.status = why ?? `no verb on ${k}`;
       return;
     }
     if (match.length > 1) {
@@ -685,6 +747,13 @@ export class App {
       this.status = "nothing to open";
       return;
     }
+    // An assignment is not in the tree, so `find` would refuse it. What it is worth reading
+    // is on the row already, and the row goes with the screen.
+    if (item.entity === "assignment") {
+      this.push({ kind: "assignment", id: item.row.id, row: { ...item.row } });
+      this.status = `assignment #${item.row.id}`;
+      return;
+    }
     if (this.find(item.entity, item.row.id) === null) {
       this.status = `${item.entity} #${item.row.id} has nothing under it`;
       return;
@@ -711,6 +780,9 @@ export class App {
   }
 
   private itemsOf(screen: Screen): Item[] {
+    // Nothing hangs under an assignment: it is the leaf the board points at, so the screen
+    // holds no rows and the cursor has nowhere to go on it.
+    if (screen.kind === "assignment") return [];
     if (screen.kind === "outline") {
       // The head of the queue box is the next task the allocator will take, and the board
       // is where that order is decided. The outline only marks the row it names.
@@ -719,10 +791,13 @@ export class App {
     }
     if (screen.kind === "node") {
       const node = this.find(screen.entity, screen.id);
-      return (node?.children ?? []).map((c) => ({
+      // The evidence first: it belongs to the record the summary names, so it reads
+      // directly under it, above the children that are records of their own.
+      const children = (node?.children ?? []).map((c) => ({
         entity: c.entity as StatefulEntity,
         row: { id: c.id, what: c.label, state: c.state, detail: c.entity },
       }));
+      return [...this.evidence(screen), ...children];
     }
     const boxes = screen.kind === "box" ? [screen.view] : this.views;
     const now = this.snapshot ?? board(this.db);
