@@ -191,6 +191,10 @@ export interface Tick {
 export interface Landed {
   readonly story: number;
   readonly sha: string;
+  /** What the operator has to be told about their own checkout, when the ref moved under
+   *  it and wecode was not allowed to bring it forward. Absent is the silent case: their
+   *  folder shows the landed files already. */
+  readonly notice?: string;
 }
 
 /** An exhausted task, and the story left waiting on it. Named, because the cost is the
@@ -1143,6 +1147,9 @@ export class Runner {
         chores.push(raised.id);
         continue;
       }
+      // Read before the merge: the landing moves the ref, and the tip it moved *from* is
+      // what says whether the operator's checkout is merely stale or holds work of theirs.
+      const wasAt = await this.tipOf(repo, `refs/heads/${base}`);
       const attempt = await attemptLanding({
         repo,
         base,
@@ -1150,7 +1157,16 @@ export class Runner {
         tree: join(this.worktreeRoot(repo), `land-${row.slug}`),
       });
       if (attempt.kind === "landed") {
-        landed.push({ story: row.id, sha: attempt.sha });
+        // The ref moved in a tree of wecode's own, so the folder the operator works in is
+        // still showing the pre-land files. Bringing it forward, or saying the command
+        // that will, is part of the landing — not an extra nobody runs.
+        const notice =
+          wasAt === null
+            ? null
+            : await this.treesFor(repo)
+                .syncPrimaryCheckout(base, wasAt, attempt.sha)
+                .catch((err: unknown) => `${base} moved, and ${repo} could not be brought forward: ${String(err)}`);
+        landed.push(notice === null ? { story: row.id, sha: attempt.sha } : { story: row.id, sha: attempt.sha, notice });
         // Proved, not reported: the chore is finished because the base contains the branch
         // when this asks the graph, never because the merge exited zero.
         if (raised !== null && (await isLanded(repo, base, branch))) {
