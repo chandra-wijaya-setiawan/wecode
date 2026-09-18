@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { withinCeiling } from "@wecode/core";
 // By path: the landing rules belong to core but nothing exports them from the barrel.
 import { type PrimaryDrift, updatePrimary } from "@wecode/core/dist/land.js";
 
@@ -182,13 +183,51 @@ export class Trees {
     return head;
   }
 
+  /** The paths of the tree the scope covers: changed against HEAD — a deletion included —
+   *  and untracked. Asked as two plain lists rather than of `status --porcelain`, whose
+   *  status letters have to be sliced off a line whose leading column may be a space.
+   *  Ignored files are left out, as `add -A` leaves them out.
+   *
+   *  Covered is asked of `withinCeiling` rather than of a second matcher: a path is a glob
+   *  that matches itself, and a matcher here that had to agree with the one the scope was
+   *  checked by would be the defect. */
+  private async inScope(path: string, scope: readonly string[]): Promise<string[]> {
+    const lines = async (args: readonly string[]): Promise<string[]> =>
+      (await git(path, args)).split("\n").filter((f) => f !== "");
+    const touched = [
+      ...(await lines(["diff", "--name-only", "--no-renames", "HEAD"])),
+      ...(await lines(["ls-files", "--others", "--exclude-standard"])),
+    ];
+    return touched.filter((f) => withinCeiling({ write: scope, tools: [] }, { write: [f], tools: [] }).ok);
+  }
+
   /** Everything the attempt wrote, on its branch. A rejected attempt still commits: the
-   *  next one must be able to see what is already there. */
-  async commitAttempt(path: string, branch: string, message: string): Promise<string | null> {
+   *  next one must be able to see what is already there.
+   *
+   *  `scope` is the assignment's write globs, and it is what gets staged — nothing else.
+   *  The harness holds the scope for the tools it grants, but a shell, a generator or a test
+   *  run writes around it, and `add -A` then carried those strays onto the branch, where a
+   *  merge put them on master (the tracked root `mail.ts` got there exactly this way). A
+   *  stray is left in the tree instead: uncommitted, so cleanup reports it rather than
+   *  landing it. Omitted — not an empty list, which is a role that may write nothing —
+   *  stages the whole tree, as before. */
+  async commitAttempt(
+    path: string,
+    branch: string,
+    message: string,
+    scope?: readonly string[],
+  ): Promise<string | null> {
     await this.refuseBaseCheckout(path, "commitAttempt");
     await this.refuseAttached(path, "commitAttempt");
     const forwarded = await this.fastForwardToHead(path, branch);
-    await git(path, ["add", "-A"]);
+    if (scope === undefined) await git(path, ["add", "-A"]);
+    else {
+      // What the attempt staged for itself is no exemption: the index is rebuilt from the
+      // scope, so an out-of-scope `git add` it ran does not survive into the commit.
+      await git(path, ["reset", "-q"]);
+      const inScope = await this.inScope(path, scope);
+      if (inScope.length > 0) await git(path, ["add", "--", ...inScope]);
+    }
     const staged = await git(path, ["diff", "--cached", "--name-only"]);
     if (staged === "") return forwarded;
     await git(path, [
