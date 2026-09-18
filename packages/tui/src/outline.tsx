@@ -339,19 +339,35 @@ const GAP = "  ";
  *  `outlineRows`; what follows it is the rollup and is nobody's column. */
 const KINDS: ReadonlySet<string> = new Set<string>(STATEFUL);
 
-/** A row cut into its declared columns, with whatever the columns did not claim last. The
- *  tree cell is the row as `outlineRows` drew it — guide, fold marker and label — because
- *  those three are one thing: the label is where the branch it hangs off ends. */
+/** The guide and fold marker a row opens with, and the label after them.
+ *
+ *  `outlineRows` draws the three as one string because the cursor, the search and the fold
+ *  keys all read `what`; the columns split it again here, where the connector's characters
+ *  are declared. A row with no guide at all still has its marker. */
+const GUIDE = new RegExp(`^((?:${RAIL}|${CLEAR}|${TEE}|${ELBOW})*[-+ ]) `);
+
+export function splitTree(what: string): [string, string] {
+  const hit = GUIDE.exec(what);
+  return hit === null ? ["", what] : [hit[1] ?? "", what.slice(hit[0].length)];
+}
+
+/** A row cut into its declared columns, with the prose the columns did not claim last. The
+ *  tree cell is the guide and the fold marker alone: a label inside it is a cell as wide as
+ *  the longest name in the tree, and the id it pushes right is then read at a different
+ *  column on every row. Out of the cell, the label leads the prose — the one part of the
+ *  line whose width is nobody's business but its own. */
 export function outlineCells(row: Row, config: OutlineConfig = OUTLINE): string[] {
   const parts = row.detail === "" ? [] : row.detail.split(" · ");
   const kind = parts.length > 0 && KINDS.has(parts[0] ?? "") ? parts[0] ?? "" : "";
+  const [guide, label] = splitTree(row.what);
   const cell: Readonly<Record<OutlineColumn, string>> = {
-    tree: row.what,
+    tree: guide,
     id: `#${row.id}`,
     type: kind === "" ? "" : abbreviate(kind, config),
     state: abbreviate(row.state, config),
   };
-  return [...config.columns.map((c) => cell[c]), parts.slice(kind === "" ? 0 : 1).join(" · ")];
+  const prose = [label, ...parts.slice(kind === "" ? 0 : 1)].filter((s) => s !== "");
+  return [...config.columns.map((c) => cell[c]), prose.join(" · ")];
 }
 
 /** How wide each declared column has to be to hold every row: one set for the whole tree,

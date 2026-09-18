@@ -7,7 +7,7 @@ import { board, loadMachines, open } from "@wecode/core";
 import { App, outlineOpensOn } from "../src/app.js";
 import { Cockpit } from "../src/screens.js";
 import { loadViews } from "../src/views.js";
-import { OUTLINE, scopeTitle } from "../src/outline.js";
+import { OUTLINE, scopeTitle, splitTree } from "../src/outline.js";
 import { seed, T, ins } from "./seed.js";
 
 const views = loadViews();
@@ -100,7 +100,9 @@ describe("the box", () => {
   });
 
   it("lines its columns up down the whole tree", () => {
-    const at = (what: string): number => row(what).indexOf("in_progress");
+    // The id, because it is the first column past the tree: what the labels used to cost
+    // the line, they now cost the prose at the end of it.
+    const at = (what: string): number => row(what).indexOf("#");
     expect(at("storefront")).toBeGreaterThan(0);
     expect(at("account recovery")).toBe(at("storefront"));
     expect(at("password reset")).toBe(at("storefront"));
@@ -136,7 +138,9 @@ describe("what it opens at", () => {
   });
 
   it("indents each level under its parent", () => {
-    const indent = (what: string): number => row(what).indexOf(what) - 2;
+    // The guide carries the whole indent now that the label is out of the tree cell, so
+    // the depth is read off the connector prefix rather than off where the label starts.
+    const indent = (what: string): number => splitTree(row(what))[0].length;
     expect(indent("1.0.0")).toBeGreaterThan(indent("storefront"));
     expect(indent("account recovery")).toBeGreaterThan(indent("1.0.0"));
     expect(indent("password reset")).toBeGreaterThan(indent("account recovery"));
@@ -145,10 +149,10 @@ describe("what it opens at", () => {
   it("shows every row's id and state beside it", () => {
     // A code, not a bare number — the outline draws rows through the same contract as
     // every other list, and list.tsx is the one place that decides what a code looks like.
-    // The tree leads, so the code sits after the label rather than at the left edge, and
-    // the type and the state are cut to the four columns views.yaml declares.
-    expect(row("storefront")).toMatch(new RegExp(`storefront\\s+#${tree.project}\\b`));
-    expect(row("storefront")).toMatch(new RegExp(`#${tree.project}\\s+proj\\s+work\\b`));
+    // The tree cell is the guide and the marker alone, so the code is the first column
+    // after it and the label follows the four columns views.yaml declares.
+    expect(row("storefront")).toMatch(new RegExp(`#${tree.project}\\s+proj\\s+work\\s+storefront`));
+    expect(splitTree(row("storefront"))[1].trimStart()).toMatch(new RegExp(`^#${tree.project}\\b`));
     expect(row("password reset")).toMatch(/\bstor\b/);
   });
 });

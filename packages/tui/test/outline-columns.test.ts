@@ -100,16 +100,16 @@ describe("abbreviating a word", () => {
 });
 
 describe("the cells of a row", () => {
-  it("puts the tree first: the guide, the marker and the label, as drawn", () => {
-    expect(outlineCells(row())[0]).toBe("├─- storefront");
+  it("puts the tree first, and it is the guide and the marker alone", () => {
+    expect(outlineCells(row())[0]).toBe("├─-");
   });
 
   it("follows it with the id, the abbreviated type and the abbreviated state", () => {
     expect(outlineCells(row()).slice(1, 4)).toEqual(["#7", "stor", "work"]);
   });
 
-  it("keeps the rollup last, unabbreviated: it is read once, not down every row", () => {
-    expect(outlineCells(row()).at(-1)).toBe("3 under · 2 planned");
+  it("keeps the label and the rollup last, unabbreviated: read once, not down every row", () => {
+    expect(outlineCells(row()).at(-1)).toBe("storefront · 3 under · 2 planned");
   });
 
   it("leaves the type empty where the row's detail names no kind", () => {
@@ -118,7 +118,7 @@ describe("the cells of a row", () => {
 
   it("follows the config's order, so moving a column moves the cell", () => {
     const config: OutlineConfig = { ...OUTLINE, columns: ["state", "id", "tree"] };
-    expect(outlineCells(row(), config).slice(0, 3)).toEqual(["work", "#7", "├─- storefront"]);
+    expect(outlineCells(row(), config).slice(0, 3)).toEqual(["work", "#7", "├─-"]);
   });
 });
 
@@ -163,7 +163,9 @@ describe("the lines it draws", () => {
   });
 
   it("cuts a line too wide for the box rather than wrapping it", () => {
-    expect(outlineLines(rows, 10, null, 8)[0]?.text).toBe("- store…");
+    // The guide survives the cut and the label is what goes: a line too narrow for both is
+    // still a line whose place in the tree can be read.
+    expect(outlineLines(rows, 10, null, 8)[0]?.text).toBe("-    #1…");
   });
 });
 
@@ -171,8 +173,7 @@ describe("on the real tree", () => {
   it("draws the guide flush left and the abbreviated words after it", () => {
     const drawn = screen();
     const storefront = drawn.find((l) => l.includes("storefront")) ?? "";
-    expect(storefront).toMatch(/^[-+ ] storefront/);
-    expect(storefront).toContain("proj");
+    expect(storefront).toMatch(/^[-+ ]\s+#\d+\s+proj\s+work\s+storefront/);
     expect(storefront).not.toContain("project #");
   });
 
