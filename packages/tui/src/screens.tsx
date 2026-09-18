@@ -212,9 +212,28 @@ export function BoxPage({
   );
 }
 
-/** The record's fields, then its children as a list. The fields are what an App knows
- *  about the record it is on — App exposes the screen's entity and id, not the row it was
- *  opened from, so the label and state are not among them. */
+/** How the children stand, most of them first and ties by name, as `ready 2 · done 1`.
+ *  A count per state rather than the states in row order: the block is read to learn
+ *  whether the record is waiting on one thing or on twenty, and a list that repeated
+ *  `ready` twenty times would answer that only by being counted.
+ *
+ *  An em dash when there are none, because a blank line reads as a line that failed to
+ *  draw rather than as a record with nothing under it. */
+export function tally(rows: readonly Row[]): string {
+  const counts = new Map<string, number>();
+  for (const row of rows) counts.set(row.state, (counts.get(row.state) ?? 0) + 1);
+  if (counts.size === 0) return "—";
+  return [...counts]
+    .sort(([a, m], [b, n]) => n - m || a.localeCompare(b))
+    .map(([state, n]) => `${state} ${n}`)
+    .join(" · ");
+}
+
+/** The summary block, then the record's children as a list. The block's fields are what an
+ *  App knows about the record it is on — App exposes the screen's entity and id, not the row
+ *  it was opened from, so the label and state are not among them. What the children add up
+ *  to goes on the block's title rather than into a field of its own: it is the part you came
+ *  to the screen for, and the title is the line the eye lands on first. */
 export function Node({
   app,
   screen,
@@ -229,12 +248,12 @@ export function Node({
   ];
   const gutter = Math.max(...fields.map(([k]) => k.length));
   const inner = width - BORDER;
-  // The fields, their border, and the children's border: what is left is the list.
+  // The summary, its border, and the children's border: what is left is the list.
   const children = Math.max(height - fields.length - 2 * BORDER, 1);
   return (
     <>
       <Panel
-        title={`${screen.entity} #${screen.id}`}
+        title={`${screen.entity} #${screen.id} · ${tally(rows)}`}
         width={width}
         height={fields.length + BORDER}
       >
