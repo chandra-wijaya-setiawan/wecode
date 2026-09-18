@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
+// By path: the landing rules belong to core but nothing exports them from the barrel.
+import { type PrimaryDrift, updatePrimary } from "@wecode/core/dist/land.js";
 
 const exec = promisify(execFile);
 
@@ -381,6 +383,72 @@ export class Trees {
     await this.mergeInto(here, branch, `land ${branch}`, `land ${branch}`);
     const sha = await git(here, ["rev-parse", "HEAD"]);
     return sha === before ? { kind: "nothing", why: "already-ancestor" } : { kind: "merged", sha };
+  }
+
+  /** docs/design/14. The other half of a landing made in a tree of wecode's own.
+   *
+   *  `update-ref` moves the base branch and writes no checkout, so the folder a person works
+   *  in keeps showing the pre-land files — with the landed paths as phantom staged deletions,
+   *  because HEAD moved under an index that never saw them. It reads as lost work, and
+   *  nothing said so.
+   *
+   *  Called with the base tip as it was before the landing and as it is after. A primary
+   *  checkout on the base holding nothing but the old tip is brought forward; one holding
+   *  the operator's own work is left exactly as it is and the command is returned for the
+   *  caller to say. Null is nothing to say: it is current, or it was never on the base. */
+  async syncPrimaryCheckout(base: string, before: string, after: string): Promise<string | null> {
+    const path = await this.rootPath();
+    const drift = await this.primaryDrift(path, base, before, after);
+    const verdict = updatePrimary(drift);
+    if (verdict.kind === "tell") return verdict.instruction;
+    if (verdict.kind === "current") return null;
+    // Not `checkout`: the branch is already at `after` and only the index and the working
+    // files are behind, which is the one thing `reset --hard` is for. It moves no ref here.
+    await git(path, ["reset", "--hard", "-q", after]);
+    return null;
+  }
+
+  /** The facts the rule in core is decided on, read off the primary checkout. Staleness is
+   *  measured against the *old* tip rather than against HEAD: HEAD is already the landing
+   *  commit, so a perfectly untouched tree reports the landed paths as deletions and every
+   *  cleanliness test built on HEAD calls it dirty. */
+  private async primaryDrift(
+    path: string,
+    base: string,
+    before: string,
+    after: string,
+  ): Promise<PrimaryDrift> {
+    const blank = { path, base, onBase: false, alreadyCurrent: false, wasTheOldTip: false, ownWork: [] };
+    const held = (await this.checkouts()).find((c) => real(c.path) === real(path));
+    if (held?.branch !== base) return blank;
+    const same = async (args: readonly string[]): Promise<boolean> =>
+      (await git(path, args).then(() => true).catch(() => false));
+    const matches = async (commit: string): Promise<boolean> =>
+      (await same(["diff", "--quiet", commit])) && (await same(["diff", "--cached", "--quiet", commit]));
+    return {
+      ...blank,
+      onBase: true,
+      alreadyCurrent: await matches(after),
+      wasTheOldTip: await matches(before),
+      ownWork: await this.wouldOverwrite(path, before, after),
+    };
+  }
+
+  /** The operator's own files the update would write over. A difference from the old tip is
+   *  theirs by definition: the tree was at that commit when the landing was made. Untracked
+   *  files count only on a path the landing touched — everything else survives the update
+   *  untouched, and refusing over an untracked build directory would leave the checkout
+   *  stale for ever. */
+  private async wouldOverwrite(path: string, before: string, after: string): Promise<string[]> {
+    const tracked = await git(path, ["diff", "--name-only", before]).catch(() => "");
+    const staged = await git(path, ["diff", "--cached", "--name-only", before]).catch(() => "");
+    const untracked = await git(path, ["ls-files", "--others", "--exclude-standard"]).catch(() => "");
+    const landedPaths = new Set(
+      (await git(this.repo, ["diff", "--name-only", before, after]).catch(() => "")).split("\n"),
+    );
+    const lines = (out: string): string[] => out.split("\n").filter((l) => l !== "");
+    const mine = [...lines(tracked), ...lines(staged), ...lines(untracked).filter((p) => landedPaths.has(p))];
+    return [...new Set(mine)].sort();
   }
 
   /** Guarded by the task's tests passing. Runs in the story tree, so nothing an agent can
