@@ -3,6 +3,7 @@ import { commandOf } from "./checks.js";
 import { queries, table, type TableDef, type Value } from "./db.js";
 import type { Budget, ObjectiveType, Scope } from "./entities.js";
 import { loadMachines } from "./machines.js";
+import type { RoleConfig } from "./roles.js";
 import { now } from "./store.js";
 import type { MachineSet, StatefulEntity, TestKind, WorkerKind } from "./types.js";
 
@@ -245,6 +246,11 @@ export class Maker {
   constructor(
     private readonly db: DatabaseSync,
     machines: MachineSet = loadMachines(),
+    /** config/roles.yaml, when the caller has it. A worker's role is its ceiling, so a role
+     *  no configuration declares is a worker with no ceiling at all — refused rather than
+     *  written. Optional and checked only when given, the way `setTaskScope` takes it: a
+     *  caller that has not loaded the config is not thereby granted the check. */
+    private readonly roles: RoleConfig | null = null,
   ) {
     this.m = machines;
   }
@@ -373,7 +379,18 @@ export class Maker {
     });
   }
 
+  /** The declared roles are named in the refusal: a worker is refused for a typo far more
+   *  often than for a role that was never meant to exist, and the list is the fix. */
   worker(name: string, role: string, kind: WorkerKind): number {
+    if (this.roles !== null && this.roles.roles[role] === undefined) {
+      const declared = Object.keys(this.roles.roles);
+      throw new CreateError(
+        `worker: no role named ${role === "" ? "(none)" : JSON.stringify(role)}. ` +
+          (declared.length === 0
+            ? "No configuration declares any role."
+            : `Declared roles: ${declared.join(", ")}.`),
+      );
+    }
     return insert(this.db, worker, { ...this.stamp(slugify(name)), name, role, kind });
   }
 
