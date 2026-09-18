@@ -23,8 +23,11 @@ import {
 } from "@wecode/core";
 import type { Row } from "./list.js";
 import {
+  atDepth,
   foldedTo,
   nodeKey,
+  openDepth,
+  treeDepth,
   openWork,
   outlineRows,
   OUTLINE,
@@ -135,8 +138,8 @@ export class App {
    *  from an hour ago would be one you could not trust to hold everything. */
   private scope: OutlineScope = "all";
   /** What the last key armed: v waits for a box's letter, a waits for a verb's, f waits for
-   *  a scope's. */
-  private armed: null | "view" | "verb" | "answer" | "scope" = null;
+   *  a scope's, t waits for a direction to move the outline's depth in. */
+  private armed: null | "view" | "verb" | "answer" | "scope" | "depth" = null;
 
   constructor(db: DatabaseSync, views: readonly View[], machines: MachineSet = loadMachines()) {
     this.db = db;
@@ -208,6 +211,10 @@ export class App {
       this.armed = null;
       return this.narrow(k);
     }
+    if (this.armed === "depth") {
+      this.armed = null;
+      return this.step(k);
+    }
     if (ENTER.includes(k)) return this.descend();
     if (k === "esc" || k === ESC) return this.pop();
     switch (k) {
@@ -222,7 +229,12 @@ export class App {
       case "f": return this.armScope();
       case "v": return this.armView();
       case "a": return this.armVerb();
-      default: this.status = `${k} does nothing here`;
+      default:
+        // The outline's own letter moves its depth: `t e` in, `t f` out. It is read from
+        // the config rather than spelled here, so the box and its depth keys cannot come
+        // to disagree about which letter the outline answers to.
+        if (k === OUTLINE.key) return this.armDepth();
+        this.status = `${k} does nothing here`;
     }
   }
 
@@ -286,6 +298,48 @@ export class App {
     this.items = this.itemsOf(this.screen);
     this.cursor = this.cursor;
     this.status = `${OUTLINE.title} — ${SCOPE_LABEL[scope]}`;
+  }
+
+  /** The two directions the depth moves in, and what each one is called when it is offered.
+   *  `e` and `f` sit under the same finger as the fold keys they scale up. */
+  private static readonly DEPTH: ReadonlyMap<string, number> = new Map([
+    ["e", +1],
+    ["f", -1],
+  ]);
+
+  private armDepth(): void {
+    if (this.screen.kind !== "outline") {
+      this.status = `${OUTLINE.key} moves the outline's depth — v ${OUTLINE.key}`;
+      return;
+    }
+    this.armed = "depth";
+    this.status = `depth? e in  f out · ${this.depthSays()}`;
+  }
+
+  /** Which level the outline stands at, and how far down it could go. A depth key moves the
+   *  whole tree at once, so the one thing the reader cannot see afterwards is *how deep*
+   *  they now are: every row on screen looks the same at level two as at level five. */
+  private depthSays(): string {
+    const forest = this.outlineForest();
+    return `level ${openDepth(forest, this.expanded)} of ${treeDepth(forest)}`;
+  }
+
+  /** Step the whole outline one level in or out. Both ends are walls: `atDepth` clamps, and
+   *  the status still names the level, so pressing into the bottom answers rather than
+   *  looking like a key that was not heard. */
+  private step(k: string): void {
+    const by = App.DEPTH.get(k);
+    if (by === undefined) {
+      this.status = `no depth on ${k}`;
+      return;
+    }
+    const forest = this.outlineForest();
+    const was = openDepth(forest, this.expanded);
+    this.expanded = atDepth(forest, this.expanded, by);
+    this.items = this.itemsOf(this.screen);
+    this.cursor = this.cursor;
+    const wall = openDepth(forest, this.expanded) === was;
+    this.status = `${OUTLINE.title} — ${this.depthSays()}${wall ? " · no further" : ""}`;
   }
 
   /** Open or close the node under the cursor by one level. The rows are rebuilt rather
