@@ -7,6 +7,10 @@ import { freshDb } from "./helpers.js";
  *  and a test that invents its own roles proves nothing about the refusal an operator meets. */
 const roles: RoleConfig = loadRoles(fileURLToPath(new URL("../../../config/roles.yaml", import.meta.url)));
 
+/** Whatever config declares, this is not one of it: pinning a literal that a later
+ *  roles.yaml may declare would turn a passing test red for no change in behaviour. */
+const undeclared = "quartermaster";
+
 const workers = (db: ReturnType<typeof freshDb>): string[] =>
   (db.prepare("SELECT role FROM worker").all() as { role: string }[]).map((r) => r.role);
 
@@ -19,6 +23,10 @@ describe("a worker's role must be one some configuration declares", () => {
     make = new Maker(db, undefined, roles);
   });
 
+  it("stands on a role the real configuration does not declare", () => {
+    expect(Object.keys(roles.roles)).not.toContain(undeclared);
+  });
+
   it("writes a worker whose role the configuration declares", () => {
     const id = make.worker("claude-1", "engineer", "agent");
 
@@ -27,13 +35,13 @@ describe("a worker's role must be one some configuration declares", () => {
   });
 
   it("refuses a role no configuration declares, and writes no row", () => {
-    expect(() => make.worker("dana", "operator", "human")).toThrow(CreateError);
+    expect(() => make.worker("dana", undeclared, "human")).toThrow(CreateError);
     expect(workers(db)).toEqual([]);
   });
 
   it("names the role it refused and the roles that are declared", () => {
-    expect(() => make.worker("dana", "operator", "human")).toThrow(
-      /^worker: no role named "operator"\. Declared roles: .*\bengineer\b/,
+    expect(() => make.worker("dana", undeclared, "human")).toThrow(
+      new RegExp(`^worker: no role named "${undeclared}"\\. Declared roles: .*\\bengineer\\b`),
     );
   });
 
@@ -48,8 +56,8 @@ describe("a worker's role must be one some configuration declares", () => {
   it("checks nothing when no configuration was handed over", () => {
     const plain = new Maker(db);
 
-    expect(plain.worker("dana", "operator", "human")).toBeGreaterThan(0);
-    expect(workers(db)).toEqual(["operator"]);
+    expect(plain.worker("dana", undeclared, "human")).toBeGreaterThan(0);
+    expect(workers(db)).toEqual([undeclared]);
   });
 
   it("refuses every role when the configuration declares none", () => {
@@ -63,8 +71,8 @@ describe("a worker's role must be one some configuration declares", () => {
   /** A role row in the database is not a declaration: config/roles.yaml is the one
    *  definition of a role's ceiling, and a row written beside it would be a second. */
   it("is unmoved by a role row written into the database", () => {
-    make.role("operator", { write: [], tools: [] }, "human");
+    make.role(undeclared, { write: [], tools: [] }, "human");
 
-    expect(() => make.worker("dana", "operator", "human")).toThrow(CreateError);
+    expect(() => make.worker("dana", undeclared, "human")).toThrow(CreateError);
   });
 });
