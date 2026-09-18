@@ -1,0 +1,45 @@
+# Every harness wecode can start a worker through, and what starting one takes.
+#
+# `harness` on a role (config/roles.yaml) names a key of this file. A name with no block
+# here is refused rather than guessed at: the alternative is a role that spawns whatever
+# binary happens to be on PATH under that name, on whatever model the box it woke up on
+# was configured with — and then two runs of one assignment are not one assignment.
+# See docs/design/11.
+#
+# The runner has one adapter per harness under packages/runner/src/adapters/, and this file
+# must declare all of them. A harness the code can start but the operator never declared is
+# the same gap as a harness declared but unreachable, seen from the other side, so both are
+# refused.
+#
+# Every block states all three keys. `null` is a declaration and not an omission: it says
+# the operator looked and the harness has no such flag, rather than leaving the harness to
+# read the machine's default.
+
+claude-code:
+  bin: claude
+  # The model a role that names none is run on. Passed on every spawn, so this choice or
+  # the assignment's is always the one that ran.
+  model: claude-opus-5
+  # One vendor, reached directly. There is no provider to name.
+  provider: null
+
+codex:
+  bin: codex
+  # `codex exec` takes no model flag, so there is nothing here to pass and a value would be
+  # a setting that silently does nothing.
+  model: null
+  provider: null
+
+pi:
+  bin: pi
+  model: claude-opus-5
+  # The first harness not tied to one vendor: pi reaches a model through a named provider,
+  # and its own default is a provider this project never chose.
+  provider: anthropic
+
+script:
+  # Not an agent. The assignment's instruction is a shell command and this is the shell that
+  # runs it — the one harness whose worker is not a model at all.
+  bin: bash
+  model: null
+  provider: null
