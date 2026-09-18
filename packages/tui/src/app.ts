@@ -1,6 +1,9 @@
 /** The cockpit's state — see config/tui-contract.yaml. Nothing here draws: an App is what
  *  a key does to what is on screen, and screens.ts is what that looks like. */
+import { readFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
+import { parse } from "yaml";
 import {
   actorOf,
   answerApproval,
@@ -28,11 +31,38 @@ import {
   openWork,
   outlineRows,
   OUTLINE,
+  OutlineError,
   SCOPE_KEYS,
   SCOPE_LABEL,
   type OutlineScope,
 } from "./outline.js";
 import type { View } from "./views.js";
+
+const VIEWS_CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
+
+/** Which scope the outline opens on, declared beside its title, key and depth. The outline
+ *  is the screen you go to for what is left, so whether it lands narrowed is a product
+ *  decision and belongs in views.yaml rather than in a literal here. The names it may take
+ *  are SCOPE_KEYS' own, so this adds no second list of them, and an unknown one is a
+ *  refusal to start rather than a screen that quietly holds the wrong rows. */
+export function loadOutlineScope(path: string = VIEWS_CONFIG): OutlineScope {
+  const raw: unknown = parse(readFileSync(path, "utf8"));
+  const outline = ((raw ?? {}) as Record<string, unknown>)["outline"];
+  const declared = ((outline ?? {}) as Record<string, unknown>)["scope"];
+  const scopes = [...SCOPE_KEYS.values()];
+  if (!scopes.includes(declared as OutlineScope)) {
+    throw new OutlineError(
+      `outline.scope must be one of ${scopes.join(", ")}, not ${String(declared)}`,
+    );
+  }
+  return declared as OutlineScope;
+}
+
+/** Read once, on the first App rather than on import: screens.tsx, app.ts and outline.tsx
+ *  form an import cycle, so a constant initialised here would read SCOPE_KEYS before
+ *  outline.tsx had finished defining it. */
+let opensOn: OutlineScope | null = null;
+export const outlineOpensOn = (): OutlineScope => (opensOn ??= loadOutlineScope());
 
 export type Screen =
   | { readonly kind: "dashboard" }
@@ -152,10 +182,10 @@ export class App {
   /** Which outline nodes are open. It belongs to the screen and outlives nothing else:
    *  folding is not a descent, so it must not cost an esc to undo. */
   private expanded: ReadonlySet<string> = new Set();
-  /** How much of the tree the outline draws. `all` is the default, and reopening returns to
-   *  it: the outline is the overview, and an overview that opened narrowed by a keystroke
-   *  from an hour ago would be one you could not trust to hold everything. */
-  private scope: OutlineScope = "all";
+  /** How much of the tree the outline draws. It opens on the scope views.yaml names, and
+   *  reopening returns to it rather than to wherever `f` last left it: an outline that
+   *  opened narrowed by a keystroke from an hour ago would be one you could not read. */
+  private scope: OutlineScope = outlineOpensOn();
   /** What the last key armed: v waits for a box's letter, a waits for a verb's, f waits for
    *  a scope's. */
   private armed: null | "view" | "verb" | "answer" | "scope" | "search" = null;
@@ -284,11 +314,11 @@ export class App {
     return this.scope === "open" ? openWork(this.forest) : this.forest;
   }
 
-  /** The outline opens folded to the level its config names, and unnarrowed. Reopening
-   *  refolds it: `v t` is how you ask for the overview, and an overview that remembered
-   *  last time's expansions would not be one. */
+  /** The outline opens folded to the level its config names, and in the scope it names.
+   *  Reopening refolds and re-narrows it: `v t` is how you ask for the overview, and an
+   *  overview that remembered last time's expansions or last time's `f` would not be one. */
   private openOutline(): void {
-    this.scope = "all";
+    this.scope = outlineOpensOn();
     // Same reading as the scope: `v t` asks for the overview, and an overview still
     // standing open where an hour-old search left it would not be one.
     this.query = "";
