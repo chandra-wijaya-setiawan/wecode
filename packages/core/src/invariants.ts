@@ -469,3 +469,143 @@ export const checkRunner = (r: RunnerBuild | null): readonly Violation[] =>
 export function checkRecord(s: Snapshot): readonly Violation[] {
   return INVARIANTS.flatMap((i) => i.check(s));
 }
+
+/** Whether a machine may make this violation's fix: docs/design/19's two columns, `safe`
+ *  above and `major` below. It is the `kind` column of `doctor_violation`, and it is data
+ *  rather than a branch so that a person can read it and disagree. */
+export type HealKind = "safe" | "major";
+
+/** What a pass says about the fix, per invariant. `heal` is the chore that would discharge
+ *  it, and null is the honest answer for a major one: there is no heal, there is a question.
+ *  Supplied by the caller because the table of remedies lives with the healer, and this file
+ *  may not depend on it. */
+export interface Remediation {
+  readonly kind: HealKind;
+  readonly heal: string | null;
+}
+
+/** Unknown is major and has no heal. A check nobody has reasoned about is the one most worth
+ *  asking a person about, so the default here refuses to call itself safe. */
+export const UNREASONED: Remediation = { kind: "major", heal: null };
+
+/** The identity of a finding: the same sentence, about the same entity. `detail` is
+ *  deliberately not in it — an accusation that now names a different sha is the same drift
+ *  still standing, and a new row for it would reset the duration it has stood for.
+ *
+ *  `entity_id` counts as part of the identity even when it is null, which is why this is a
+ *  string rather than a tuple: a role-level and a schema-level finding both have no id, and
+ *  only `entity` and `slug` tell them apart. */
+export const violationKey = (invariant: string, entity: string, id: number | null, slug: string): string =>
+  [invariant, entity, id === null ? "" : String(id), slug].join("");
+
+const keyOfFound = (v: Violation): string => violationKey(v.invariant, v.entity, v.id, v.slug);
+
+/** An open row of `doctor_violation` — one this pass is being compared against. `rowid` is
+ *  how a write names it back. */
+export interface OpenViolation {
+  readonly rowid: number;
+  readonly invariant: string;
+  readonly entity: string;
+  readonly entity_id: number | null;
+  readonly slug: string;
+}
+
+/** A row this pass opens. `first_seen` and `last_seen` are both this pass: a violation found
+ *  for the first time has stood for no time at all, and saying so is not the same as saying
+ *  nothing. */
+export interface NewViolation extends Violation, Remediation {
+  readonly found_at: string;
+  readonly first_seen: string;
+  readonly last_seen: string;
+}
+
+/** What this pass owes the report. Three statements and no deletion, because a violation the
+ *  record has forgotten is indistinguishable from one it never had:
+ *
+ *  | op | when | what it writes |
+ *  |---|---|---|
+ *  | `open` | found, and no open row claims it | the whole row, seen first and last by this pass |
+ *  | `seen` | found, and an open row claims it | `last_seen`, so the duration it has stood grows |
+ *  | `clear` | an open row this pass looked for and did not find | `cleared_at`, and the row stays |
+ *
+ *  A write and not a mutation: this file changes nothing, and the caller with the handle
+ *  applies these in one transaction beside the pass row. */
+export type ReportWrite =
+  | { readonly op: "open"; readonly row: NewViolation }
+  | { readonly op: "seen"; readonly rowid: number; readonly last_seen: string }
+  | { readonly op: "clear"; readonly rowid: number; readonly cleared_at: string };
+
+/** The report this pass leaves, against the one it found.
+ *
+ *  `ran` is the whole care taken here. A pass that could not run a check has learned nothing
+ *  about it, and clearing that check's violations would be recording a heal that nobody
+ *  performed — the drift would be gone from the report while still standing in the record.
+ *  So only the checks that ran may clear anything, and everything else is left exactly as
+ *  the last pass that did run left it. */
+export function reportWrites(
+  open: readonly OpenViolation[],
+  found: readonly Violation[],
+  at: string,
+  ran: (invariant: string) => boolean,
+  healOf: (invariant: string) => Remediation = () => UNREASONED,
+): readonly ReportWrite[] {
+  const standing = new Map(
+    open.map((o) => [violationKey(o.invariant, o.entity, o.entity_id, o.slug), o] as const),
+  );
+  const seen = new Set<string>();
+
+  const writes: ReportWrite[] = found.map((v) => {
+    const key = keyOfFound(v);
+    seen.add(key);
+    const already = standing.get(key);
+    if (already !== undefined) return { op: "seen", rowid: already.rowid, last_seen: at };
+    const { kind, heal } = healOf(v.invariant);
+    return { op: "open", row: { ...v, kind, heal, found_at: at, first_seen: at, last_seen: at } };
+  });
+
+  return [
+    ...writes,
+    ...open
+      .filter((o) => ran(o.invariant))
+      .filter((o) => !seen.has(violationKey(o.invariant, o.entity, o.entity_id, o.slug)))
+      .map((o): ReportWrite => ({ op: "clear", rowid: o.rowid, cleared_at: at })),
+  ];
+}
+
+/** How long a violation has been standing, in milliseconds. Zero for one this pass found
+ *  first, which is a real answer and not a missing one.
+ *
+ *  Both timestamps come off the row, so this asks no clock: what is being measured is how
+ *  long the record has held the accusation, not how long ago it was written. */
+export const violationDuration = (v: { readonly first_seen: string; readonly last_seen: string }): number =>
+  Date.parse(v.last_seen) - Date.parse(v.first_seen);
+
+/** What one check came to. `ran` is false for a check that could not be made — no git to
+ *  ask, a snapshot that would not read, a check that threw — and a check that did not run is
+ *  neither clean nor broken. */
+export interface CheckOutcome {
+  readonly invariant: string;
+  readonly ran: boolean;
+  readonly found: number;
+}
+
+/** One row per pass, whatever the pass found. `doctor_run`'s shape. */
+export interface DoctorRun {
+  readonly at: string;
+  readonly duration_ms: number;
+  readonly checks_run: number;
+  readonly checks_failed: number;
+}
+
+/** The pass's own row. Exactly one, every time, and it is the counts that make an empty
+ *  report readable: nothing found out of eleven checks run is a healthy record, and nothing
+ *  found out of none is a record nobody looked at.
+ *
+ *  `duration_ms` is the caller's measurement, passed in. Nothing in this file reads a clock,
+ *  and a pass is the only party that knows when it started. */
+export const doctorRun = (checks: readonly CheckOutcome[], at: string, duration_ms: number): DoctorRun => ({
+  at,
+  duration_ms,
+  checks_run: checks.filter((c) => c.ran).length,
+  checks_failed: checks.filter((c) => c.ran && c.found > 0).length,
+});
