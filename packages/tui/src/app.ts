@@ -71,7 +71,11 @@ export type Screen =
   | { readonly kind: "dashboard" }
   | { readonly kind: "box"; readonly view: View }
   | { readonly kind: "outline" }
-  | { readonly kind: "node"; readonly entity: StatefulEntity; readonly id: number };
+  | { readonly kind: "node"; readonly entity: StatefulEntity; readonly id: number }
+  /** An assignment, drawn from the board row it was opened from. An assignment hangs off
+   *  the tree rather than in it — `tree()` walks project → task_test and stops — so the
+   *  row the board built is the whole of what this screen knows, and it carries it. */
+  | { readonly kind: "assignment"; readonly id: number; readonly row: Row };
 
 /** A screen and where the cursor was on it, so esc comes back to the row you left. */
 interface Frame {
@@ -719,6 +723,13 @@ export class App {
       this.status = "nothing to open";
       return;
     }
+    // An assignment is not in the tree, so `find` would refuse it. What it is worth reading
+    // is on the row already, and the row goes with the screen.
+    if (item.entity === "assignment") {
+      this.push({ kind: "assignment", id: item.row.id, row: { ...item.row } });
+      this.status = `assignment #${item.row.id}`;
+      return;
+    }
     if (this.find(item.entity, item.row.id) === null) {
       this.status = `${item.entity} #${item.row.id} has nothing under it`;
       return;
@@ -745,6 +756,9 @@ export class App {
   }
 
   private itemsOf(screen: Screen): Item[] {
+    // Nothing hangs under an assignment: it is the leaf the board points at, so the screen
+    // holds no rows and the cursor has nowhere to go on it.
+    if (screen.kind === "assignment") return [];
     if (screen.kind === "outline") {
       // The head of the queue box is the next task the allocator will take, and the board
       // is where that order is decided. The outline only marks the row it names.
