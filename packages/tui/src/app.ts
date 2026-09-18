@@ -26,14 +26,17 @@ import {
 } from "@wecode/core";
 import type { Row } from "./list.js";
 import {
+  atDepth,
   foldedTo,
   nodeKey,
+  openDepth,
   openWork,
   outlineRows,
   OUTLINE,
   OutlineError,
   SCOPE_KEYS,
   SCOPE_LABEL,
+  treeDepth,
   type OutlineScope,
 } from "./outline.js";
 import type { View } from "./views.js";
@@ -128,6 +131,22 @@ const matches = (node: Node, q: string): boolean => {
     .every((word) => label.includes(word));
 };
 
+/** The forest a query leaves: every row that answers it, and the rows above those, and
+ *  nothing else. A search is a filter rather than a jump — a tree that still held the
+ *  hundred rows you were not looking for would leave you reading it to find the one you
+ *  were. The rows under a match go with it: what is under a match is what folding is for.
+ *  A query nothing answers prunes to nothing, and `matching` leaves the tree as it was. */
+const matching = (forest: readonly Node[], query: string): readonly Node[] => {
+  const prune = (nodes: readonly Node[]): Node[] =>
+    nodes.flatMap((n) => {
+      if (matches(n, query)) return [n];
+      const under = prune(n.children);
+      return under.length === 0 ? [] : [{ ...n, children: under }];
+    });
+  const pruned = prune(forest);
+  return pruned.length === 0 ? forest : pruned;
+};
+
 /** The facade's methods, by the entity and verb each one invokes. Automatic transitions are
  *  absent, because the facade has no method for one — the cockpit can only offer a verb it
  *  can name a method for, so `a` cannot arm something no actor may invoke. */
@@ -190,8 +209,8 @@ export class App {
    *  opened narrowed by a keystroke from an hour ago would be one you could not read. */
   private scope: OutlineScope = outlineOpensOn();
   /** What the last key armed: v waits for a box's letter, a waits for a verb's, f waits for
-   *  a scope's. */
-  private armed: null | "view" | "verb" | "answer" | "scope" | "search" = null;
+   *  a scope's, t waits for a direction to take the whole tree's depth in. */
+  private armed: null | "view" | "verb" | "answer" | "scope" | "search" | "depth" = null;
   /** What is being typed after `/`, and what was typed the last time it was committed.
    *  They are two fields because the committed one outlives the typing: `n` is only worth
    *  a key if it goes on working after the prompt it came from has gone. */
@@ -309,6 +328,10 @@ export class App {
       this.armed = null;
       return this.narrow(k);
     }
+    if (this.armed === "depth") {
+      this.armed = null;
+      return this.step(k);
+    }
     if (ENTER.includes(k)) return this.descend();
     if (k === "esc" || k === ESC) return this.pop();
     switch (k) {
@@ -321,6 +344,7 @@ export class App {
       case "+": return this.fold(true);
       case "-": return this.fold(false);
       case "f": return this.armScope();
+      case "t": return this.armDepth();
       case "/": return this.armSearch();
       case "n": return this.jump(1);
       case "N": return this.jump(-1);
@@ -354,7 +378,8 @@ export class App {
    *  the outline does — folding, the rows, the fold keys — reads it through here, so the
    *  narrowing cannot apply to the rows and not to the folding. */
   private outlineForest(): readonly Node[] {
-    return this.scope === "open" ? openWork(this.forest) : this.forest;
+    const scoped = this.scope === "open" ? openWork(this.forest) : this.forest;
+    return this.query === "" ? scoped : matching(scoped, this.query);
   }
 
   /** The outline opens folded to the level its config names, and in the scope it names.
@@ -400,9 +425,9 @@ export class App {
     return this.query;
   }
 
-  /** Start typing a search. The tree is the one screen a filter cannot serve: a box keeps
-   *  rows by their state, and what you have is a number off another screen or two words out
-   *  of a title. */
+  /** Start typing a search. A box keeps rows by their state; what you have in hand is a
+   *  number off another screen or two words out of a title, and what you want back is the
+   *  tree with only those rows in it. */
   private armSearch(): void {
     if (this.screen.kind !== "outline") {
       this.status = `/ searches the outline — v ${OUTLINE.key}`;
@@ -436,11 +461,13 @@ export class App {
     this.prompt();
   }
 
-  /** Commit a query: reveal every row that answers it and land on the first.
+  /** Commit a query: filter the tree down to the rows that answer it and land on the first.
    *
-   *  Revealing is the point. A match under a folded parent that stayed folded would be a
-   *  search that told you the row exists and not where, which is the one thing the outline
-   *  is for. */
+   *  Filtering is the point. A search that only moved the cursor left the other hundred rows
+   *  on screen, so finding the second match meant reading past them; the outline is for
+   *  seeing where a row hangs, and the rows above a match are the only ones that say so.
+   *  Those ancestors are also expanded, because a match kept behind a fold is a search that
+   *  told you the row exists and not where. */
   private seek(query: string): void {
     this.query = query;
     if (query === "") {
@@ -533,6 +560,42 @@ export class App {
     this.items = this.itemsOf(this.screen);
     this.cursor = this.cursor;
     this.status = "";
+  }
+
+  /** Arm the depth keys. `t` is the tree's own letter — the same one `v` opens the outline
+   *  with — so `t e` and `t f` read as "the tree, one level further in / out". */
+  private armDepth(): void {
+    if (this.screen.kind !== "outline") {
+      this.status = `t e steps the outline in — v ${OUTLINE.key}`;
+      return;
+    }
+    this.armed = "depth";
+    this.status = `depth? e in  f out — ${this.depthNow()}`;
+  }
+
+  /** Take the whole tree one level in or out. `+`/`-` open the node under the cursor; these
+   *  move every branch at once, because reading a tree a node at a time never ends. */
+  private step(k: string): void {
+    const by = k === "e" ? +1 : k === "f" ? -1 : 0;
+    if (by === 0) {
+      this.status = `no depth on ${k}`;
+      return;
+    }
+    const was = openDepth(this.outlineForest(), this.expanded);
+    this.expanded = atDepth(this.outlineForest(), this.expanded, by);
+    this.items = this.itemsOf(this.screen);
+    this.cursor = this.cursor;
+    const now = openDepth(this.outlineForest(), this.expanded);
+    // Both ends are walls: saying so is the difference between a key that did nothing and
+    // a key that is not bound.
+    const wall = by > 0 ? "nothing further in" : "nothing further out";
+    this.status = now === was ? `${this.depthNow()} — ${wall}` : this.depthNow();
+  }
+
+  /** How far open the outline stands, out of how far it goes. */
+  private depthNow(): string {
+    const forest = this.outlineForest();
+    return `depth ${openDepth(forest, this.expanded)}/${treeDepth(forest)}`;
   }
 
   private openBox(k: string): void {
