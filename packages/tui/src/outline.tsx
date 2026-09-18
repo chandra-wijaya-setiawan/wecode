@@ -82,6 +82,67 @@ export const OUTLINE: OutlineConfig = loadOutline();
  *  half of the key. */
 export const nodeKey = (n: Node): string => `${n.entity}#${n.id}`;
 
+/** How much of the tree the outline is drawing. `all` is every row there is; `open` is the
+ *  work still owed and the rows it hangs under. */
+export type OutlineScope = "open" | "all";
+
+/** What each scope is called on the screen, because a narrowed outline that looks like the
+ *  whole one is a screen that lies about what is left. */
+export const SCOPE_LABEL: Readonly<Record<OutlineScope, string>> = {
+  open: "open work",
+  all: "all work",
+};
+
+/** How the box's title says which scope it is in. Only the narrowed one is named: `all` is
+ *  what the outline means unqualified, and a title that said so on every screen would spend
+ *  columns to tell you that nothing is being hidden. The exception is what needs saying. */
+export const scopeTitle = (scope: OutlineScope, count: number): string =>
+  scope === "all"
+    ? `${OUTLINE.title} (${count})`
+    : `${OUTLINE.title} — ${SCOPE_LABEL[scope]} (${count})`;
+
+/** The letter each scope is asked for by, after `f`. */
+export const SCOPE_KEYS: ReadonlyMap<string, OutlineScope> = new Map([
+  ["o", "open"],
+  ["a", "all"],
+]);
+
+/** States nothing is owed in: the landed terminal of every machine in
+ *  config/machines.yaml, plus `dropped`.
+ *
+ *  `failed` is deliberately absent. A failed test is work still owed — the same reading
+ *  delivered.ts takes — so narrowing to open work must keep it, or the one screen you go
+ *  to for what is left would hide the rows that most need you. */
+const SETTLED: ReadonlySet<string> = new Set([
+  "released",
+  "delivered",
+  "met",
+  "accepted",
+  "passed",
+  "done",
+  "dropped",
+]);
+
+/** Whether this row is itself work still owed, ignoring what hangs under it. */
+export const isOpenWork = (n: Node): boolean => !SETTLED.has(n.state);
+
+/** What an empty *narrowed* outline says. `outline.empty` in views.yaml cannot serve: it
+ *  tells you to create a project, and here the projects exist and are finished. It belongs
+ *  beside that one in the config, which this story's scope does not reach. */
+export const NOTHING_OPEN = "no open work — everything here has landed or been dropped";
+
+/** The forest with the settled work cut out of it. A settled row survives only while
+ *  something open still hangs under it: the outline's one job is saying where a row sits in
+ *  the work, and a kept child with no parent above it would have nowhere to sit. */
+export function openWork(forest: readonly Node[]): readonly Node[] {
+  const keep = (n: Node): Node | null => {
+    const children = n.children.map(keep).filter((c): c is Node => c !== null);
+    if (children.length === 0 && !isOpenWork(n)) return null;
+    return { ...n, children };
+  };
+  return forest.map(keep).filter((c): c is Node => c !== null);
+}
+
 /** The keys expanded when the outline opens: everything above the level it folds to. The
  *  level itself is shown and its children are not, which is what folded *to* means. */
 export function foldedTo(forest: readonly Node[], entity: string): ReadonlySet<string> {
@@ -229,8 +290,13 @@ export function outlineRows(
   return out;
 }
 
-/** One box, titled with its count and the letter that opens it, holding every visible row
- *  at one set of column widths so the ids and states line up down the whole tree. */
+/** One box, titled with its scope, its count and the letter that opens it, holding every
+ *  visible row at one set of column widths so the ids and states line up down the whole
+ *  tree.
+ *
+ *  The scope is in the title rather than only in the status line, because the status line is
+ *  the last thing that happened and this is what you are looking at: a narrowed outline is
+ *  read for minutes after the keystroke that narrowed it scrolled away. */
 export function Outline({
   app,
   width,
@@ -244,13 +310,15 @@ export function Outline({
   const inner = width - BORDER;
   return (
     <Panel
-      title={`${OUTLINE.title} (${rows.length})`}
+      title={scopeTitle(app.outlineScope, rows.length)}
       letter={OUTLINE.key}
       width={width}
       height={height}
     >
       {rows.length === 0 ? (
-        <Text wrap="truncate">{clip(OUTLINE.empty, inner)}</Text>
+        <Text wrap="truncate">
+          {clip(app.outlineScope === "open" ? NOTHING_OPEN : OUTLINE.empty, inner)}
+        </Text>
       ) : (
         <List
           rows={rows}
