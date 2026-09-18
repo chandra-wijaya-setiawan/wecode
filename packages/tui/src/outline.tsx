@@ -18,9 +18,33 @@ const CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
 /** A border costs a column each side. */
 const BORDER = 2;
 
-/** Two spaces of indent per level: deep enough to read, cheap enough that a task_test at
- *  depth nine still has its label on the screen. */
-const INDENT = "  ";
+/** Two columns of indent per level: deep enough to read, cheap enough that a task_test at
+ *  depth nine still has its label on the screen. The connectors are drawn inside that same
+ *  budget rather than on top of it, so a level that reads at a glance costs no label width. */
+export const INDENT = 2;
+
+/** The tee a row hangs off its parent by, and the elbow the last of the siblings hangs off
+ *  instead. That difference is the whole point: a bare indent has to be counted to know
+ *  which level a row is on, and a branch that visibly closes does not. */
+const TEE = "├─";
+const ELBOW = "└─";
+
+/** Under an ancestor that still has siblings to come the branch keeps going, so its column
+ *  carries a rail; under the last of them there is nothing below and the column is blank. */
+const RAIL = "│ ";
+const CLEAR = "  ";
+
+/** A row's guide columns, one per level above it, ending in its own connector.
+ *
+ *  `closed` runs from the level under the roots down to this row, and says at each level
+ *  whether that node was the last of its siblings. The roots are left out and drawn flush:
+ *  sibling roots are separate trees rather than one branch, so nothing hangs off a root and
+ *  no column of the screen belongs to it. */
+export function connector(closed: readonly boolean[]): string {
+  if (closed.length === 0) return "";
+  const rails = closed.slice(0, -1).map((last) => (last ? CLEAR : RAIL));
+  return `${rails.join("")}${closed[closed.length - 1] ? ELBOW : TEE}`;
+}
 
 export interface OutlineConfig {
   readonly title: string;
@@ -180,9 +204,10 @@ export function outlineRows(
   next: number | null,
 ): OutlineLine[] {
   const out: OutlineLine[] = [];
-  const walk = (nodes: readonly Node[], depth: number): void => {
-    for (const n of nodes) {
+  const walk = (nodes: readonly Node[], closed: readonly boolean[], root: boolean): void => {
+    for (const [i, n] of nodes.entries()) {
       const open = expanded.has(nodeKey(n));
+      const here = root ? [] : [...closed, i === nodes.length - 1];
       // The fold marker is the key that changes it, so the row says what to press.
       const marker = n.children.length === 0 ? " " : open ? "-" : "+";
       const isNext = next !== null && n.entity === "task" && n.id === next;
@@ -190,17 +215,17 @@ export function outlineRows(
       out.push({
         row: {
           id: n.id,
-          what: `${INDENT.repeat(depth)}${marker} ${n.label}`,
+          what: `${connector(here)}${marker} ${n.label}`,
           state: n.state,
           detail: detail.join(" · "),
         },
         entity: n.entity as StatefulEntity,
         node: n,
       });
-      if (open) walk(n.children, depth + 1);
+      if (open) walk(n.children, here, false);
     }
   };
-  walk(forest, 0);
+  walk(forest, [], true);
   return out;
 }
 

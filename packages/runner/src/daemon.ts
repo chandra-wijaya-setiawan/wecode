@@ -70,6 +70,7 @@ interface AssignmentRow {
   worktree: string;
   phase: string;
   commit_sha: string | null;
+  updated_at: string;
 }
 
 interface TestRow {
@@ -115,6 +116,7 @@ const tbl = {
     "worktree",
     "phase",
     "commit_sha",
+    "updated_at",
   ]),
   test: table<TestRow>("acceptance_test", [
     "id",
@@ -530,19 +532,30 @@ export class Runner {
     return join(repo, ".wecode", "worktrees");
   }
 
-  /** The lowest-numbered worker of this role with nothing open against it. The dialect
-   *  spells no NOT EXISTS, no ORDER BY and no LIMIT, so the busy set is held here and the
-   *  lowest id is taken in TypeScript — the same answer, off the same two tables. */
+  /** The free worker of this role that finished longest ago — least recently finished, not
+   *  lowest id. Taking the lowest id kept the fleet's first worker in every tree and left the
+   *  rest cold, so a fleet was only ever as wide as its busiest member; picking by how long
+   *  ago a worker last ended spreads the work, and rotates through the roster on its own.
+   *
+   *  A worker that has never finished anything has waited longest of all, so it goes first.
+   *  Ids break the tie, which is what makes a fleet with no history behave as it used to.
+   *
+   *  The dialect spells no NOT EXISTS, no ORDER BY and no LIMIT, so the busy set and the
+   *  last-finished times are held here and the choice is made in TypeScript. */
   private freeWorker(role: string): number | null {
     const q = queries(this.db);
-    const busy = new Set(
-      q
-        .selectFrom(tbl.assignment)
-        .select(["worker_id", "phase"])
-        .all()
-        .filter((a) => OPEN_PHASES.includes(a.phase))
-        .map((a) => a.worker_id),
-    );
+    const rows = q.selectFrom(tbl.assignment).select(["worker_id", "phase", "updated_at"]).all();
+    const busy = new Set(rows.filter((a) => OPEN_PHASES.includes(a.phase)).map((a) => a.worker_id));
+
+    // When a worker last ended an assignment. `updated_at` is stamped on every phase change,
+    // so on an ended row it is the moment that attempt stopped being this worker's.
+    const finished = new Map<number, string>();
+    for (const a of rows) {
+      if (!ENDED_PHASES.includes(a.phase)) continue;
+      const seen = finished.get(a.worker_id);
+      if (seen === undefined || a.updated_at > seen) finished.set(a.worker_id, a.updated_at);
+    }
+
     const free = q
       .selectFrom(tbl.worker)
       .select(["id"])
@@ -550,7 +563,10 @@ export class Runner {
       .all()
       .map((w) => w.id)
       .filter((id) => !busy.has(id));
-    return free.length === 0 ? null : Math.min(...free);
+    if (free.length === 0) return null;
+
+    const idle = (id: number): string => finished.get(id) ?? "";
+    return free.reduce((best, id) => (idle(id) < idle(best) || (idle(id) === idle(best) && id < best) ? id : best));
   }
 
   /** An attempt that has ended: commit whatever it wrote onto its task branch, then let the
