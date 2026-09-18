@@ -229,6 +229,64 @@ export function tally(rows: readonly Row[]): string {
     .join(" · ");
 }
 
+/** A record's facts, one to a line, names left-aligned into a gutter as wide as the
+ *  longest of them. Every detail screen's block is this, so the blocks line up with each
+ *  other rather than each choosing its own gutter. */
+function Fields({
+  fields,
+  width,
+}: {
+  readonly fields: readonly (readonly [string, string])[];
+  readonly width: number;
+}) {
+  const gutter = Math.max(...fields.map(([k]) => k.length));
+  return (
+    <>
+      {fields.map(([k, v]) => (
+        <Text key={k} wrap="truncate">
+          {clip(`${k.padEnd(gutter)}  ${v}`, width)}
+        </Text>
+      ))}
+    </>
+  );
+}
+
+/** What the board knows about one assignment, on a screen of its own.
+ *
+ *  The fields are the row's, because an assignment is not in the tree and the row is what
+ *  there is: the board already decided what an assignment is worth saying — the objective
+ *  it is working, its phase, and the line under it that is the worker and the spend while
+ *  it runs and the question while it waits. Drawing it again from the database would be a
+ *  second opinion the dashboard's row would then disagree with.
+ *
+ *  No children box. An assignment is the leaf the board points at, and an empty box saying
+ *  so would cost two lines to say nothing. */
+export function Assignment({
+  screen,
+  width,
+}: {
+  readonly screen: Screen & { kind: "assignment" };
+  readonly width: number;
+}) {
+  const { row } = screen;
+  const fields: [string, string][] = [
+    ["entity", "assignment"],
+    ["id", `#${screen.id}`],
+    ["objective", row.what],
+    ["state", row.state],
+    ["detail", row.detail === "" ? "—" : row.detail],
+  ];
+  return (
+    <Panel
+      title={`assignment #${screen.id} · ${row.state}`}
+      width={width}
+      height={fields.length + BORDER}
+    >
+      <Fields fields={fields} width={width - BORDER} />
+    </Panel>
+  );
+}
+
 /** The summary block, then the record's children as a list. The block's fields are what an
  *  App knows about the record it is on — App exposes the screen's entity and id, not the row
  *  it was opened from, so the label and state are not among them. What the children add up
@@ -246,7 +304,6 @@ export function Node({
     ["id", `#${screen.id}`],
     ["children", String(rows.length)],
   ];
-  const gutter = Math.max(...fields.map(([k]) => k.length));
   const inner = width - BORDER;
   // The summary, its border, and the children's border: what is left is the list.
   const children = Math.max(height - fields.length - 2 * BORDER, 1);
@@ -257,11 +314,7 @@ export function Node({
         width={width}
         height={fields.length + BORDER}
       >
-        {fields.map(([k, v]) => (
-          <Text key={k} wrap="truncate">
-            {clip(`${k.padEnd(gutter)}  ${v}`, inner)}
-          </Text>
-        ))}
+        <Fields fields={fields} width={inner} />
       </Panel>
       <Panel title={`children (${rows.length})`} width={width} height={children + BORDER}>
         {rows.length === 0 ? (
@@ -315,6 +368,8 @@ export function Cockpit({ app, width, height }: ScreenProps) {
           <BoxPage app={app} screen={screen} width={width} height={body} />
         ) : screen.kind === "outline" ? (
           <Outline app={app} width={width} height={body} />
+        ) : screen.kind === "assignment" ? (
+          <Assignment screen={screen} width={width} />
         ) : (
           <Node app={app} screen={screen} width={width} height={body} />
         )}
