@@ -109,8 +109,8 @@ components:
     package: runner
     layer: service
     component: true
-    owns: one per kind of worker — the only thing that knows the difference
-    modules: [adapters/claude-code, adapters/codex, adapters/pi, adapters/script, adapters/denials]
+    owns: one per kind of worker — the only thing that knows the difference — plus the preconditions every kind shares
+    modules: [worker, adapters/claude-code, adapters/codex, adapters/pi, adapters/script, adapters/denials]
 
   doctor:
     package: runner
