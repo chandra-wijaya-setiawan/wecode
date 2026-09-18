@@ -67,6 +67,10 @@ outline:
   key: t
   # Folded to here when it opens: this level is shown, and what hangs under it is not.
   depth: story
+  # How much of the tree it opens on — `open` is the work still owed, `all` is every row
+  # there is. `f` moves between the two at runtime; this is the one the screen lands on,
+  # and which that is is a decision about the product, not about the App.
+  scope: open
   empty: no projects — wecode project create --parent <workspace> <name>
 
 views:
