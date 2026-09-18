@@ -134,4 +134,46 @@ export function reportLeftover(state: BaseState): string | null {
   );
 }
 
+/** The two path sets a landing merge has to be judged on, as git answers them.
+ *
+ *  Both are relative to the merge base, because that is what decides a merge: a path the
+ *  base deleted *after* the fork point is deleted by the merge too and needs no rule, while
+ *  a path the base deleted *before* it is absent from the merge base, so a branch that has
+ *  the path is a branch that added it. */
+export interface LandingDiff {
+  readonly branch: string;
+  readonly base: string;
+  /** Paths the branch adds against the merge base —
+   *  `git diff --name-only --diff-filter=A <merge-base> <branch>`. */
+  readonly added: readonly string[];
+  /** Paths the base's history removed and the base tip does not hold —
+   *  `git log --diff-filter=D --name-only <base>` less `git ls-tree -r --name-only <base>`. */
+  readonly removedByBase: readonly string[];
+}
+
+/** Why this branch may not land, or null when it may.
+ *
+ *  A removal is a decision, and a merge is the one place it can be undone without anybody
+ *  deciding anything: git adds back a path the branch carries and the base's merge base does
+ *  not hold, says nothing, and exits 0. That is how a deleted file reached master twice —
+ *  an attempt commit re-added it and the landing merge carried it in.
+ *
+ *  So the path is named. Not "your branch conflicts" and not a count: the operator has to
+ *  decide whether the removal or the re-add was the mistake, and they cannot do that without
+ *  knowing which file it is about. */
+export function refuseResurrection(diff: LandingDiff): string | null {
+  const { branch, base, added, removedByBase } = diff;
+  const gone = new Set(removedByBase);
+  const back = [...new Set(added.filter((p) => gone.has(p)))].sort();
+  if (back.length === 0) return null;
+  const these = back.length === 1 ? "a path" : `${back.length} paths`;
+  return (
+    `land ${branch} refused: it would restore ${these} ${base} removed.\n${indent(back)}\n` +
+    `  ${base} deleted ${back.length === 1 ? "it" : "them"} on purpose, and the merge would ` +
+    `add ${back.length === 1 ? "it" : "them"} back without saying so.\n` +
+    `  drop the commit on ${branch} that re-adds ${back.length === 1 ? "it" : "them"} — or ` +
+    `delete ${back.length === 1 ? "it" : "them"} on ${branch} — then redeliver and land again.`
+  );
+}
+
 const indent = (lines: readonly string[]): string => lines.map((l) => `  ${l}`).join("\n");
