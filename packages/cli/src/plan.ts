@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
+import { matchesGlob, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { parseArgs } from "node:util";
 import {
@@ -219,6 +219,7 @@ function help(): string {
     "keys",
     ...rows.map(([where, keys]) => `  ${pad(where as string)}${keys as string}`),
     "",
+    "A test naming a file is refused unless that file exists or some task's scope writes it.",
     `A criteria naming no test of its own gets an extra ${AUTHORS} task that writes one.`,
     `A task's tools come from its role, or ${DEFAULT_TOOLS.join(", ")} when there are no roles.`,
     `An epic holds ${CHILDREN.epic}, a release holds ${CHILDREN.release}; only the root joins an existing row by id.`,
@@ -397,6 +398,30 @@ function requirement(
   return statement === null ? null : { statement, criteria };
 }
 
+/** The files a test command names: a word carrying a slash whose last segment has an
+ *  extension. `packages/tui` is a filter over whatever is there; `test/list.test.ts` is a
+ *  file, and either it is there or nothing runs. */
+function files(artefact: string): readonly string[] {
+  return artefact
+    .split(/\s+/)
+    .map((w) => w.replace(/^['"]+|['"]+$/g, ""))
+    .filter((w) => w.includes("/") && /\.[A-Za-z0-9]+$/.test(w.slice(w.lastIndexOf("/") + 1)));
+}
+
+/** A test command naming a file that is not there and that nobody is scoped to write runs
+ *  no tests and passes — `vitest run maler` is green forever. It is refused by path, while
+ *  the whole file is still being read, because a typo found at plan time costs a keystroke
+ *  and the same typo found at pass time costs a story. A path some task under it will write
+ *  is not yet a file and is not a mistake. */
+function artefacts(test: string | null, scope: readonly string[], where: string, say: string[]): void {
+  if (test === null) return;
+  for (const path of files(test)) {
+    if (existsSync(resolve(process.cwd(), path))) continue;
+    if (scope.some((g) => matchesGlob(path, g))) continue;
+    say.push(`${where}: test: no file matches ${path}`);
+  }
+}
+
 function criterion(
   v: unknown,
   where: string,
@@ -416,7 +441,12 @@ function criterion(
   // A criteria that names no test of its own has nobody writing one. The task that writes it
   // is the acceptance-tester's, not the engineer's — the two must not be the same pair of hands.
   const authoring = m["test"] === undefined ? authoringTask(statement, config, roles) : null;
-  return { statement, test, tasks: authoring === null ? tasks : [...tasks, authoring] };
+  const all = authoring === null ? tasks : [...tasks, authoring];
+
+  // Only what this file spells: a path in `project.yaml`'s fallback is that file's to answer
+  // for. A criteria has no scope of its own, so the test it names may be one its tasks write.
+  if (m["test"] !== undefined) artefacts(test, all.flatMap((t) => t.scope), where, say);
+  return { statement, test, tasks: all };
 }
 
 const AUTHORS = "acceptance-tester";
@@ -473,6 +503,8 @@ function task(
     const within = withinCeiling(def.scope, { write: scope, tools });
     if (!within.ok) say.push(`${where}: ${within.why}`);
   }
+
+  if (m["test"] !== undefined) artefacts(test, scope ?? [], where, say);
 
   const promises = promise(m["promises"], `${where}: promises`, say);
 
