@@ -35,7 +35,7 @@ describe("the built cockpit, driven in a terminal", () => {
       const frame = cockpit.frame();
       expect(frame).toContain("Projects (1) [p]");
       expect(frame).toContain("storefront");
-      expect(frame).toContain("Queue (1) [q]");
+      expect(frame).toContain("Cooking (1) [c]");
       expect(frame).toContain("send the reset mail");
       expect(frame).toContain("j/k move");
     });

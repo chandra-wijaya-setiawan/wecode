@@ -58,11 +58,15 @@ const descendTo = (...steps: string[]): void => {
 
 describe("the dashboard", () => {
   it("lists every box's rows in the order the page declares", () => {
+    // Projects, needs_human, open, cooking — the page is four boxes now, and the queued
+    // task is no longer a box of its own: it is a row in the fold, which the page draws
+    // last. So the same four rows come back in a different order, and that order is the
+    // page's, not the board's.
     expect(whats()).toEqual([
       "storefront",
-      "send the reset mail",
       "password reset",
       "account recovery",
+      "send the reset mail",
     ]);
     expect(app.screen).toEqual({ kind: "dashboard" });
   });
@@ -121,11 +125,12 @@ describe("v, then a box's letter", () => {
   });
 
   it("opens that box at full height, with only its rows", () => {
-    const q = [...boxKeys(views)].find(([, v]) => v.name === "queued")?.[0] as string;
+    // The fold, which is where the queued task lives now that Queue is not a box.
+    const c = [...boxKeys(views)].find(([, v]) => v.name === "cooking")?.[0] as string;
 
     app.key("v");
-    expect(app.status).toContain("Queue");
-    app.key(q);
+    expect(app.status).toContain("Cooking");
+    app.key(c);
 
     expect(app.screen).toMatchObject({ kind: "box" });
     expect(whats()).toEqual(["send the reset mail"]);
