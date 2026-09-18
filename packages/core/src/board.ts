@@ -35,8 +35,9 @@ interface ProjectRow {
   id: number;
   name: string;
   state: string;
+  updated_at: string;
 }
-const projects = table<ProjectRow>("project", ["id", "name", "state"]);
+const projects = table<ProjectRow>("project", ["id", "name", "state", "updated_at"]);
 
 const releases = table<{ id: number; project_id: number }>("release", ["id", "project_id"]);
 
@@ -45,8 +46,9 @@ interface EpicRow {
   release_id: number;
   title: string;
   state: string;
+  updated_at: string;
 }
-const epics = table<EpicRow>("epic", ["id", "release_id", "title", "state"]);
+const epics = table<EpicRow>("epic", ["id", "release_id", "title", "state", "updated_at"]);
 
 interface StoryRow {
   id: number;
@@ -95,6 +97,7 @@ interface TaskRow {
   attempts: number;
   max_retry: number;
   state: string;
+  updated_at: string;
 }
 const tasks = table<TaskRow>("task", [
   "id",
@@ -104,6 +107,7 @@ const tasks = table<TaskRow>("task", [
   "attempts",
   "max_retry",
   "state",
+  "updated_at",
 ]);
 
 interface AssignmentRow {
@@ -326,9 +330,81 @@ const newestRun = (a: TaskTestRow, b: TaskTestRow): number => {
   return b.id - a.id;
 };
 
+/** The board asks a person two questions, and only one of them is theirs: *what waits on
+ *  you*, and *what is cooking*. `needs_human` is the first. The other seven panels — these —
+ *  are the machine's own business, and seven boxes of it is seven places to look for the one
+ *  row that has stopped moving.
+ *
+ *  Written as `keyof Board` so a panel renamed out from under the fold is a build error
+ *  rather than a box that quietly stops being folded. `dropped`, `unproven` and
+ *  `unmergeable` are absent because no panel draws them: the fold is over what a person is
+ *  shown, not over every filter the module can compute. */
+export const MACHINE_SIDE = [
+  "projects",
+  "running",
+  "stale",
+  "queued",
+  "failed",
+  "open",
+  "delivered",
+] as const satisfies readonly (keyof Board)[];
+
+/** A cooking row and the instant it has last moved, off its own record.
+ *
+ *  Kept beside the row rather than on it: `Row` is what the cockpit draws and what the
+ *  panels return, and a field only the fold reads has no business there. Nor could the
+ *  instant be looked up by id afterwards — an epic and a story can share one, and `stale`
+ *  alone gathers rows from four tables. */
+interface Aged {
+  readonly since: string;
+  readonly row: Row;
+}
+
+/** Oldest first: the smallest instant, then by id, so a tick with nothing moving draws the
+ *  same list twice. A row the record cannot date sorts last — an unparseable timestamp is
+ *  not evidence of age, and reading it as *now* would put it at the head of the list, which
+ *  is the one place a person actually looks. */
+const sat = (a: Aged): number => {
+  const then = instant(a.since);
+  return Number.isNaN(then) ? Number.POSITIVE_INFINITY : then;
+};
+const oldestFirst = (a: Aged, b: Aged): number => {
+  const x = sat(a);
+  const y = sat(b);
+  return x === y ? a.row.id - b.row.id : x - y;
+};
+
+/** The age leads the detail, so it is a column the eye can run down a list whose rows are
+ *  otherwise four different kinds of thing. A panel whose detail already says the same
+ *  minutes — a refusal's, a waiting assignment's, a running attempt's — does not say them
+ *  twice; one that says a different number keeps it, because it is about something else. */
+const withAge = (a: Aged, asOf: number): Row => {
+  const age = `${minutes(a.since, asOf)}m`;
+  const detail = a.row.detail.replace(new RegExp(` · ${age}(?= · |$)`), "");
+  return { ...a.row, detail: detail === "" ? age : `${age} · ${detail}` };
+};
+
+/** Every machine-side panel's rows in one list, oldest first, each carrying how long it has
+ *  been sitting. How long is the only field that ranks rows of different kinds against each
+ *  other, so it is what the fold is ordered by. */
+export function cooking(db: DatabaseSync, project: number | null = null): readonly Row[] {
+  const { aged, asOf } = snapshot(db, project);
+  return [...aged].sort(oldestFirst).map((a) => withAge(a, asOf));
+}
+
 /** `project` narrows every group but `projects` to one project's work. The projects box is
  *  how you get back out again, so it always shows the whole workspace. */
 export function board(db: DatabaseSync, project: number | null = null): Board {
+  return snapshot(db, project).groups;
+}
+
+/** The board and the fold are one query: the seven machine-side panels record each row's
+ *  age as they build it, and `cooking` is that record sorted. Computing them apart would be
+ *  two reads of the same tables that could disagree about what is on the board. */
+function snapshot(
+  db: DatabaseSync,
+  project: number | null,
+): { groups: Board; aged: readonly Aged[]; asOf: number } {
   const q = queries(db);
   const asOf = Date.now();
 
@@ -339,6 +415,14 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
   const taskTestRows = q.selectFrom(taskTests).all();
   const assignmentRows = q.selectFrom(assignments).all();
   const walk = new Walk(db, epicRows, storyRows, taskRows, testRows);
+
+  /** Recorded as each machine-side panel builds its row, and returned untouched, so the
+   *  panels stay exactly the shape they were and the fold still knows every row's age. */
+  const aged: Aged[] = [];
+  const cook = <R extends Row>(since: string, row: R): R => {
+    aged.push({ since, row });
+    return row;
+  };
 
   /** No project asked for is every project: the predicate is true for every row. */
   const only = (of: number | null): boolean => project === null || of === project;
@@ -427,12 +511,12 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
         return f === undefined
           ? []
           : [
-              {
+              cook(f.since, {
                 id: c.id,
                 what: `${c.kind} ${c.target_type} #${c.target_id}`,
                 state: c.state,
                 detail: `${f.why} · ${f.passes} passes · ${minutes(f.since, asOf)}m`,
-              },
+              }),
             ];
       });
   };
@@ -449,7 +533,7 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
     return at !== undefined && at.state === "failed" ? at.last_output : null;
   };
 
-  return {
+  const groups: Board = {
     // What exists, with how much of it is finished. Without this a board with nothing in
     // flight is indistinguishable from a board with no project at all.
     projects: q
@@ -457,7 +541,12 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
       .all()
       .map((p) => {
         const count = perProject.get(p.id) ?? { delivered: 0, all: 0 };
-        return { id: p.id, what: p.name, state: p.state, detail: `${count.delivered}/${count.all} stories` };
+        return cook(p.updated_at, {
+          id: p.id,
+          what: p.name,
+          state: p.state,
+          detail: `${count.delivered}/${count.all} stories`,
+        });
       })
       .sort(byId),
     // Nothing is moving it, and nothing is going to. Derived rather than a state: staleness
@@ -471,37 +560,41 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
         if (t.state !== "ready" || f === undefined || f.passes < 3) return [];
         if (!only(walk.ofTask(t.id)) || attempted.has(t.id)) return [];
         return [
-          {
+          cook(f.since, {
             id: t.id,
             what: t.title,
             state: "ready",
             detail: `${f.why} · ${f.passes} passes · ${minutes(f.since, asOf)}m${denied(t.id)}`,
-          },
+          }),
         ];
       }),
       ...assignmentRows
         .filter((a) => a.phase === "waiting" && only(walk.ofAssignment(a)) && elapsed(a.updated_at, asOf) > 15)
-        .map((a) => ({
-          id: a.id,
-          what: objective(a),
-          state: "waiting",
-          detail: `waiting on you · ${minutes(a.updated_at, asOf)}m`,
-        })),
+        .map((a) =>
+          cook(a.updated_at, {
+            id: a.id,
+            what: objective(a),
+            state: "waiting",
+            detail: `waiting on you · ${minutes(a.updated_at, asOf)}m`,
+          }),
+        ),
       ...staleChores(),
       ...storyRows
         .filter((s) => s.state === "in_progress" && only(walk.ofStory(s.id)) && !perStory.has(s.id))
-        .map((s) => ({ id: s.id, what: s.title, state: s.state, detail: "no work under it" })),
+        .map((s) => cook(s.updated_at, { id: s.id, what: s.title, state: s.state, detail: "no work under it" })),
     ].sort(byId),
     // pending counts: a worktree is cut and a session is starting. Leaving it out made the
     // board say nothing was running while an agent was working.
     running: assignmentRows
       .filter((a) => (a.phase === "pending" || a.phase === "running") && only(walk.ofAssignment(a)))
-      .map((a) => ({
-        id: a.id,
-        what: objective(a),
-        state: a.phase,
-        detail: `${(a.worker_id === null ? undefined : nameOf.get(a.worker_id)) ?? "?"} · ${minutes(a.created_at, asOf)}m · ${thousands(a.spent)}k`,
-      }))
+      .map((a) =>
+        cook(a.created_at, {
+          id: a.id,
+          what: objective(a),
+          state: a.phase,
+          detail: `${(a.worker_id === null ? undefined : nameOf.get(a.worker_id)) ?? "?"} · ${minutes(a.created_at, asOf)}m · ${thousands(a.spent)}k`,
+        }),
+      )
       .sort(byId),
     needs_human: assignmentRows
       .filter((a) => a.phase === "waiting" && only(walk.ofAssignment(a)))
@@ -519,12 +612,16 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
     // The detail is why it is not running: the last pass's refusal, or its role.
     queued: taskRows
       .filter((t) => t.state === "ready" && placed(walk.ofTask(t.id)) && !attempted.has(t.id))
-      .map((t) => ({
-        id: t.id,
-        what: t.title,
-        state: t.state,
-        detail: `${refusalOf.get(t.id)?.why ?? t.role}${denied(t.id)}`,
-      }))
+      .map((t) =>
+        // Sitting since the first pass that refused it, or since the record last moved it:
+        // a queued task's age is how long it has been waiting for a slot, not how old it is.
+        cook(refusalOf.get(t.id)?.since ?? t.updated_at, {
+          id: t.id,
+          what: t.title,
+          state: t.state,
+          detail: `${refusalOf.get(t.id)?.why ?? t.role}${denied(t.id)}`,
+        }),
+      )
       .sort(byId),
     // Work that stopped because its attempts ran out, or because a pass is still owed to
     // it. Abandoned work is not here: dropped was somebody's decision and wants nothing
@@ -538,7 +635,12 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
             ? `out of attempts · ${t.attempts} of ${t.max_retry}${denied(t.id)} · retry it with a reason, or drop it`
             : `attempts ${t.attempts}/${t.max_retry}${denied(t.id)}`;
         const why = lastLine(failure(t));
-        return { id: t.id, what: t.title, state: t.state, detail: why === "" ? detail : `${detail} · ${why}` };
+        return cook(t.updated_at, {
+          id: t.id,
+          what: t.title,
+          state: t.state,
+          detail: why === "" ? detail : `${detail} · ${why}`,
+        });
       })
       .sort(byId),
     // Put down on purpose. Its own filter, under its own name, so nothing reading `failed`
@@ -558,7 +660,7 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
       .filter((s) => s.state === "delivered" && only(walk.ofStory(s.id)))
       .sort((a, b) => (a.updated_at === b.updated_at ? 0 : a.updated_at < b.updated_at ? 1 : -1))
       .slice(0, 20)
-      .map((s) => ({ id: s.id, what: s.title, state: s.state, detail: "story" })),
+      .map((s) => cook(s.updated_at, { id: s.id, what: s.title, state: s.state, detail: "story" })),
     // Delivered, and the last thing that tried to land it could not. A filter rather than
     // a state: the story is delivered, and stays delivered — what is wrong is between its
     // branch and master, and only the thing holding a repository can see it. Stories 138
@@ -578,15 +680,22 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
     open: [
       ...epicRows
         .filter((e) => !["delivered", "dropped"].includes(e.state) && only(walk.ofRelease(e.release_id)))
-        .map((e) => ({ id: e.id, what: e.title, state: e.state, detail: "epic" })),
+        .map((e) => cook(e.updated_at, { id: e.id, what: e.title, state: e.state, detail: "epic" })),
       ...storyRows
         .filter((s) => !["delivered", "dropped"].includes(s.state) && only(walk.ofStory(s.id)))
         .map((s) => {
           const count = perStory.get(s.id) ?? { done: 0, all: 0 };
-          return { id: s.id, what: s.title, state: s.state, detail: `${count.done}/${count.all} tasks` };
+          return cook(s.updated_at, {
+            id: s.id,
+            what: s.title,
+            state: s.state,
+            detail: `${count.done}/${count.all} tasks`,
+          });
         }),
     ].sort((a, b) => (a.detail === b.detail ? a.id - b.id : a.detail < b.detail ? -1 : 1)),
   };
+
+  return { groups, aged, asOf };
 }
 
 /** What the last pass decided about a task it did not start. One row per task, replaced
