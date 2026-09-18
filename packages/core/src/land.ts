@@ -176,4 +176,62 @@ export function refuseResurrection(diff: LandingDiff): string | null {
   );
 }
 
+/** What the primary checkout looks like once the base ref has been moved by a merge made
+ *  somewhere else. */
+export interface PrimaryDrift {
+  /** The repository root of the primary checkout — the folder a person works in. */
+  readonly path: string;
+  /** The branch the story landed on. */
+  readonly base: string;
+  /** True when the primary checkout has `base` checked out. When it does not, its files
+   *  were never showing the base and nothing is owed. */
+  readonly onBase: boolean;
+  /** True when its index and working tree already hold the landing commit — the operator
+   *  landed it themselves, or a previous tick brought the tree forward. */
+  readonly alreadyCurrent: boolean;
+  /** True when its index and working tree still hold exactly the commit the base pointed
+   *  at before the landing — nothing of the operator's is in there to lose. */
+  readonly wasTheOldTip: boolean;
+  /** Anything of the operator's the update would write over: tracked edits, or untracked
+   *  files sitting on a path the landing changed. Empty when there is none. */
+  readonly ownWork: readonly string[];
+}
+
+/** Either the primary checkout may be brought up to the ref, or it may not and the operator
+ *  is told the command. Never a third thing, and never silence. */
+export type PrimaryUpdate =
+  | { readonly kind: "current" }
+  | { readonly kind: "update" }
+  | { readonly kind: "tell"; readonly instruction: string };
+
+/** docs/design/14. A landing merge made in a tree of wecode's own moves `refs/heads/<base>`
+ *  and writes nobody's checkout. That is the rule that keeps an operator's folder safe, and
+ *  it is also how a landed story went invisible: the board said delivered, `git log` showed
+ *  the merge, and the folder on disk still held the pre-land files — at worst with the
+ *  landed paths reading as staged deletions, because HEAD moved under an index that never
+ *  saw them. It reads exactly like lost work.
+ *
+ *  So the ref moving is never the end of it. A primary checkout that is on the base and
+ *  holds nothing but the old tip is brought forward, because there is nothing there to
+ *  lose. One that holds the operator's own work is not touched — that invariant does not
+ *  bend — and then the command that would bring it forward is named, in full, with the path
+ *  it is to be run in. The one thing not allowed is neither. */
+export function updatePrimary(drift: PrimaryDrift): PrimaryUpdate {
+  const { path, base, onBase, alreadyCurrent, wasTheOldTip, ownWork } = drift;
+  if (!onBase || alreadyCurrent) return { kind: "current" };
+  if (wasTheOldTip && ownWork.length === 0) return { kind: "update" };
+  const what =
+    ownWork.length === 0
+      ? `${path} is not at the commit ${base} was landed from`
+      : `${path} has work of yours that bringing it forward would write over:\n${indent(ownWork)}`;
+  return {
+    kind: "tell",
+    instruction:
+      `${base} moved: ${path} still shows the files from before the landing.\n` +
+      `  ${what}\n` +
+      `  in ${path}: git restore --source=HEAD --staged --worktree . ` +
+      `(commit or stash your own changes first — this discards them).`,
+  };
+}
+
 const indent = (lines: readonly string[]): string => lines.map((l) => `  ${l}`).join("\n");
