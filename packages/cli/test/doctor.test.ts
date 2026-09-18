@@ -68,6 +68,8 @@ describe("wecode doctor", () => {
   it("is quiet about a delivered story once something under it is recorded as landed", () => {
     setState("story", ids.story, "delivered");
     recordLanded(ids.task);
+    // The epic above it delivers too, or it is an unsettled parent over a settled story.
+    setState("epic", ids.epic, "delivered");
 
     expect(run(["doctor"])).toBe(0);
     expect(said()).toBe("");
@@ -80,6 +82,11 @@ describe("wecode doctor", () => {
     // A requirement that is met though every criteria under it is dropped.
     setState("requirement", ids.requirement, "met");
     setState("acceptance_criteria", ids.criteria, "dropped");
+    // A second, still-open requirement under the story, so settling the first one does not
+    // make the story a parent whose every child is settled — that is another sentence's case.
+    db.prepare(
+      "INSERT INTO requirement (slug,story_id,statement,state,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+    ).run("one-use", ids.story, "a reset link is used exactly once", "in_progress", T, T);
     // A second story, in_progress, with nothing under it at all.
     db.prepare(
       "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)",
