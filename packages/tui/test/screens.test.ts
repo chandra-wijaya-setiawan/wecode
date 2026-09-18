@@ -129,15 +129,17 @@ describe("the dashboard", () => {
   it("carries each box's count and the letter that opens it in its title", () => {
     const out = lines().join("\n");
     expect(out).toContain("─ Projects (1) [p] ─");
-    expect(out).toContain("─ Queue (1) [q] ─");
-    expect(out).toContain("─ Running (0) [r] ─");
+    // The fold, holding the row the Queue box used to, and the one box on the page that
+    // can still be empty with a seeded database.
+    expect(out).toContain("─ Cooking (1) [c] ─");
+    expect(out).toContain("─ Needs you (0) [n] ─");
   });
 
   it("says what an empty box is empty of, in that box's own words", () => {
     const out = lines();
-    const at = titled(out, "Running (0)");
+    const at = titled(out, "Needs you (0)");
     expect(at).toBeGreaterThanOrEqual(0);
-    expect(inside(out, at)).toEqual(["nothing is running"]);
+    expect(inside(out, at)).toEqual(["nothing waits on you"]);
   });
 
   it("trims a box to the rows it declares and says how many it dropped", () => {
@@ -155,7 +157,7 @@ describe("the dashboard", () => {
     expect(rows.at(-1)).toContain(`… and ${13 - (declared - 1)} more`);
     // And the next box begins directly under this one's bottom border.
     expect(out[at + declared + 1]?.startsWith("└")).toBe(true);
-    expect(titled(out, "Running (0)")).toBe(at + declared + 2);
+    expect(titled(out, "Needs you (0)")).toBe(at + declared + 2);
   });
 
   it("marks the cursor in the box that holds it and in no other", () => {
@@ -180,27 +182,27 @@ describe("a box screen", () => {
     expect(titled(out, "Projects (21) [p]")).toBe(0);
     // Ten lines of rows inside the box — more than the six it gets on the dashboard — and
     // no other box on the screen.
-    expect(titled(out, "Running (")).toBe(-1);
+    expect(titled(out, "Cooking (")).toBe(-1);
     // A row begins with its code, which is a number said as one: "#12".
     expect(inside(out, 0).filter((l) => /^#\d/.test(l)).length).toBeGreaterThan(6);
     expect(inverted(frame(100, 12))).toHaveLength(1);
   });
 
   it("lines its columns up with the same box on the dashboard", () => {
-    const onDashboard = inside(lines(), titled(lines(), "Queue (1)"))[0];
+    const onDashboard = inside(lines(), titled(lines(), "Cooking (1)"))[0];
     app.key("v");
-    app.key("q");
+    app.key("c");
     expect(app.screen).toMatchObject({ kind: "box" });
     expect(inside(lines(), 0)[0]).toBe(onDashboard);
   });
 
   it("says the box is empty rather than drawing nothing", () => {
     app.key("v");
-    app.key("r");
+    app.key("n");
     expect(app.screen).toMatchObject({ kind: "box" });
     const out = lines(100, 10);
-    expect(titled(out, "Running (0) [r]")).toBe(0);
-    expect(inside(out, 0)[0]).toBe("nothing is running");
+    expect(titled(out, "Needs you (0) [n]")).toBe(0);
+    expect(inside(out, 0)[0]).toBe("nothing waits on you");
   });
 });
 
@@ -293,16 +295,10 @@ describe("the key bar", () => {
  *  screen is. These moved here when render.ts went. */
 describe("views", () => {
   it("loads every box the page orders", () => {
-    expect(views.map((v) => v.name)).toEqual([
-      "projects",
-      "running",
-      "needs_human",
-      "stale",
-      "queued",
-      "failed",
-      "open",
-      "delivered",
-    ]);
+    // Four, in the page's order: the two questions the board asks a person, and the two
+    // boxes that are the tree rather than a report. The five machine-side panels are one
+    // box now, `cooking`.
+    expect(views.map((v) => v.name)).toEqual(["projects", "needs_human", "open", "cooking"]);
   });
 
   /** The rename has to reach the whitelist too: a box named `open` whose filter the code
