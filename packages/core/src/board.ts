@@ -24,6 +24,10 @@ export interface Board {
   readonly open: readonly Row[];
   readonly delivered: readonly Row[];
   readonly unmergeable: readonly Row[];
+  /** `MACHINE_SIDE`'s panels as one list, oldest first. A group like any other, so a box
+   *  can name it in views.yaml — the fold is what the board draws, not a second API
+   *  beside it. */
+  readonly cooking: readonly Row[];
 }
 
 /** The columns this module reads, and only those.
@@ -331,21 +335,25 @@ const newestRun = (a: TaskTestRow, b: TaskTestRow): number => {
 };
 
 /** The board asks a person two questions, and only one of them is theirs: *what waits on
- *  you*, and *what is cooking*. `needs_human` is the first. The other seven panels — these —
- *  are the machine's own business, and seven boxes of it is seven places to look for the one
- *  row that has stopped moving.
+ *  you*, and *what is cooking*. `needs_human` is the first. These five are the machine's own
+ *  business, and five boxes of it is five places to look for the one row that has stopped
+ *  moving.
+ *
+ *  `projects` and `open` were folded here too, and are not any more: they are not a report
+ *  on the machine, they are the tree — the rows `enter` descends from, and the only way into
+ *  a release or a requirement. A fold is over rows nobody navigates, and a folded row is
+ *  off six tables, so it cannot say which entity it is. Folding the two of them left the
+ *  dashboard with nothing to open.
  *
  *  Written as `keyof Board` so a panel renamed out from under the fold is a build error
  *  rather than a box that quietly stops being folded. `dropped`, `unproven` and
  *  `unmergeable` are absent because no panel draws them: the fold is over what a person is
  *  shown, not over every filter the module can compute. */
 export const MACHINE_SIDE = [
-  "projects",
   "running",
   "stale",
   "queued",
   "failed",
-  "open",
   "delivered",
 ] as const satisfies readonly (keyof Board)[];
 
@@ -388,8 +396,7 @@ const withAge = (a: Aged, asOf: number): Row => {
  *  been sitting. How long is the only field that ranks rows of different kinds against each
  *  other, so it is what the fold is ordered by. */
 export function cooking(db: DatabaseSync, project: number | null = null): readonly Row[] {
-  const { aged, asOf } = snapshot(db, project);
-  return [...aged].sort(oldestFirst).map((a) => withAge(a, asOf));
+  return snapshot(db, project).groups.cooking;
 }
 
 /** `project` narrows every group but `projects` to one project's work. The projects box is
@@ -533,7 +540,7 @@ function snapshot(
     return at !== undefined && at.state === "failed" ? at.last_output : null;
   };
 
-  const groups: Board = {
+  const panels: Omit<Board, "cooking"> = {
     // What exists, with how much of it is finished. Without this a board with nothing in
     // flight is indistinguishable from a board with no project at all.
     projects: q
@@ -541,12 +548,12 @@ function snapshot(
       .all()
       .map((p) => {
         const count = perProject.get(p.id) ?? { delivered: 0, all: 0 };
-        return cook(p.updated_at, {
+        return {
           id: p.id,
           what: p.name,
           state: p.state,
           detail: `${count.delivered}/${count.all} stories`,
-        });
+        };
       })
       .sort(byId),
     // Nothing is moving it, and nothing is going to. Derived rather than a state: staleness
@@ -680,19 +687,25 @@ function snapshot(
     open: [
       ...epicRows
         .filter((e) => !["delivered", "dropped"].includes(e.state) && only(walk.ofRelease(e.release_id)))
-        .map((e) => cook(e.updated_at, { id: e.id, what: e.title, state: e.state, detail: "epic" })),
+        .map((e) => ({ id: e.id, what: e.title, state: e.state, detail: "epic" })),
       ...storyRows
         .filter((s) => !["delivered", "dropped"].includes(s.state) && only(walk.ofStory(s.id)))
         .map((s) => {
           const count = perStory.get(s.id) ?? { done: 0, all: 0 };
-          return cook(s.updated_at, {
+          return {
             id: s.id,
             what: s.title,
             state: s.state,
             detail: `${count.done}/${count.all} tasks`,
-          });
+          };
         }),
     ].sort((a, b) => (a.detail === b.detail ? a.id - b.id : a.detail < b.detail ? -1 : 1)),
+  };
+
+  /** Built last, because every panel above it has had to record its rows' ages first. */
+  const groups: Board = {
+    ...panels,
+    cooking: [...aged].sort(oldestFirst).map((a) => withAge(a, asOf)),
   };
 
   return { groups, aged, asOf };
