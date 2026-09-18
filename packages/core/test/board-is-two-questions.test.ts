@@ -1,6 +1,10 @@
 /** The board asks two questions, and only one of them is a person's: what waits on you, and
- *  what is cooking. `needs_human` is the first; the seven machine-side panels fold into the
+ *  what is cooking. `needs_human` is the first; the five machine-side panels fold into the
  *  second — one list, oldest first, every row carrying how long it has been sitting.
+ *
+ *  `projects` and `open` are on neither side of that: they are the tree the dashboard is
+ *  navigated by rather than a report on the machine, so they keep boxes of their own and
+ *  the fold leaves them alone.
  *
  *  What is held here is the fold itself: that it covers every machine-side panel and nothing
  *  else, that it is ordered by age rather than by id, and that the age on a row is read off
@@ -85,15 +89,34 @@ beforeEach(() => {
 });
 
 describe("the fold covers the machine side and nothing else", () => {
-  it("names the seven panels that are the machine's business, and not the one that is yours", () => {
-    expect([...MACHINE_SIDE]).toEqual(["projects", "running", "stale", "queued", "failed", "open", "delivered"]);
+  it("names the five panels that are the machine's business, and not the one that is yours", () => {
+    expect([...MACHINE_SIDE]).toEqual(["running", "stale", "queued", "failed", "delivered"]);
     expect([...MACHINE_SIDE]).not.toContain("needs_human");
   });
 
+  it("leaves the two boxes that are the tree out of the fold", () => {
+    // Not an omission: a folded row is off five tables and can no longer say which entity
+    // it is, and these two are the rows `enter` descends from. Folding them would leave
+    // the dashboard with nothing to open.
+    expect([...MACHINE_SIDE]).not.toContain("projects");
+    expect([...MACHINE_SIDE]).not.toContain("open");
+    const b = board(db);
+    expect(b.projects.length).toBeGreaterThan(0);
+    expect(b.open.length).toBeGreaterThan(0);
+    for (const row of [...b.projects, ...b.open]) {
+      expect(cooking(db).some((f) => f.id === row.id && f.what === row.what)).toBe(false);
+    }
+  });
+
   it("keeps every row of every machine-side panel, and exactly as many rows as they hold", () => {
-    db.prepare("UPDATE task SET state = 'ready' WHERE id = ?").run(tree.task);
+    // Five rows off four of the five panels — running, stale, queued and delivered — so
+    // the count cannot be one panel's.
+    refusedSince("no worker free", ago(200));
     assign("a1", { created_at: ago(7) });
     storyIn(tree.epic, "shipped", "delivered", ago(30));
+    storyIn(tree.epic, "also-shipped", "delivered", ago(31));
+    storyIn(tree.epic, "shipped-too", "delivered", ago(32));
+    storyIn(tree.epic, "and-shipped", "delivered", ago(33));
 
     const b = board(db);
     const folded = cooking(db);
@@ -214,14 +237,15 @@ describe("every cooking row says its age", () => {
   });
 
   it("reads the age off the row's own record", () => {
-    // In progress with no work under it, which is two panels' business: stale says it is
-    // sitting and open says how far it has got. A fold is not a dedupe — the two rows say
-    // different things — and both carry the one age the story's record gives them.
-    storyIn(tree.epic, "waiting-story", "in_progress", ago(90));
+    // A task refused the same way three times is two panels' business: queued says it has
+    // no slot and stale says it has stopped moving. A fold is not a dedupe — the two rows
+    // say different things — and both are dated from the refusal rather than from the
+    // task's last touch, which the seed left at 2026-09-13.
+    refusedSince("no worker free", ago(90));
     const details = cooking(db)
-      .filter((r) => r.what === "waiting-story")
+      .filter((r) => r.what === "send the reset mail")
       .map((r) => r.detail);
-    expect(details.sort()).toEqual(["90m · 0/0 tasks", "90m · no work under it"]);
+    expect(details.sort()).toEqual(["90m · no worker free", "90m · no worker free · 3 passes"]);
   });
 
   it("keeps the panel's own detail behind the age", () => {
