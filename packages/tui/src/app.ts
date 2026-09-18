@@ -102,6 +102,30 @@ const ENTITY: Readonly<Record<keyof Board, StatefulEntity | null>> = {
   open: null,
   delivered: "story",
   unmergeable: "story",
+  // The machine-side panels folded into one list, so the box holds assignments, tasks and
+  // stories at once and no one word names them. `entityOf` asks the panels back.
+  cooking: null,
+};
+
+/** What a row on a box is a row of. A box whose rows are all one kind says so above; the
+ *  two that hold more than one kind are answered from the row.
+ *
+ *  `open` tags epic or story in its detail. The fold cannot: its detail leads with the age,
+ *  and it is carrying five panels' rows. So the panels themselves are asked — a folded row
+ *  is still on exactly the panel it came from, and that panel does name one kind. Matched
+ *  on id, words and state together, because an id alone is shared across tables and the
+ *  fold rewrites the detail to put the age in front of it. */
+const entityOf = (filter: keyof Board, row: Row, now: Board): StatefulEntity => {
+  const named = ENTITY[filter];
+  if (named !== null) return named;
+  if (filter !== "cooking") return row.detail === "epic" ? "epic" : "story";
+  for (const [panel, entity] of Object.entries(ENTITY) as [keyof Board, StatefulEntity | null][]) {
+    if (entity === null) continue;
+    if (now[panel].some((r) => r.id === row.id && r.what === row.what && r.state === row.state)) {
+      return entity;
+    }
+  }
+  return "story";
 };
 
 /** What a terminal sends for the esc key, by code point rather than as a literal control
@@ -704,7 +728,7 @@ export class App {
     const now = this.snapshot ?? board(this.db);
     return boxes.flatMap((v) =>
       now[v.filter].map((row) => ({
-        entity: ENTITY[v.filter] ?? (row.detail === "epic" ? "epic" : "story"),
+        entity: entityOf(v.filter, row, now),
         row: { ...row },
       })),
     );
