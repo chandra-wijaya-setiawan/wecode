@@ -197,11 +197,11 @@ export interface PrimaryDrift {
   readonly ownWork: readonly string[];
 }
 
-/** Either the primary checkout may be brought up to the ref, or it may not and the operator
- *  is told the command. Never a third thing, and never silence. */
+/** Either the primary checkout is already showing the landing, or it is behind and the
+ *  operator is told the command. Never a third thing, and never silence — and never wecode
+ *  writing the files itself. */
 export type PrimaryUpdate =
   | { readonly kind: "current" }
-  | { readonly kind: "update" }
   | { readonly kind: "tell"; readonly instruction: string };
 
 /** docs/design/14. A landing merge made in a tree of wecode's own moves `refs/heads/<base>`
@@ -211,19 +211,22 @@ export type PrimaryUpdate =
  *  landed paths reading as staged deletions, because HEAD moved under an index that never
  *  saw them. It reads exactly like lost work.
  *
- *  So the ref moving is never the end of it. A primary checkout that is on the base and
- *  holds nothing but the old tip is brought forward, because there is nothing there to
- *  lose. One that holds the operator's own work is not touched — that invariant does not
- *  bend — and then the command that would bring it forward is named, in full, with the path
- *  it is to be run in. The one thing not allowed is neither. */
+ *  So the ref moving is never the end of it — but the answer is words, not a write. The
+ *  checkout that holds the base is the operator's, and wecode writing it is the same class
+ *  of surprise as the silence was: a tree that changed under somebody while they were in
+ *  it. Even "clean and at the old tip" is only clean as far as git can see, and it is not
+ *  wecode's to reset. So every drift that is not already current is an instruction, naming
+ *  the command in full and the path it is to be run in. The one thing not allowed is
+ *  neither. */
 export function updatePrimary(drift: PrimaryDrift): PrimaryUpdate {
   const { path, base, onBase, alreadyCurrent, wasTheOldTip, ownWork } = drift;
   if (!onBase || alreadyCurrent) return { kind: "current" };
-  if (wasTheOldTip && ownWork.length === 0) return { kind: "update" };
   const what =
-    ownWork.length === 0
-      ? `${path} is not at the commit ${base} was landed from`
-      : `${path} has work of yours that bringing it forward would write over:\n${indent(ownWork)}`;
+    ownWork.length > 0
+      ? `${path} has work of yours that bringing it forward would write over:\n${indent(ownWork)}`
+      : wasTheOldTip
+        ? `${path} holds nothing but the files ${base} pointed at before the landing`
+        : `${path} is not at the commit ${base} was landed from`;
   return {
     kind: "tell",
     instruction:

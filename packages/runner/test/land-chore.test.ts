@@ -14,6 +14,9 @@ import {
   open,
   type RoleConfig,
 } from "@wecode/core";
+// Imported by path: the landing rules belong to core but nothing exports them from the
+// barrel.
+import { updatePrimary } from "../../core/src/land.js";
 import { DEFAULT_BUDGET, Runner } from "../src/index.js";
 import { attemptLanding, isLanded, LAND_CHECK } from "../src/land-chore.js";
 
@@ -123,7 +126,9 @@ describe("a delivered story with no land commit in the base", () => {
 
     const tick = await runner().tick();
 
-    expect(tick.landed).toEqual([{ story: s.id, sha: git(repo, "rev-parse", "main") }]);
+    // toMatchObject, not toEqual: every landing now also carries the notice for the
+    // checkout that holds the base, which the test below is about.
+    expect(tick.landed).toMatchObject([{ story: s.id, sha: git(repo, "rev-parse", "main") }]);
     expect(subjects("main")[0]).toBe(`land story/${s.slug}`);
     expect(git(repo, "ls-tree", "--name-only", "main")).toContain("reset.ts");
     expect(await isLanded(repo, "main", `story/${s.slug}`)).toBe(true);
@@ -152,6 +157,41 @@ describe("a delivered story with no land commit in the base", () => {
     expect(existsSync(join(repo, "reset.ts"))).toBe(false);
     expect(existsSync(landTree(s.slug))).toBe(false);
     expect(checkouts()).toEqual(before);
+  });
+
+  it("is not silent about it either: the untouched checkout is told the command", async () => {
+    const s = story("password reset", "reset.ts");
+
+    const tick = await runner().tick();
+
+    // Not writing the operator's tree is only half of it. The other half is saying the tree
+    // is behind, and how to bring it forward, in the path it is to be run in.
+    const notice = tick.landed.find((l) => l.story === s.id)?.notice ?? "";
+    expect(notice).toContain(repo);
+    expect(notice).toContain("git restore --source=HEAD --staged --worktree .");
+  });
+
+  it("has no drift it answers by writing: every one is current or an instruction", () => {
+    const drifts = [true, false].flatMap((wasTheOldTip) =>
+      [[], ["README.md"]].map((ownWork) => ({
+        path: "/w/repo",
+        base: "main",
+        onBase: true,
+        alreadyCurrent: false,
+        wasTheOldTip,
+        ownWork,
+      })),
+    );
+    for (const drift of drifts) {
+      const verdict = updatePrimary(drift);
+      expect(verdict.kind).toBe("tell");
+      if (verdict.kind === "tell") expect(verdict.instruction).toContain("/w/repo");
+    }
+    // And a checkout that is not on the base, or already holds the landing, is left in peace
+    // without a word — there is nothing there that is stale.
+    const quiet = { path: "/w/repo", base: "main", alreadyCurrent: false, wasTheOldTip: false, ownWork: [] };
+    expect(updatePrimary({ ...quiet, onBase: false })).toEqual({ kind: "current" });
+    expect(updatePrimary({ ...quiet, onBase: true, alreadyCurrent: true })).toEqual({ kind: "current" });
   });
 
   it("lands it once: the tick after reads it as already there", async () => {
@@ -225,7 +265,7 @@ describe("a story the landing is not owed for", () => {
     expect(git(repo, "rev-parse", "main")).toBe(tip);
 
     const second = await runner().tick();
-    expect(second.landed).toEqual([{ story: s.id, sha: git(repo, "rev-parse", "main") }]);
+    expect(second.landed).toMatchObject([{ story: s.id, sha: git(repo, "rev-parse", "main") }]);
   });
 
   it("has no branch at all, so there is nothing to land and nothing to say", async () => {
@@ -326,7 +366,7 @@ describe("a land chore, raised on the refusal", () => {
     rmSync(landTree(s.slug));
     const tick = await runner().tick();
 
-    expect(tick.landed).toEqual([{ story: s.id, sha: git(repo, "rev-parse", "main") }]);
+    expect(tick.landed).toMatchObject([{ story: s.id, sha: git(repo, "rev-parse", "main") }]);
     // `done` by `finish`, not by `close`: a worker — the runner itself — made the merge and
     // the graph proved it. The board counts it as work carried out.
     expect(choreFor(db, "land", "story", s.id)?.state).toBe("done");
