@@ -134,6 +134,10 @@ interface Task {
   readonly tools: readonly string[];
   readonly test: string | null;
   readonly role: string;
+  /** Whether the file spelled this scope out. A scope fallen back to from `project.yaml` is
+   *  that file's to answer for, and every task in the plan would carry the same one, so the
+   *  one-path-one-task rule judges only the scopes a person wrote here. */
+  readonly given: boolean;
   /** The symbols the task says it will deliver, `file:symbol` each. Kept but never created
    *  from: a promise is what `--propose-scope` asks the tree about, and a scope is still
    *  written by a person. */
@@ -229,6 +233,7 @@ function help(): string {
     "A test naming a file is refused unless that file exists or some task's scope writes it.",
     `A criteria naming no test of its own gets an extra ${AUTHORS} task that writes one.`,
     `A task's tools come from its role, or ${DEFAULT_TOOLS.join(", ")} when there are no roles.`,
+    "Two tasks under one story must not spell a scope path that both can write.",
     "A requirement given as an id joins that requirement, which must be one of the joined story's.",
     `An epic holds ${CHILDREN.epic}, a release holds ${CHILDREN.release}; only the root joins an existing row by id.`,
     "",
@@ -328,7 +333,49 @@ function read(doc: unknown, config: ProjectConfig | null, roles: RoleConfig | nu
   }
 
   const top = level(m, root, "the file", config, roles, say);
+  if (top !== null) collisions(top, say);
   return { root, join: top?.id ?? id(m[root]), parent, top };
+}
+
+/** Two tasks under one story that may both write a path are two agents editing one file at
+ *  once: whichever lands second either loses the other's work or fails to apply, and no test
+ *  says which. The story is the unit because its tasks are what run together. Refused here,
+ *  where moving one path from one task to the other costs a line, rather than at merge. */
+function collisions(l: Level, say: string[]): void {
+  for (const c of l.children) collisions(c, say);
+  if (l.kind !== "story") return;
+  const tasks = l.requirements.flatMap((r) => r.criteria.flatMap((c) => c.tasks)).filter((t) => t.given);
+  const story = l.name ?? `#${String(l.id)}`;
+  for (const [i, a] of tasks.entries()) {
+    for (const b of tasks.slice(i + 1)) {
+      const path = shared(a.scope, b.scope);
+      if (path !== null) {
+        say.push(`story ${story}: ${a.title} and ${b.title} both write ${path}; two tasks under one story share no path`);
+      }
+    }
+  }
+}
+
+/** The first pair of globs from two scopes that can write the same file, named as the file
+ *  says them. Two globs collide when neither segment rules the other out — a wildcard in a
+ *  segment reaches whatever a name there reaches, and `**` reaches everything below it. */
+function shared(a: readonly string[], b: readonly string[]): string | null {
+  for (const x of a) {
+    for (const y of b) {
+      if (overlaps(x, y)) return x === y ? x : `${x} and ${y}`;
+    }
+  }
+  return null;
+}
+
+function overlaps(x: string, y: string): boolean {
+  const g = x.split("/");
+  const h = y.split("/");
+  for (let i = 0; i < Math.min(g.length, h.length); i++) {
+    if (g[i] === "**" || h[i] === "**") return true;
+    if (!matchesGlob(g[i] as string, h[i] as string) && !matchesGlob(h[i] as string, g[i] as string)) return false;
+  }
+  return g.length === h.length;
 }
 
 const found = (key: string | undefined): string => (key === undefined ? "; this one is empty" : `, not ${key}`);
@@ -545,6 +592,7 @@ function authoringTask(statement: string, config: ProjectConfig | null, roles: R
     tools: [...def.scope.tools],
     test: config?.test ?? null,
     role: AUTHORS,
+    given: false,
     promises: [],
   };
 }
@@ -596,7 +644,7 @@ function task(
 
   return title === null || scope === null || scope.length === 0
     ? null
-    : { title, scope, tools, test, role, promises };
+    : { title, scope, tools, test, role, given: m["scope"] !== undefined, promises };
 }
 
 // ── the rows this command reads ──────────────────────────────────────────────────────────
