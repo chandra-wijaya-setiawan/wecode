@@ -1059,6 +1059,18 @@ export class Runner {
   ): Promise<number[]> {
     const chore = choreFor(this.db, "refresh", "story", story.id);
     if (!(await this.isBehind(repo, branch, base))) {
+      // Up to date is not the same as repaired. A branch reset onto the base contains it by
+      // construction, so this test alone blesses the one refresh that must never be blessed:
+      // the one that threw the story's own work away to make the check true. Closing here
+      // would then overwrite the `failed` verdict `proveChore` gave it, and the orphaned
+      // commits would be nowhere on the board. So the chore stays exactly where it is, still
+      // owed, with the loss recorded against it.
+      const orphaned = await this.orphanedBy(repo, branch, story.id);
+      if (orphaned !== null) {
+        if (chore === null) return [];
+        if (chore.state !== "running") recordChoreRefusal(this.db, orphaned, chore.id);
+        return chore.state === "done" ? [] : [chore.id];
+      }
       // The world moved: the branch took the base, so what was owed is not owed any more.
       // `running` is left alone — a worker is in the tree on it, and the verdict is that
       // attempt's to give.
@@ -1430,12 +1442,73 @@ export class Runner {
       if (!(await this.contains(target.repo, branch, base))) {
         return { ok: false, why: `${base} is not an ancestor of ${branch}: the merge was not made` };
       }
+      // Asked before the suite, because a branch that dropped the work it was carrying is
+      // green for the wrong reason: the tests that would have failed went with the commits.
+      const orphaned = await this.orphanedBy(target.repo, branch, target.story);
+      if (orphaned !== null) return { ok: false, why: `${branch} contains ${base}, but ${orphaned}` };
       const red = await this.suiteRed(target);
       if (red !== null) return { ok: false, why: `${branch} contains ${base}, but the suite is red: ${red}` };
       return { ok: true };
     } catch (err) {
       return { ok: false, why: (err as Error).message };
     }
+  }
+
+  /** What a refresh has thrown away, or null when it has thrown nothing away.
+   *
+   *  A refresh is asked for one thing — put the base into the story branch — and it is
+   *  judged by one question, "is the base an ancestor of the branch". `git reset --hard base`
+   *  answers that question perfectly and does the opposite of the work: every commit the
+   *  story was carrying stops being reachable from its branch, and the check still passes.
+   *  So does a rebase that drops a commit, and a force-push of a tree built from the base.
+   *  The attempts are still in the object store for a while, and they are nowhere a person
+   *  will look; by the time the story's tests are re-run the only evidence is that the work
+   *  is gone.
+   *
+   *  The commits this defends are the ones wecode itself put on the branch: `landed_branch`
+   *  records, per task, the task-branch tip that `landDoneTasks` merged into the story — the
+   *  attempt's commit, and a fact the runner wrote rather than one it was told. Each of them
+   *  was reachable from the story branch the moment it was recorded, so any of them that is
+   *  not reachable now was dropped by whatever last rewrote the branch.
+   *
+   *  An empty `sha` is skipped: it means the tip could not be read at merge time, and an
+   *  unknown commit is not evidence that a known one is missing. */
+  private async orphanedBy(repo: string, branch: string, storyId: number): Promise<string | null> {
+    const lost: string[] = [];
+    for (const row of this.landedAttempts(storyId)) {
+      if (!(await this.contains(repo, branch, row.sha))) lost.push(`task ${row.task} at ${row.sha.slice(0, 12)}`);
+    }
+    if (lost.length === 0) return null;
+    return `it no longer reaches work wecode merged into it: ${lost.join(", ")} — a refresh adds the base, it does not replace the branch`;
+  }
+
+  /** The attempt commits this story's tasks landed on its branch. The walk is
+   *  task → acceptance_test → criteria, which is `criteriaOfStory` from the other end. */
+  private landedAttempts(storyId: number): { task: number; sha: string }[] {
+    const under = this.criteriaOfStory(storyId);
+    const q = queries(this.db);
+    const tests = new Set(
+      q
+        .selectFrom(tbl.test)
+        .select(["id", "parent_id"])
+        .all()
+        .filter((t) => under.has(t.parent_id))
+        .map((t) => t.id),
+    );
+    const tasks = new Set(
+      q
+        .selectFrom(tbl.task)
+        .select(["id", "acceptance_test_id"])
+        .all()
+        .filter((t) => tests.has(t.acceptance_test_id))
+        .map((t) => t.id),
+    );
+    return q
+      .selectFrom(tbl.landed)
+      .select(["task_id", "sha"])
+      .all()
+      .filter((r) => tasks.has(r.task_id) && r.sha !== "")
+      .map((r) => ({ task: r.task_id, sha: r.sha }));
   }
 
   /** `git merge-base --is-ancestor`: the merge, read off the graph rather than off a report. */
