@@ -98,11 +98,14 @@ components:
     owns: runs a test's artefact where the test belongs and records what came back
     modules: [examiner]
 
-  synchroniser:
+  # Named for the one thing it does that no other box can: it holds the order. Every pass of
+  # a tick is a call into another component, so what is left here is the sequence — and
+  # `tick-holds-only-order.test.ts` fails the moment a decision moves into it.
+  tick:
     package: runner
     layer: service
     component: true
-    owns: writes what was observed back to the core, so the record and reality agree on every tick
+    owns: the order the passes of a tick run in, and nothing about what any of them decides; and the one attempt that puts a delivered story's branch in the base
     modules: [daemon, land-chore]
 
   worker adapter:
