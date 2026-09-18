@@ -990,9 +990,10 @@ export class Runner {
       if (base === null) continue;
       const branch = `story/${story.slug}`;
       // `refresh` is about the tree wecode is judging in right now, and that is an
-      // in_progress story's. A story on hold or delivered is not being proved in, and for a
-      // delivered one `merge` below is the chore that is owed.
-      if (story.state === "in_progress") open.push(...(await this.followRefresh(story, repo, branch, base, behind)));
+      // in_progress story's: only that story raises one. But a chore already on the board is
+      // a claim about the branch, not about the story's state, so its check is re-read on
+      // every tick whatever state the story has moved to — see `followRefresh`.
+      open.push(...(await this.followRefresh(story, repo, branch, base, behind)));
       if (story.state !== "delivered") continue;
       if (await this.mergesCleanly(repo, base, branch)) {
         // The other half of the same rule. The conflict is gone, so an open chore for it is
@@ -1039,9 +1040,18 @@ export class Runner {
    *
    *  `behind` is still taken, for one thing only: when the proving pass did try the merge,
    *  its conflict is the better sentence to record against the chore than "does not contain".
-   *  It never decides whether the chore is owed. */
+   *  It never decides whether the chore is owed.
+   *
+   *  Raising is an in_progress story's alone, but re-reading is not. A story that moves to
+   *  `on_hold` or `delivered` with a `failed` refresh chore on it used to take that chore
+   *  out of reach of the only pass that ever revisits it: the branch could take the base an
+   *  hour later and the row would still be `failed`, refusing a tree that is fine, for good.
+   *  So the check is re-read whatever state the story is in, and a chore whose condition has
+   *  cleared is closed. A story that cannot raise one also cannot have one re-raised here —
+   *  when it is still behind, an existing chore is left exactly as it stands, and not
+   *  dispatched, because nothing is being proved in that tree. */
   private async followRefresh(
-    story: { id: number; slug: string; project: number },
+    story: { id: number; slug: string; project: number; state: string },
     repo: string,
     branch: string,
     base: string,
@@ -1057,6 +1067,8 @@ export class Runner {
       }
       return [];
     }
+    // Still behind, and this story is not being proved in. The chore stands as it is.
+    if (story.state !== "in_progress") return [];
     const why = behind.find((b) => b.story === story.id)?.why ?? `${branch} does not contain ${base}`;
     const raised = ensureChore(this.db, {
       project_id: story.project,
