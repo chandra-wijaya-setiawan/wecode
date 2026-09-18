@@ -229,10 +229,11 @@ export function tally(rows: readonly Row[]): string {
     .join(" · ");
 }
 
-/** The summary block, then the record's children as a list. The block is what an App knows
- *  about the record it is on — App exposes the screen's entity and id, not the row it was
- *  opened from, so the label and state are not among them — and what the children it just
- *  drew add up to, which is the part you came to the screen for. */
+/** The summary block, then the record's children as a list. The block's fields are what an
+ *  App knows about the record it is on — App exposes the screen's entity and id, not the row
+ *  it was opened from, so the label and state are not among them. What the children add up
+ *  to goes on the block's title rather than into a field of its own: it is the part you came
+ *  to the screen for, and the title is the line the eye lands on first. */
 export function Node({
   app,
   screen,
@@ -244,7 +245,6 @@ export function Node({
     ["entity", screen.entity],
     ["id", `#${screen.id}`],
     ["children", String(rows.length)],
-    ["states", tally(rows)],
   ];
   const gutter = Math.max(...fields.map(([k]) => k.length));
   const inner = width - BORDER;
@@ -253,7 +253,7 @@ export function Node({
   return (
     <>
       <Panel
-        title={`${screen.entity} #${screen.id}`}
+        title={`${screen.entity} #${screen.id} · ${tally(rows)}`}
         width={width}
         height={fields.length + BORDER}
       >

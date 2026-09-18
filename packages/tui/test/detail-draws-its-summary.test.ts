@@ -75,20 +75,20 @@ function crowd(db: DatabaseSync, states: readonly string[]): void {
 }
 
 describe("the summary block at the top of a record's screen", () => {
-  it("names the record and what is under it, one field to a line", () => {
+  it("names the record, one field to a line, and how its children stand on the title", () => {
     descendTo("storefront");
-    expect(summary(lines())).toEqual([
+    const out = lines();
+    expect(out[0]).toContain(`─ project #${tree.project} · in_progress 1`);
+    expect(summary(out)).toEqual([
       "entity    project",
       `id        #${tree.project}`,
       "children  1",
-      "states    in_progress 1",
     ]);
   });
 
-  it("sits above the children, in a box titled for the record", () => {
+  it("sits above the children, which are drawn in a box of their own", () => {
     descendTo("storefront");
     const out = lines();
-    expect(out[0]).toContain(`─ project #${tree.project}`);
     const children = out.findIndex((l) => l.includes("─ children (1)"));
     expect(children).toBeGreaterThan(summary(out).length);
   });
@@ -98,22 +98,18 @@ describe("the summary block at the top of a record's screen", () => {
     app.refresh();
     descendTo("storefront", "1.0.0", "account recovery", "password reset");
     descendTo("one link, one change", "a link is emailed", "the mail arrives");
-    expect(summary(lines())).toEqual([
-      "entity    acceptance_test",
-      "id        #1",
-      "children  4",
-      "states    ready 3 · done 1",
-    ]);
+    const out = lines();
+    expect(out[0]).toContain("─ acceptance_test #1 · ready 3 · done 1");
+    expect(summary(out)).toEqual(["entity    acceptance_test", "id        #1", "children  4"]);
   });
 
   it("says so with a dash when the record has nothing under it", () => {
     descendTo("storefront", "1.0.0", "account recovery", "password reset");
     descendTo("one link, one change", "a link is emailed", "the mail arrives");
     descendTo("send the reset mail", "the mailer is called");
-    const rows = summary(lines());
-    expect(rows[0]).toBe("entity    task_test");
-    expect(rows[2]).toBe("children  0");
-    expect(rows[3]).toBe("states    —");
+    const out = lines();
+    expect(out[0]).toContain("─ task_test #1 · —");
+    expect(summary(out)[2]).toBe("children  0");
   });
 
   it("is drawn whole before the children get a line, however short the terminal", () => {
@@ -121,7 +117,8 @@ describe("the summary block at the top of a record's screen", () => {
     for (const height of [8, 10, 24]) {
       const out = lines(100, height);
       expect(out).toHaveLength(height);
-      expect(summary(out)).toHaveLength(4);
+      expect(summary(out)).toHaveLength(3);
+      expect(out[0]).toContain("· in_progress 1");
     }
   });
 
