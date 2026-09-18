@@ -22,7 +22,16 @@ import {
   type StatefulEntity,
 } from "@wecode/core";
 import type { Row } from "./list.js";
-import { foldedTo, nodeKey, outlineRows, OUTLINE } from "./outline.js";
+import {
+  foldedTo,
+  nodeKey,
+  openWork,
+  outlineRows,
+  OUTLINE,
+  SCOPE_KEYS,
+  SCOPE_LABEL,
+  type OutlineScope,
+} from "./outline.js";
 import type { View } from "./views.js";
 
 export type Screen =
@@ -121,8 +130,13 @@ export class App {
   /** Which outline nodes are open. It belongs to the screen and outlives nothing else:
    *  folding is not a descent, so it must not cost an esc to undo. */
   private expanded: ReadonlySet<string> = new Set();
-  /** What the last key armed: v waits for a box's letter, a waits for a verb's. */
-  private armed: null | "view" | "verb" | "answer" = null;
+  /** How much of the tree the outline draws. `all` is the default, and reopening returns to
+   *  it: the outline is the overview, and an overview that opened narrowed by a keystroke
+   *  from an hour ago would be one you could not trust to hold everything. */
+  private scope: OutlineScope = "all";
+  /** What the last key armed: v waits for a box's letter, a waits for a verb's, f waits for
+   *  a scope's. */
+  private armed: null | "view" | "verb" | "answer" | "scope" = null;
 
   constructor(db: DatabaseSync, views: readonly View[], machines: MachineSet = loadMachines()) {
     this.db = db;
@@ -190,6 +204,10 @@ export class App {
       this.armed = null;
       return this.say(k);
     }
+    if (this.armed === "scope") {
+      this.armed = null;
+      return this.narrow(k);
+    }
     if (ENTER.includes(k)) return this.descend();
     if (k === "esc" || k === ESC) return this.pop();
     switch (k) {
@@ -201,6 +219,7 @@ export class App {
       case "r": this.refresh(); this.status = "refreshed"; return;
       case "+": return this.fold(true);
       case "-": return this.fold(false);
+      case "f": return this.armScope();
       case "v": return this.armView();
       case "a": return this.armVerb();
       default: this.status = `${k} does nothing here`;
@@ -222,13 +241,51 @@ export class App {
     this.status = `box? ${[...boxes, `${OUTLINE.key} ${OUTLINE.title}`].join("  ")}`;
   }
 
-  /** The outline opens folded to the level its config names. Reopening refolds it: `v t`
-   *  is how you ask for the overview, and an overview that remembered last time's
-   *  expansions would not be one. */
+  /** Which scope the outline is drawing, for the box to title itself with. */
+  get outlineScope(): OutlineScope {
+    return this.scope;
+  }
+
+  /** The tree the outline draws: the whole forest, or only the work still owed. Everything
+   *  the outline does — folding, the rows, the fold keys — reads it through here, so the
+   *  narrowing cannot apply to the rows and not to the folding. */
+  private outlineForest(): readonly Node[] {
+    return this.scope === "open" ? openWork(this.forest) : this.forest;
+  }
+
+  /** The outline opens folded to the level its config names, and unnarrowed. Reopening
+   *  refolds it: `v t` is how you ask for the overview, and an overview that remembered
+   *  last time's expansions would not be one. */
   private openOutline(): void {
-    this.expanded = foldedTo(this.forest, OUTLINE.depth);
+    this.scope = "all";
+    this.expanded = foldedTo(this.outlineForest(), OUTLINE.depth);
     this.push({ kind: "outline" });
-    this.status = OUTLINE.title;
+    this.status = `${OUTLINE.title} — ${SCOPE_LABEL[this.scope]} · f narrows`;
+  }
+
+  private armScope(): void {
+    if (this.screen.kind !== "outline") {
+      this.status = `f narrows the outline — v ${OUTLINE.key}`;
+      return;
+    }
+    this.armed = "scope";
+    this.status = `show? ${[...SCOPE_KEYS].map(([k, s]) => `${k} ${SCOPE_LABEL[s]}`).join("  ")}`;
+  }
+
+  /** Narrow the outline to open work, or widen it back to all of it. The fold keys are
+   *  re-derived rather than kept: the rows a narrowing removes take their fold state with
+   *  them, so widening again stands open to the level the outline opens at. */
+  private narrow(k: string): void {
+    const scope = SCOPE_KEYS.get(k);
+    if (scope === undefined) {
+      this.status = `no scope on ${k}`;
+      return;
+    }
+    this.scope = scope;
+    this.expanded = foldedTo(this.outlineForest(), OUTLINE.depth);
+    this.items = this.itemsOf(this.screen);
+    this.cursor = this.cursor;
+    this.status = `${OUTLINE.title} — ${SCOPE_LABEL[scope]}`;
   }
 
   /** Open or close the node under the cursor by one level. The rows are rebuilt rather
@@ -389,7 +446,7 @@ export class App {
       // The head of the queue box is the next task the allocator will take, and the board
       // is where that order is decided. The outline only marks the row it names.
       const now = this.snapshot ?? board(this.db);
-      return outlineRows(this.forest, this.expanded, now.queued[0]?.id ?? null);
+      return outlineRows(this.outlineForest(), this.expanded, now.queued[0]?.id ?? null);
     }
     if (screen.kind === "node") {
       const node = this.find(screen.entity, screen.id);
