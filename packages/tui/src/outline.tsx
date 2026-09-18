@@ -7,11 +7,11 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
-import { Text } from "ink";
-import type { Node, StatefulEntity } from "@wecode/core";
+import { Box, Text } from "ink";
+import { STATEFUL, type Node, type StatefulEntity } from "@wecode/core";
 import type { App } from "./app.js";
-import { clip, columnWidths, List, type Row } from "./list.js";
-import { COLUMNS, Panel } from "./screens.js";
+import { clip, stateColour, type Line, type Row } from "./list.js";
+import { Panel } from "./screens.js";
 
 const CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
 
@@ -46,12 +46,23 @@ export function connector(closed: readonly boolean[]): string {
   return `${rails.join("")}${closed[closed.length - 1] ? ELBOW : TEE}`;
 }
 
+/** The repeating columns the outline can draw, beside the tree itself. Order is config's;
+ *  the names are the code's, so a column the config asks for either draws or fails to load. */
+export const OUTLINE_COLUMNS = ["tree", "id", "type", "state"] as const;
+export type OutlineColumn = (typeof OUTLINE_COLUMNS)[number];
+
 export interface OutlineConfig {
   readonly title: string;
   readonly key: string;
   /** The entity the outline is folded to when it opens. */
   readonly depth: string;
   readonly empty: string;
+  /** Left to right, what the line is made of. */
+  readonly columns: readonly OutlineColumn[];
+  /** How many characters the type and the state each get. */
+  readonly abbreviate: number;
+  /** The words a plain cut would not tell apart, shortened by hand. */
+  readonly abbreviations: Readonly<Record<string, string>>;
 }
 
 export class OutlineError extends Error {}
@@ -73,8 +84,33 @@ export function loadOutline(path: string = CONFIG): OutlineConfig {
     key,
     depth: typeof v["depth"] === "string" ? v["depth"] : "story",
     empty: typeof v["empty"] === "string" ? v["empty"] : "-",
+    columns: columnsOf(v["columns"]),
+    abbreviate: typeof v["abbreviate"] === "number" ? v["abbreviate"] : 4,
+    abbreviations: wordsOf(v["abbreviations"]),
   };
 }
+
+/** The declared order, checked against the names this file draws. An unknown column is a
+ *  line the code cannot compose, and failing to load says so where it can be fixed. */
+function columnsOf(raw: unknown): readonly OutlineColumn[] {
+  if (raw === undefined) return OUTLINE_COLUMNS;
+  if (!Array.isArray(raw)) throw new OutlineError("outline.columns must be a list");
+  return raw.map((c) => {
+    if (!OUTLINE_COLUMNS.includes(c as OutlineColumn)) {
+      throw new OutlineError(`outline.columns names no column ${String(c)}`);
+    }
+    return c as OutlineColumn;
+  });
+}
+
+const wordsOf = (raw: unknown): Readonly<Record<string, string>> => {
+  const out: Record<string, string> = {};
+  if (raw === null || typeof raw !== "object") return out;
+  for (const [word, short] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof short === "string") out[word] = short;
+  }
+  return out;
+};
 
 export const OUTLINE: OutlineConfig = loadOutline();
 
@@ -290,6 +326,82 @@ export function outlineRows(
   return out;
 }
 
+/** A word in the columns the config gives it: the hand-written short form where there is
+ *  one, and otherwise the word's own first characters. Two spaces between columns; the same
+ *  gap the shared list keeps. */
+export function abbreviate(word: string, config: OutlineConfig = OUTLINE): string {
+  return config.abbreviations[word] ?? word.slice(0, config.abbreviate);
+}
+
+const GAP = "  ";
+
+/** A detail whose first part is an entity's name is that row's kind, put there by
+ *  `outlineRows`; what follows it is the rollup and is nobody's column. */
+const KINDS: ReadonlySet<string> = new Set<string>(STATEFUL);
+
+/** A row cut into its declared columns, with whatever the columns did not claim last. The
+ *  tree cell is the row as `outlineRows` drew it — guide, fold marker and label — because
+ *  those three are one thing: the label is where the branch it hangs off ends. */
+export function outlineCells(row: Row, config: OutlineConfig = OUTLINE): string[] {
+  const parts = row.detail === "" ? [] : row.detail.split(" · ");
+  const kind = parts.length > 0 && KINDS.has(parts[0] ?? "") ? parts[0] ?? "" : "";
+  const cell: Readonly<Record<OutlineColumn, string>> = {
+    tree: row.what,
+    id: `#${row.id}`,
+    type: kind === "" ? "" : abbreviate(kind, config),
+    state: abbreviate(row.state, config),
+  };
+  return [...config.columns.map((c) => cell[c]), parts.slice(kind === "" ? 0 : 1).join(" · ")];
+}
+
+/** How wide each declared column has to be to hold every row: one set for the whole tree,
+ *  so the columns line up down all of it rather than per screenful. */
+export function outlineWidths(rows: readonly Row[], config: OutlineConfig = OUTLINE): number[] {
+  const cells = rows.map((r) => outlineCells(r, config));
+  return config.columns.map((_, j) => Math.max(...cells.map((c) => (c[j] ?? "").length), 0));
+}
+
+/** Rows the height can show, scrolled so the cursor is among them. The shared list does
+ *  this arithmetic too, and fixes the column order with it; the outline keeps the order and
+ *  pays for the window again. */
+function window(count: number, height: number, cursor: number | null): [number, number] {
+  if (count <= height) return [0, count];
+  // One line goes to the "… and N more" tally.
+  const shown = Math.max(height - 1, 0);
+  if (cursor === null || cursor < shown) return [0, shown];
+  const first = Math.min(cursor - shown + 1, count - shown);
+  return [first, first + shown];
+}
+
+/** The outline's own lines, in the declared order. It does not go through the shared list
+ *  because that list's contract is the code and the state first and the description last —
+ *  right for a box of unrelated rows, and for a tree it buries the guide mid-line. */
+export function outlineLines(
+  rows: readonly Row[],
+  height: number,
+  cursor: number | null,
+  width: number,
+  config: OutlineConfig = OUTLINE,
+): Line[] {
+  if (height <= 0) return [];
+  const sizes = outlineWidths(rows, config);
+  const [first, last] = window(rows.length, height, cursor);
+  const lines = rows.slice(first, last).map((row, i) => ({
+    text: clip(
+      outlineCells(row, config)
+        .map((c, j) => c.padEnd(sizes[j] ?? 0, " "))
+        .join(GAP)
+        .trimEnd(),
+      width,
+    ),
+    state: row.state,
+    cursor: cursor !== null && first + i === cursor,
+  }));
+  const hidden = rows.length - lines.length;
+  if (hidden > 0) lines.push({ text: clip(`… and ${hidden} more`, width), state: "", cursor: false });
+  return lines;
+}
+
 /** One box, titled with its scope, its count and the letter that opens it, holding every
  *  visible row at one set of column widths so the ids and states line up down the whole
  *  tree.
@@ -320,14 +432,13 @@ export function Outline({
           {clip(app.outlineScope === "open" ? NOTHING_OPEN : OUTLINE.empty, inner)}
         </Text>
       ) : (
-        <List
-          rows={rows}
-          columns={COLUMNS}
-          height={height - BORDER}
-          cursor={app.cursor}
-          width={inner}
-          widths={columnWidths(rows, COLUMNS)}
-        />
+        <Box flexDirection="column">
+          {outlineLines(rows, height - BORDER, app.cursor, inner).map((line, i) => (
+            <Text key={i} wrap="truncate" inverse={line.cursor} color={stateColour(line.state)}>
+              {line.text}
+            </Text>
+          ))}
+        </Box>
       )}
     </Panel>
   );

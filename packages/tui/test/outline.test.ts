@@ -145,9 +145,11 @@ describe("what it opens at", () => {
   it("shows every row's id and state beside it", () => {
     // A code, not a bare number — the outline draws rows through the same contract as
     // every other list, and list.tsx is the one place that decides what a code looks like.
-    expect(row("storefront")).toMatch(new RegExp(`^#${tree.project}\\b`));
-    expect(row("storefront")).toContain("in_progress");
-    expect(row("password reset")).toContain("story");
+    // The tree leads, so the code sits after the label rather than at the left edge, and
+    // the type and the state are cut to the four columns views.yaml declares.
+    expect(row("storefront")).toMatch(new RegExp(`storefront\\s+#${tree.project}\\b`));
+    expect(row("storefront")).toMatch(new RegExp(`#${tree.project}\\s+proj\\s+work\\b`));
+    expect(row("password reset")).toMatch(/\bstor\b/);
   });
 });
 
