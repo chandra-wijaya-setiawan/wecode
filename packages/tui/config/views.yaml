@@ -4,8 +4,19 @@
 #
 # Rearranging, renaming or resizing the board is an edit to this file. A new filter is not.
 
+# Four boxes. Eight was eight places to look for the one row that has stopped moving, and
+# five of those eight were the machine reporting on itself — running, stale, queued, failed
+# and delivered are now one box, `cooking`, folded oldest-first by core/board.ts (see
+# MACHINE_SIDE there). Oldest-first is the point of folding them: what has stopped moving
+# is at the top of one list instead of somewhere in five.
+#
+# The four that are left are the two questions the board asks a person — what waits on you,
+# and what is cooking — and the two boxes that are not a report at all but the tree: the
+# projects are the way back out to the whole workspace, and the open epics and stories are
+# what `enter` descends from. Neither is foldable; a folded row is off five tables and can
+# no longer say which entity it is.
 page:
-  order: [projects, running, needs_human, stale, queued, failed, open, delivered]
+  order: [projects, needs_human, open, cooking]
 
 # The services box is not one of the views: it is not a filter over the board, `v` does not
 # open it, and its four rows are four different questions rather than one query's rows. What
@@ -105,38 +116,20 @@ views:
     filter: projects
     rows: 6
     empty: no projects — wecode project create --parent <workspace> <name>
-  running:
-    title: Running
-    filter: running
-    rows: 5
-    empty: nothing is running
   needs_human:
     title: Needs you
     filter: needs_human
     rows: 5
     empty: nothing waits on you
-  stale:
-    title: Stale
-    filter: stale
-    rows: 6
-    empty: nothing has been sitting
-  queued:
-    title: Queue
-    filter: queued
-    rows: 5
-    empty: nothing is waiting for a slot
-  failed:
-    title: Failed
-    filter: failed
-    rows: 5
-    empty: nothing has given up
   open:
     title: Open
     filter: open
     rows: 8
     empty: no epics or stories open
-  delivered:
-    title: Delivered
-    filter: delivered
-    rows: 5
-    empty: nothing delivered yet
+  # The five folded panels in one list, oldest first. It gets the height the five used to
+  # share between them, because it is now the whole of the machine's side of the board.
+  cooking:
+    title: Cooking
+    filter: cooking
+    rows: 12
+    empty: nothing is cooking

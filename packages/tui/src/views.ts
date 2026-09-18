@@ -19,7 +19,11 @@ export interface View {
  *  `Board` interface, as the object `board()` returns, and twice in views.yaml — so it is
  *  written as `keyof Board` and nothing else: `satisfies` makes a typo here a build error
  *  rather than a box that silently keeps no rows. test/filter-names.test.ts closes the
- *  rest of the circle, against a real board and against the config. */
+ *  rest of the circle, against a real board and against the config.
+ *
+ *  Every group the board computes is nameable, not just the ones the page draws today: the
+ *  page is four boxes and views.yaml decides which four. Cutting a box, or putting one
+ *  back, is an edit to that file and to nothing here. */
 export const FILTERS = [
   "projects",
   "running",
@@ -27,8 +31,12 @@ export const FILTERS = [
   "stale",
   "queued",
   "failed",
+  "dropped",
+  "unproven",
   "open",
   "delivered",
+  "unmergeable",
+  "cooking",
 ] as const satisfies readonly (keyof Board)[];
 
 /** Every name here has to resolve to a filter the code knows. A typo is a refusal to
