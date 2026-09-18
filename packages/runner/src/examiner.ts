@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
@@ -59,17 +59,57 @@ export const PROJECT_CONFIG = "config/project.yaml";
  *  names none. Read off the tree being examined rather than off the runner's own checkout:
  *  a task_test runs in the attempt's worktree, and it is that worktree that must be built. */
 export function prepareCommandOf(cwd: string): string | null {
+  const command = projectConfig(cwd)["prepare"];
+  return typeof command === "string" && command.trim() !== "" ? command : null;
+}
+
+/** The tree's own project config, or an empty one where there is none to read. An unreadable
+ *  config is never a verdict: nothing is prepared and nothing is re-run, and the tests are
+ *  judged exactly as they always were rather than going unrunnable over a typo. */
+function projectConfig(cwd: string): Record<string, unknown> {
   const path = resolve(cwd, PROJECT_CONFIG);
-  if (!existsSync(path)) return null;
+  if (!existsSync(path)) return {};
   try {
     const raw: unknown = parse(readFileSync(path, "utf8"));
-    const command = (raw as Record<string, unknown> | null)?.["prepare"];
-    return typeof command === "string" && command.trim() !== "" ? command : null;
+    return typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
   } catch {
-    // An unreadable config is not a build failure. Nothing is prepared and the tests run
-    // as they always did, rather than every test in the tree going unrunnable over a typo.
-    return null;
+    return {};
   }
+}
+
+/** Written where the board reads a run's output, ahead of what the script printed, so a
+ *  proof that never reached the thing it claims is read as unproved rather than as a pass. */
+export const ENTRY_HIDDEN = "unproved: it still passes with its entry point hidden";
+
+/** Where a proof enters the code it proves. A screen proof that renders a component
+ *  directly passes just as well when the file the app actually draws is gone, and such a
+ *  proof says nothing about the screen. Which file each proof must enter by is a fact about
+ *  the packaging, so it is declared in `config/project.yaml` and read from there. */
+export interface Entry {
+  /** What identifies the proof: any artefact whose command names this is checked. */
+  readonly proof: string;
+  /** The file the proof must be reached through, relative to the tree. */
+  readonly file: string;
+}
+
+/** The `entry:` list of the tree being examined. A tree that declares none is judged on its
+ *  exit codes alone, exactly as before. */
+export function entriesOf(cwd: string): readonly Entry[] {
+  const raw = projectConfig(cwd)["entry"];
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((e) => {
+    const { proof, file } = (e ?? {}) as Record<string, unknown>;
+    return typeof proof === "string" && typeof file === "string" && proof !== "" && file !== ""
+      ? [{ proof, file }]
+      : [];
+  });
+}
+
+/** The entry point an artefact must be reached through, or null when none is declared for
+ *  it. Named rather than matched: a `proof` is a path the command carries, so the same
+ *  declaration reads the same whichever runner the command drives. */
+export function entryFor(artefact: string, entries: readonly Entry[]): Entry | null {
+  return entries.find((e) => artefact.includes(e.proof)) ?? null;
 }
 
 /** What each runner prints when its selection came up empty. Exit code says nothing here:
@@ -346,12 +386,18 @@ export class Examiner {
       // exit code alone cannot tell that apart from a suite that ran and passed, so the
       // output is read too, and a run that matched nothing fails.
       const empty = out.ok && matchedNoTest(out.output);
-      const ok = out.ok && !empty;
+      // A green run still proves nothing when it is green without the code it claims. Only
+      // a pass is worth re-running: a failure is already no pass to refuse.
+      const hidden = out.ok && !empty ? await this.unreached(row.artefact, cwd) : null;
+      const ok = out.ok && !empty && hidden === null;
       const at = now();
       const body = out.output.slice(-8000);
+      let reason = body;
+      if (hidden !== null) reason = `${ENTRY_HIDDEN}: ${hidden}\n${body}`;
+      else if (empty) reason = `${NO_TEST_MATCHED}: ${row.artefact}\n${body}`;
       this.stamp(entity, row.id, {
         last_run_at: at,
-        last_output: empty ? `${NO_TEST_MATCHED}: ${row.artefact}\n${body}` : body,
+        last_output: reason,
         provenance_sha: provenance,
         updated_at: at,
       });
@@ -394,6 +440,30 @@ export class Examiner {
     const why = out.ok ? null : out.output.slice(-8000);
     this.prepared.set(key, why);
     return why;
+  }
+
+  /** The entry point a green run never went through, or null when the run is a proof.
+   *
+   *  The file is moved aside and the same command run again: a proof that enters by it dies
+   *  without it, and one that passes anyway proved something other than what it claims. The
+   *  file is put back whatever the run does, because an examined tree is still the tree the
+   *  work is in.
+   *
+   *  A tree that declares no entry point for the artefact, and one whose declared file is
+   *  not there, are both left alone — a stale line in a config is not a failing test. */
+  private async unreached(artefact: string, cwd: string): Promise<string | null> {
+    const entry = entryFor(artefact, entriesOf(cwd));
+    if (entry === null) return null;
+    const path = resolve(cwd, entry.file);
+    if (!existsSync(path)) return null;
+    const aside = `${path}.hidden-by-examiner`;
+    renameSync(path, aside);
+    try {
+      const again = await this.runOne(artefact, cwd);
+      return again.ok && !matchedNoTest(again.output) ? entry.file : null;
+    } finally {
+      renameSync(aside, path);
+    }
   }
 
   /** True when this test already has a verdict reached against this exact fingerprint.
