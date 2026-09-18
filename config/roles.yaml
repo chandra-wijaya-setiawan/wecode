@@ -34,6 +34,21 @@ roles:
       write: ["**"]
       tools: ["bash", "read", "edit", "write"]
 
+  # The role the person at the keyboard holds. `OPERATOR` is the actor every unattributed
+  # answer already carries — `actorOf(WECODE_ACTOR) ?? OPERATOR` in the TUI and the CLI — and
+  # `answerApproval` refuses a name that is not a human worker row. Without this declaration
+  # the default actor cannot be hired at all, so every approval answered from the cockpit is
+  # refused with `"operator" is not a human worker`.
+  #
+  # A human role gets no flags, it gets a message: no tools, and nothing writable. An
+  # operator's authority is over the record, not over the tree — a person who wants to edit
+  # files does it as themselves, outside the workforce.
+  operator:
+    worker_kind: human
+    scope:
+      write: []
+      tools: []
+
   acceptance-tester:
     worker_kind: agent
     scope:
