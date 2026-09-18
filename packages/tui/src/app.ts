@@ -26,14 +26,17 @@ import {
 } from "@wecode/core";
 import type { Row } from "./list.js";
 import {
+  atDepth,
   foldedTo,
   nodeKey,
+  openDepth,
   openWork,
   outlineRows,
   OUTLINE,
   OutlineError,
   SCOPE_KEYS,
   SCOPE_LABEL,
+  treeDepth,
   type OutlineScope,
 } from "./outline.js";
 import type { View } from "./views.js";
@@ -203,8 +206,8 @@ export class App {
    *  opened narrowed by a keystroke from an hour ago would be one you could not read. */
   private scope: OutlineScope = outlineOpensOn();
   /** What the last key armed: v waits for a box's letter, a waits for a verb's, f waits for
-   *  a scope's. */
-  private armed: null | "view" | "verb" | "answer" | "scope" | "search" = null;
+   *  a scope's, t waits for a direction to take the whole tree's depth in. */
+  private armed: null | "view" | "verb" | "answer" | "scope" | "search" | "depth" = null;
   /** What is being typed after `/`, and what was typed the last time it was committed.
    *  They are two fields because the committed one outlives the typing: `n` is only worth
    *  a key if it goes on working after the prompt it came from has gone. */
@@ -282,6 +285,10 @@ export class App {
       this.armed = null;
       return this.narrow(k);
     }
+    if (this.armed === "depth") {
+      this.armed = null;
+      return this.step(k);
+    }
     if (ENTER.includes(k)) return this.descend();
     if (k === "esc" || k === ESC) return this.pop();
     switch (k) {
@@ -294,6 +301,7 @@ export class App {
       case "+": return this.fold(true);
       case "-": return this.fold(false);
       case "f": return this.armScope();
+      case "t": return this.armDepth();
       case "/": return this.armSearch();
       case "n": return this.jump(1);
       case "N": return this.jump(-1);
@@ -509,6 +517,42 @@ export class App {
     this.items = this.itemsOf(this.screen);
     this.cursor = this.cursor;
     this.status = "";
+  }
+
+  /** Arm the depth keys. `t` is the tree's own letter — the same one `v` opens the outline
+   *  with — so `t e` and `t f` read as "the tree, one level further in / out". */
+  private armDepth(): void {
+    if (this.screen.kind !== "outline") {
+      this.status = `t e steps the outline in — v ${OUTLINE.key}`;
+      return;
+    }
+    this.armed = "depth";
+    this.status = `depth? e in  f out — ${this.depthNow()}`;
+  }
+
+  /** Take the whole tree one level in or out. `+`/`-` open the node under the cursor; these
+   *  move every branch at once, because reading a tree a node at a time never ends. */
+  private step(k: string): void {
+    const by = k === "e" ? +1 : k === "f" ? -1 : 0;
+    if (by === 0) {
+      this.status = `no depth on ${k}`;
+      return;
+    }
+    const was = openDepth(this.outlineForest(), this.expanded);
+    this.expanded = atDepth(this.outlineForest(), this.expanded, by);
+    this.items = this.itemsOf(this.screen);
+    this.cursor = this.cursor;
+    const now = openDepth(this.outlineForest(), this.expanded);
+    // Both ends are walls: saying so is the difference between a key that did nothing and
+    // a key that is not bound.
+    const wall = by > 0 ? "nothing further in" : "nothing further out";
+    this.status = now === was ? `${this.depthNow()} — ${wall}` : this.depthNow();
+  }
+
+  /** How far open the outline stands, out of how far it goes. */
+  private depthNow(): string {
+    const forest = this.outlineForest();
+    return `depth ${openDepth(forest, this.expanded)}/${treeDepth(forest)}`;
   }
 
   private openBox(k: string): void {
