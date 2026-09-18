@@ -75,6 +75,9 @@ outline:
   # What the outline spends its width on, left to right. The tree is first: a guide drawn
   # after two columns of repeating words starts in the middle of the line, and a guide you
   # have to find the left edge of is one nobody follows down sixty rows.
+  #
+  # The tree cell is the guide and the fold marker only. The label is not a column — it
+  # leads the prose after these, so a long name costs the line it is on and no other.
   columns: [tree, id, type, state]
   # Four columns each for the two words that repeat on every row. Four tells the kinds
   # apart (proj rele epic stor requ acce task) and the states too; wider than that spends
