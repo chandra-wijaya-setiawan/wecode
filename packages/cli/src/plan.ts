@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { matchesGlob, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -422,6 +422,65 @@ function artefacts(test: string | null, scope: readonly string[], where: string,
   }
 }
 
+/** The workspace's packages, as `pnpm-workspace.yaml` spells them: the globs are that file's
+ *  to declare, not this module's to assume, and a tree with no workspace file has no packages
+ *  and so nothing to reach past. */
+function workspace(root: string): readonly { dir: string; name: string }[] {
+  const file = resolve(root, "pnpm-workspace.yaml");
+  if (!existsSync(file)) return [];
+  const doc = parse(readFileSync(file, "utf8")) as { packages?: unknown } | null;
+  const globs = Array.isArray(doc?.packages) ? doc.packages.filter((g): g is string => typeof g === "string") : [];
+  const out: { dir: string; name: string }[] = [];
+  for (const glob of globs) {
+    const parent = glob.endsWith("/*") ? glob.slice(0, -2) : null;
+    if (parent === null || !existsSync(resolve(root, parent))) continue;
+    for (const entry of readdirSync(resolve(root, parent))) {
+      const manifest = resolve(root, parent, entry, "package.json");
+      if (!existsSync(manifest)) continue;
+      const name = (JSON.parse(readFileSync(manifest, "utf8")) as { name?: unknown }).name;
+      out.push({ dir: `${parent}/${entry}`, name: typeof name === "string" ? name : entry });
+    }
+  }
+  return out;
+}
+
+/** Whether a scope glob can write anything inside a directory. Compared segment by segment, so
+ *  that a wildcard in the package slot reaches every package and a named one reaches its own. */
+function touches(glob: string, dir: string): boolean {
+  const g = glob.split("/");
+  const d = dir.split("/");
+  for (let i = 0; i < Math.min(g.length, d.length); i++) {
+    if (g[i] === "**") return true;
+    if (!matchesGlob(d[i] as string, g[i] as string)) return false;
+  }
+  return true;
+}
+
+/** The packages a command runs: one it names by path, and one it names by `--filter`. Both
+ *  are how pnpm is told which package a suite belongs to, and both narrow the run to it. */
+function runs(test: string, packages: readonly { dir: string; name: string }[]): readonly string[] {
+  const words = test.split(/\s+/).map((w) => w.replace(/^['"]+|['"]+$/g, ""));
+  const filtered = new Set<string>();
+  for (const [i, w] of words.entries()) {
+    const arg = w.startsWith("--filter=") ? w.slice("--filter=".length) : w === "--filter" ? words[i + 1] : undefined;
+    if (arg !== undefined) filtered.add(arg.replace(/^[.^]+|\.+$/g, ""));
+  }
+  return packages
+    .filter((p) => filtered.has(p.name) || words.some((w) => w === p.dir || w.startsWith(`${p.dir}/`)))
+    .map((p) => p.dir);
+}
+
+/** A task whose test runs a package its scope cannot write is a task that cannot change its
+ *  own verdict: the suite is green or red on work done elsewhere, and the agent is graded on
+ *  a tree it may not touch. Refused at plan time, where it costs one line of the file. */
+function reach(test: string | null, scope: readonly string[], where: string, say: string[]): void {
+  if (test === null) return;
+  for (const dir of runs(test, workspace(process.cwd()))) {
+    if (scope.some((g) => touches(g, dir))) continue;
+    say.push(`${where}: test: runs ${dir}, which this scope cannot reach`);
+  }
+}
+
 function criterion(
   v: unknown,
   where: string,
@@ -505,6 +564,10 @@ function task(
   }
 
   if (m["test"] !== undefined) artefacts(test, scope ?? [], where, say);
+
+  // Unlike the path check above, this one judges the fallback test too: a project-wide command
+  // that narrows to one package is as unreachable as one the file spells out.
+  if (scope !== null) reach(test, scope, where, say);
 
   const promises = promise(m["promises"], `${where}: promises`, say);
 
