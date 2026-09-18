@@ -1,68 +1,163 @@
 # wecode
 
-Deterministic project management for a developer and their coding agents. Work is written
-down as tests before it is built, agents get one task each inside a scope they cannot leave,
-and nothing is finished because an agent said so — a task is done when its tests pass, and a
-story is delivered when every test that proves it passes.
+## A command center means you're still in it.
 
-**We code while you are sleeping.**
+Twenty agents, three projects, one of you. Every tool ships a better dashboard for watching
+them. wecode ships a team you don't have to watch — work written down as tests, one job per
+agent, a tester on a different model than the coder, and nothing merged that didn't prove
+itself.
 
-## Quick start
+You talk to one agent. It runs the other nineteen.
+
+**No slop, just deliver. We code while you are sleeping.**
+
+---
+
+## Today
+
+```
+agent-3: Done! All tests pass. ✅
+you:     ...opens a 400-line diff at 1am
+```
+
+Sometimes it edited the test. Sometimes its filter matched nothing and exited 0. Sometimes
+it worked in a file nobody asked it to touch. You find out at review, or in production, or
+never.
+
+## With wecode
+
+```
+$ wecode board
+
+needs you (1)
+  ● approval · 6m   push this rewrite to the public repo — its history is unrelated
+                    a · approve    r · refuse    enter · see the evidence
+
+cooking (3)
+  ◆ 4m   task #337  running             dev-2 · claude · 18k
+  ◆ 2m   task #341  running             dev-5 · codex · 9k
+  ○ 0m   task #344  waiting for a slot
+
+delivered (2)
+  story #294  the outline can be narrowed to open work
+  story #291  an approval is answered where it is shown
+```
+
+One question, and it's the right kind: a one-way door only you can walk through. Press `a`.
+
+Everything reversible — a retry, a stale branch, a scope that was too narrow — is in
+`cooking`, and nobody is waiting on you for it. Nothing in `delivered` got there because an
+agent said so.
+
+## The shape of it
+
+```mermaid
+flowchart TB
+  op(("👤 you")) <-->|"say what to build ·<br/>answer what needs you"| ORC
+  op <-.->|"away from the terminal"| CH[[Telegram]]
+  CH <-.-> ORC
+
+  ORC["🤖 orchestrator<br/><i>claude code</i>"] -->|"plans stories,<br/>tests, tasks"| WC
+
+  subgraph WC["wecode"]
+    direction LR
+    ALLOC[allocator] --> FORE[foreman]
+    GATE{{gate · runs your tests}}
+    DOC["🤖 doctor + healer<br/><i>finds drift, fixes what it can</i>"]
+    EXP[["explorer<br/>tree-sitter index"]]
+  end
+
+  FORE --> W1["🤖 dev-1<br/><i>claude code</i>"]
+  FORE --> W2["🤖 dev-2<br/><i>pi · gpt-5.6</i>"]
+  FORE --> W3["🤖 tester<br/><i>codex</i>"]
+
+  W1 & W2 & W3 -->|attempt| GATE
+  GATE -->|red| ALLOC
+  GATE -->|green| REPO[("your repo<br/>main branch")]
+  EXP -.->|"what a file defines,<br/>who calls a symbol"| ALLOC
+  DOC -.->|"a chore, or one question"| ALLOC
+  WC -.->|"only what needs a person"| op
+  WC --> DB[(SQLite)]
+```
+
+The tester is a different harness on purpose: a proof written by the model that wrote the
+code inherits its blind spots.
+
+## The rules
+
+| | |
+|---|---|
+| **A ticket is a test** | No test, no task |
+| **The test must fail first** | Proved red on your main branch before work starts |
+| **Its own repo, its own files** | Anything outside the list is refused, not warned about |
+| **Two agents never share a file** | Overlapping work waits instead of racing |
+| **The gate runs the test, not the agent** | In the tree the agent worked in, reading the output — not just the exit code |
+| **It notices its own drift** | A `done` task with no passing test, a delivered story that never reached your branch, a task nobody can start — found, and fixed where that's safe |
+| **It knows your code** | Asks an index what a file defines and who calls a symbol, so a task's file list is derived rather than guessed |
+
+There is no command an agent can run to mark its own work finished.
+
+## Try it
 
 ```bash
 pnpm install && pnpm -r build
-
 cd /path/to/your/project
-wecode init                      # the database, config/roles.yaml, config/budget.yaml
-
-wecode workspace create acme
-wecode project create --parent 1 storefront
-wecode release create --parent 1 1.0
-wecode epic create --parent 1 "account recovery"
-wecode story create --parent 1 "password reset"
-wecode requirement create --parent 1 "a reset link authenticates exactly one change"
-wecode acceptance_criteria create --parent 1 "a link is emailed within 60s"
-wecode acceptance_test create --parent 1 "the mail arrives" --artefact "bash test/mail.sh"
-wecode task create --parent 1 "send the reset mail" --role engineer
-wecode task scope 1 --write "src/mail/**" --tools bash,read,edit,write
-wecode task_test create --parent 1 "the mailer is called" --artefact "vitest run mail"
-wecode worker create claude-1 --role engineer --kind agent
-
-for e in project release epic story requirement acceptance_criteria; do wecode $e start 1; done
-wecode acceptance_test deliver 1
-wecode task_test deliver 1
-wecode task start 1
-
-wecode-runner --once              # or install contrib/wecode-runner.service
-wecode board
+wecode init && wecode onboard
 ```
 
-## What happens on a tick
+A story is one document, not fifteen commands:
 
-| | |
-|---|---|
-| **allocate** | pick a ready task within the attention budget, bind a worker, cut a worktree at its task branch |
-| **run** | start a coding agent session in that tree with only the flags its scope allows |
-| **prove** | run the task's tests **in that tree**, before it is released |
-| **land** | commit the attempt to its task branch, release the tree, merge into the story branch |
-| **prove again** | run the acceptance tests in the story tree, and let the cascade run |
+```yaml
+story: 1
+requirements:
+  - statement: a reset link authenticates exactly one change
+    criteria:
+      - statement: a link is emailed within 60s
+        test: bash test/mail.sh
+        tasks:
+          - title: send the reset mail
+            scope: [src/mail/send.ts, test/mail.sh]
+            test: pnpm vitest run mail
+```
 
-A passing acceptance test accepts its criteria, which meets its requirement, which delivers
-its story and its epic. Nobody invokes those — they fire when their guard becomes true.
-Shipping a release is the one completion that stays a decision.
+```bash
+wecode plan feature.yaml
+wecode-runner      # allocate · run · prove · land, every ten seconds
+wecode-tui         # the cockpit
+```
 
-## Packages
+Then go to bed.
 
-| | |
-|---|---|
-| `@wecode/core` | entities, state machines as YAML, guards, the cascade, SQLite, the board |
-| `@wecode/cli` | every verb as a command |
-| `@wecode/tui` | the board, declared in `views.yaml` |
-| `@wecode/runner` | allocator, foreman, synchroniser, worker adapters, git trees |
+## Nothing is marked done by hand
 
-## Design
+```mermaid
+stateDiagram-v2
+  [*] --> planned
+  planned --> ready: start
+  ready --> done: every test passed
+  ready --> failed: out of attempts
+  failed --> ready: retry, with a reason
+  done --> [*]
+  note right of done
+    automatic. no verb, no actor.
+  end note
+```
 
-[`docs/design`](docs/design), in order — architecture, scenarios, entities, the ERD, state
-diagrams, verbs, attributes, roles, worktrees, the attention budget, harness notes.
+A passing test accepts its criteria, which meets its requirement, which delivers its story
+and its epic — none of it invoked by anyone. Shipping a release stays your decision.
 
-The Rust implementation this replaces is at `../archived/wecode-rust`, tagged `rust-final`.
+## Where it is
+
+Built by pointing it at itself: **168 stories, 232 tasks, 2,088 tests green**. Every rule
+above is in use by the thing that wrote it.
+
+Also true: it drives **Claude Code** today, with **Codex** and **pi** adapters written and
+the model per seat set in config; the healer repairs the causes it can name and escalates
+the rest; one machine, one SQLite file, no server; the cockpit has rough edges.
+
+## For agents, and the curious
+
+[`docs/design`](docs/design) — architecture, entities, the ERD, state diagrams, roles,
+worktrees, the attention budget, healing, health, the one-assignment model. The state
+machines are 118 lines of YAML and the diagrams are generated from them, so they cannot
+drift. Packages: `core` · `cli` · `tui` · `runner` · `explorer`.
