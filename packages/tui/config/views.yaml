@@ -21,6 +21,45 @@ services:
     state: not built
     detail: healing and collection
 
+# Why a row is cooking. A row in flight is one of a few kinds of moving-or-stuck, and which
+# kind it is, is the first thing a person asks of it — so the box says the why on every row,
+# gathers the rows that share one, and marks them so a row read on its own still carries its
+# group.
+#
+# The colours are here for the same reason the titles are: which states are alarming is a
+# judgement about this workspace, not an arithmetic a list can do. This is the only place
+# they are written; list.tsx reads them and holds none of its own.
+#
+# `groups` is drawn in the order given — what wants a person first, what is already done
+# last. A state no group claims falls to `ungrouped`, where the why is the state's own word.
+# Adding a state to a group, or a group to the box, is an edit to this file and nothing else.
+cooking:
+  groups:
+    - name: gave_up
+      why: gave up
+      mark: "x"
+      colour: red
+      states: [failed, dropped]
+    - name: waits_on_you
+      why: waits on you
+      mark: "!"
+      colour: yellow
+      states: [waiting, on_hold, blocked, pending]
+    - name: in_hand
+      why: a worker has it
+      mark: ">"
+      colour: ""
+      states: [running, attempting]
+    - name: settled
+      why: nothing left to do
+      mark: "+"
+      colour: green
+      states: [delivered, released, done, passed, met, accepted, succeeded]
+  # No group claims it: nothing to say beyond the state itself, and no mark worth spending.
+  ungrouped:
+    mark: " "
+    colour: ""
+
 # The outline is the same tree the boxes filter, drawn whole. It is not a view: it has no
 # filter, because it keeps every row there is and folds the ones you are not reading.
 outline:
@@ -28,7 +67,34 @@ outline:
   key: t
   # Folded to here when it opens: this level is shown, and what hangs under it is not.
   depth: story
+  # How much of the tree it opens on — `open` is the work still owed, `all` is every row
+  # there is. `f` moves between the two at runtime; this is the one the screen lands on,
+  # and which that is is a decision about the product, not about the App.
+  scope: open
   empty: no projects — wecode project create --parent <workspace> <name>
+  # What the outline spends its width on, left to right. The tree is first: a guide drawn
+  # after two columns of repeating words starts in the middle of the line, and a guide you
+  # have to find the left edge of is one nobody follows down sixty rows.
+  columns: [tree, id, type, state]
+  # Four columns each for the two words that repeat on every row. Four tells the kinds
+  # apart (proj rele epic stor requ acce task) and the states too; wider than that spends
+  # the label's width saying the same word again.
+  abbreviate: 4
+  # The words four of their own characters would not tell apart, or would mislead.
+  abbreviations:
+    requirement: requ
+    criteria: crit
+    acceptance_test: atst
+    task_test: ttst
+    in_progress: work
+    not_started: nots
+    on_hold: hold
+    delivered: delv
+    dropped: drop
+    planned: plan
+    released: rels
+    accepted: acpt
+    succeeded: succ
 
 views:
   projects:

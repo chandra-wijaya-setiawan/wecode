@@ -7,7 +7,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
 import { loadMachines, open, type Node } from "@wecode/core";
-import { App } from "../src/app.js";
+import { App, outlineOpensOn } from "../src/app.js";
 import { Cockpit } from "../src/screens.js";
 import { loadViews } from "../src/views.js";
 import {
@@ -73,6 +73,14 @@ const openOutline = (): void => {
   app.key(OUTLINE.key);
 };
 
+/** The outline lands on the scope views.yaml declares, so a test about the narrowing has to
+ *  widen it first rather than assume the whole tree is what it opened on. */
+const openOutlineOnAll = (): void => {
+  openOutline();
+  app.key("f");
+  app.key("a");
+};
+
 const whats = (): string[] => app.lines().map((r) => r.what);
 
 const has = (what: string): boolean => whats().some((w) => w.includes(what));
@@ -134,7 +142,7 @@ describe("openWork", () => {
 
 describe("f o narrows the outline to open work", () => {
   it("drops a branch nothing is owed in", () => {
-    openOutline();
+    openOutlineOnAll();
     expect(has("legacy-login")).toBe(true);
     app.key("f");
     app.key("o");
@@ -162,7 +170,7 @@ describe("f o narrows the outline to open work", () => {
   });
 
   it("counts only the rows it kept in the box's title", () => {
-    openOutline();
+    openOutlineOnAll();
     const all = app.lines().length;
     app.key("f");
     app.key("o");
@@ -192,7 +200,7 @@ describe("saying which it is in", () => {
   });
 
   it("leaves the title unqualified on all work, because that is what the outline means", () => {
-    openOutline();
+    openOutlineOnAll();
     expect(plain(frame())).toContain(`${OUTLINE.title} (${app.lines().length})`);
     expect(plain(frame())).not.toContain(SCOPE_LABEL.open);
     app.key("f");
@@ -224,15 +232,15 @@ describe("saying which it is in", () => {
     expect(app.status).toContain("f narrows");
   });
 
-  it("opens on all work, so the overview is never secretly a subset", () => {
+  it("opens on the scope views.yaml declares, and lands back on it after a widening", () => {
     openOutline();
-    expect(app.outlineScope).toBe("all");
+    expect(app.outlineScope).toBe(outlineOpensOn());
     app.key("f");
-    app.key("o");
+    app.key("a");
     app.key("esc");
     openOutline();
-    expect(app.outlineScope).toBe("all");
-    expect(has("legacy-login")).toBe(true);
+    expect(app.outlineScope).toBe(outlineOpensOn());
+    expect(has("legacy-login")).toBe(false);
   });
 });
 
@@ -240,7 +248,7 @@ describe("what f refuses", () => {
   it("does nothing off the outline but say how to get there", () => {
     app.key("f");
     expect(app.status).toBe(`f narrows the outline — v ${OUTLINE.key}`);
-    expect(app.outlineScope).toBe("all");
+    expect(app.outlineScope).toBe(outlineOpensOn());
   });
 
   it("does not arm off the outline, so the next key is still its own", () => {

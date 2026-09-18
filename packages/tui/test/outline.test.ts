@@ -4,10 +4,10 @@ import type { DatabaseSync } from "node:sqlite";
 import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
 import { board, loadMachines, open } from "@wecode/core";
-import { App } from "../src/app.js";
+import { App, outlineOpensOn } from "../src/app.js";
 import { Cockpit } from "../src/screens.js";
 import { loadViews } from "../src/views.js";
-import { OUTLINE } from "../src/outline.js";
+import { OUTLINE, scopeTitle } from "../src/outline.js";
 import { seed, T, ins } from "./seed.js";
 
 const views = loadViews();
@@ -88,10 +88,12 @@ describe("getting there", () => {
 describe("the box", () => {
   beforeEach(open_);
 
-  it("is one bordered box titled with its count and its key", () => {
+  it("is one bordered box titled with its scope, its count and its key", () => {
     const out = lines();
     expect(out[0]?.startsWith("┌")).toBe(true);
-    expect(out[0]).toContain(`─ ${OUTLINE.title} (${app.lines().length}) [${OUTLINE.key}] ─`);
+    expect(out[0]).toContain(
+      `─ ${scopeTitle(outlineOpensOn(), app.lines().length)} [${OUTLINE.key}] ─`,
+    );
     // One box, not a stack: exactly one top border and one bottom.
     expect(out.filter((l) => l.startsWith("┌"))).toHaveLength(1);
     expect(out.filter((l) => l.startsWith("└"))).toHaveLength(1);
@@ -107,6 +109,10 @@ describe("the box", () => {
   it("uses colour for state and for nothing else", () => {
     ins(db, "INSERT INTO project (slug,workspace_id,name,repo,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", "dead", 1, "abandoned", "/repo", "dropped", T, T);
     app.refresh();
+    // A dropped project is settled work, so the scope the outline opens on has already
+    // dropped it: widen to all before asking what the state colours are doing.
+    app.key("f");
+    app.key("a");
     const red = coloured(frame(), RED);
     expect(red).toHaveLength(1);
     expect(red[0]).toContain("abandoned");
@@ -139,9 +145,11 @@ describe("what it opens at", () => {
   it("shows every row's id and state beside it", () => {
     // A code, not a bare number — the outline draws rows through the same contract as
     // every other list, and list.tsx is the one place that decides what a code looks like.
-    expect(row("storefront")).toMatch(new RegExp(`^#${tree.project}\\b`));
-    expect(row("storefront")).toContain("in_progress");
-    expect(row("password reset")).toContain("story");
+    // The tree leads, so the code sits after the label rather than at the left edge, and
+    // the type and the state are cut to the four columns views.yaml declares.
+    expect(row("storefront")).toMatch(new RegExp(`storefront\\s+#${tree.project}\\b`));
+    expect(row("storefront")).toMatch(new RegExp(`#${tree.project}\\s+proj\\s+work\\b`));
+    expect(row("password reset")).toMatch(/\bstor\b/);
   });
 });
 
