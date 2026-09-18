@@ -75,6 +75,28 @@ const ENTITY: Readonly<Record<keyof Board, StatefulEntity | null>> = {
  *  character. `key("esc")` is the same key by name. */
 const ESC = String.fromCharCode(27);
 const ENTER = ["enter", "\r", "\n"];
+/** What a terminal sends for backspace, by name and by both code points terminals use. */
+const RUBOUT = ["backspace", "delete", String.fromCharCode(8), String.fromCharCode(127)];
+
+/** Whether a query names a row by its number rather than by its words. A bare number is
+ *  read as an id: ids are what the other screens print and what the cli takes, so the
+ *  number you copied off one of them has to find the row here. */
+const isId = (q: string): boolean => /^#?\d+$/.test(q);
+
+/** Whether a row answers a query. A number matches the row's id exactly — `1` must not
+ *  land on `21`, or the id you typed would not be the row you get. Words match the label
+ *  case-insensitively and all of them must be in it, in any order: a search is how you
+ *  narrow, so a second word can only ever mean fewer rows. */
+const matches = (node: Node, q: string): boolean => {
+  const query = q.trim();
+  if (query === "") return false;
+  if (isId(query)) return node.id === Number(query.replace("#", ""));
+  const label = node.label.toLowerCase();
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .every((word) => label.includes(word));
+};
 
 /** The facade's methods, by the entity and verb each one invokes. Automatic transitions are
  *  absent, because the facade has no method for one — the cockpit can only offer a verb it
@@ -136,7 +158,12 @@ export class App {
   private scope: OutlineScope = "all";
   /** What the last key armed: v waits for a box's letter, a waits for a verb's, f waits for
    *  a scope's. */
-  private armed: null | "view" | "verb" | "answer" | "scope" = null;
+  private armed: null | "view" | "verb" | "answer" | "scope" | "search" = null;
+  /** What is being typed after `/`, and what was typed the last time it was committed.
+   *  They are two fields because the committed one outlives the typing: `n` is only worth
+   *  a key if it goes on working after the prompt it came from has gone. */
+  private typed = "";
+  private query = "";
 
   constructor(db: DatabaseSync, views: readonly View[], machines: MachineSet = loadMachines()) {
     this.db = db;
@@ -192,6 +219,7 @@ export class App {
   }
 
   key(k: string): void {
+    if (this.armed === "search") return this.type(k);
     if (this.armed === "view") {
       this.armed = null;
       return this.openBox(k);
@@ -220,6 +248,9 @@ export class App {
       case "+": return this.fold(true);
       case "-": return this.fold(false);
       case "f": return this.armScope();
+      case "/": return this.armSearch();
+      case "n": return this.jump(1);
+      case "N": return this.jump(-1);
       case "v": return this.armView();
       case "a": return this.armVerb();
       default: this.status = `${k} does nothing here`;
@@ -258,6 +289,9 @@ export class App {
    *  last time's expansions would not be one. */
   private openOutline(): void {
     this.scope = "all";
+    // Same reading as the scope: `v t` asks for the overview, and an overview still
+    // standing open where an hour-old search left it would not be one.
+    this.query = "";
     this.expanded = foldedTo(this.outlineForest(), OUTLINE.depth);
     this.push({ kind: "outline" });
     this.status = `${OUTLINE.title} — ${SCOPE_LABEL[this.scope]} · f narrows`;
@@ -286,6 +320,124 @@ export class App {
     this.items = this.itemsOf(this.screen);
     this.cursor = this.cursor;
     this.status = `${OUTLINE.title} — ${SCOPE_LABEL[scope]}`;
+  }
+
+  /** What the last committed search was looking for, for the screen to say so with. */
+  get outlineQuery(): string {
+    return this.query;
+  }
+
+  /** Start typing a search. The tree is the one screen a filter cannot serve: a box keeps
+   *  rows by their state, and what you have is a number off another screen or two words out
+   *  of a title. */
+  private armSearch(): void {
+    if (this.screen.kind !== "outline") {
+      this.status = `/ searches the outline — v ${OUTLINE.key}`;
+      return;
+    }
+    this.armed = "search";
+    this.typed = "";
+    this.prompt();
+  }
+
+  private prompt(): void {
+    this.status = `/${this.typed}`;
+  }
+
+  /** A key while the search line is open. Every printable key is a character of the query
+   *  rather than a command — `n` and `j` are letters in a label, and a search box that
+   *  moved the cursor on one of them would be unusable. Enter commits, esc abandons. */
+  private type(k: string): void {
+    if (ENTER.includes(k)) {
+      this.armed = null;
+      return this.seek(this.typed.trim());
+    }
+    if (k === "esc" || k === ESC) {
+      this.armed = null;
+      this.typed = "";
+      this.status = "";
+      return;
+    }
+    if (RUBOUT.includes(k)) this.typed = this.typed.slice(0, -1);
+    else if (k.length === 1) this.typed += k;
+    this.prompt();
+  }
+
+  /** Commit a query: reveal every row that answers it and land on the first.
+   *
+   *  Revealing is the point. A match under a folded parent that stayed folded would be a
+   *  search that told you the row exists and not where, which is the one thing the outline
+   *  is for. */
+  private seek(query: string): void {
+    this.query = query;
+    if (query === "") {
+      this.status = "nothing to search for";
+      return;
+    }
+    this.expanded = new Set([...this.expanded, ...this.ancestors(query)]);
+    this.items = this.itemsOf(this.screen);
+    const hits = this.hits();
+    if (hits.length === 0) {
+      this.cursor = this.cursor;
+      this.status = `nothing matches ${query}`;
+      return;
+    }
+    this.cursor = hits[0] as number;
+    this.at(hits, 0);
+  }
+
+  /** The fold keys of every node above a match, so committing a search opens the branches
+   *  its matches hang in and no others. */
+  private ancestors(query: string): ReadonlySet<string> {
+    const keys = new Set<string>();
+    const walk = (nodes: readonly Node[], above: readonly Node[]): boolean => {
+      let found = false;
+      for (const n of nodes) {
+        const under = walk(n.children, [...above, n]);
+        if (under || matches(n, query)) {
+          for (const a of above) keys.add(nodeKey(a));
+          found = true;
+        }
+      }
+      return found;
+    };
+    walk(this.outlineForest(), []);
+    return keys;
+  }
+
+  /** Where the matches are among the rows on screen, in the order the outline draws them:
+   *  `n` goes down the tree, which is the direction `j` goes. */
+  private hits(): number[] {
+    return this.items.flatMap((item, i) =>
+      item.node !== undefined && matches(item.node, this.query) ? [i] : [],
+    );
+  }
+
+  /** The next match after the cursor, or the previous one before it, wrapping. Wrapping
+   *  rather than stopping: the count is on the line, so you can see you have come round. */
+  private jump(by: number): void {
+    if (this.screen.kind !== "outline") {
+      this.status = `n walks the outline's matches — v ${OUTLINE.key}`;
+      return;
+    }
+    if (this.query === "") {
+      this.status = "nothing searched — / searches";
+      return;
+    }
+    const hits = this.hits();
+    if (hits.length === 0) {
+      this.status = `nothing matches ${this.query}`;
+      return;
+    }
+    const here = this.cursor;
+    const past = by > 0 ? hits.find((i) => i > here) : [...hits].reverse().find((i) => i < here);
+    const index = past === undefined ? (by > 0 ? 0 : hits.length - 1) : hits.indexOf(past);
+    this.cursor = hits[index] as number;
+    this.at(hits, index);
+  }
+
+  private at(hits: readonly number[], index: number): void {
+    this.status = `${index + 1}/${hits.length} matching ${this.query}`;
   }
 
   /** Open or close the node under the cursor by one level. The rows are rebuilt rather
