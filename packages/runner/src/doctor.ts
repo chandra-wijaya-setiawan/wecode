@@ -181,6 +181,21 @@ const doctorViolation = table<ViolationRow>("doctor_violation", [
   "found_at",
 ]);
 
+/** One check a pass ran, as the pass recorded it. Rewritten whole every tick beside the
+ *  violations, and in the same transaction: a report and the list of what produced it that
+ *  came from two different passes would be worse than either alone. */
+interface PassRow {
+  rowid?: number;
+  invariant: string;
+  /** Whether this check had to ask git, and whether git was there to be asked. Stored as
+   *  0/1 because sqlite has no boolean, and read back as one. */
+  world: number;
+  reachable: number;
+  found: number;
+  at: string;
+}
+const doctorPass = table<PassRow>("doctor_pass", ["rowid", "invariant", "world", "reachable", "found", "at"]);
+
 const sqliteMaster = table<{ type: string; name: string }>("sqlite_master", ["type", "name"]);
 
 /** A name that is something to select from. `type IN (…)` has no spelling in the dialect and
@@ -309,6 +324,28 @@ export function snapshot(db: DatabaseSync): Snapshot {
   return { nodes, workers, schema_version: version?.version ?? 0 };
 }
 
+/** The step every pass begins with, named so the report can say a pass got no further than
+ *  it. Not an invariant: a snapshot that cannot be taken is the pass failing to look. */
+export const SNAPSHOT_STEP = "snapshot";
+
+/** One check a pass ran, and what came of it. `found: 0` is the sentence the story is for:
+ *  this check ran, over this record, and had nothing to say. */
+export interface LookedAt {
+  readonly invariant: string;
+  /** The check asks git. */
+  readonly world: boolean;
+  /** git answered — a world check whose repository was missing looked at less than it says. */
+  readonly reachable: boolean;
+  readonly found: number;
+}
+
+/** What the last pass looked at. `null` is nobody looked: no pass has run against this
+ *  record at all, which is a different fact from a pass that found nothing. */
+export interface Pass {
+  readonly at: string;
+  readonly looked: readonly LookedAt[];
+}
+
 /** The check, wired to a record.
  *
  *  Runner-owned, like `landed_branch`: the ledger says what is true of the work, this says
@@ -337,13 +374,22 @@ export class Doctor {
          found_at  TEXT    NOT NULL
        )`,
     );
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS doctor_pass (
+         invariant TEXT    NOT NULL,
+         world     INTEGER NOT NULL,
+         reachable INTEGER NOT NULL,
+         found     INTEGER NOT NULL,
+         at        TEXT    NOT NULL
+       )`,
+    );
   }
 
   /** One pass. Returns what it found and records the same, and throws for nothing. */
   check(): readonly Violation[] {
-    const found = this.run();
+    const { found, looked } = this.run();
     try {
-      this.record(found);
+      this.record(found, looked);
     } catch {
       // The report is worth less than the tick. A table that could not be written is drift
       // of its own, and the next pass rewrites it whole anyway.
@@ -353,22 +399,36 @@ export class Doctor {
 
   /** The shared pass, `runChecks`, over this tick's snapshot. A snapshot that cannot be
    *  taken is reported in the same shape as a check that threw. */
-  private run(): readonly Violation[] {
+  private run(): { readonly found: readonly Violation[]; readonly looked: readonly LookedAt[] } {
     let s: Snapshot;
     try {
       s = snapshot(this.db);
     } catch (err) {
-      return [broken("snapshot", err)];
+      // The pass looked at the record and got no further. Said as the one step it did
+      // attempt, so the report is not an empty list that reads like nobody came.
+      const found = [broken(SNAPSHOT_STEP, err)];
+      return { found, looked: [{ invariant: SNAPSHOT_STEP, world: false, reachable: false, found: 1 }] };
     }
-    return runChecks(s, worldOf(this.git, this.base), this.invariants);
+    const world = worldOf(this.git, this.base);
+    const found = runChecks(s, world, this.invariants);
+    return { found, looked: lookedAt(this.invariants, world, found) };
   }
 
   /** Replaced, not appended: the answer to "what is wrong now" is this pass and only this
    *  pass. One transaction, so a view never reads half a report. */
-  private record(found: readonly Violation[]): void {
+  private record(found: readonly Violation[], looked: readonly LookedAt[]): void {
     const at = now();
     const q = queries(this.db);
     transact(this.db, () => {
+      q.deleteFrom(doctorPass).run();
+      for (const l of looked)
+        q.insertInto(doctorPass, {
+          invariant: l.invariant,
+          world: l.world ? 1 : 0,
+          reachable: l.reachable ? 1 : 0,
+          found: l.found,
+          at,
+        }).run();
       q.deleteFrom(doctorViolation).run();
       for (const v of found)
         q.insertInto(doctorViolation, {
@@ -481,6 +541,26 @@ export function runChecks(
     // over-accuses is better than a pass that dies of a missing repository.
     return [...found, broken(WORLD_CHECK, err)];
   }
+}
+
+/** What a pass looked at, built from the set it ran and what that pass returned. Derived
+ *  rather than collected inside `runChecks`, so the two halves that share that function —
+ *  the tick and `wecode doctor` — cannot come apart over a count. */
+export function lookedAt(
+  invariants: readonly Invariant[],
+  world: World,
+  found: readonly Violation[],
+): readonly LookedAt[] {
+  const counted = new Map<string, number>();
+  for (const v of found) counted.set(v.invariant, (counted.get(v.invariant) ?? 0) + 1);
+  return checksOf(invariants).map((c) => ({
+    invariant: c.name,
+    world: c.world,
+    // A pure check needs nothing of the world, so it is reachable in the only sense that
+    // applies to it: everything it reads was there.
+    reachable: c.world ? world.reachable : true,
+    found: counted.get(c.name) ?? 0,
+  }));
 }
 
 /** A marker written, and the commit it was read from. */
@@ -643,6 +723,28 @@ const broken = (name: string, err: unknown): Violation => ({
   slug: name,
   detail: `the check itself failed: ${(err as Error).message}`,
 });
+
+/** What a view reads to tell a quiet record from an unexamined one. The last pass and every
+ *  check it ran, in the order it ran them; `null` when no pass has been recorded, which is
+ *  the only honest way to say nobody looked. */
+export function lastPass(db: DatabaseSync): Pass | null {
+  if (!hasTable(db, "doctor_pass")) return null;
+  const rows = queries(db)
+    .selectFrom(doctorPass)
+    .select(["rowid", "invariant", "world", "reachable", "found", "at"])
+    .all()
+    .sort((a, b) => (a.rowid ?? 0) - (b.rowid ?? 0));
+  if (rows.length === 0) return null;
+  return {
+    at: rows[0]!.at,
+    looked: rows.map((r) => ({
+      invariant: r.invariant,
+      world: r.world === 1,
+      reachable: r.reachable === 1,
+      found: r.found,
+    })),
+  };
+}
 
 /** What a view reads. The last pass, in the order it was found. */
 export function violations(db: DatabaseSync): readonly Violation[] {
