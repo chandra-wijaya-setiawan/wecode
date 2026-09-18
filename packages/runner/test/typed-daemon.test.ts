@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -24,12 +24,26 @@ const withoutDdl = code.replace(DDL, "");
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
-/** Writes the file it was told to, then reports success: the smallest real worker. */
+/** Writes the file it was told to, then reports success: the smallest real worker.
+ *
+ *  It writes where the assignment says and nowhere else. A `Work` whose worktree is empty,
+ *  relative or missing used to resolve against `process.cwd()`, which under vitest is this
+ *  repository — so a fixture worker would drop `mail.ts` into the real checkout and the
+ *  stray outlived the run. Refusing is what a real adapter does with the same work (see
+ *  `refuseWithoutWorktree`), so the double refuses too rather than writing somewhere. */
 class Writer implements WorkerAdapter {
   readonly kind = "agent";
+  /** Every path it has written, for the tests that ask where the work landed. */
+  readonly wrote: string[] = [];
   constructor(private readonly file = "mail.ts") {}
   async start(w: Work): Promise<Observation> {
-    writeFileSync(join(w.worktree, this.file), "export const send = () => {};\n");
+    const tree = w.worktree;
+    if (tree.trim() === "" || !isAbsolute(tree) || !existsSync(tree) || !statSync(tree).isDirectory()) {
+      throw new Error(`refusing to write outside a worktree: assignment ${w.id} names ${JSON.stringify(tree)}`);
+    }
+    const path = join(tree, this.file);
+    writeFileSync(path, "export const send = () => {};\n");
+    this.wrote.push(path);
     return { phase: "succeeded", session: "s1", spent: { tokens: 5, seconds: 1 }, commit: null };
   }
   async poll(w: Work): Promise<Observation> {
@@ -221,6 +235,67 @@ describe("allocation, through the layer", () => {
 
 /** The merge-base of the story branch and main, which is the base a test is proved at. */
 const baseOf = (slug: string): string => git(repo, "merge-base", `story/${slug}`, "main");
+
+/** This checkout, which is where a worker that escapes its worktree writes: a relative path
+ *  resolves against the vitest process's cwd, and that is the repository itself. */
+const checkout = git(process.cwd(), "rev-parse", "--show-toplevel");
+
+/** True when `path` is inside `dir` — a plain prefix test is wrong, `/tmp/a-2` starts with
+ *  `/tmp/a`. */
+const inside = (dir: string, path: string): boolean => {
+  const rel = relative(dir, path);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+};
+
+describe("the writer stays inside its worktree", () => {
+  it("writes into the tree the assignment was given, under the repo's worktree root", async () => {
+    const writer = new Writer();
+    const r = await runner(writer).tick();
+
+    const tree = (
+      db.prepare("SELECT worktree FROM assignment WHERE id = ?").get(r.allocated.created) as { worktree: string }
+    ).worktree;
+    expect(writer.wrote).toEqual([join(tree, "mail.ts")]);
+    expect(inside(join(repo, ".wecode", "worktrees"), tree)).toBe(true);
+  });
+
+  it("leaves nothing of itself outside the temporary repository", async () => {
+    const before = existsSync(join(checkout, "mail.ts"));
+    const writer = new Writer();
+    await runner(writer).tick();
+
+    for (const path of writer.wrote) expect(inside(repo, path), path).toBe(true);
+    // The stray this story is about: the suite must not add one to the real checkout.
+    expect(existsSync(join(checkout, "mail.ts"))).toBe(before);
+    expect(before).toBe(false);
+  });
+
+  it("refuses work that names no worktree rather than writing relative to the cwd", async () => {
+    const writer = new Writer("escaped.ts");
+    const work = { id: 1, objective_type: "task", objective_id: task, worktree: "" } as unknown as Work;
+
+    await expect(writer.start(work)).rejects.toThrow(/refusing to write outside a worktree/);
+    expect(writer.wrote).toEqual([]);
+    expect(existsSync(resolve(process.cwd(), "escaped.ts"))).toBe(false);
+  });
+
+  it("refuses a worktree that is a relative path, which is how the cwd gets written into", async () => {
+    const writer = new Writer("escaped.ts");
+    const work = { id: 2, objective_type: "task", objective_id: task, worktree: "." } as unknown as Work;
+
+    await expect(writer.start(work)).rejects.toThrow(/refusing to write outside a worktree/);
+    expect(existsSync(resolve(process.cwd(), "escaped.ts"))).toBe(false);
+  });
+
+  it("refuses a worktree that has been pruned", async () => {
+    const writer = new Writer();
+    const gone = join(repo, ".wecode", "worktrees", "never-cut");
+    const work = { id: 3, objective_type: "task", objective_id: task, worktree: gone } as unknown as Work;
+
+    await expect(writer.start(work)).rejects.toThrow(/refusing to write outside a worktree/);
+    expect(existsSync(gone)).toBe(false);
+  });
+});
 
 describe("the run at base, through the layer", () => {
   it("records red at base on the test's own columns, and fingerprints the run", async () => {
