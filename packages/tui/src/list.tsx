@@ -1,8 +1,13 @@
 /** One reusable list at three sizes — see config/tui-contract.yaml. The arithmetic is the
  *  part worth keeping: Ink lays the boxes out, but what a cell says once it will not fit,
  *  and which rows a height can show, are still decisions this file makes. */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { Box, Text } from "ink";
+import { parse } from "yaml";
 import { STATEFUL } from "@wecode/core";
+
+const CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
 
 export interface Row {
   readonly id: number;
@@ -40,15 +45,111 @@ const GAP = "  ";
  *  nothing to say about itself is drawn plain. */
 const PLAIN = "";
 
-const RED = ["failed", "dropped"];
-const YELLOW = ["waiting", "on_hold", "pending", "blocked"];
-const GREEN = ["delivered", "released", "done", "passed", "met", "accepted", "succeeded"];
+export class CookingError extends Error {}
+
+/** One answer to "why is this row in flight", and how a row that has that answer is drawn.
+ *  Every word of it — the why, the mark, the colour and which states earn it — is declared
+ *  in views.yaml, because none of them is something this file can work out. */
+export interface CookingGroup {
+  readonly name: string;
+  readonly why: string;
+  readonly mark: string;
+  readonly colour: string;
+  readonly states: readonly string[];
+}
+
+export interface CookingConfig {
+  /** Drawn in this order: what wants a person first, what is already done last. */
+  readonly groups: readonly CookingGroup[];
+  readonly ungrouped: { readonly mark: string; readonly colour: string };
+}
+
+const str = (v: unknown, where: string): string => {
+  if (typeof v !== "string") throw new CookingError(`${where} must be a string`);
+  return v;
+};
+
+export function loadCooking(path: string = CONFIG): CookingConfig {
+  const top = (parse(readFileSync(path, "utf8")) ?? {}) as Record<string, unknown>;
+  const c = top["cooking"];
+  if (c === null || typeof c !== "object") throw new CookingError("views.yaml has no cooking");
+  const cfg = c as Record<string, unknown>;
+
+  const groups = cfg["groups"];
+  if (!Array.isArray(groups)) throw new CookingError("cooking.groups must be a list");
+  const loaded = groups.map((g: unknown, i: number): CookingGroup => {
+    const d = (g ?? {}) as Record<string, unknown>;
+    const at = `cooking.groups[${i}]`;
+    const states = d["states"];
+    if (!Array.isArray(states) || states.some((s) => typeof s !== "string")) {
+      throw new CookingError(`${at}.states must be a list of strings`);
+    }
+    return {
+      name: str(d["name"], `${at}.name`),
+      why: str(d["why"], `${at}.why`),
+      mark: str(d["mark"], `${at}.mark`),
+      colour: str(d["colour"], `${at}.colour`),
+      states: states as string[],
+    };
+  });
+
+  // A state in two groups is two whys for one row, and which one you get would come down to
+  // the order of the file. Refuse to start rather than draw whichever won.
+  const seen = new Set<string>();
+  for (const g of loaded) {
+    for (const s of g.states) {
+      if (seen.has(s)) throw new CookingError(`cooking: ${s} is in more than one group`);
+      seen.add(s);
+    }
+  }
+
+  const un = (cfg["ungrouped"] ?? {}) as Record<string, unknown>;
+  return {
+    groups: loaded,
+    ungrouped: {
+      mark: str(un["mark"], "cooking.ungrouped.mark"),
+      colour: str(un["colour"], "cooking.ungrouped.colour"),
+    },
+  };
+}
+
+/** Read once, and not at import: list.tsx is pulled in by every screen there is, and a read
+ *  at module scope would make the config a condition of loading the module rather than of
+ *  drawing a row. */
+let cached: CookingConfig | null = null;
+export const cooking = (): CookingConfig => (cached ??= loadCooking());
+
+/** For tests, and for a config reloaded under a running board. */
+export const forgetCooking = (): void => {
+  cached = null;
+};
+
+export const groupOf = (state: string): CookingGroup | undefined =>
+  cooking().groups.find((g) => g.states.includes(state));
+
+/** Every cooking row has a why. A state no group claims still answers the question — with
+ *  its own word, which is the most that can honestly be said about it. */
+export const why = (row: Row): string =>
+  groupOf(row.state)?.why ?? row.state.replace(/_/g, " ");
+
+export const mark = (row: Row): string => groupOf(row.state)?.mark ?? cooking().ungrouped.mark;
 
 export function stateColour(state: string): string {
-  if (RED.includes(state)) return "red";
-  if (YELLOW.includes(state)) return "yellow";
-  if (GREEN.includes(state)) return "green";
-  return PLAIN;
+  return groupOf(state)?.colour ?? cooking().ungrouped.colour;
+}
+
+/** Grouped: the rows gathered by their why, in the order views.yaml declares the groups,
+ *  and inside a group in the order they arrived. The rows no group claims come last. */
+export function groupCooking(rows: readonly Row[]): readonly Row[] {
+  const order = cooking().groups.map((g) => g.name);
+  const rank = (row: Row): number => {
+    const g = groupOf(row.state);
+    return g === undefined ? order.length : order.indexOf(g.name);
+  };
+  return rows
+    .map((row, i) => [row, i] as const)
+    .sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1])
+    .map(([row]) => row);
 }
 
 const cell = (row: Row, column: (typeof COLUMNS)[number]): string =>
@@ -119,6 +220,39 @@ export function listLines(
     lines.push({ text: clip(`… and ${hidden} more`, width), state: PLAIN, cursor: false });
   }
   return lines;
+}
+
+/** The cooking box's lines. Same arithmetic as any other list — the grouping, the mark and
+ *  the why are the whole difference, and they are all read off views.yaml.
+ *
+ *  The mark leads the line and the why closes it, so the two things a person scans for are
+ *  at the two edges and the row itself is between them. The why column is as wide as the
+ *  widest why on the whole list rather than on the visible slice, so scrolling does not slide
+ *  the column sideways under the reader.
+ *
+ *  The cursor still indexes the rows given; it is the grouped order they are drawn in, so a
+ *  caller that moves a cursor must move it over `groupCooking(rows)`. */
+export function cookingLines(
+  rows: readonly Row[],
+  height: number,
+  cursor: number | null,
+  width: number,
+): Line[] {
+  const grouped = groupCooking(rows);
+  const whys = Math.max(...grouped.map((row) => why(row).length), 0);
+  const [first, last] = window(grouped.length, height, cursor);
+  // The mark and its space, and the gap before the why: what is left is the row's own.
+  const body = Math.max(width - whys - 2 - GAP.length, 0);
+  return listLines(grouped, height, cursor, body).map((line, i) => {
+    // One line past the visible rows is the "… and N more" tally: it has no row behind it,
+    // so it has neither a group to mark nor a why to give, and it is left as it was drawn.
+    if (first + i >= last) return line;
+    const row = grouped[first + i] as Row;
+    // Clipped once more at the end: on a narrow box the why is what the cut reaches first,
+    // which is the right thing to lose — the row is still the row.
+    const text = `${mark(row)} ${pad(line.text, body)}${GAP}${why(row)}`.trimEnd();
+    return { ...line, text: clip(text, width) };
+  });
 }
 
 export interface ListProps {
