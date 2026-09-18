@@ -38,10 +38,16 @@ const UNDECLARED: Readonly<Record<string, readonly string[]>> = {
 /** Tables no interface in entities.ts claims. Not drift: each is either bookkeeping the
  *  record keeps about itself, or an entity whose shape lives with the code that owns it —
  *  chore in src/chore.ts, lesson in src/lessons.ts, refusal and chore_refusal in
- *  src/types.ts. Listed so that a table added with no shape anywhere is caught here. */
+ *  src/types.ts, doctor_run and doctor_violation in src/invariants.ts. Listed so that a
+ *  table added with no shape anywhere is caught here. */
 const UNCLAIMED = [
   "chore",
   "chore_refusal",
+  // 014. The doctor's own record of what it found and when it last ran: a violation row is
+  // open from first_seen until cleared_at, and a doctor_run row is one pass. Their shapes
+  // are the writes described in src/invariants.ts, not an entity anyone else constructs.
+  "doctor_run",
+  "doctor_violation",
   "ledger",
   "lesson",
   "refusal",
