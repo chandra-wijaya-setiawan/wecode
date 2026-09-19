@@ -335,18 +335,29 @@ export function abbreviate(word: string, config: OutlineConfig = OUTLINE): strin
 
 const GAP = "  ";
 
+/** The horizontal the tee and the elbow already end in, spent again on the columns the
+ *  row's depth did not use. */
+const LEADER = "─";
+
 /** The tree cell in its column: the guide flush left, the fold marker flush right, and the
- *  padding the depth did not spend between them.
+ *  row's own branch drawn across what is between them.
  *
  *  The column is as wide as the deepest row, so padding it on the right strands a shallow
  *  row's marker whole levels away from the id it belongs to — on the real tree that is a
- *  dozen blank columns between the `+` and the `#`, and the two have to be read as one
- *  thing: the marker says what pressing does to *that* row. The guide is what has to stay
- *  left, because a rail only means anything in the column its parent drew it in. So the
- *  gap goes where nothing is read — inside the row's own indent. */
+ *  dozen blank columns between the `+` and the `#`. Holding the marker right fixed that and
+ *  left the blank inside the cell instead, which is the same defect one column over: the
+ *  guide stops, a gap of nothing follows, and the marker reads as belonging to whatever row
+ *  the eye lands on next. Filling that gap with the horizontal the connector already ends in
+ *  makes the three one run — the branch leaves the parent's rail and arrives at the id of the
+ *  row it is the branch of, with nothing to cross in between.
+ *
+ *  A root is the exception, and deliberately: nothing hangs off it, so there is no branch to
+ *  continue and a leader there would draw a parent that does not exist. Its columns stay
+ *  blank and its marker still sits against its id. */
 export function padTree(cell: string, size: number): string {
   if (cell === "") return "".padEnd(size, " ");
-  return `${cell.slice(0, -1).padEnd(size - 1, " ")}${cell.slice(-1)}`;
+  const guide = cell.slice(0, -1);
+  return `${guide.padEnd(size - 1, guide === "" ? " " : LEADER)}${cell.slice(-1)}`;
 }
 
 /** A detail whose first part is an entity's name is that row's kind, put there by
