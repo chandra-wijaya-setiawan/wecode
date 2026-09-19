@@ -57,8 +57,8 @@ beforeEach(() => {
   const tree = seed(db);
   // Wholly landed: nothing under it is owed, so the narrowing takes the branch entire.
   story(tree.epic, "legacy-login", "delivered", "met");
-  // Landed at the top with work still under it: the story row has to survive, or its open
-  // requirement would have nowhere to hang.
+  // Landed at the top with work still under it: the story row goes with the settled work
+  // and its open requirement is re-rooted where the story sat.
   story(tree.epic, "billing", "delivered", "in_progress");
   app = new App(db, views, machines);
 });
@@ -84,13 +84,6 @@ const openOutlineOnAll = (): void => {
 const whats = (): string[] => app.lines().map((r) => r.what);
 
 const has = (what: string): boolean => whats().some((w) => w.includes(what));
-
-/** Put the cursor on the row naming a thing. */
-const onto = (what: string): void => {
-  const at = whats().findIndex((w) => w.includes(what));
-  expect(at, `no row for ${what}`).toBeGreaterThanOrEqual(0);
-  app.cursor = at;
-};
 
 describe("openWork", () => {
   const node = (state: string, children: readonly Node[] = []): Node => ({
@@ -127,11 +120,10 @@ describe("openWork", () => {
     expect(openWork([node("delivered", [node("met"), node("met")])])).toEqual([]);
   });
 
-  it("keeps a settled row that still has open work under it, and only that work", () => {
+  it("cuts a settled row that still has open work under it, and re-roots that work", () => {
     const kept = openWork([node("delivered", [node("met"), node("in_progress")])]);
     expect(kept).toHaveLength(1);
-    expect(kept[0]?.state).toBe("delivered");
-    expect(kept[0]?.children.map((c) => c.state)).toEqual(["in_progress"]);
+    expect(kept[0]?.state).toBe("in_progress");
   });
 
   it("leaves the forest alone when everything in it is open", () => {
@@ -150,22 +142,18 @@ describe("f o narrows the outline to open work", () => {
     expect(has("password reset")).toBe(true);
   });
 
-  it("keeps a landed row that open work still hangs under", () => {
+  it("cuts a landed row too, and draws the open work that hung under it in its place", () => {
     openOutline();
     app.key("f");
     app.key("o");
-    expect(has("billing")).toBe(true);
-    onto("billing");
-    app.key("+");
+    expect(whats().some((w) => /\bbilling\b(?! requirement)/.test(w))).toBe(false);
     expect(has("billing requirement")).toBe(true);
   });
 
-  it("shows only the open work under a row it opens", () => {
+  it("leaves the settled work under a landed row out with it", () => {
     openOutline();
     app.key("f");
     app.key("o");
-    onto("billing");
-    app.key("+");
     expect(has("legacy-login requirement")).toBe(false);
   });
 
