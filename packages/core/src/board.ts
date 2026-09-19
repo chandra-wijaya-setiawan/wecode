@@ -124,9 +124,12 @@ interface AssignmentRow {
   objective_type: string;
   objective_id: number;
   worker_id: number | null;
+  worktree: string;
+  budget: string | null;
   phase: string;
   kind: string | null;
   question: string | null;
+  last_seen: string | null;
   spent: string | null;
   created_at: string;
   updated_at: string;
@@ -136,9 +139,12 @@ const assignments = table<AssignmentRow>("assignment", [
   "objective_type",
   "objective_id",
   "worker_id",
+  "worktree",
+  "budget",
   "phase",
   "kind",
   "question",
+  "last_seen",
   "spent",
   "created_at",
   "updated_at",
@@ -755,6 +761,72 @@ export function recordRefusal(db: DatabaseSync, why: string, taskId: number): vo
 
 export function clearRefusal(db: DatabaseSync, taskId: number): void {
   queries(db).deleteFrom(refusals).where("task_id", "=", taskId).run();
+}
+
+/** Tokens and seconds — what an assignment was given, and what it has used. The same two
+ *  numbers in both directions, because a spend is only readable against the allowance it
+ *  is a spend of. */
+export interface Spend {
+  readonly tokens: number;
+  readonly seconds: number;
+}
+
+const NOTHING: Spend = { tokens: 0, seconds: 0 };
+
+/** `budget` and `spent` are JSON in a text column. Malformed JSON reads as nothing, the way
+ *  `thousands` already reads it: a board that throws on one bad row is no board at all. */
+const spend = (raw: string | null): Spend => {
+  let v: { tokens?: unknown; seconds?: unknown } | null = null;
+  try {
+    v = raw === null ? null : (JSON.parse(raw) as { tokens?: unknown; seconds?: unknown });
+  } catch {
+    v = null;
+  }
+  if (v === null || typeof v !== "object") return NOTHING;
+  return {
+    tokens: typeof v.tokens === "number" ? v.tokens : 0,
+    seconds: typeof v.seconds === "number" ? v.seconds : 0,
+  };
+};
+
+/** What the record says about how one assignment is going.
+ *
+ *  The board's row already says what it is working, who has it and what phase it is in, so
+ *  none of that is repeated here: this is the half of the record a list of four columns has
+ *  no room for — the allowance, the spend against it, and when the runner last reported.
+ *  The page draws the row for the first half and this for the second, and the two cannot
+ *  disagree because neither restates the other. */
+export interface AssignmentFacts {
+  readonly worktree: string;
+  readonly budget: Spend;
+  readonly spent: Spend;
+  /** When the runner last wrote to the record, or null when it never has — a pending
+   *  assignment has been dispatched and has said nothing yet. */
+  readonly beat: string | null;
+  /** Milliseconds since that beat. Null when there has been none, or when the timestamp is
+   *  one nothing can parse: an unreadable beat is no evidence of life. */
+  readonly silent: number | null;
+  /** Whether the record still expects the assignment to be working. A finished one is not
+   *  silent, it is over, and a page that called it silent would read as an alarm. */
+  readonly open: boolean;
+}
+
+export function assignmentFacts(
+  db: DatabaseSync,
+  id: number,
+  asOf: number = Date.now(),
+): AssignmentFacts | null {
+  const a = queries(db).selectFrom(assignments).where("id", "=", id).get();
+  if (a === null) return null;
+  const since = a.last_seen === null ? NaN : instant(a.last_seen);
+  return {
+    worktree: a.worktree,
+    budget: spend(a.budget),
+    spent: spend(a.spent),
+    beat: a.last_seen,
+    silent: Number.isNaN(since) ? null : asOf - since,
+    open: OPEN_PHASES.includes(a.phase),
+  };
 }
 
 /** How many assignments hold a slot. `waiting` counts: waiting on a person is exactly the

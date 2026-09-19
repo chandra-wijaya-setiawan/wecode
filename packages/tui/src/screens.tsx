@@ -6,6 +6,8 @@
  *  what each is called, and which one holds the cursor. */
 import type { ReactNode } from "react";
 import { Box, Text } from "ink";
+// By path, as app.ts imports it: index.ts names what board.ts offers one export at a time.
+import type { AssignmentFacts } from "@wecode/core/dist/board.js";
 import { boxKeys, type App, type Screen } from "./app.js";
 import { clip, columnWidths, List, type Column, type Row } from "./list.js";
 import { Outline, OUTLINE } from "./outline.js";
@@ -229,60 +231,176 @@ export function tally(rows: readonly Row[]): string {
     .join(" · ");
 }
 
-/** A record's facts, one to a line, names left-aligned into a gutter as wide as the
+type Field = readonly [string, string];
+
+/** A value broken onto as many lines as it needs at this width, on spaces where there are
+ *  any and mid-word where a single word is wider than the room. Ink would wrap this for us,
+ *  but only by wrapping the whole `name  value` line back to column zero, and a continuation
+ *  under the gutter is what makes the names a column you can run your eye down. */
+function fold(value: string, width: number): string[] {
+  if (width <= 0) return [""];
+  const lines: string[] = [];
+  let line = "";
+  for (let word of value.split(/\s+/).filter((w) => w !== "")) {
+    while (word.length > width) {
+      if (line !== "") {
+        lines.push(line);
+        line = "";
+      }
+      lines.push(word.slice(0, width));
+      word = word.slice(width);
+    }
+    if (line === "") line = word;
+    else if (line.length + 1 + word.length <= width) line = `${line} ${word}`;
+    else {
+      lines.push(line);
+      line = word;
+    }
+  }
+  if (line !== "" || lines.length === 0) lines.push(line);
+  return lines;
+}
+
+/** A record's facts as text: `name  value`, names left-aligned into a gutter as wide as the
  *  longest of them. Every detail screen's block is this, so the blocks line up with each
- *  other rather than each choosing its own gutter. */
+ *  other rather than each choosing its own gutter.
+ *
+ *  `wrap` is what a page with the whole terminal to itself does with a value too long for
+ *  one line; a block sized to `fields.length` cannot afford it and clips instead. */
+export function fieldLines(fields: readonly Field[], width: number, wrap = false): string[] {
+  const gutter = Math.max(...fields.map(([k]) => k.length));
+  return fields.flatMap(([k, v]) => {
+    const head = `${k.padEnd(gutter)}  `;
+    if (!wrap) return [clip(head + v, width)];
+    const pad = " ".repeat(gutter + 2);
+    return fold(v, width - gutter - 2).map((part, i) => (i === 0 ? head : pad) + part);
+  });
+}
+
 function Fields({
   fields,
   width,
 }: {
-  readonly fields: readonly (readonly [string, string])[];
+  readonly fields: readonly Field[];
   readonly width: number;
 }) {
-  const gutter = Math.max(...fields.map(([k]) => k.length));
   return (
     <>
-      {fields.map(([k, v]) => (
-        <Text key={k} wrap="truncate">
-          {clip(`${k.padEnd(gutter)}  ${v}`, width)}
+      {fieldLines(fields, width).map((line, i) => (
+        <Text key={`${i}`} wrap="truncate">
+          {line}
         </Text>
       ))}
     </>
   );
 }
 
-/** What the board knows about one assignment, on a screen of its own.
+/** How long an assignment may say nothing and still be called alive. The runner ticks
+ *  every 15 seconds by default and writes `last_seen` on each observation it makes, so a
+ *  minute is four missed ticks: long enough that a slow tick is not an alarm, short enough
+ *  that a worker who died is not still being called alive a coffee later.
  *
- *  The fields are the row's, because an assignment is not in the tree and the row is what
- *  there is: the board already decided what an assignment is worth saying — the objective
- *  it is working, its phase, and the line under it that is the worker and the spend while
- *  it runs and the question while it waits. Drawing it again from the database would be a
- *  second opinion the dashboard's row would then disagree with.
+ *  A literal here and not in views.yaml only because that file declares boxes and this is
+ *  not one. It is a threshold, so it belongs beside the other view configuration the day
+ *  the page has any. */
+export const ALIVE_FOR_MS = 4 * 15_000;
+
+/** Tokens as the board writes them, `2.0k`, so the page and the running box's detail count
+ *  in the same unit. */
+const tokens = (n: number): string => `${(n / 1000).toFixed(1)}k`;
+
+/** A spend as a share of what was allowed. Nothing when nothing was allowed: `0 of 0` is
+ *  not 0% or 100%, it is a budget nobody set, and a percentage would invent one. */
+const share = (used: number, given: number): string =>
+  given <= 0 ? "" : ` (${Math.round((used / given) * 100)}%)`;
+
+/** What it has spent against what it was given, both dimensions on one line. A spend with
+ *  no allowance beside it answers no question an operator has. */
+export function budgetLine(facts: AssignmentFacts | null): string {
+  if (facts === null) return "—";
+  const { budget, spent } = facts;
+  return [
+    `${tokens(spent.tokens)} of ${tokens(budget.tokens)} tokens${share(spent.tokens, budget.tokens)}`,
+    `${spent.seconds}s of ${budget.seconds}s${share(spent.seconds, budget.seconds)}`,
+  ].join(" · ");
+}
+
+/** Whole seconds under a minute, whole minutes above it: the page is read to learn whether
+ *  a beat was a moment ago or an hour ago, and no reading of it turns on the seconds. */
+const ago = (ms: number): string => {
+  const seconds = Math.max(Math.trunc(ms / 1000), 0);
+  return seconds < 60 ? `${seconds}s ago` : `${Math.trunc(seconds / 60)}m ago`;
+};
+
+/** Whether anything is still working this assignment, in a word and then the evidence for
+ *  it. The word comes first because it is the one thing read off this page at a glance, and
+ *  a bare timestamp makes the reader do the subtraction themselves.
+ *
+ *  A finished assignment is not silent, it is over — calling it silent would put an alarm
+ *  on every record the board has ever closed. */
+export function beatLine(facts: AssignmentFacts | null): string {
+  if (facts === null) return "—";
+  if (!facts.open) return facts.beat === null ? "over · never reported" : `over · last ${ago(facts.silent ?? 0)}`;
+  if (facts.silent === null) return "no beat yet · dispatched and not started";
+  return `${facts.silent <= ALIVE_FOR_MS ? "alive" : "silent"} · last beat ${ago(facts.silent)}`;
+}
+
+/** As many of these lines as the panel has room for, and a count of what was dropped. A
+ *  page that drew past its own border would overwrite the status line and the key bar,
+ *  which are the two lines that always have to be readable. */
+export function fit(lines: readonly string[], rows: number, width: number): string[] {
+  if (rows <= 0) return [];
+  if (lines.length <= rows) return [...lines];
+  const kept = lines.slice(0, Math.max(rows - 1, 0));
+  return [...kept, clip(`… and ${lines.length - kept.length} more`, width)];
+}
+
+/** What is known about one assignment, on a screen of its own, filling it.
+ *
+ *  Half the fields are the board's row — the objective, the phase, and the line under it
+ *  that is the worker and the spend while it runs and the question while it waits — because
+ *  the board already decided what an assignment is worth saying and a second reading would
+ *  be an opinion the dashboard's row could disagree with. The other half is the part four
+ *  columns had no room for: what it was allowed, what it has used, and when it last spoke.
+ *  Neither half restates the other, so neither can contradict it.
+ *
+ *  The values wrap rather than clip. A question is the whole reason the page exists for a
+ *  waiting assignment, and half a question with an ellipsis on it is a page you have to
+ *  leave to read.
  *
  *  No children box. An assignment is the leaf the board points at, and an empty box saying
  *  so would cost two lines to say nothing. */
 export function Assignment({
   screen,
+  facts,
   width,
+  height,
 }: {
   readonly screen: Screen & { kind: "assignment" };
+  readonly facts: AssignmentFacts | null;
   readonly width: number;
+  readonly height: number;
 }) {
   const { row } = screen;
-  const fields: [string, string][] = [
+  const fields: Field[] = [
     ["entity", "assignment"],
     ["id", `#${screen.id}`],
     ["objective", row.what],
     ["state", row.state],
+    ["budget", budgetLine(facts)],
+    ["beat", beatLine(facts)],
+    ["worktree", facts === null ? "—" : facts.worktree],
     ["detail", row.detail === "" ? "—" : row.detail],
   ];
+  const inner = width - BORDER;
+  const body = Math.max(height - BORDER, 1);
   return (
-    <Panel
-      title={`assignment #${screen.id} · ${row.state}`}
-      width={width}
-      height={fields.length + BORDER}
-    >
-      <Fields fields={fields} width={width - BORDER} />
+    <Panel title={`assignment #${screen.id} · ${row.state}`} width={width} height={body + BORDER}>
+      {fit(fieldLines(fields, inner, true), body, inner).map((line, i) => (
+        <Text key={`${i}`} wrap="truncate">
+          {line}
+        </Text>
+      ))}
     </Panel>
   );
 }
@@ -378,7 +496,7 @@ export function Cockpit({ app, width, height }: ScreenProps) {
         ) : screen.kind === "outline" ? (
           <Outline app={app} width={width} height={body} />
         ) : screen.kind === "assignment" ? (
-          <Assignment screen={screen} width={width} />
+          <Assignment screen={screen} facts={app.factsNow()} width={width} height={body} />
         ) : (
           <Node app={app} screen={screen} width={width} height={body} />
         )}
