@@ -28,6 +28,8 @@ export interface ScriptReport {
   readonly unrunnable?: readonly number[];
   /** Tests whose script said one thing and the engine refused it. Never a pass. */
   readonly refused?: readonly Refused[];
+  /** Tests that failed and then passed on the very same tree. Not a verdict either way. */
+  readonly flaky?: readonly number[];
   /** Why the tree could not be made runnable, in the build's own words, or absent when it
    *  built. A tree that does not build proves nothing about the work in it — not even the
    *  verdicts already standing against it — so this is said on every report, including the
@@ -36,7 +38,7 @@ export interface ScriptReport {
   readonly unprepared?: string;
 }
 
-const nothing: ScriptReport = { passed: [], failed: [], skipped: [], unrunnable: [], refused: [] };
+const nothing: ScriptReport = { passed: [], failed: [], skipped: [], unrunnable: [], refused: [], flaky: [] };
 
 /** Written where the board reads a run's output, so a missing script never reads as a
  *  failure with an empty reason. */
@@ -54,6 +56,12 @@ export const NO_TEST_MATCHED = "no test matched";
  *  A fresh worktree has no dependencies installed and nothing built, and a suite run in one
  *  dies on the first import — which is a fact about the tree, never about the work. */
 export const UNPREPARED = "unrunnable: the tree could not be prepared";
+
+/** Written where the board reads a run's output when the same command failed and then
+ *  passed against the same unmoved tree. Two opposite answers from one tree are not a
+ *  verdict on the work — the test is telling on itself — so it is said in those words
+ *  rather than recorded as the red that happened to come first. */
+export const FLAKY = "flaky: it failed and then passed on the same tree";
 
 /** Where the command that makes a tree runnable is written, relative to the tree it
  *  prepares. It is the project's own onboarding config, so the person who owns the build
@@ -352,6 +360,7 @@ export class Examiner {
     const skipped: number[] = [];
     const unrunnable: number[] = [];
     const refused: Refused[] = [];
+    const flaky: number[] = [];
     const tip = await this.tip(cwd);
     // The tree is made runnable before a word of it is proved. A suite that dies on a
     // missing dependency exits non-zero exactly as a broken one does, so without this the
@@ -369,7 +378,7 @@ export class Examiner {
         this.stamp(entity, row.id, { last_output: `${UNPREPARED}\n${unprepared}`, updated_at: at });
         unrunnable.push(row.id);
       }
-      return { passed, failed, skipped, unrunnable, refused, unprepared };
+      return { passed, failed, skipped, unrunnable, refused, flaky, unprepared };
     }
     if (rows.length === 0) return nothing;
     // Stamped beside every verdict this pass takes: what the test was run against, not just
@@ -392,6 +401,19 @@ export class Examiner {
         continue;
       }
       const out = await this.runOne(row.artefact, cwd);
+      // A red that goes green on the second ask, with nothing between the two runs, is a
+      // fact about the test and not about the tree. Recording it as a failure accuses work
+      // that may be sound; recording it as a pass hides a test nobody can trust. So it is
+      // left exactly as it stands, named for what it is, and asked again next tick.
+      if (!out.ok && (await this.passesAlone(row.artefact, cwd))) {
+        const at = now();
+        this.stamp(entity, row.id, {
+          last_output: `${FLAKY}: ${row.artefact}\n${out.output.slice(-8000)}`,
+          updated_at: at,
+        });
+        flaky.push(row.id);
+        continue;
+      }
       // A command that exited 0 having selected no test proves nothing about the tree. The
       // exit code alone cannot tell that apart from a suite that ran and passed, so the
       // output is read too, and a run that matched nothing fails.
@@ -431,7 +453,17 @@ export class Examiner {
       (ok ? passed : failed).push(row.id);
     }
 
-    return { passed, failed, skipped, unrunnable, refused };
+    return { passed, failed, skipped, unrunnable, refused, flaky };
+  }
+
+  /** True when a command that has just failed passes on being asked again, by itself,
+   *  against the same tree. The one thing between the two runs is the first run, so a
+   *  disagreement between them belongs to the test: order, a clock, a port, a leftover
+   *  file. A second red — or a green that selected nothing — is no disagreement at all,
+   *  and the failure stands. */
+  private async passesAlone(artefact: string, cwd: string): Promise<boolean> {
+    const again = await this.runOne(artefact, cwd);
+    return again.ok && !matchedNoTest(again.output);
   }
 
   /** Makes a tree runnable, and answers with why it could not be — null when it is ready,
