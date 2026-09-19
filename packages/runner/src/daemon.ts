@@ -348,11 +348,11 @@ export class Runner {
     const allocated = await this.allocateOne();
     const foreman = await this.foreman.tick();
     const settled = await this.settleEnded();
+    // Level-triggered: a guard that became true for a reason other than the verb that just
+    // ran settles here — including the task settleEnded proved, which lands just below.
+    const settled2 = this.engine.settle();
     const merged = await this.landDoneTasks();
     const acceptance = await this.proveStories();
-    // Level-triggered: anything whose guard became true for a reason other than the verb
-    // that just ran settles here, rather than waiting for an event that already happened.
-    const settled2 = this.engine.settle();
     const exhausted = this.enforceRetryLimit();
     // Last, and after settle(): a story becomes delivered in settle(), and the condition
     // this reads is about a story that already is.
