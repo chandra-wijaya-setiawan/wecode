@@ -1,6 +1,12 @@
 /** The board asks two questions, and only one of them is a person's: what waits on you, and
- *  what is cooking. `needs_human` is the first; the four machine-side panels fold into the
- *  second — one list, oldest first, every row carrying how long it has been sitting.
+ *  what is stuck. `needs_human` is the first; `stale` and `failed` fold into the second —
+ *  one list, oldest first, every row carrying how long it has been sitting.
+ *
+ *  Two, not four. `queued` and `delivered` were folded here and are not any more: a task
+ *  waiting for a slot and a story waiting to land are both somebody's next move, and a box
+ *  opened to ask *what has gone wrong* that answers with ten green rows is a box that has
+ *  been asked two questions. They are boxes of their own now, and so is `planned`, which
+ *  `open` used to hold together with the work already in flight.
  *
  *  `running` is on neither side of it. The fold ranks by age, which is the question to ask
  *  of a row nobody is holding; a running row is held, and what it is asked is who has it
@@ -10,9 +16,9 @@
  *  is navigated by rather than a report on the machine, so they keep boxes of their own and
  *  the fold leaves them alone.
  *
- *  What is held here is the fold itself: that it covers every machine-side panel and nothing
- *  else, that it is ordered by age rather than by id, and that the age on a row is read off
- *  that row's own record rather than guessed. */
+ *  What is held here is the fold itself: that it covers the two panels that are stuck work
+ *  and nothing else, that it is ordered by age rather than by id, and that the age on a row
+ *  is read off that row's own record rather than guessed. */
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 // From the module rather than the facade: `index.ts` publishes the composed board, and the
@@ -84,6 +90,23 @@ const refusedSince = (why: string, since: string): void => {
   db.prepare("UPDATE refusal SET since = ? WHERE task_id = ?").run(since, tree.task);
 };
 
+/** A task that has given up, dated. `failed` is half the fold, and the half a case can make
+ *  as many rows of as it likes — a delivered story used to serve that purpose and is out of
+ *  the fold now, because waiting to land is not being stuck. */
+const failedAt = (slug: string, updated: string): number =>
+  ins(
+    "INSERT INTO task (slug,acceptance_test_id,title,scope,role,budget,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+    slug,
+    tree.acceptance,
+    slug,
+    "{}",
+    "engineer",
+    "{}",
+    "failed",
+    T,
+    updated,
+  );
+
 /** The age a cooking row leads with, as a number of minutes. */
 const age = (detail: string): number => Number(/^(\d+)m(?: · |$)/.exec(detail)?.[1] ?? Number.NaN);
 
@@ -93,9 +116,79 @@ beforeEach(() => {
 });
 
 describe("the fold covers the machine side and nothing else", () => {
-  it("names the four panels that are the machine's business, and not the one that is yours", () => {
-    expect([...MACHINE_SIDE]).toEqual(["stale", "queued", "failed", "delivered"]);
+  it("names the two panels that are stuck work, and not the one that is yours", () => {
+    expect([...MACHINE_SIDE]).toEqual(["stale", "failed"]);
     expect([...MACHINE_SIDE]).not.toContain("needs_human");
+  });
+
+  /** The cut. Queued and delivered were folded here, and neither of them is stuck: a task
+   *  waiting for a slot is waiting its turn, and a delivered story is waiting to land. Both
+   *  are somebody's next move, and reading them in the same list as a task that ran out of
+   *  attempts made the box answer a question nobody asked it. */
+  it("leaves out the panels that are waiting on a move rather than stuck", () => {
+    expect([...MACHINE_SIDE]).not.toContain("queued");
+    expect([...MACHINE_SIDE]).not.toContain("delivered");
+
+    db.prepare("UPDATE task SET state = 'ready' WHERE id = ?").run(tree.task);
+    const shipped = storyIn(tree.epic, "shipped", "delivered", ago(30));
+
+    const b = board(db);
+    expect(b.queued.map((r) => r.id)).toEqual([tree.task]);
+    expect(b.delivered.map((r) => r.id)).toEqual([shipped]);
+    for (const row of [...b.queued, ...b.delivered]) {
+      expect(cooking(db).some((f) => f.id === row.id && f.what === row.what)).toBe(false);
+    }
+  });
+
+  /** And neither of them pays the fold's price on the way out: a panel outside the fold
+   *  records no age, so its detail is its own rather than a number of minutes in front of
+   *  it. This is what told the two boxes apart before they were boxes. */
+  it("leaves the unfolded panels' details as the panels wrote them", () => {
+    db.prepare("UPDATE task SET state = 'ready' WHERE id = ?").run(tree.task);
+    const shipped = storyIn(tree.epic, "shipped", "delivered", ago(30));
+
+    expect(board(db).queued.find((r) => r.id === tree.task)?.detail).toBe("engineer");
+    expect(board(db).delivered.find((r) => r.id === shipped)?.detail).toBe("story");
+  });
+
+  /** What is written down and not begun is its own question — *what is next* — and it is
+   *  not the fold's. `open` held it together with the work in flight, which is the box that
+   *  answered two questions at once and so answered neither. */
+  it("gives the planned epics and stories a panel of their own, outside the fold", () => {
+    expect([...MACHINE_SIDE]).not.toContain("planned");
+    const next = storyIn(tree.epic, "next-thing", "planned", ago(30));
+
+    const b = board(db);
+    expect(b.planned.map((r) => r.what)).toEqual(["next-thing"]);
+    expect(b.planned.map((r) => r.detail)).toEqual(["story"]);
+    // Still under `open` too: that filter is every epic and story not finished, and it is
+    // what the outline and the cli read. What changed is which of them the page draws.
+    expect(b.open.some((r) => r.id === next)).toBe(true);
+    expect(cooking(db).some((r) => r.what === "next-thing")).toBe(false);
+  });
+
+  it("keeps a started epic or story out of planned", () => {
+    // The seed's own, both in_progress: planned is what nobody has picked up, not what is
+    // merely unfinished.
+    expect(board(db).planned).toEqual([]);
+    expect(board(db).open.length).toBeGreaterThan(0);
+  });
+
+  it("tags an epic apart from a story in planned, the way open does", () => {
+    const epic = ins(
+      "INSERT INTO epic (slug,release_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+      "later",
+      tree.release,
+      "later epic",
+      "planned",
+      T,
+      T,
+    );
+    storyIn(tree.epic, "later-story", "planned", T);
+
+    const planned = board(db).planned;
+    expect(planned.find((r) => r.id === epic)?.detail).toBe("epic");
+    expect(planned.find((r) => r.what === "later-story")?.detail).toBe("story");
   });
 
   it("leaves running out of the fold, and keeps its rows whole on its own panel", () => {
@@ -124,13 +217,12 @@ describe("the fold covers the machine side and nothing else", () => {
   });
 
   it("keeps every row of every machine-side panel, and exactly as many rows as they hold", () => {
-    // Six rows off three of the four panels — stale, queued and delivered — so the count
-    // cannot be one panel's.
+    // Rows off both panels — stale and failed — so the count cannot be one panel's.
     refusedSince("no worker free", ago(200));
-    storyIn(tree.epic, "shipped", "delivered", ago(30));
-    storyIn(tree.epic, "also-shipped", "delivered", ago(31));
-    storyIn(tree.epic, "shipped-too", "delivered", ago(32));
-    storyIn(tree.epic, "and-shipped", "delivered", ago(33));
+    failedAt("gave-up", ago(30));
+    failedAt("gave-up-too", ago(31));
+    failedAt("and-gave-up", ago(32));
+    failedAt("also-gave-up", ago(33));
 
     const b = board(db);
     const folded = cooking(db);
@@ -202,21 +294,20 @@ describe("oldest first", () => {
     // Four rows off three panels — delivered, queued, stale and delivered again — so the
     // order cannot be the panels' order and cannot be an id order either. The refused task
     // is two rows, because queued and stale say different things about it.
-    storyIn(tree.epic, "newest", "delivered", ago(5));
+    failedAt("newest", ago(5));
     refusedSince("no worker free", ago(40));
-    storyIn(tree.epic, "oldest", "delivered", ago(600));
+    failedAt("oldest", ago(600));
 
     expect(order("newest", "oldest", "send the reset mail")).toEqual([
       "oldest",
-      "send the reset mail",
       "send the reset mail",
       "newest",
     ]);
   });
 
   it("puts the older row first even when the younger one has the smaller id", () => {
-    const early = storyIn(tree.epic, "early-id", "delivered", ago(1));
-    const late = storyIn(tree.epic, "late-id", "delivered", ago(999));
+    const early = failedAt("early-id", ago(1));
+    const late = failedAt("late-id", ago(999));
     expect(early).toBeLessThan(late);
 
     expect(order("early-id", "late-id")).toEqual(["late-id", "early-id"]);
@@ -224,16 +315,16 @@ describe("oldest first", () => {
 
   it("falls back to the id when two rows have sat since the same instant", () => {
     const same = ago(50);
-    const first = storyIn(tree.epic, "tie-a", "delivered", same);
-    const second = storyIn(tree.epic, "tie-b", "delivered", same);
+    const first = failedAt("tie-a", same);
+    const second = failedAt("tie-b", same);
     expect(first).toBeLessThan(second);
 
     expect(order("tie-a", "tie-b")).toEqual(["tie-a", "tie-b"]);
   });
 
   it("sorts a row nothing can date last rather than first", () => {
-    storyIn(tree.epic, "no-date", "delivered", "whenever");
-    storyIn(tree.epic, "ancient", "delivered", ago(10_000));
+    failedAt("no-date", "whenever");
+    failedAt("ancient", ago(10_000));
 
     const folded = cooking(db);
     expect(folded[0]?.what).toBe("ancient");
@@ -244,7 +335,7 @@ describe("oldest first", () => {
 describe("every cooking row says its age", () => {
   it("leads the detail with the minutes, on every row there is", () => {
     refusedSince("no worker free", ago(7));
-    storyIn(tree.epic, "shipped", "delivered", ago(30));
+    failedAt("gave-up", ago(30));
 
     for (const row of cooking(db)) {
       expect(row.detail, `#${row.id} ${row.what}`).toMatch(/^\d+m(?: · |$)/);
@@ -252,27 +343,28 @@ describe("every cooking row says its age", () => {
   });
 
   it("reads the age off the row's own record", () => {
-    // A task refused the same way three times is two panels' business: queued says it has
-    // no slot and stale says it has stopped moving. A fold is not a dedupe — the two rows
-    // say different things — and both are dated from the refusal rather than from the
-    // task's last touch, which the seed left at 2026-09-13.
+    // A task refused the same way three times is stale, and it is dated from the refusal
+    // rather than from the task's last touch, which the seed left at 2026-09-13. Its queue
+    // row is no longer in the fold at all — waiting for a slot is not being stuck.
     refusedSince("no worker free", ago(90));
     const details = cooking(db)
       .filter((r) => r.what === "send the reset mail")
       .map((r) => r.detail);
-    expect(details.sort()).toEqual(["90m · no worker free", "90m · no worker free · 3 passes"]);
+    expect(details).toEqual(["90m · no worker free · 3 passes"]);
   });
 
   it("keeps the panel's own detail behind the age", () => {
-    const story = storyIn(tree.epic, "shipped", "delivered", ago(30));
-    expect(cooking(db).find((r) => r.id === story)?.detail).toBe("30m · story");
+    const gone = failedAt("gave-up", ago(30));
+    expect(cooking(db).find((r) => r.id === gone)?.detail).toBe("30m · attempts 0/3");
   });
 
-  it("dates a queued task from the pass that refused it, not from the record's last touch", () => {
+  it("dates a stale task from the pass that refused it, not from the record's last touch", () => {
     refusedSince("no worker free", ago(120));
+    // The queue row says why there is no slot and says nothing about age: it is outside the
+    // fold, so no number of minutes is put in front of it.
     const queued = board(db).queued.find((r) => r.id === tree.task);
     expect(queued?.detail).toBe("no worker free");
-    expect(age(cooking(db).find((r) => r.detail.endsWith("no worker free"))?.detail ?? "")).toBe(120);
+    expect(age(cooking(db).find((r) => r.detail.endsWith("3 passes"))?.detail ?? "")).toBe(120);
   });
 
   it("says the same minutes once, where the panel already said them", () => {

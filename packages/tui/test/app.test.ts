@@ -14,21 +14,26 @@ const ins = (db: DatabaseSync, sql: string, ...args: (string | number | null)[])
   return (db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id;
 };
 
-/** One of everything, in states that put a row in a box: a project and a queued task on
- *  the dashboard, and the whole chain underneath for a node screen to walk. */
+/** One of everything, in states that put a row in a box: a queued task and a planned story
+ *  on the dashboard, and the whole chain underneath for a node screen to walk.
+ *
+ *  Two rows rather than one, because half of what is asked here is what the cursor does
+ *  between them. The board's seven boxes are each one question, and an in_progress epic or
+ *  story is on none of them — it is in flight, which the outline and Running answer. */
 function seed(db: DatabaseSync) {
   const ws = ins(db, "INSERT INTO workspace (slug,name,path,created_at,updated_at) VALUES (?,?,?,?,?)", "acme", "acme", "/acme", T, T);
   const project = ins(db, "INSERT INTO project (slug,workspace_id,name,repo,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", "storefront", ws, "storefront", "/repo", "in_progress", T, T);
   const release = ins(db, "INSERT INTO release (slug,project_id,version,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", "v1", project, "1.0.0", "in_progress", T, T);
   const epic = ins(db, "INSERT INTO epic (slug,release_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", "recovery", release, "account recovery", "in_progress", T, T);
   const story = ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", "reset", epic, "password reset", "in_progress", T, T);
+  const planned = ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", "next", epic, "the next thing", "planned", T, T);
   const requirement = ins(db, "INSERT INTO requirement (slug,story_id,statement,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", "one-change", story, "one link, one change", "in_progress", T, T);
   const criteria = ins(db, "INSERT INTO acceptance_criteria (slug,requirement_id,statement,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", "emailed", requirement, "a link is emailed", "in_progress", T, T);
   const acceptance = ins(db, "INSERT INTO acceptance_test (slug,parent_id,statement,kind,artefact,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", "mail-arrives", criteria, "the mail arrives", "script", "bash test/mail.sh", "planned", T, T);
   const dropped = ins(db, "INSERT INTO acceptance_test (slug,parent_id,statement,kind,artefact,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", "mail-twice", criteria, "the mail arrives twice", "script", "bash test/twice.sh", "dropped", T, T);
   const task = ins(db, "INSERT INTO task (slug,acceptance_test_id,title,scope,role,budget,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)", "send-mail", acceptance, "send the reset mail", JSON.stringify({ write: ["src/mail/**"], tools: ["bash"] }), "engineer", JSON.stringify({ tokens: 1000, seconds: 60 }), "ready", T, T);
   const taskTest = ins(db, "INSERT INTO task_test (slug,parent_id,statement,kind,artefact,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", "mailer-called", task, "the mailer is called", "script", "vitest run mail", "ready", T, T);
-  return { project, release, epic, story, requirement, criteria, acceptance, dropped, task, taskTest };
+  return { project, release, epic, story, planned, requirement, criteria, acceptance, dropped, task, taskTest };
 }
 
 const stateOf = (db: DatabaseSync, table: string, id: number): string =>
@@ -47,7 +52,7 @@ beforeEach(() => {
 const whats = (): string[] => app.lines().map((r) => r.what);
 
 /** The outline, which is how a project is reached now that the board has no projects box:
- *  the four boxes are what waits on you, the open work, what is running and the fold. */
+ *  its seven are needs you, running, queue, cooking, planned, delivered and dropped. */
 const fromTheOutline = (): void => {
   app.key("v");
   app.key("t");
@@ -74,14 +79,13 @@ const descendTo = (...steps: string[]): void => {
 
 describe("the dashboard", () => {
   it("lists every box's rows in the order the page declares", () => {
-    // needs_human, open, running, cooking — the page is four boxes, and neither the
-    // project nor the queued task is a box of its own: the project is reached through the
-    // outline, and the task is a row in the fold, which the page draws last. So the rows
-    // come back in the page's order, not the board's.
+    // needs you, running, queue, cooking, planned, delivered, dropped — seven boxes, and
+    // the project is on none of them: it is reached through the outline. The ready task is
+    // Queue's, which the page draws third, and the planned story is Planned's, which it
+    // draws fifth. So the rows come back in the page's order, not the board's.
     expect(whats()).toEqual([
-      "password reset",
-      "account recovery",
       "send the reset mail",
+      "the next thing",
     ]);
     expect(app.screen).toEqual({ kind: "dashboard" });
   });
@@ -140,11 +144,11 @@ describe("v, then a box's letter", () => {
   });
 
   it("opens that box at full height, with only its rows", () => {
-    // The fold, which is where the queued task lives now that Queue is not a box.
-    const c = [...boxKeys(views)].find(([, v]) => v.name === "cooking")?.[0] as string;
+    // Queue, which is where the ready task lives now that it is a box again.
+    const c = [...boxKeys(views)].find(([, v]) => v.name === "queued")?.[0] as string;
 
     app.key("v");
-    expect(app.status).toContain("Cooking");
+    expect(app.status).toContain("Queue");
     app.key(c);
 
     expect(app.screen).toMatchObject({ kind: "box" });
@@ -152,14 +156,18 @@ describe("v, then a box's letter", () => {
   });
 
   /** The point of cutting a box from the page was the height it took from the boxes beside
-   *  it. Its letter took none of that, so `v p` still opens the projects the dashboard no
-   *  longer draws — the box is off the page, not taken away. */
+   *  it. Its letter took none of that, so the projects the dashboard no longer draws are
+   *  still one keystroke away — the box is off the page, not taken away. Which letter that
+   *  is comes off `boxKeys`, because with seven boxes on the page the free letters are the
+   *  page's leavings and hardcoding one here would make the order of the page a fact about
+   *  this test. */
   it("opens an off-page box on its letter, and offers it", () => {
     expect(whats()).not.toContain("storefront");
+    const j = [...boxKeys([...views, ...loadOffPage()])].find(([, v]) => v.name === "projects")?.[0] as string;
 
     app.key("v");
     expect(app.status).toContain("Projects");
-    app.key("p");
+    app.key(j);
 
     expect(app.screen).toMatchObject({ kind: "box" });
     expect(whats()).toEqual(["storefront"]);
@@ -194,7 +202,7 @@ describe("v, then a box's letter", () => {
 describe("esc, and the stack it pops", () => {
   it("comes back to the row it left", () => {
     app.key("j");
-    const p = [...boxKeys(views)].find(([, v]) => v.name === "open")?.[0] as string;
+    const p = [...boxKeys(views)].find(([, v]) => v.name === "queued")?.[0] as string;
     app.key("v");
     app.key(p);
     expect(app.cursor).toBe(0);
