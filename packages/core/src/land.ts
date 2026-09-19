@@ -117,20 +117,42 @@ export function reportAbort(state: BaseState, branch: string): string {
   return `  the merge was NOT undone.\n${left}\n${chore}`;
 }
 
+/** The staged half of `git status --porcelain`: the lines whose index column is neither a
+ *  space nor `?`. Exported because staged-or-not is the whole difference between a leftover
+ *  somebody will notice and one that disappears into the next commit. */
+export function stagedLeftover(dirty: readonly string[]): readonly string[] {
+  return dirty.filter((l) => l.length > 0 && l[0] !== " " && l[0] !== "?");
+}
+
 /** What the base was left holding that it did not start with, or null when it is clean.
  *
  *  Said after the merge as well as after an abort: land promises the base it touched is a
- *  base somebody else can land on next, and the only way to keep that promise is to look. */
+ *  base somebody else can land on next, and the only way to keep that promise is to look.
+ *
+ *  A staged leftover is called by that name. An unstaged edit sits in the tree where the
+ *  next `git status` shows it and the next commit leaves it alone; a staged one is already
+ *  in the index, so the next commit made in that tree — by the operator, by an agent, by a
+ *  hook — carries it under somebody else's message. Same three lines of output, but the
+ *  remedy is `git restore --staged`, not `git merge --abort`, and an operator told the
+ *  wrong one of those twice is an operator who stops reading. */
 export function reportLeftover(state: BaseState): string | null {
   const { here, base, dirty, merging } = state;
   if (!merging && dirty.length === 0) return null;
+  const staged = merging ? [] : stagedLeftover(dirty);
   const what = merging
     ? `${base} in ${here} is still mid-merge`
-    : `${base} in ${here} was left with uncommitted changes`;
+    : staged.length > 0
+      ? `${base} in ${here} was left with a staged diff, already in the index`
+      : `${base} in ${here} was left with uncommitted changes`;
+  const it = staged.length === 1 ? "it" : "them";
+  const how =
+    staged.length > 0
+      ? `  the next commit made in that tree carries ${it}, whoever makes it.\n` +
+        `  run git restore --staged . in that tree to unstage ${it}, then git status.`
+      : `  run git merge --abort in that tree, or git status to see what is left.`;
   return (
     `  ${what} — do not commit there until it is clean:\n` +
-    `${dirty.length === 0 ? "  (no tracked file differs)" : indent(dirty)}\n` +
-    `  run git merge --abort in that tree, or git status to see what is left.`
+    `${dirty.length === 0 ? "  (no tracked file differs)" : indent(dirty)}\n${how}`
   );
 }
 
