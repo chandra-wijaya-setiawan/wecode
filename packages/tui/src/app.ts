@@ -104,6 +104,7 @@ const ENTITY: Readonly<Record<keyof Board, StatefulEntity | null>> = {
   unproven: "acceptance_test",
   // Two tables in one box; board.ts tags which in the detail.
   open: null,
+  planned: null,
   delivered: "story",
   unmergeable: "story",
   // The machine-side panels folded into one list, so the box holds assignments, tasks and
@@ -114,11 +115,11 @@ const ENTITY: Readonly<Record<keyof Board, StatefulEntity | null>> = {
 /** What a row on a box is a row of. A box whose rows are all one kind says so above; the
  *  two that hold more than one kind are answered from the row.
  *
- *  `open` tags epic or story in its detail. The fold cannot: its detail leads with the age,
- *  and it is carrying five panels' rows. So the panels themselves are asked — a folded row
- *  is still on exactly the panel it came from, and that panel does name one kind. Matched
- *  on id, words and state together, because an id alone is shared across tables and the
- *  fold rewrites the detail to put the age in front of it. */
+ *  `open` and `planned` tag epic or story in their detail. The fold cannot: its detail leads
+ *  with the age, and it carries more than one panel's rows. So the panels themselves are
+ *  asked — a folded row is still on exactly the panel it came from, and that panel does name
+ *  one kind. Matched on id, words and state together, because an id alone is shared across
+ *  tables and the fold rewrites the detail to put the age in front of it. */
 const entityOf = (filter: keyof Board, row: Row, now: Board): StatefulEntity => {
   const named = ENTITY[filter];
   if (named !== null) return named;

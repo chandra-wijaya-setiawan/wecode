@@ -13,6 +13,12 @@ export interface View {
   readonly filter: keyof Board;
   readonly rows: number;
   readonly empty: string;
+  /** The letter `v` opens it on, when the first free letter of its name is not the one an
+   *  operator would reach for. Seven boxes is more names than there are distinct first
+   *  letters, and which letter a box answers to is a thing a person memorises — so it is
+   *  declared beside the title rather than fallen out of the order the page happens to be
+   *  in. A box that declares none still takes the first letter nothing has claimed. */
+  readonly key?: string;
 }
 
 /** The filters a box may name. This is a fourth copy of words that already exist as the
@@ -22,7 +28,7 @@ export interface View {
  *  rest of the circle, against a real board and against the config.
  *
  *  Every group the board computes is nameable, not just the ones the page draws today: the
- *  page is four boxes and views.yaml decides which four. Cutting a box, or putting one
+ *  page is seven boxes and views.yaml decides which seven. Cutting a box, or putting one
  *  back, is an edit to that file and to nothing here. */
 export const FILTERS = [
   "projects",
@@ -34,6 +40,7 @@ export const FILTERS = [
   "dropped",
   "unproven",
   "open",
+  "planned",
   "delivered",
   "unmergeable",
   "cooking",
@@ -50,8 +57,13 @@ const read = (name: string, v: Record<string, unknown>): View => {
   if (typeof filter !== "string" || !(FILTERS as readonly string[]).includes(filter)) {
     throw new ViewError(`${name}: unknown filter ${String(filter)}`);
   }
+  const key = v["key"];
+  if (key !== undefined && (typeof key !== "string" || key.length !== 1)) {
+    throw new ViewError(`${name}: key must be one letter, not ${String(key)}`);
+  }
   return {
     name,
+    ...(key === undefined ? {} : { key: key as string }),
     title: typeof v["title"] === "string" ? v["title"] : name,
     filter: filter as keyof Board,
     rows: typeof v["rows"] === "number" ? v["rows"] : 5,

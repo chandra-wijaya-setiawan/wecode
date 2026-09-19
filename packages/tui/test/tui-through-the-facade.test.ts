@@ -37,7 +37,7 @@ beforeEach(() => {
 });
 
 /** The outline, which is where a project is reached now that the dashboard has no projects
- *  box: its four are what waits on you, the open work, what is running and the fold. */
+ *  box: its seven are needs you, running, queue, cooking, planned, delivered and dropped. */
 const fromTheOutline = (): void => {
   app.key("v");
   app.key("t");
