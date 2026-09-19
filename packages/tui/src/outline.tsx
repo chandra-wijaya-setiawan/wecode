@@ -167,16 +167,38 @@ export const isOpenWork = (n: Node): boolean => !SETTLED.has(n.state);
  *  beside that one in the config, which this story's scope does not reach. */
 export const NOTHING_OPEN = "no open work — everything here has landed or been dropped";
 
-/** The forest with the settled work cut out of it. A settled row survives only while
- *  something open still hangs under it: the outline's one job is saying where a row sits in
- *  the work, and a kept child with no parent above it would have nowhere to sit. */
+/** A row drawn where its own parent is not. The flag rides on the node rather than beside
+ *  it because `openWork` hands the forest straight to the folding and the rows, and a set
+ *  kept alongside would have to be threaded through every one of them. */
+interface Rooted extends Node {
+  readonly orphaned?: boolean;
+}
+
+/** Whether this row was lifted out from under a settled parent. */
+export const isOrphan = (n: Node): boolean => (n as Rooted).orphaned === true;
+
+/** What the screen calls such a row. Narrowing to open work is read for what is left, and a
+ *  row silently promoted a level would answer "where does this sit" with a lie; the word is
+ *  the outline admitting it moved the row rather than hiding that it did. */
+export const ORPHANED = "orphaned";
+
+/** The forest with the settled work cut out of it — all of it, including the rows open work
+ *  hangs under. A landed parent is not work still owed, and keeping it to host its children
+ *  is the narrowing showing you the very rows you asked it to drop.
+ *
+ *  What hangs under a cut row is lifted into its place, in its order, so nothing open is
+ *  lost with the parent. The lifted rows are marked `orphaned`, because that is the one
+ *  thing the tree can no longer tell you: the guide beside them now draws a parent that is
+ *  not theirs. */
 export function openWork(forest: readonly Node[]): readonly Node[] {
-  const keep = (n: Node): Node | null => {
-    const children = n.children.map(keep).filter((c): c is Node => c !== null);
-    if (children.length === 0 && !isOpenWork(n)) return null;
-    return { ...n, children };
-  };
-  return forest.map(keep).filter((c): c is Node => c !== null);
+  const lift = (nodes: readonly Node[]): Node[] =>
+    nodes.flatMap((n) => {
+      const children = lift(n.children);
+      if (isOpenWork(n)) return [{ ...n, children }];
+      // Already an orphan stays one: it is lifted again, not re-parented.
+      return children.map((c): Rooted => ({ ...c, orphaned: true }));
+    });
+  return lift(forest);
 }
 
 /** The keys expanded when the outline opens: everything above the level it folds to. The
@@ -308,7 +330,12 @@ export function outlineRows(
       // The fold marker is the key that changes it, so the row says what to press.
       const marker = n.children.length === 0 ? " " : open ? "-" : "+";
       const isNext = next !== null && n.entity === "task" && n.id === next;
-      const detail = [n.entity, isNext ? "next to run" : "", rollup(n)].filter((s) => s !== "");
+      const detail = [
+        n.entity,
+        isOrphan(n) ? ORPHANED : "",
+        isNext ? "next to run" : "",
+        rollup(n),
+      ].filter((s) => s !== "");
       out.push({
         row: {
           id: n.id,
