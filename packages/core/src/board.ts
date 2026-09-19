@@ -20,8 +20,13 @@ export interface Board {
   readonly failed: readonly Row[];
   readonly dropped: readonly Row[];
   readonly unproven: readonly Row[];
-  /** Every epic and story still open — planned and in_progress alike, not future work. */
+  /** Every epic and story still open — planned and in_progress alike, not future work.
+   *  Off the page for exactly that reason: a box that holds both answers no question, so
+   *  `planned` draws the half nobody has picked up and the outline draws the rest. */
   readonly open: readonly Row[];
+  /** Every epic and story nobody has started. What is written down and not begun is the
+   *  question *what is next*, which is a different one from *what is moving*. */
+  readonly planned: readonly Row[];
   readonly delivered: readonly Row[];
   readonly unmergeable: readonly Row[];
   /** `MACHINE_SIDE`'s panels as one list, oldest first. A group like any other, so a box
@@ -334,33 +339,23 @@ const newestRun = (a: TaskTestRow, b: TaskTestRow): number => {
   return b.id - a.id;
 };
 
-/** The board asks a person two questions, and only one of them is theirs: *what waits on
- *  you*, and *what is cooking*. `needs_human` is the first. These four are the machine's own
- *  business, and four boxes of it is four places to look for the one row that has stopped
- *  moving.
+/** What is cooking is what is stuck: a task that has given up, and work that has stopped
+ *  moving with nobody holding it. Those two, and nothing else.
  *
- *  `running` was folded here and is not any more. The fold is ordered by age because age is
- *  what ranks rows nobody is holding against each other — and a running row is held: what
- *  is asked of it is which worker and how much spent, and it stops being a row at all the
- *  moment the worker is done. Ranking it by staleness sorted the freshest thing on the
- *  board to the bottom of the one list it shares with four panels of stuck work.
+ *  It was four. `queued` and `delivered` were in it, and they are not stuck — a queued task
+ *  is waiting its turn and a delivered story is waiting to land, and both of those are
+ *  somebody's next move rather than a fault. Folded together, a red failed row sat in the
+ *  same list as ten green delivered ones and the box could not be read at a glance: the one
+ *  question it is opened with, *what has gone wrong*, was answered by a list that was mostly
+ *  things that had gone right. So they are boxes of their own again, `queue` and
+ *  `delivered`, and the fold keeps the two panels that are the same question.
  *
- *  `projects` and `open` were folded here too, and are not any more: they are not a report
- *  on the machine, they are the tree — the rows `enter` descends from, and the only way into
- *  a release or a requirement. A fold is over rows nobody navigates, and a folded row is
- *  off six tables, so it cannot say which entity it is. Folding the two of them left the
- *  dashboard with nothing to open.
+ *  `running` is not here for the same reason it never was: the fold ranks by age, which is
+ *  the question to ask of a row nobody is holding, and a running row is held.
  *
  *  Written as `keyof Board` so a panel renamed out from under the fold is a build error
- *  rather than a box that quietly stops being folded. `dropped`, `unproven` and
- *  `unmergeable` are absent because no panel draws them: the fold is over what a person is
- *  shown, not over every filter the module can compute. */
-export const MACHINE_SIDE = [
-  "stale",
-  "queued",
-  "failed",
-  "delivered",
-] as const satisfies readonly (keyof Board)[];
+ *  rather than a box that quietly stops being folded. */
+export const MACHINE_SIDE = ["stale", "failed"] as const satisfies readonly (keyof Board)[];
 
 /** A cooking row and the instant it has last moved, off its own record.
  *
@@ -410,7 +405,7 @@ export function board(db: DatabaseSync, project: number | null = null): Board {
   return snapshot(db, project).groups;
 }
 
-/** The board and the fold are one query: the seven machine-side panels record each row's
+/** The board and the fold are one query: the machine-side panels record each row's
  *  age as they build it, and `cooking` is that record sorted. Computing them apart would be
  *  two reads of the same tables that could disagree about what is on the board. */
 function snapshot(
@@ -623,18 +618,18 @@ function snapshot(
     // the task is consulted, because a task's own machine already decided it was ready and
     // a second opinion here would be a task the allocator takes and the board never shows.
     // The detail is why it is not running: the last pass's refusal, or its role.
+    //
+    // Not `cook`ed: waiting for a slot is not being stuck — see MACHINE_SIDE — so a queued
+    // row records no age and the fold never sees it. If it has also stopped moving, `stale`
+    // says so and the fold has it from there.
     queued: taskRows
       .filter((t) => t.state === "ready" && placed(walk.ofTask(t.id)) && !attempted.has(t.id))
-      .map((t) =>
-        // Sitting since the first pass that refused it, or since the record last moved it:
-        // a queued task's age is how long it has been waiting for a slot, not how old it is.
-        cook(refusalOf.get(t.id)?.since ?? t.updated_at, {
-          id: t.id,
-          what: t.title,
-          state: t.state,
-          detail: `${refusalOf.get(t.id)?.why ?? t.role}${denied(t.id)}`,
-        }),
-      )
+      .map((t) => ({
+        id: t.id,
+        what: t.title,
+        state: t.state,
+        detail: `${refusalOf.get(t.id)?.why ?? t.role}${denied(t.id)}`,
+      }))
       .sort(byId),
     // Work that stopped because its attempts ran out, or because a pass is still owed to
     // it. Abandoned work is not here: dropped was somebody's decision and wants nothing
@@ -669,11 +664,14 @@ function snapshot(
       .filter((t) => t.state === "ready" && t.red_at_base_sha === null && only(walk.ofTest(t.id)))
       .map((t) => ({ id: t.id, what: t.statement, state: t.state, detail: "no red run recorded" }))
       .sort(byId),
+    // Waiting to land, which is a move somebody still owes it rather than a fault — so it
+    // is a box of its own and is not `cook`ed into the fold. Newest first: the story just
+    // delivered is the one whose landing is next.
     delivered: storyRows
       .filter((s) => s.state === "delivered" && only(walk.ofStory(s.id)))
       .sort((a, b) => (a.updated_at === b.updated_at ? 0 : a.updated_at < b.updated_at ? 1 : -1))
       .slice(0, 20)
-      .map((s) => cook(s.updated_at, { id: s.id, what: s.title, state: s.state, detail: "story" })),
+      .map((s) => ({ id: s.id, what: s.title, state: s.state, detail: "story" })),
     // Delivered, and the last thing that tried to land it could not. A filter rather than
     // a state: the story is delivered, and stays delivered — what is wrong is between its
     // branch and master, and only the thing holding a repository can see it. Stories 138
@@ -689,6 +687,18 @@ function snapshot(
             return [{ id: s.id, what: s.title, state: s.state, detail: `${c.branch} · ${c.reason}` }];
           })
           .sort(byId),
+    // Written down and not begun. `open` holds these and the in-flight work together, which
+    // is two questions in one box; this is the half a person reads when they are asking what
+    // to pick up. The detail is the kind and nothing else — a planned story has no progress
+    // to report, and `entityOf` in the cockpit reads the word to know which table to open.
+    planned: [
+      ...epicRows
+        .filter((e) => e.state === "planned" && only(walk.ofRelease(e.release_id)))
+        .map((e) => ({ id: e.id, what: e.title, state: e.state, detail: "epic" })),
+      ...storyRows
+        .filter((s) => s.state === "planned" && only(walk.ofStory(s.id)))
+        .map((s) => ({ id: s.id, what: s.title, state: s.state, detail: "story" })),
+    ].sort((a, b) => (a.detail === b.detail ? a.id - b.id : a.detail < b.detail ? -1 : 1)),
     // A story carries how far it has got: tasks done out of tasks that exist.
     open: [
       ...epicRows
