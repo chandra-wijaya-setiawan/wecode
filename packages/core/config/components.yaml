@@ -144,7 +144,7 @@ components:
     package: ui
     layer: client
     component: true
-    owns: the screens a person reads stated as ports — what the index of boxes must say, said once and without naming a renderer. The renderers behind it — ink for a terminal, wireframe for a picture — draw those lines and decide nothing
+    owns: the screens a person reads stated as ports — what the index of boxes must say, said once and without naming a renderer. The renderers behind it — ink for a terminal, wireframe for a picture — draw those lines and decide nothing. It also judges what was drawn — whether one capture of a screen is self-consistent, and what is different between two of them
     modules: [adapters/ink, check, diff, index, ports, wireframe]
 
   tui:
