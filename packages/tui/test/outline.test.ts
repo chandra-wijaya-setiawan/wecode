@@ -139,8 +139,10 @@ describe("what it opens at", () => {
 
   it("indents each level under its parent", () => {
     // The guide carries the whole indent now that the label is out of the tree cell, so
-    // the depth is read off the connector prefix rather than off where the label starts.
-    const indent = (what: string): number => splitTree(row(what))[0].length;
+    // the depth is read off the connector rather than off where the label starts — and
+    // off the connector alone, the marker having been pulled right against the id.
+    const indent = (what: string): number =>
+      (/^(?:[│ ]{2})*(?:[├└]─)?/.exec(row(what))?.[0] ?? "").trimEnd().length;
     expect(indent("1.0.0")).toBeGreaterThan(indent("storefront"));
     expect(indent("account recovery")).toBeGreaterThan(indent("1.0.0"));
     expect(indent("password reset")).toBeGreaterThan(indent("account recovery"));
