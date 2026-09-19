@@ -3,6 +3,10 @@
  *  drawn grouped, marked and with its why, and that none of the words doing it live in a
  *  .tsx file. */
 import { GREEN, RED, YELLOW, coloured, plain } from "./force-color.js";
+
+/** chalk's `gray` is the bright-black foreground, closed by the same reset any other
+ *  colour is — so `coloured` reads it like the rest. */
+const DIM = 90;
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -182,13 +186,15 @@ describe("the colours are configuration", () => {
   });
 
   it("still draws the board's colours, now that they come from the file", () => {
-    const rows = [row(1, "gave up", "failed"), row(2, "waits", "waiting"), row(3, "s", "delivered")];
+    const rows = [row(1, "ask", "approval"), row(2, "waits", "waiting"), row(3, "s", "delivered")];
     const out = render(
       createElement(List, { rows, height: 3, cursor: null, width: 40 }),
     ).lastFrame() ?? "";
+    // Red is the ask, dim is the settled row, and green is nowhere on the board.
     expect(coloured(out, RED)).toEqual([plain(out).split("\n")[0]]);
     expect(coloured(out, YELLOW)).toEqual([plain(out).split("\n")[1]]);
-    expect(coloured(out, GREEN)).toEqual([plain(out).split("\n")[2]]);
+    expect(coloured(out, DIM)).toEqual([plain(out).split("\n")[2]]);
+    expect(coloured(out, GREEN)).toEqual([]);
   });
 
   it("takes a new state into a group without a line of code changing", () => {

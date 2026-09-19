@@ -4,6 +4,10 @@ import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
 import { List, columnWidths, type ListProps, type Row } from "../src/list.js";
 
+/** chalk's `gray` is the bright-black foreground, closed by the same reset any other
+ *  colour is — so `coloured` reads it like the rest. */
+const DIM = 90;
+
 const row = (id: number, what: string, state = "ready", detail = ""): Row => ({
   id,
   what,
@@ -162,26 +166,31 @@ describe("the list's cursor", () => {
 describe("the list's colour", () => {
   it("is the row's state and nothing else", () => {
     const rows = [
-      row(1, "gave up", "failed"),
+      row(1, "land it?", "approval"),
       row(2, "waits", "waiting"),
       row(3, "shipped", "delivered"),
       row(4, "going", "in_progress"),
+      row(5, "gave up", "failed"),
     ];
-    const out = list(rows, 5, null, 80);
+    const out = list(rows, 6, null, 80);
 
-    expect(coloured(out, RED)).toEqual(["#1  failed       gave up"]);
+    // Red is the row that cannot move until a person moves it, and nothing else — a
+    // failed row is the runner's own, so it is drawn as plain as an in_progress one.
+    expect(coloured(out, RED)).toEqual(["#1  approval     land it?"]);
     expect(coloured(out, YELLOW)).toEqual(["#2  waiting      waits"]);
-    expect(coloured(out, GREEN)).toEqual(["#3  delivered    shipped"]);
+    expect(coloured(out, GREEN)).toEqual([]);
+    expect(coloured(out, DIM)).toEqual(["#3  delivered    shipped"]);
     // A state with nothing to say about itself is drawn plain, and so is the tally.
     expect(plain(out).split("\n")[3]).toBe("#4  in_progress  going");
     expect(out).toContain("#4  in_progress  going");
+    expect(out).toContain("#5  failed       gave up");
   });
 
   it("leaves the tally uncoloured, whatever the rows it counts were", () => {
-    const rows = [1, 2, 3].map((i) => row(i, `t${i}`, "failed"));
+    const rows = [1, 2, 3].map((i) => row(i, `t${i}`, "approval"));
     const out = list(rows, 2, null, 80);
 
-    expect(coloured(out, RED)).toEqual(["#1  failed  t1"]);
+    expect(coloured(out, RED)).toEqual(["#1  approval  t1"]);
     expect(out).toContain("… and 2 more");
   });
 });

@@ -75,12 +75,28 @@ services:
 # `groups` is drawn in the order given — what wants a person first, what is already done
 # last. A state no group claims falls to `ungrouped`, where the why is the state's own word.
 # Adding a state to a group, or a group to the box, is an edit to this file and nothing else.
+# Red is spent on one thing: a row that cannot move until a person moves it. There is
+# exactly one of those — an assignment parked on a question — and the states it is drawn
+# under are the kinds of question it asks (core's ASK_KINDS), because that is what the
+# Needs you box puts in a row's state column. Nothing else on the board earns red.
+#
+# It used to be spent on `gave_up`, which is the machine's own bucket: a task out of
+# attempts is retried, re-queued or dropped by the runner without anybody being told, so
+# an alarm there is an alarm nobody can answer. And `settled` used to be green, which made
+# twenty finished rows the brightest thing on a screen whose whole job is to show you the
+# one row that is not finished. So: cooking's own states are drawn in the plain
+# foreground with their mark carrying the meaning, settled is dim, and red is red.
 cooking:
   groups:
+    - name: wants_you
+      why: wants you
+      mark: "?"
+      colour: red
+      states: [approval, input, option]
     - name: gave_up
       why: gave up
       mark: "x"
-      colour: red
+      colour: ""
       states: [failed, dropped]
     - name: waits_on_you
       why: waits on you
@@ -95,7 +111,7 @@ cooking:
     - name: settled
       why: nothing left to do
       mark: "+"
-      colour: green
+      colour: gray
       states: [delivered, released, done, passed, met, accepted, succeeded]
   # No group claims it: nothing to say beyond the state itself, and no mark worth spending.
   ungrouped:
