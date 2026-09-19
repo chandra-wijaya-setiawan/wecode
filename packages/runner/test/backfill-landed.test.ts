@@ -40,13 +40,34 @@ beforeEach(() => {
 });
 
 /** A story `delivered` with a task under it and no marker anywhere: the drift the doctor
- *  names, in the shape the five real ones have. */
+ *  names, in the shape the five real ones have.
+ *
+ *  The chain under it is settled too, and that is not decoration: a delivered story with a
+ *  `ready` task beneath it is a second, different drift — `nothing_is_open_under_a_settled_parent`
+ *  names the task — and these tests are about the missing marker alone. */
 function deliveredStory(title: string): { story: number } {
   const story = make.story(epic, title);
   const criteria = make.criteria(make.requirement(story, "it works"), `${title} is accepted`);
   make.task(make.acceptanceTest(criteria, `${title} passes`, "manual"), `build ${title}`);
   db.prepare("UPDATE story SET state = 'delivered' WHERE id = ?").run(story);
+  settleUnder(story);
   return { story };
+}
+
+/** Every descendant of a story put into its own success state, by direct SQL for the same
+ *  reason the story above is: the fixture is asserting about a record that already got
+ *  here, not about the transitions that would have brought it. */
+function settleUnder(story: number): void {
+  db.prepare("UPDATE requirement SET state = 'met' WHERE story_id = ?").run(story);
+  db.prepare(
+    "UPDATE acceptance_criteria SET state = 'accepted' WHERE requirement_id IN (SELECT id FROM requirement WHERE story_id = ?)",
+  ).run(story);
+  db.prepare(
+    "UPDATE acceptance_test SET state = 'passed' WHERE parent_id IN (SELECT ac.id FROM acceptance_criteria ac JOIN requirement r ON r.id = ac.requirement_id WHERE r.story_id = ?)",
+  ).run(story);
+  db.prepare(
+    "UPDATE task SET state = 'done' WHERE acceptance_test_id IN (SELECT at.id FROM acceptance_test at JOIN acceptance_criteria ac ON ac.id = at.parent_id JOIN requirement r ON r.id = ac.requirement_id WHERE r.story_id = ?)",
+  ).run(story);
 }
 
 /** A commit on the base whose subject is exactly what `wecode land` writes. */

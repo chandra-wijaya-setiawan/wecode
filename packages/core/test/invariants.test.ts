@@ -249,6 +249,9 @@ const broken: Snapshot = {
     node("story", 1, "reset", "dropped", { parent_id: 1 }),
     node("story", 2, "lockout", "delivered", { parent_id: 2 }),
     node("story", 3, "unlock", "in_progress", { parent_id: 2 }),
+    // `met`, over a criteria still in_progress: the child of a settled parent, which is the
+    // one shape only the upward check sees.
+    node("requirement", 1, "one-change", "met", { parent_id: 1 }),
     node("acceptance_criteria", 1, "emailed", "in_progress", { parent_id: 1 }),
     node("acceptance_test", 1, "mail-arrives", "ready", { parent_id: 1 }),
     node("acceptance_test", 2, "mail-bounces", "failed", { parent_id: 1 }),
@@ -272,6 +275,10 @@ describe("one pass", () => {
   it("names the entity that broke it, never its parent or its child", () => {
     expect(named(checkRecord(broken)).sort()).toEqual(
       [
+        "acceptance_criteria#1 emailed",
+        // Twice: it has a failed test with no open task, and it is itself open under a
+        // requirement that is met. Two sentences, two findings, and both name the criteria
+        // rather than the requirement over it.
         "acceptance_criteria#1 emailed",
         "acceptance_test#1 mail-arrives",
         "epic#1 recovery",
