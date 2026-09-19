@@ -119,6 +119,13 @@ components:
     owns: checks wecode against itself, heals what it safely can, and proposes the rest as a chore
     modules: [doctor, healer, ceiling, screens-check]
 
+  heartbeat:
+    package: runner
+    layer: service
+    component: true
+    owns: saying the runner process is alive, on a clock of its own — so a long tick is never read as a dead runner
+    modules: [heartbeat]
+
   runner surface:
     package: runner
     layer: surface
