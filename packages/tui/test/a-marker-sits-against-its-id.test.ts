@@ -51,8 +51,9 @@ const screen = (): string[] => {
 
 describe("padding the tree cell", () => {
   it("spends the padding between the guide and the marker, not after the marker", () => {
+    // What it is spent *on* is the-tree-cell-is-contiguous's: the branch runs across it.
     expect(padTree("-", 5)).toBe("    -");
-    expect(padTree("└─+", 5)).toBe("└─  +");
+    expect(padTree("└─+", 5)).toBe("└───+");
   });
 
   it("leaves a cell already as wide as its column alone", () => {
