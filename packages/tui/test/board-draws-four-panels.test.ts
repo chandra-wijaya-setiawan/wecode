@@ -24,7 +24,7 @@ import { App } from "../src/app.js";
 import { Cockpit } from "../src/screens.js";
 import { loadViews } from "../src/views.js";
 import { loadServices } from "../src/services.js";
-import { seed } from "./seed.js";
+import { ins, seed, T } from "./seed.js";
 
 const PANELS = 4;
 
@@ -109,6 +109,41 @@ describe("the board draws four panels", () => {
     const at = out.findIndex((l) => l.startsWith(`┌─ ${fold?.title} (`));
     const end = out.findIndex((l, i) => i > at && l.startsWith("└"));
     expect(out.slice(at + 1, end).join("\n")).toContain("send the reset mail");
+  });
+
+  /** Which four they are is views.yaml's, but *that running is one of them* is not a
+   *  rename — it is the fold's shape, and it is the same decision MACHINE_SIDE records.
+   *  Asserted on the filters rather than the titles: a filter is a name the code knows. */
+  it("spends one of the four on running, and none of them on projects", () => {
+    const filters = views.map((v) => v.filter);
+    expect(filters, `the page is ${filters.join(", ")}`).toContain("running");
+    expect(filters).not.toContain("projects");
+  });
+
+  /** And it draws rows, not just a border: the worker holding a row is what the box is
+   *  read for, and a running row that only the fold had was sorted by how long it had sat
+   *  — the far end of the list from where anyone looked for it. */
+  it("draws the running assignment in the running panel, with the worker that holds it", () => {
+    const worker = ins(db, "INSERT INTO worker (slug,name,role,kind,created_at,updated_at) VALUES (?,?,?,?,?,?)", "claude-1", "claude-1", "engineer", "agent", T, T);
+    ins(
+      db,
+      `INSERT INTO assignment (slug,objective_type,objective_id,worker_id,scope,budget,worktree,phase,spent,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      "a1", "task", tree.task, worker, "{}", "{}", "/tmp/wt", "running", "{}", T, T,
+    );
+    app.refresh();
+
+    const title = views.find((v) => v.filter === "running")?.title;
+    const out = lines();
+    const at = out.findIndex((l) => l.startsWith(`┌─ ${title} (1)`));
+    expect(at, `no running panel with a row in it`).toBeGreaterThanOrEqual(0);
+    const end = out.findIndex((l, i) => i > at && l.startsWith("└"));
+    const box = out.slice(at + 1, end).join("\n");
+    expect(box).toContain("send the reset mail");
+    expect(box).toContain("claude-1");
+
+    // And it is that panel's row, not the fold's: the fold is what nobody is holding.
+    expect(board(db).cooking.some((r) => r.state === "running")).toBe(false);
   });
 
   it("loses no row to the fold: each is drawn once, on one panel", () => {
