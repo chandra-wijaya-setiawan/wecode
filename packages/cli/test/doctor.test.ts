@@ -171,7 +171,11 @@ describe("wecode doctor", () => {
     expect(said()).toContain("999");
   });
 
-  it("writes nothing to the database it is inspecting", () => {
+  /** The pass appends its own row to `doctor_run` — that is `a-clean-pass-is-recorded` —
+   *  and that is the only thing it writes. The record it is grading is left exactly as it
+   *  was found, the ledger included: a ledger line is something that happened to the work,
+   *  and a pass that changed nothing did not happen to the work. */
+  it("writes no ledger line and changes no state in the record it inspects", () => {
     setState("story", ids.story, "delivered");
     const before = db.prepare("SELECT count(*) AS n FROM ledger").get() as { n: number };
 
