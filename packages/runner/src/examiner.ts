@@ -222,6 +222,23 @@ export function budgetsOf(cwd: string): readonly TimeBudget[] {
   });
 }
 
+/** What an artefact that declares nothing is given, where the tree declares nothing either.
+ *  A last resort, not a policy: ten minutes suits a unit test and starves a cold full suite,
+ *  which is the whole reason a tree gets to say otherwise. */
+export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** The tree's own default, in milliseconds, or null where it names none. `timeout:` covers
+ *  the artefacts worth naming one by one; a tree whose every proof is slow — a cold monorepo,
+ *  an emulator — should not have to list them all to say so, and the person who owns the
+ *  build says it here rather than in a `.ts`.
+ *
+ *  Anything but a positive number is no declaration at all: a typo leaves the built-in limit
+ *  in place rather than running every proof with no budget. */
+export function defaultTimeoutOf(cwd: string): number | null {
+  const raw = projectConfig(cwd)["timeout_default"];
+  return typeof raw === "number" && raw > 0 ? raw * 1000 : null;
+}
+
 /** The milliseconds an artefact declared for itself, or `fallback` where it declared none.
  *  Matched by name, the way `entry:` is: a `proof` is a substring the command carries, so
  *  one declaration covers the narrowed re-run of that same command too — it is the artefact
@@ -350,7 +367,11 @@ export class Examiner {
 
   constructor(
     private readonly db: DatabaseSync,
-    private readonly timeoutMs = 10 * 60 * 1000,
+    /** An explicit limit from the caller, which beats anything the tree declares by default:
+     *  a caller that names a number has a reason the tree cannot know. Left undefined — as
+     *  the daemon leaves it — the tree's `timeout_default:` decides, and the built-in only
+     *  where the tree is silent. */
+    private readonly timeoutMs?: number,
   ) {
     this.verbs = new Verbs(new Engine(db));
     // Runner-owned, beside the record rather than in it: the ledger says what is true of the
@@ -636,7 +657,8 @@ export class Examiner {
    *  tree being examined, not off this runner's checkout, for the same reason `prepare:` is:
    *  it is a fact about the work in that tree. */
   private async runOne(artefact: string, cwd: string): Promise<{ ok: boolean; output: string }> {
-    const timeout = timeoutFor(artefact, budgetsOf(cwd), this.timeoutMs);
+    const fallback = this.timeoutMs ?? defaultTimeoutOf(cwd) ?? DEFAULT_TIMEOUT_MS;
+    const timeout = timeoutFor(artefact, budgetsOf(cwd), fallback);
     try {
       const { stdout, stderr } = await exec("bash", ["-lc", artefact], {
         cwd,
