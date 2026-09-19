@@ -39,6 +39,13 @@ describe("a task is about the work, not the attempt", () => {
   it("is ready only through a guard", () => {
     expect(transitionFor(set.task, "planned", "start")?.guard).toBe("task_may_be_attempted");
   });
+
+  /** A transition names one guard, so the branch question and the tests question are asked
+   *  under the single name the registry binds. `finish-asks-the-branch.test.ts` proves the
+   *  binding; this only holds the table to naming a guard at all. */
+  it("is done only through a guard", () => {
+    expect(transitionFor(set.task, "ready", "finish")?.guard).toBe("every_task_test_settled");
+  });
 });
 
 describe("check", () => {

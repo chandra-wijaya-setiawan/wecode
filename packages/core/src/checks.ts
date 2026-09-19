@@ -1,6 +1,15 @@
 import type { DatabaseSync } from "node:sqlite";
 import { queries, table, type Dialect } from "./db.js";
-import { ALLOW, refuse, type Guard, type GuardName, type GuardRegistry } from "./guards.js";
+import {
+  ALLOW,
+  all,
+  refuse,
+  taskFinishesOnItsOwnWork,
+  type Guard,
+  type GuardName,
+  type GuardRegistry,
+  type TaskWork,
+} from "./guards.js";
 import type { Repo } from "./repo.js";
 import type { StatefulEntity } from "./types.js";
 
@@ -136,6 +145,39 @@ const acceptanceTest = table<{
   red_at_base_sha: string | null;
 }>("acceptance_test", ["id", "slug", "statement", "red_at_base_sha"]);
 
+/** The part of a task a guard reads to name the branch its work was done on. */
+const taskNaming = table<{ id: number; slug: string }>("task", ["id", "slug"]);
+
+/** The attempts made on something, and what each one committed. An attempt that wrote
+ *  nothing records no sha, which is how "the branch holds no commit of its own" is
+ *  visible from the record alone. */
+const attempt = table<{
+  objective_type: string;
+  objective_id: number;
+  commit_sha: string | null;
+}>("assignment", ["objective_type", "objective_id", "commit_sha"]);
+
+/** What the record knows about the branch a task was worked on.
+ *
+ *  The branch is named from the slug, the same way the runner names it when it cuts one.
+ *  Its own commits are the attempt commits recorded against the task: a refresh merge is
+ *  never one of them, because nothing records a sha for a merge nobody's attempt made. */
+const workOnTask = (repo: Repo) => (id: number): TaskWork | null => {
+  const q = queriesOf(repo);
+  const task = q.selectFrom(taskNaming).select(["slug"]).where("id", "=", id).get();
+  if (task === null) return null;
+  const attempts = q
+    .selectFrom(attempt)
+    .select(["commit_sha"])
+    .where("objective_type", "=", "task")
+    .where("objective_id", "=", id)
+    .all();
+  const ownCommits = attempts
+    .map((a) => a.commit_sha)
+    .filter((sha): sha is string => sha !== null && sha.trim() !== "");
+  return { branch: `task/${task.slug}`, ownCommits };
+};
+
 /** Whether a test names something to run. One definition, because two guards ask it and a
  *  copy that drifted would let one of them through. */
 const hasArtefact = (repo: Repo, entity: string, id: number): boolean => {
@@ -158,7 +200,15 @@ export function guards(repo: Repo): Readonly<Record<GuardName, Guard>> {
     every_criteria_accepted_or_dropped: allChildrenSucceeded(repo, ["accepted"]),
     every_criteria_dropped: allChildrenDropped(repo),
     every_acceptance_test_settled: allChildrenSucceeded(repo, ["passed"]),
-    every_task_test_settled: allChildrenSucceeded(repo, ["passed"]),
+    /** The guard on `task.finish`, and the only one. A transition names one guard, so the
+     *  two questions a finish has to answer are asked by one built from both: the tests
+     *  agree, *and* the branch holds a commit the task wrote. Tests alone are not enough —
+     *  a task whose task_tests were dropped settles them all and would finish on an empty
+     *  branch, leaving the record saying work landed that no commit carries. */
+    every_task_test_settled: all(
+      allChildrenSucceeded(repo, ["passed"]),
+      taskFinishesOnItsOwnWork(workOnTask(repo)),
+    ),
 
     /** A test whose artefact is missing is unrunnable, and silently so. */
     artefact_resolves: ({ entity, id }) =>
