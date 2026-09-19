@@ -335,9 +335,15 @@ const newestRun = (a: TaskTestRow, b: TaskTestRow): number => {
 };
 
 /** The board asks a person two questions, and only one of them is theirs: *what waits on
- *  you*, and *what is cooking*. `needs_human` is the first. These five are the machine's own
- *  business, and five boxes of it is five places to look for the one row that has stopped
+ *  you*, and *what is cooking*. `needs_human` is the first. These four are the machine's own
+ *  business, and four boxes of it is four places to look for the one row that has stopped
  *  moving.
+ *
+ *  `running` was folded here and is not any more. The fold is ordered by age because age is
+ *  what ranks rows nobody is holding against each other — and a running row is held: what
+ *  is asked of it is which worker and how much spent, and it stops being a row at all the
+ *  moment the worker is done. Ranking it by staleness sorted the freshest thing on the
+ *  board to the bottom of the one list it shares with four panels of stuck work.
  *
  *  `projects` and `open` were folded here too, and are not any more: they are not a report
  *  on the machine, they are the tree — the rows `enter` descends from, and the only way into
@@ -350,7 +356,6 @@ const newestRun = (a: TaskTestRow, b: TaskTestRow): number => {
  *  `unmergeable` are absent because no panel draws them: the fold is over what a person is
  *  shown, not over every filter the module can compute. */
 export const MACHINE_SIDE = [
-  "running",
   "stale",
   "queued",
   "failed",
@@ -592,16 +597,17 @@ function snapshot(
     ].sort(byId),
     // pending counts: a worktree is cut and a session is starting. Leaving it out made the
     // board say nothing was running while an agent was working.
+    //
+    // Not `cook`ed: this panel is off the fold — see MACHINE_SIDE — so its rows record no
+    // age, and `cooking` never sees them.
     running: assignmentRows
       .filter((a) => (a.phase === "pending" || a.phase === "running") && only(walk.ofAssignment(a)))
-      .map((a) =>
-        cook(a.created_at, {
-          id: a.id,
-          what: objective(a),
-          state: a.phase,
-          detail: `${(a.worker_id === null ? undefined : nameOf.get(a.worker_id)) ?? "?"} · ${minutes(a.created_at, asOf)}m · ${thousands(a.spent)}k`,
-        }),
-      )
+      .map((a) => ({
+        id: a.id,
+        what: objective(a),
+        state: a.phase,
+        detail: `${(a.worker_id === null ? undefined : nameOf.get(a.worker_id)) ?? "?"} · ${minutes(a.created_at, asOf)}m · ${thousands(a.spent)}k`,
+      }))
       .sort(byId),
     needs_human: assignmentRows
       .filter((a) => a.phase === "waiting" && only(walk.ofAssignment(a)))

@@ -39,7 +39,7 @@ import {
   treeDepth,
   type OutlineScope,
 } from "./outline.js";
-import type { View } from "./views.js";
+import { loadOffPage, type View } from "./views.js";
 
 const VIEWS_CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
 
@@ -245,13 +245,20 @@ export class App {
   private typed = "";
   private query = "";
 
-  constructor(db: DatabaseSync, views: readonly View[], machines: MachineSet = loadMachines()) {
+  constructor(
+    db: DatabaseSync,
+    views: readonly View[],
+    machines: MachineSet = loadMachines(),
+    offPage: readonly View[] = loadOffPage(),
+  ) {
     this.db = db;
     this.views = views;
     this.engine = new Engine(db, machines);
     this.facade = new Verbs(this.engine);
     this.repo = new Repo(db);
-    this.keys = boxKeys(views);
+    // `v` reaches every box there is, not only the four the page spends its height on. The
+    // page's own come first, so an off-page box can never take a letter one of them wants.
+    this.keys = boxKeys([...views, ...offPage]);
     this.refresh();
   }
 
