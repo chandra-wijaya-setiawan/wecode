@@ -1367,6 +1367,7 @@ export class Runner {
         return this.refuseChore(chore, `${branch} is the base branch: landing is yours to do, not a chore's`);
       }
       const tree = await trees.storyTree(target.slug, join(this.worktreeRoot(target.repo), `story-${target.slug}`));
+      const claimed = await this.claimedScope(chore, target.repo, branch, scope.scope);
       // The approval guard lives in `start`, so a kind that needs one refuses here and
       // nothing is created for it.
       if (chore.state === "planned") {
@@ -1377,7 +1378,7 @@ export class Runner {
         objective_type: "chore" as "task",
         objective_id: chore.id,
         worker_id: worker,
-        scope: scope.scope,
+        scope: claimed,
         budget: this.opts.choreBudget ?? CHORE_BUDGET,
         worktree: tree,
       });
@@ -1575,6 +1576,52 @@ export class Runner {
     const def = loaded.config.roles[role];
     if (def === undefined) return { ok: false, why: `no role ${role} in ${ROLES_FILE}` };
     return { ok: true, scope: def.scope };
+  }
+
+  /** The scope a chore is actually dispatched under: the role's, narrowed to the files the
+   *  work has to touch when this machine can name them.
+   *
+   *  `system` is declared `write: ["**"]` because a conflict is wherever the conflict is,
+   *  and for a `merge` chore — whose merge is the branch into the base, a graph this tree
+   *  cannot be asked about — that stays the honest answer. A `refresh` is the other
+   *  direction, and there the conflicting paths *are* knowable before a worker is hired:
+   *  `merge-tree` replays base-into-branch off the object store and names them. So the
+   *  refresh gets a scope that says what it writes, and `**` stops being the standing
+   *  authority of every chore.
+   *
+   *  The role's scope is still the ceiling — this only ever narrows — and the fallback is
+   *  the role's own. A merge-tree that cannot answer (no conflict to name, git too old, a
+   *  ref that is gone) must not turn into an empty scope, which would forbid the very
+   *  resolution the chore exists for. */
+  private async claimedScope(chore: Chore, repo: string, branch: string, role: Scope): Promise<Scope> {
+    if (chore.kind !== "refresh") return role;
+    let base: string;
+    try {
+      base = await this.treesFor(repo).integrationBranch();
+    } catch {
+      return role;
+    }
+    const conflicted = await this.conflictedPaths(repo, branch, base);
+    return conflicted.length === 0 ? role : { ...role, write: conflicted };
+  }
+
+  /** The paths a base-into-branch merge would conflict on, read off the object store rather
+   *  than off a working tree: `merge-tree` writes no files and needs no checkout, so asking
+   *  costs nothing and cannot wedge the tree the worker is about to be handed.
+   *
+   *  Exit 1 is the answer, not the failure — it is what git returns when the merge conflicts
+   *  — and with `--name-only --no-messages` stdout is the written tree's oid on the first
+   *  line and one conflicting path on each line after it. Any other exit is no answer. */
+  private async conflictedPaths(repo: string, branch: string, base: string): Promise<string[]> {
+    const args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", branch, base];
+    const out = await exec("git", args, { cwd: repo })
+      .then(() => "")
+      .catch((err: { code?: number; stdout?: string }) => (err.code === 1 ? (err.stdout ?? "") : ""));
+    return out
+      .split("\n")
+      .slice(1)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
   }
 
   /** One read per repository per tick. A tick dispatches every planned chore, and six of
