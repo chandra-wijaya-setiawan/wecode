@@ -37,7 +37,6 @@ over:
   packages/runner/test/codex-adapter.test.ts: 500
   packages/runner/test/typed-daemon.test.ts: 465
   packages/runner/test/typed-foreman.test.ts: 447
-  packages/runner/test/land-chore.test.ts: 437
   packages/explorer/test/repo-explorer.test.ts: 434
   packages/core/src/create.ts: 427
   packages/runner/src/healer.ts: 420
