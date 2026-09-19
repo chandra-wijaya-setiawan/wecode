@@ -8,7 +8,7 @@ import { Box, Text } from "ink";
 // By path, as app.ts imports it: index.ts names what board.ts offers one export at a time.
 import type { AssignmentFacts } from "@wecode/core/dist/board.js";
 import { boxKeys, type App, type Screen } from "./app.js";
-import { clip, columnWidths, List, type Column, type Row } from "./list.js";
+import { clip, columnWidths, List, sectionMark, type Column, type Row } from "./list.js";
 import { Outline, OUTLINE } from "./outline.js";
 import { loadServices, Services, SERVICE_ROWS } from "./services.js";
 
@@ -16,16 +16,12 @@ import { loadServices, Services, SERVICE_ROWS } from "./services.js";
  *  would put a disk read on the refresh tick. */
 const SERVICES = loadServices();
 
-/** Every column, on every screen. views.yaml declares title, filter, rows and empty but no
- *  columns, so there is nothing per-box to honour here: a box and its full-height page
- *  differ only in which rows they keep. */
+/** Every column, on every screen: a box and its full-height page differ only in rows. */
 export const COLUMNS: readonly Column[] = ["#", "what", "state", "detail"];
 
-/** The keys each screen answers, in the order a reader scans them. App.key handles j k g G
- *  + - enter esc q r v a; esc and +/- are the two a screen can lack, because the dashboard
- *  has nothing to pop and only the outline folds. Everything else is on every screen. A
- *  function rather than a constant: the outline names its own key, and this module and that
- *  one each draw part of the other, so the list cannot be built at import time. */
+/** The keys each screen answers, in scan order. esc and +/- are the two a screen can lack.
+ *  A function rather than a constant: the outline names its own key, and this module and
+ *  that one each draw part of the other, so the list cannot be built at import time. */
 const KEYS = (): readonly (readonly [string, string])[] => [
   ["j/k", "move"],
   ["g/G", "top/end"],
@@ -55,15 +51,16 @@ const RULE = 1;
 
 interface PanelProps {
   readonly title: string;
+  /** A section's glyph, from views.yaml. A Panel has none: a page is one thing. */
+  readonly mark?: string | undefined;
   readonly letter?: string | undefined;
   readonly width: number;
   readonly height: number;
   readonly children: ReactNode;
 }
 
-/** A bordered box whose title sits in its top border, carrying the count and the letter
- *  `v` opens it by. The title is drawn absolutely one row above the content, which is the
- *  border row — Ink has no title of its own, and this is the whole of the arithmetic. */
+/** A bordered box whose title sits in its top border with the count and the letter `v`
+ *  opens it by. Ink has no title, so it is drawn absolutely onto the border row. */
 export function Panel({ title, letter, width, height, children }: PanelProps) {
   const head = clip(` ${label(title, letter)} `, Math.max(width - 4, 0));
   return (
@@ -82,8 +79,8 @@ export function Panel({ title, letter, width, height, children }: PanelProps) {
   );
 }
 
-/** The title of a region, in the words the box pages put in their border: the name, the
- *  letter `v` opens it by, and the count the caller has already folded into the title. */
+/** A region's name, with the letter `v` opens it by; the count is already in `title`. The
+ *  letter is not capitalised with the name: it is the key a person types, not a word. */
 const label = (title: string, letter: string | undefined): string =>
   `${title}${letter === undefined ? "" : ` [${letter}]`}`;
 
@@ -95,9 +92,14 @@ const label = (title: string, letter: string | undefined): string =>
  *  So the chrome is one line and the height goes back to the rows. The name sits in the
  *  rule rather than above it, for the same reason a border's sat in its top edge: a section
  *  holding nothing is then one line of chrome and not two. The full-height pages keep their
- *  borders — two lines once is not sixteen, and it is what tells a page from the bar. */
-function Section({ title, letter, width, height, children }: PanelProps) {
-  const head = clip(`── ${label(title, letter)} `, width);
+ *  borders — two lines once is not sixteen, and it is what tells a page from the bar.
+ *
+ *  The head is a glyph and then the name in capitals. Eight rules down a page all begin
+ *  `── ` and then a word in the same case as the words under them, and a reader scanning
+ *  for where a section starts was reading the words to find out. The capitals answer that
+ *  without being read, and the glyph is the section's own — the same one its rows carry. */
+function Section({ title, mark, letter, width, height, children }: PanelProps) {
+  const head = clip(`── ${mark} ${label(title.toUpperCase(), letter)} `, width);
   return (
     <Box flexDirection="column" flexShrink={0} width={width} height={height}>
       <Text wrap="truncate">{head + "─".repeat(Math.max(width - head.length, 0))}</Text>
@@ -125,10 +127,9 @@ function boardRows(app: App): Row[] {
   return app.views.flatMap((v) => board[v.filter].map((row) => ({ ...row })));
 }
 
-/** Where each box's rows start in App.lines(), which is every box's rows end to end. The
- *  cursor is one number over that whole run, so a box has to know its own offset to tell
- *  whether the cursor is in it. A box is as tall as the rows it has, up to the height it
- *  declares: an empty box that kept its declared height would push the rest off screen. */
+/** Where each box's rows start in App.lines(): the cursor is one number over every box's
+ *  rows end to end, so a box needs its offset to tell whether it holds the cursor. A box is
+ *  as tall as the rows it has, up to the height it declares. */
 function boxes(
   app: App,
   rows: readonly Row[],
@@ -173,7 +174,12 @@ export function Dashboard({ app, width }: ScreenProps) {
   const serviceRows = SERVICE_ROWS + app.boardNow().projects.length;
   return (
     <>
-      <Section title={SERVICES.title} width={width} height={serviceRows + RULE}>
+      <Section
+        title={SERVICES.title}
+        mark={sectionMark("services")}
+        width={width}
+        height={serviceRows + RULE}
+      >
         <Services app={app} width={width} config={SERVICES} />
       </Section>
       {boxes(app, rows).map((box) => {
@@ -184,6 +190,7 @@ export function Dashboard({ app, width }: ScreenProps) {
           <Section
             key={box.name}
             title={`${box.title} (${box.rows.length})`}
+            mark={sectionMark(box.name)}
             letter={key.get(box.name)}
             width={width}
             height={box.height + RULE}
@@ -240,11 +247,9 @@ export function BoxPage({
   );
 }
 
-/** How the children stand, most of them first and ties by name, as `ready 2 · done 1`.
- *  A count per state rather than the states in row order: the block is read to learn
- *  whether the record is waiting on one thing or on twenty, and a list that repeated
- *  `ready` twenty times would answer that only by being counted. An em dash when there are
- *  none, because a blank line reads as a line that failed to draw. */
+/** How the children stand, most first and ties by name, as `ready 2 · done 1`. A count per
+ *  state, not the states in row order: the block is read to learn whether the record waits
+ *  on one thing or twenty. An em dash for none — a blank line reads as a failed draw. */
 export function tally(rows: readonly Row[]): string {
   const counts = new Map<string, number>();
   for (const row of rows) counts.set(row.state, (counts.get(row.state) ?? 0) + 1);
@@ -257,10 +262,9 @@ export function tally(rows: readonly Row[]): string {
 
 type Field = readonly [string, string];
 
-/** A value broken onto as many lines as it needs at this width, on spaces where there are
- *  any and mid-word where a single word is wider than the room. Ink would wrap this for us,
- *  but only by wrapping the whole `name  value` line back to column zero, and a continuation
- *  under the gutter is what makes the names a column you can run your eye down. */
+/** A value broken onto as many lines as it needs, on spaces or mid-word. Ink would wrap
+ *  the whole `name  value` line back to column zero; a continuation under the gutter is
+ *  what makes the names a column you can run your eye down. */
 function fold(value: string, width: number): string[] {
   if (width <= 0) return [""];
   const lines: string[] = [];
@@ -377,17 +381,13 @@ export function fit(lines: readonly string[], rows: number, width: number): stri
 
 /** What is known about one assignment, on a screen of its own, filling it.
  *
- *  Half the fields are the board's row — the objective, the phase, and the line under it
- *  that is the worker and the spend while it runs and the question while it waits — because
- *  the board already decided what an assignment is worth saying and a second reading would
- *  be an opinion the dashboard's row could disagree with. The other half is the part four
- *  columns had no room for: what it was allowed, what it has used, and when it last spoke.
- *  Neither half restates the other, so neither can contradict it.
+ *  Half the fields are the board's row, because the board already decided what an
+ *  assignment is worth saying and a second reading could disagree with it. The other half
+ *  is what four columns had no room for: what it was allowed, what it has used, and when it
+ *  last spoke. Neither half restates the other, so neither can contradict it.
  *
- *  The values wrap rather than clip: a question is the whole reason the page exists for a
- *  waiting assignment, and half a question with an ellipsis on it is a page you have to
- *  leave to read. No children box — an assignment is the leaf the board points at, and an
- *  empty box saying so would cost two lines to say nothing. */
+ *  The values wrap rather than clip: half a question with an ellipsis on it is a page you
+ *  have to leave to read. No children box — an assignment is a leaf. */
 export function Assignment({
   screen,
   facts,
