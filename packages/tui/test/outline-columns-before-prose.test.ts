@@ -98,7 +98,9 @@ describe("down the drawn tree", () => {
 
   it("puts the id, type and state between the guide and the label on the real tree", () => {
     for (const line of screen()) {
-      expect(line, line).toMatch(/^[│ ]*(?:[├└]─)? *[-+ ] {2}#\d+\s+\w{3,4}\s+\w{3,4}\s+\S/);
+      // The guide reaches the marker unbroken where there is one — see
+      // the-tree-cell-is-contiguous — and a root's blank columns lead its marker instead.
+      expect(line, line).toMatch(/^(?:[│ ]{2})*(?:[├└]─+| *)[-+ ] {2}#\d+\s+\w{3,4}\s+\w{3,4}\s+\S/);
     }
   });
 });
