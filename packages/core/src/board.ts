@@ -20,18 +20,15 @@ export interface Board {
   readonly failed: readonly Row[];
   readonly dropped: readonly Row[];
   readonly unproven: readonly Row[];
-  /** Every epic and story still open — planned and in_progress alike, not future work.
-   *  Off the page for exactly that reason: a box that holds both answers no question, so
-   *  `planned` draws the half nobody has picked up and the outline draws the rest. */
+  /** Every epic and story still open, planned and in_progress alike. Off the page for that
+   *  reason: `planned` draws the half nobody has picked up and the outline draws the rest. */
   readonly open: readonly Row[];
-  /** Every epic and story nobody has started. What is written down and not begun is the
-   *  question *what is next*, which is a different one from *what is moving*. */
+  /** Every epic and story nobody has started — *what is next*, not *what is moving*. */
   readonly planned: readonly Row[];
   readonly delivered: readonly Row[];
   readonly unmergeable: readonly Row[];
   /** `MACHINE_SIDE`'s panels as one list, oldest first. A group like any other, so a box
-   *  can name it in views.yaml — the fold is what the board draws, not a second API
-   *  beside it. */
+   *  can name it in views.yaml — the fold is what the board draws, not a second API. */
   readonly cooking: readonly Row[];
 }
 
@@ -184,15 +181,13 @@ const landConflicts = table<{ story_id: number; branch: string; reason: string }
   "reason",
 ]);
 
-/** The catalogue is a table like any other, so asking whether a table exists is a query
- *  over declared columns rather than a hand-written string. */
+/** The catalogue is a table like any other, so asking whether one exists is a query. */
 const catalogue = table<{ type: string; name: string }>("sqlite_master", ["type", "name"]);
 
 /** Whether a branch merges is a fact about the repository, so the runner owns both the
  *  observation and the table it lands in — `land_conflict (story_id, branch, reason, at)`,
  *  created beside the record the way `landed_branch` and `red_at_base` are. A workspace
- *  that has never run a lander has no such table, and that is not an error: it is a board
- *  with nothing recorded against it. */
+ *  that has never landed has no such table, which is nothing recorded rather than error. */
 export const hasTable = (db: DatabaseSync, name: string): boolean =>
   queries(db).selectFrom(catalogue).select(["name"]).where("type", "=", "table").where("name", "=", name).get() !==
   null;
@@ -201,14 +196,14 @@ export const hasTable = (db: DatabaseSync, name: string): boolean =>
  *  the four copies of the same three phase names that four SQL strings held. */
 const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
 
-/** SQLite's `julianday` reads a bare timestamp as UTC where `Date.parse` would read it as
- *  local time. The record always writes ISO-8601 with a Z, but a hand-edited row may not,
- *  so the Z is supplied rather than assumed. */
+/** SQLite's `julianday` reads a bare timestamp as UTC where `Date.parse` reads it as local
+ *  time. The record writes ISO-8601 with a Z, but a hand-edited row may not, so the Z is
+ *  supplied rather than assumed. */
 const instant = (at: string): number => Date.parse(/([Zz]|[+-]\d\d:?\d\d)$/.test(at) ? at : `${at}Z`);
 
 /** `(julianday('now') - julianday(at)) * 1440` — minutes, unrounded, as the threshold on a
- *  waiting assignment compares them. A timestamp nothing can parse is no elapsed time at
- *  all: the arithmetic was NULL before, and a NULL detail is a row the cockpit cannot draw. */
+ *  waiting assignment compares them. An unparseable timestamp is no elapsed time at all:
+ *  the arithmetic was NULL, and a NULL detail is a row the cockpit cannot draw. */
 const elapsed = (at: string, asOf: number): number => {
   const then = instant(at);
   return Number.isNaN(then) ? 0 : (asOf - then) / 60000;
@@ -218,8 +213,8 @@ const elapsed = (at: string, asOf: number): number => {
 const minutes = (at: string, asOf: number): number => Math.trunc(elapsed(at, asOf));
 
 /** `coalesce(json_extract(a.spent, '$.tokens'), 0) / 1000`, divided the way SQLite divides
- *  it: two integers truncate. Malformed JSON is read as nothing spent — `json_extract`
- *  would have raised, and a board that throws is no board at all. */
+ *  it: two integers truncate. Malformed JSON reads as nothing spent — a board that throws
+ *  on one bad row is no board at all. */
 const thousands = (spent: string | null): number => {
   let tokens: unknown = null;
   try {
@@ -244,10 +239,9 @@ const byId = (a: Row, b: Row): number => a.id - b.id;
  *  and the walk up is the only way to know which: nothing below a project carries a
  *  project_id, so nothing can disagree with it.
  *
- *  A Map per level rather than the five nested subqueries this replaces. The dialect spells
- *  no join, and the walk is the same five steps for every row on every group of the board,
- *  so the levels are read once and stepped through per row. A step that finds nothing is
- *  `null`, which is what a subquery over no rows was.
+ *  A Map per level rather than the five nested subqueries this replaces: the dialect spells
+ *  no join, and the same five steps are taken for every row of every group, so the levels
+ *  are read once. A step that finds nothing is `null`, as a subquery over no rows was.
  *
  *  Each method takes the id of the thing named, so `ofStory` is given a story. The strings
  *  it replaces did not hold to that — `ofStory` read `FROM epic e WHERE e.id = ${id}` while
@@ -319,9 +313,8 @@ class Walk {
 
 /** The one line of a test's output worth carrying. A failing runner says why on its last
  *  line — the assertion, the exception, the exit status — and everything above it is the
- *  part you only need once you have decided to go and look. Trailing blank lines are what
- *  a process's output ends with far more often than not, so the last *non-blank* line is
- *  the one meant here. */
+ *  part you only need once you have decided to go and look. Output ends in blank lines far
+ *  more often than not, so the last *non-blank* line is the one meant here. */
 const WIDTH = 120;
 export function lastLine(output: string | null | undefined): string {
   if (output === null || output === undefined) return "";
@@ -348,16 +341,8 @@ const newestRun = (a: TaskTestRow, b: TaskTestRow): number => {
 /** What is cooking is what is stuck: a task that has given up, and work that has stopped
  *  moving with nobody holding it. Those two, and nothing else.
  *
- *  It was four. `queued` and `delivered` were in it, and they are not stuck — a queued task
- *  is waiting its turn and a delivered story is waiting to land, and both of those are
- *  somebody's next move rather than a fault. Folded together, a red failed row sat in the
- *  same list as ten green delivered ones and the box could not be read at a glance: the one
- *  question it is opened with, *what has gone wrong*, was answered by a list that was mostly
- *  things that had gone right. So they are boxes of their own again, `queue` and
- *  `delivered`, and the fold keeps the two panels that are the same question.
- *
- *  `running` is not here for the same reason it never was: the fold ranks by age, which is
- *  the question to ask of a row nobody is holding, and a running row is held.
+ *  Why it is these two and not `queued`, `delivered` or `running` is argued once, in the
+ *  header of board-is-two-questions.test.ts, which is where it is also held.
  *
  *  Written as `keyof Board` so a panel renamed out from under the fold is a build error
  *  rather than a box that quietly stops being folded. */
@@ -365,19 +350,17 @@ export const MACHINE_SIDE = ["stale", "failed"] as const satisfies readonly (key
 
 /** A cooking row and the instant it has last moved, off its own record.
  *
- *  Kept beside the row rather than on it: `Row` is what the cockpit draws and what the
- *  panels return, and a field only the fold reads has no business there. Nor could the
- *  instant be looked up by id afterwards — an epic and a story can share one, and `stale`
- *  alone gathers rows from four tables. */
+ *  Beside the row rather than on it: a field only the fold reads has no business on what
+ *  the cockpit draws, and the instant cannot be looked up by id afterwards — an epic and a
+ *  story can share one, and `stale` alone gathers rows from four tables. */
 interface Aged {
   readonly since: string;
   readonly row: Row;
 }
 
 /** Oldest first: the smallest instant, then by id, so a tick with nothing moving draws the
- *  same list twice. A row the record cannot date sorts last — an unparseable timestamp is
- *  not evidence of age, and reading it as *now* would put it at the head of the list, which
- *  is the one place a person actually looks. */
+ *  same list twice. A row the record cannot date sorts last — reading an unparseable
+ *  timestamp as *now* would put it at the head, which is the one place a person looks. */
 const sat = (a: Aged): number => {
   const then = instant(a.since);
   return Number.isNaN(then) ? Number.POSITIVE_INFINITY : then;
@@ -389,9 +372,9 @@ const oldestFirst = (a: Aged, b: Aged): number => {
 };
 
 /** The age leads the detail, so it is a column the eye can run down a list whose rows are
- *  otherwise four different kinds of thing. A panel whose detail already says the same
- *  minutes — a refusal's, a waiting assignment's, a running attempt's — does not say them
- *  twice; one that says a different number keeps it, because it is about something else. */
+ *  otherwise four kinds of thing. A panel whose detail already says the same minutes does
+ *  not say them twice; one that says a different number keeps it, being about something
+ *  else. */
 const withAge = (a: Aged, asOf: number): Row => {
   const age = `${minutes(a.since, asOf)}m`;
   const detail = a.row.detail.replace(new RegExp(` · ${age}(?= · |$)`), "");
@@ -409,6 +392,38 @@ export function cooking(db: DatabaseSync, project: number | null = null): readon
  *  how you get back out again, so it always shows the whole workspace. */
 export function board(db: DatabaseSync, project: number | null = null): Board {
   return snapshot(db, project).groups;
+}
+
+/** How long since anything under each project was touched, in milliseconds per project id.
+ *
+ *  A project's beat, and the one part of its pulse the board's groups cannot answer: three
+ *  empty boxes say both *nothing to do* and *nobody has looked since Tuesday*, and this is
+ *  what tells them apart. Nothing below a project carries a project_id, so what moved under
+ *  it is knowable only by the same walk up that places every row.
+ *
+ *  A project nothing can date is absent rather than zero — an unreadable timestamp is no
+ *  evidence of a beat, the way it is no evidence of age in the fold. */
+export function silence(db: DatabaseSync, asOf: number = Date.now()): ReadonlyMap<number, number> {
+  const q = queries(db);
+  const epicRows = q.selectFrom(epics).all();
+  const storyRows = q.selectFrom(stories).all();
+  const taskRows = q.selectFrom(tasks).all();
+  const walk = new Walk(db, epicRows, storyRows, taskRows, q.selectFrom(acceptanceTests).all());
+  const beat = new Map<number, string>();
+  const felt = (project: number | null, at: string): void => {
+    if (project === null) return;
+    const held = beat.get(project);
+    if (held === undefined || held < at) beat.set(project, at);
+  };
+  for (const e of epicRows) felt(walk.ofEpic(e.id), e.updated_at);
+  for (const s of storyRows) felt(walk.ofStory(s.id), s.updated_at);
+  for (const t of taskRows) felt(walk.ofTask(t.id), t.updated_at);
+  for (const a of q.selectFrom(assignments).all()) felt(walk.ofAssignment(a), a.updated_at);
+  const since = ([project, at]: [number, string]): [number, number][] => {
+    const then = instant(at);
+    return Number.isNaN(then) ? [] : [[project, Math.max(0, asOf - then)]];
+  };
+  return new Map([...beat].flatMap(since));
 }
 
 /** The board and the fold are one query: the machine-side panels record each row's
@@ -441,11 +456,9 @@ function snapshot(
   const only = (of: number | null): boolean => project === null || of === project;
 
   /** Like `only`, but a row the walk cannot place is shown on every board rather than on
-   *  none. The walk up is five levels, and one missing link anywhere above a task used to
-   *  take it off the narrowed board silently — while the allocator, which never walks up,
-   *  went on dispatching it. An operator reading an empty queue beside a busy runner has no
-   *  way back from that. Used by the queue, because the queue is the one group whose absence
-   *  is mistaken for there being no work. */
+   *  none. Used by the queue alone: a missing link anywhere above a task took it off the
+   *  narrowed board while the allocator, which never walks up, went on dispatching it, and
+   *  an empty queue beside a busy runner is the one absence read as there being no work. */
   const placed = (of: number | null): boolean => only(of) || of === null;
 
   const refusalOf = index(q.selectFrom(refusals).all(), (f) => f.task_id, (f) => f);
@@ -454,11 +467,9 @@ function snapshot(
   const testById = index(testRows, (t) => t.id, (t) => t);
   const storyById = index(storyRows, (s) => s.id, (s) => s);
 
-  /** What the task stands refused permission to write, as a clause to hang off a detail.
-   *
-   *  Beside the other refusals rather than in a box of its own: a task is refused a pass by
-   *  the allocator and refused a write by the harness, and the operator reading "why is this
-   *  not moving" wants both in the same sentence. Nothing recorded is nothing said. */
+  /** What the task stands refused permission to write, as a clause to hang off a detail —
+   *  beside the allocator's refusal rather than in a box of its own, because "why is this
+   *  not moving" wants both in one sentence. Nothing recorded is nothing said. */
   const denied = (task: number): string => {
     const paths = scopeRefusals(db, task);
     return paths.length === 0 ? "" : ` · refused a write to ${paths.join(", ")}`;
@@ -501,17 +512,15 @@ function snapshot(
 
   /** A chore the last pass could not dispatch, said beside the tasks it could not start.
    *
-   *  Same shape and same wording as a task's: the operator asking "why has nothing moved"
-   *  does not care which id space the answer is in, and three merge chores sitting in
-   *  `planned` for half an hour with no reason on the board is the whole complaint. A chore
-   *  carries its project_id, so the walk up that every other group does is not needed here.
+   *  Same shape and same wording as a task's: "why has nothing moved" does not care which
+   *  id space the answer is in. A chore carries its project_id, so no walk up is needed.
    *
-   *  No `passes >= 3` here, unlike a task's: a task that is merely queued says its reason in
-   *  `queued`, and a chore has no such box, so the first pass that refuses it is the first
-   *  chance anyone has to read why.
+   *  No `passes >= 3` here, unlike a task's: a queued task says its reason in `queued`, and
+   *  a chore has no such box, so the first pass that refuses it is the first chance anyone
+   *  has to read why.
    *
-   *  `chore_refusal` arrives with the chore migration; a workspace older than it has no such
-   *  table, and that is a board with nothing recorded against it rather than an error. */
+   *  `chore_refusal` arrives with the chore migration; a workspace older than it has no
+   *  such table, which is nothing recorded against the board rather than an error. */
   const staleChores = (): Row[] => {
     if (!hasTable(db, "chore_refusal")) return [];
     const why = index(q.selectFrom(choreRefusals).all(), (f) => f.chore_id, (f) => f);
@@ -534,9 +543,9 @@ function snapshot(
       });
   };
 
-  /** A count of attempts says a task failed; it never says what failed. The last line of the
-   *  output of the test that is still red is the smallest thing that does, so it is carried
-   *  here rather than left for a `wecode show` on a test whose id you first have to find. */
+  /** A count of attempts says a task failed; it never says what failed. The last line of
+   *  the red test's output is the smallest thing that does, so it is carried here rather
+   *  than left for a `wecode show` on a test whose id you first have to find. */
   const failure = (t: TaskRow): string | null => {
     const own = taskTestRows
       .filter((tt) => tt.parent_id === t.id && tt.state === "failed" && tt.last_output !== null)
@@ -547,8 +556,8 @@ function snapshot(
   };
 
   const panels: Omit<Board, "cooking"> = {
-    // What exists, with how much of it is finished. Without this a board with nothing in
-    // flight is indistinguishable from a board with no project at all.
+    // What exists, with how much of it is finished — without which a board with nothing in
+    // flight reads the same as a board with no project at all.
     projects: q
       .selectFrom(projects)
       .all()
@@ -562,11 +571,10 @@ function snapshot(
         };
       })
       .sort(byId),
-    // Nothing is moving it, and nothing is going to. Derived rather than a state: staleness
-    // is an observation about the world, and the moment it becomes a column somebody has to
-    // keep it in agreement with the world.
-    // Staleness is read from what the allocator recorded, not guessed: it is the only
-    // thing that knows why a ready task did not become an assignment.
+    // Nothing is moving it, and nothing is going to. Derived rather than a state: the
+    // moment staleness becomes a column somebody has to keep it in agreement with the
+    // world. Read from what the allocator recorded, not guessed: it is the only thing that
+    // knows why a ready task did not become an assignment.
     stale: [
       ...taskRows.flatMap((t) => {
         const f = refusalOf.get(t.id);
@@ -619,15 +627,13 @@ function snapshot(
         detail: a.question ?? "",
       }))
       .sort(byId),
-    // ready, and nothing open is attempting it: the queue is what waits on a slot. This is
-    // the same condition `readyCandidates` dispatches on and nothing more — no state above
-    // the task is consulted, because a task's own machine already decided it was ready and
-    // a second opinion here would be a task the allocator takes and the board never shows.
-    // The detail is why it is not running: the last pass's refusal, or its role.
+    // ready, and nothing open is attempting it: the queue is what waits on a slot. The
+    // same condition `readyCandidates` dispatches on and nothing more — a second opinion
+    // here would be a task the allocator takes and the board never shows. The detail is
+    // why it is not running: the last pass's refusal, or its role.
     //
-    // Not `cook`ed: waiting for a slot is not being stuck — see MACHINE_SIDE — so a queued
-    // row records no age and the fold never sees it. If it has also stopped moving, `stale`
-    // says so and the fold has it from there.
+    // Not `cook`ed: waiting for a slot is not being stuck — see MACHINE_SIDE. If it has
+    // also stopped moving, `stale` says so and the fold has it from there.
     queued: taskRows
       .filter((t) => t.state === "ready" && placed(walk.ofTask(t.id)) && !attempted.has(t.id))
       .map((t) => ({
@@ -638,9 +644,9 @@ function snapshot(
       }))
       .sort(byId),
     // Work that stopped because its attempts ran out, or because a pass is still owed to
-    // it. Abandoned work is not here: dropped was somebody's decision and wants nothing
-    // from anyone, an exhausted task is waiting for a person to retry it or drop it, and
-    // one box for both made a triage of ten rows say nothing about which was which.
+    // it. Abandoned work is not here: dropped wants nothing from anyone, an exhausted task
+    // waits for a person to retry it or drop it, and one box for both made a triage of ten
+    // rows say nothing about which was which.
     failed: taskRows
       .filter((t) => t.state === "failed" && only(walk.ofTask(t.id)))
       .map((t) => {
@@ -657,15 +663,15 @@ function snapshot(
         });
       })
       .sort(byId),
-    // Put down on purpose. Its own filter, under its own name, so nothing reading `failed`
-    // has to carry the reason to tell the two apart.
+    // Put down on purpose, under its own name, so nothing reading `failed` has to carry
+    // the reason to tell the two apart.
     dropped: taskRows
       .filter((t) => t.state === "dropped" && only(walk.ofTask(t.id)))
       .map((t) => ({ id: t.id, what: t.title, state: t.state, detail: "dropped by decision" }))
       .sort(byId),
-    // Ready to run, but nobody has watched it fail — so passing it would prove nothing.
-    // A group rather than a state: red is an observation, and the test is otherwise a
-    // perfectly ordinary ready test. These are what `test_has_been_red` will refuse.
+    // Ready to run, but nobody has watched it fail — so passing it would prove nothing. A
+    // group rather than a state: red is an observation, and the test is otherwise an
+    // ordinary ready test. These are what `test_has_been_red` will refuse.
     unproven: testRows
       .filter((t) => t.state === "ready" && t.red_at_base_sha === null && only(walk.ofTest(t.id)))
       .map((t) => ({ id: t.id, what: t.statement, state: t.state, detail: "no red run recorded" }))
@@ -679,9 +685,8 @@ function snapshot(
       .slice(0, 20)
       .map((s) => ({ id: s.id, what: s.title, state: s.state, detail: "story" })),
     // Delivered, and the last thing that tried to land it could not. A filter rather than
-    // a state: the story is delivered, and stays delivered — what is wrong is between its
-    // branch and master, and only the thing holding a repository can see it. Stories 138
-    // and 139 sat for a day because the only record of it was prose in a chat.
+    // a state: the story stays delivered — what is wrong is between its branch and master,
+    // and only the thing holding a repository can see it.
     unmergeable: !hasTable(db, "land_conflict")
       ? []
       : q
@@ -693,10 +698,9 @@ function snapshot(
             return [{ id: s.id, what: s.title, state: s.state, detail: `${c.branch} · ${c.reason}` }];
           })
           .sort(byId),
-    // Written down and not begun. `open` holds these and the in-flight work together, which
-    // is two questions in one box; this is the half a person reads when they are asking what
-    // to pick up. The detail is the kind and nothing else — a planned story has no progress
-    // to report, and `entityOf` in the cockpit reads the word to know which table to open.
+    // Written down and not begun: the half of `open` a person reads when asking what to
+    // pick up. The detail is the kind and nothing else — a planned story has no progress to
+    // report, and `entityOf` in the cockpit reads the word to know which table to open.
     planned: [
       ...epicRows
         .filter((e) => e.state === "planned" && only(walk.ofRelease(e.release_id)))
@@ -737,9 +741,9 @@ function snapshot(
  *  each time, so the board always shows the current reason rather than a history.
  *
  *  The same reason keeps its `since`: a task refused for the same thing all morning is a
- *  different problem from one refused for a new reason a minute ago. Which of the two it is
- *  is decided here rather than in a `CASE` inside the upsert — the dialect assigns a value
- *  or the excluded row's, and nothing else — so the read and the write are one transaction. */
+ *  different problem from one refused for a new reason a minute ago. Decided here rather
+ *  than in a `CASE` inside the upsert, which the dialect does not spell, so the read and
+ *  the write are one transaction. */
 export function recordRefusal(db: DatabaseSync, why: string, taskId: number): void {
   const at = now();
   transact(db, () => {
@@ -764,8 +768,7 @@ export function clearRefusal(db: DatabaseSync, taskId: number): void {
 }
 
 /** Tokens and seconds — what an assignment was given, and what it has used. The same two
- *  numbers in both directions, because a spend is only readable against the allowance it
- *  is a spend of. */
+ *  numbers both ways: a spend is only readable against the allowance it is a spend of. */
 export interface Spend {
   readonly tokens: number;
   readonly seconds: number;
@@ -789,13 +792,10 @@ const spend = (raw: string | null): Spend => {
   };
 };
 
-/** What the record says about how one assignment is going.
- *
- *  The board's row already says what it is working, who has it and what phase it is in, so
- *  none of that is repeated here: this is the half of the record a list of four columns has
- *  no room for — the allowance, the spend against it, and when the runner last reported.
- *  The page draws the row for the first half and this for the second, and the two cannot
- *  disagree because neither restates the other. */
+/** What the record says about how one assignment is going: the half a list of four columns
+ *  has no room for — the allowance, the spend against it, and when the runner last
+ *  reported. The board's row says the rest, so neither restates the other and the two
+ *  cannot disagree. */
 export interface AssignmentFacts {
   readonly worktree: string;
   readonly budget: Spend;

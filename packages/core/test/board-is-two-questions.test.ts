@@ -8,13 +8,10 @@
  *  been asked two questions. They are boxes of their own now, and so is `planned`, which
  *  `open` used to hold together with the work already in flight.
  *
- *  `running` is on neither side of it. The fold ranks by age, which is the question to ask
- *  of a row nobody is holding; a running row is held, and what it is asked is who has it
- *  and how much they have spent. So it keeps a box of its own and the fold leaves it alone.
- *
- *  `projects` and `open` are on neither side of that either: they are the tree the dashboard
- *  is navigated by rather than a report on the machine, so they keep boxes of their own and
- *  the fold leaves them alone.
+ *  `running` is on neither side of it: the fold ranks by age, which is the question to ask
+ *  of a row nobody is holding, and a running row is held. Nor are `projects` and `open` —
+ *  they are the tree the dashboard is navigated by rather than a report on the machine. All
+ *  three keep boxes of their own and the fold leaves them alone.
  *
  *  What is held here is the fold itself: that it covers the two panels that are stuck work
  *  and nothing else, that it is ordered by age rather than by id, and that the age on a row
@@ -23,7 +20,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 // From the module rather than the facade: `index.ts` publishes the composed board, and the
 // fold is board.ts's own, so this is where its contract is.
-import { MACHINE_SIDE, board, cooking, recordRefusal } from "../src/board.js";
+import { MACHINE_SIDE, board, cooking, recordRefusal, silence } from "../src/board.js";
 import { freshDb, seed } from "./helpers.js";
 
 let db: DatabaseSync;
@@ -83,16 +80,15 @@ const assign = (
   );
 
 /** A task refused a pass for the same reason three times running, which is what puts it in
- *  `stale` — and `since` is when the first of those passes was, so it is the age too. */
+ *  `stale`. `since` is the first of those passes, so it is the age too. */
 const refusedSince = (why: string, since: string): void => {
   db.prepare("UPDATE task SET state = 'ready' WHERE id = ?").run(tree.task);
   for (let i = 0; i < 3; i++) recordRefusal(db, why, tree.task);
   db.prepare("UPDATE refusal SET since = ? WHERE task_id = ?").run(since, tree.task);
 };
 
-/** A task that has given up, dated. `failed` is half the fold, and the half a case can make
- *  as many rows of as it likes — a delivered story used to serve that purpose and is out of
- *  the fold now, because waiting to land is not being stuck. */
+/** A task that has given up, dated — `failed` is the half of the fold a case can make as
+ *  many rows of as it likes. */
 const failedAt = (slug: string, updated: string): number =>
   ins(
     "INSERT INTO task (slug,acceptance_test_id,title,scope,role,budget,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -121,10 +117,8 @@ describe("the fold covers the machine side and nothing else", () => {
     expect([...MACHINE_SIDE]).not.toContain("needs_human");
   });
 
-  /** The cut. Queued and delivered were folded here, and neither of them is stuck: a task
-   *  waiting for a slot is waiting its turn, and a delivered story is waiting to land. Both
-   *  are somebody's next move, and reading them in the same list as a task that ran out of
-   *  attempts made the box answer a question nobody asked it. */
+  /** The cut, argued in the header: neither of the two that were folded here is stuck, and
+   *  reading them beside a task out of attempts made the box answer a question nobody asked. */
   it("leaves out the panels that are waiting on a move rather than stuck", () => {
     expect([...MACHINE_SIDE]).not.toContain("queued");
     expect([...MACHINE_SIDE]).not.toContain("delivered");
@@ -140,9 +134,8 @@ describe("the fold covers the machine side and nothing else", () => {
     }
   });
 
-  /** And neither of them pays the fold's price on the way out: a panel outside the fold
-   *  records no age, so its detail is its own rather than a number of minutes in front of
-   *  it. This is what told the two boxes apart before they were boxes. */
+  /** And neither pays the fold's price on the way out: a panel outside it records no age,
+   *  so its detail is its own rather than a number of minutes in front of it. */
   it("leaves the unfolded panels' details as the panels wrote them", () => {
     db.prepare("UPDATE task SET state = 'ready' WHERE id = ?").run(tree.task);
     const shipped = storyIn(tree.epic, "shipped", "delivered", ago(30));
@@ -151,9 +144,8 @@ describe("the fold covers the machine side and nothing else", () => {
     expect(board(db).delivered.find((r) => r.id === shipped)?.detail).toBe("story");
   });
 
-  /** What is written down and not begun is its own question — *what is next* — and it is
-   *  not the fold's. `open` held it together with the work in flight, which is the box that
-   *  answered two questions at once and so answered neither. */
+  /** What is written down and not begun is its own question — *what is next* — and `open`
+   *  held it together with the work in flight, answering two at once and so neither. */
   it("gives the planned epics and stories a panel of their own, outside the fold", () => {
     expect([...MACHINE_SIDE]).not.toContain("planned");
     const next = storyIn(tree.epic, "next-thing", "planned", ago(30));
@@ -384,5 +376,24 @@ describe("the panels the fold reads are left as they were", () => {
       { id: 1, what: "send the reset mail", state: "running", detail: "claude-1 · 7m · 2k" },
     ]);
     expect(board(db).delivered).toEqual([{ id: story, what: "shipped", state: "delivered", detail: "story" }]);
+  });
+});
+
+/** The third question, and the only one the groups cannot answer: is this project beating?
+ *  Three empty boxes say both *nothing to do* and *nobody has looked since Tuesday*, and
+ *  `silence` tells them apart — so it is held here, beside the fold. */
+describe("a project's beat", () => {
+  it("is the newest touch anywhere under the project, walked up to it", () => {
+    const asOf = Date.parse(T) + 600_000;
+    storyIn(tree.epic, "moved", "in_progress", new Date(asOf - 60_000).toISOString());
+    // The project row itself has not been touched since T, and the story has.
+    expect(silence(db, asOf).get(tree.project)).toBe(60_000);
+  });
+
+  it("leaves out a project nothing under it can date rather than calling it fresh", () => {
+    db.prepare("UPDATE story SET updated_at = 'not a time' WHERE id = ?").run(tree.story);
+    db.prepare("UPDATE epic SET updated_at = 'not a time' WHERE id = ?").run(tree.epic);
+    db.prepare("UPDATE task SET updated_at = 'not a time' WHERE id = ?").run(tree.task);
+    expect(silence(db).has(tree.project)).toBe(false);
   });
 });
