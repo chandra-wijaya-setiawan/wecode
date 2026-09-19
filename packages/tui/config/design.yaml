@@ -1,0 +1,73 @@
+# The cockpit's design, declared rather than drawn.
+#
+# views.yaml says which boxes there are and what each is called. This file says what the
+# frame around them looks like: what chrome a section gets, how a head is written, where
+# the bars sit, and which keys the bar names. Those were decisions argued out in docstrings
+# inside screens.tsx, where the only way to ask what the cockpit is supposed to look like
+# was to read the code that draws it — so a drawn frame could not disagree with the design,
+# because there was no design to disagree with.
+#
+# test/the-cockpit-matches-its-design.test.ts gates the rendered frame against this file.
+# Changing how the cockpit looks is an edit here first, and a red test until the drawing
+# follows.
+
+# Nothing in this file repeats views.yaml. The section names, their order and their letters
+# are read from there; `lead` is the one section that is not a box and so has no row there.
+page:
+  # Drawn above the boxes: a dead runner or an unreadable schema is the reason every box
+  # under it is wrong, so it is read before the board and not after it.
+  lead: services
+  # The rest of the page, in order, is views.yaml `page.order`. It is not copied here.
+  boxes: views.yaml#page.order
+
+# A dashboard section is a rule with its name in it. A border would cost two lines and two
+# columns to make the same separation: eight sections at two lines is sixteen — more height
+# than the Cooking box is allowed to draw — and the columns come off every row on the page.
+# So the chrome is one line, the name sits in the rule rather than above it, and every row
+# starts at the terminal's left edge.
+dashboard:
+  chrome: rule
+  chrome_lines_per_section: 1
+  rows_begin_at_column: 0
+  # What a box is made of. The rule keeps `─`, which is why it is not here: what a box
+  # costs is these two lines and these two columns.
+  forbidden: ["┌", "┐", "└", "┘", "│", "├", "┤"]
+
+# How a head is written, and then filled with `glyph` to the full width. A box carries the
+# count of what it is holding and the letter `v` opens it by; the lead section is neither a
+# filter nor keyed, so it carries neither.
+head:
+  glyph: "─"
+  section: "── {title} "
+  box: "── {title} ({count}) [{key}] "
+
+# A screen given the whole terminal for one thing keeps its border: two lines once is not
+# sixteen, and the border is what tells that page from the bars under it.
+pages:
+  chrome: border
+  bordered: [box, outline, node, assignment]
+
+# The last line is the bar, and the one line the App has to say anything on sits directly
+# above it. Both always have to be readable, which is why the body states its height rather
+# than flexing into whatever is left.
+bars:
+  key_bar: last
+  status: above_key_bar
+
+# Every key the screen answers, in the order a reader scans them. A key the bar omits is a
+# way in nobody can find, so a key is dropped only where the screen refuses it: the
+# dashboard has nothing to pop, and only the outline folds.
+key_bar:
+  gap: "  "
+  entry: "{key} {does}"
+  keys:
+    - { key: "j/k", does: move }
+    - { key: "g/G", does: top/end }
+    - { key: "+/-", does: fold, only_on: [outline] }
+    - { key: "enter", does: open }
+    - { key: "esc", does: back, except_on: [dashboard] }
+    - { key: "v", does: box }
+    - { key: "v t", does: outline }
+    - { key: "a", does: act }
+    - { key: "r", does: refresh }
+    - { key: "q", does: quit }
