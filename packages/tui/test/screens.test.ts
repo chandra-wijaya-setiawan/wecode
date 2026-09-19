@@ -141,12 +141,16 @@ describe("the dashboard", () => {
 
   it("carries each box's count and the letter that opens it in its title", () => {
     const out = lines().join("\n");
-    expect(out).toContain("─ Open (2) [o] ─");
-    // The fold, holding the row the Queue box used to, and the two boxes on the page that
-    // can still be empty with a seeded database — running is one of them again.
-    expect(out).toContain("─ Cooking (1) [c] ─");
+    // Every one of the seven, with the letter views.yaml declares for it. The seed puts a
+    // row in exactly one of them — the ready task is Queue's — and the other six say zero,
+    // which is the point of carrying the count: an empty box is an answer.
     expect(out).toContain("─ Needs you (0) [n] ─");
     expect(out).toContain("─ Running (0) [r] ─");
+    expect(out).toContain("─ Queue (1) [q] ─");
+    expect(out).toContain("─ Cooking (0) [c] ─");
+    expect(out).toContain("─ Planned (0) [p] ─");
+    expect(out).toContain("─ Delivered (0) [d] ─");
+    expect(out).toContain("─ Dropped (0) [x] ─");
   });
 
   it("says what an empty box is empty of, in that box's own words", () => {
@@ -158,21 +162,20 @@ describe("the dashboard", () => {
 
   it("trims a box to the rows it declares and says how many it dropped", () => {
     for (let i = 0; i < 12; i += 1) {
-      ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", `s${i}`, tree.epic, `story ${i}`, "in_progress", T, T);
+      ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", `s${i}`, tree.epic, `story ${i}`, "planned", T, T);
     }
     app.refresh();
     const out = lines();
-    // The seed's epic and story, and the twelve.
-    const at = titled(out, "Open (14)");
-    const declared = views.find((v) => v.name === "open")?.rows ?? 0;
+    const at = titled(out, "Planned (12)");
+    const declared = views.find((v) => v.name === "planned")?.rows ?? 0;
     const rows = inside(out, at);
 
     expect(rows).toHaveLength(declared);
     // The declared rows, the last of which is the tally of what did not fit.
-    expect(rows.at(-1)).toContain(`… and ${14 - (declared - 1)} more`);
+    expect(rows.at(-1)).toContain(`… and ${12 - (declared - 1)} more`);
     // And the next box begins directly under this one's bottom border.
     expect(out[at + declared + 1]?.startsWith("└")).toBe(true);
-    expect(titled(out, "Running (0)")).toBe(at + declared + 2);
+    expect(titled(out, "Delivered (0)")).toBe(at + declared + 2);
   });
 
   it("marks the cursor in the box that holds it and in no other", () => {
@@ -186,27 +189,28 @@ describe("the dashboard", () => {
 describe("a box screen", () => {
   it("draws one filter, at full height, with the cursor", () => {
     for (let i = 0; i < 20; i += 1) {
-      ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", `s${i}`, tree.epic, `story ${i}`, "in_progress", T, T);
+      ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", `s${i}`, tree.epic, `story ${i}`, "planned", T, T);
     }
     app.refresh();
     app.key("v");
-    app.key("o");
+    app.key("p");
     expect(app.screen).toMatchObject({ kind: "box" });
 
     const out = lines(100, 12);
-    expect(titled(out, "Open (22) [o]")).toBe(0);
+    expect(titled(out, "Planned (20) [p]")).toBe(0);
     // Ten lines of rows inside the box — more than the eight it gets on the dashboard —
     // and no other box on the screen.
     expect(titled(out, "Cooking (")).toBe(-1);
-    // A row begins with its code, which is a number said as one: "#12".
-    expect(inside(out, 0).filter((l) => /^#\d/.test(l)).length).toBeGreaterThan(6);
+    // A row begins with its code — a number said as one — behind the kind of thing it is,
+    // because Planned holds epics and stories together: "story #12".
+    expect(inside(out, 0).filter((l) => /^story #\d/.test(l)).length).toBeGreaterThan(6);
     expect(inverted(frame(100, 12))).toHaveLength(1);
   });
 
   it("lines its columns up with the same box on the dashboard", () => {
-    const onDashboard = inside(lines(), titled(lines(), "Cooking (1)"))[0];
+    const onDashboard = inside(lines(), titled(lines(), "Queue (1)"))[0];
     app.key("v");
-    app.key("c");
+    app.key("q");
     expect(app.screen).toMatchObject({ kind: "box" });
     expect(inside(lines(), 0)[0]).toBe(onDashboard);
   });
@@ -318,19 +322,32 @@ describe("the key bar", () => {
  *  screen is. These moved here when render.ts went. */
 describe("views", () => {
   it("loads every box the page orders", () => {
-    // Four, in the page's order: what waits on you, the open work, who is holding what,
-    // and the fold. `running` is its own box again and `projects` is off the page — the
-    // outline is the way back out to the workspace.
-    expect(views.map((v) => v.name)).toEqual(["needs_human", "open", "running", "cooking"]);
+    // Seven, in the page's order: what wants you, what is moving, what waits its turn,
+    // what is stuck, what is not begun, what is finished but not landed, and what was put
+    // down. `projects` is off the page — the outline is the way back out to the workspace.
+    expect(views.map((v) => v.name)).toEqual([
+      "needs_human",
+      "running",
+      "queued",
+      "cooking",
+      "planned",
+      "delivered",
+      "dropped",
+    ]);
   });
 
   /** Off the page is not gone. `projects` was cut from the dashboard for the height it
-   *  took, and the height is the whole of what it cost — the letter that opened it is worth
-   *  nothing to the three boxes that stayed, so it keeps it. */
-  it("keeps the projects box off the page and still declared", () => {
-    expect(views.map((v) => v.name)).not.toContain("projects");
-    expect(loadOffPage().map((v) => v.name)).toEqual(["projects"]);
-    expect(loadOffPage().find((v) => v.name === "projects")?.filter).toBe("projects");
+   *  took, and the height is the whole of what it cost — a letter costs the boxes that
+   *  stayed nothing, so it keeps one. */
+  /** Two boxes are off the page now: `projects`, and `open` since `planned` took its place
+   *  among the seven. Both are asserted by name, because "off the page" is the one state a
+   *  box can be in that nothing on the dashboard would show. */
+  it("keeps the projects and open boxes off the page and still declared", () => {
+    for (const name of ["projects", "open"]) {
+      expect(views.map((v) => v.name)).not.toContain(name);
+      expect(loadOffPage().find((v) => v.name === name)?.filter).toBe(name);
+    }
+    expect(loadOffPage().map((v) => v.name).sort()).toEqual(["open", "projects"]);
   });
 
   it("refuses an off-page box whose filter the code does not know", () => {
@@ -345,10 +362,30 @@ describe("views", () => {
     expect(loadOffPage(p)).toEqual([]);
   });
 
-  /** The rename has to reach the whitelist too: a box named `open` whose filter the code
+  /** The rename has to reach the whitelist too: a box named `planned` whose filter the code
    *  does not know is a refusal to start, so this is what loadViews accepting it proves. */
-  it("resolves the open box to the open filter", () => {
-    expect(views.find((v) => v.name === "open")?.filter).toBe("open");
+  it("resolves the planned box to the planned filter", () => {
+    expect(views.find((v) => v.name === "planned")?.filter).toBe("planned");
+  });
+
+  /** The letters are the file's. Seven names do not have seven distinct first letters, so
+   *  which box answers to which key stopped being something the page's order could decide. */
+  it("gives every box on the page the letter views.yaml declares for it", () => {
+    expect(views.map((v) => `${v.name}:${v.key ?? ""}`)).toEqual([
+      "needs_human:n",
+      "running:r",
+      "queued:q",
+      "cooking:c",
+      "planned:p",
+      "delivered:d",
+      "dropped:x",
+    ]);
+  });
+
+  it("refuses a declared letter that is not one letter", () => {
+    const p = join(tmp("wecode-views-"), "views.yaml");
+    writeFileSync(p, "page:\n  order: [a]\nviews:\n  a:\n    filter: running\n    key: rr\n");
+    expect(() => loadViews(p)).toThrow(/key must be one letter/);
   });
 
   it("refuses a filter the code does not know", () => {
@@ -416,8 +453,8 @@ describe("the terminal", () => {
     start();
     await until("q quit");
     expect(out).toContain(HIDE);
-    expect(out).toContain("Open (2)");
-    expect(out).toContain("password reset");
+    expect(out).toContain("Queue (1)");
+    expect(out).toContain("send the reset mail");
     expect(out).toContain("workspace ");
   });
 
@@ -434,7 +471,7 @@ describe("the terminal", () => {
     await until("q quit");
     c.stdin?.write("v");
     await until("box?");
-    c.stdin?.write("o");
+    c.stdin?.write("q");
     // The box screen: one filter, and esc on the bar because there is now something to pop.
     await until("esc back");
     expect(out).not.toContain("no box on");
@@ -442,13 +479,13 @@ describe("the terminal", () => {
 
   it("redraws on a timer, without a keystroke", async () => {
     start();
-    await until("Open (2)");
+    await until("Planned (0)");
     const file = open(path);
     file
       .prepare("INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)")
-      .run("second", 1, "second story", "in_progress", T, T);
+      .run("second", 1, "second story", "planned", T, T);
     file.close();
-    await until("Open (3)");
+    await until("Planned (1)");
   }, 20_000);
 
   it("leaves the terminal clean on q", async () => {
