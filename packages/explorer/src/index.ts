@@ -15,3 +15,13 @@ export {
   type Use,
 } from "./ports.js";
 export { openCodegraph } from "./adapters/codegraph.js";
+export {
+  ArchitectureError,
+  loadArchitecture,
+  nodeAt,
+  nodes,
+  unclaimed,
+  type ArchNode,
+  type Architecture,
+  type NodeKind,
+} from "./architecture.js";
