@@ -549,15 +549,25 @@ export class Trees {
   }
 
   /** Guarded by the task's tests passing. Runs in the story tree, so nothing an agent can
-   *  be dispatched into is ever the tree holding the integration branch. */
+   *  be dispatched into is ever the tree holding the integration branch.
+   *
+   *  The same trap `land` has: `git merge` exits 0 and says "Already up to date" when there
+   *  was nothing to merge, so a task whose work never reached the story reads as merged and
+   *  the daemon records the landing. So the story tip is read either side of the merge, and
+   *  a merge that left the branch where it was is refused rather than reported. */
   async mergeTaskIntoStory(taskBranch: string, storySlug: string, storyTreePath: string): Promise<void> {
     await this.refuseBaseCheckout(storyTreePath, "mergeTaskIntoStory");
     const tree = await this.storyTree(storySlug, storyTreePath);
-    await this.mergeInto(
-      tree,
-      taskBranch,
-      `merge ${taskBranch}`,
-      `merge ${taskBranch} into story/${storySlug}`,
+    const branch = `story/${storySlug}`;
+    const before = await git(tree, ["rev-parse", "HEAD"]);
+    await this.mergeInto(tree, taskBranch, `merge ${taskBranch}`, `merge ${taskBranch} into ${branch}`);
+    const after = await git(tree, ["rev-parse", "HEAD"]);
+    if (after !== before) return;
+    const why = (await this.isAncestor(tree, taskBranch, "HEAD"))
+      ? `${taskBranch} is already in ${branch}, so the merge had nothing to add`
+      : `${taskBranch} is not in ${branch} either, so the merge did not happen`;
+    throw new GitError(
+      `merge ${taskBranch} into ${branch} moved nothing: ${branch} is still at ${short(before)} — ${why}`,
     );
   }
 
