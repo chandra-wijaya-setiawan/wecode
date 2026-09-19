@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -55,15 +55,36 @@ function readyTask(artefact: string): { task: number; taskTest: number } {
   return { task, taskTest };
 }
 
-/** A command that fails the first time it is run in a tree and passes every time after:
- *  the shape of a test that leaks state between runs. Nothing about the tree changes
- *  between the two runs — only that the first one happened. */
-const failsOnceThenPasses = (tree: string): string =>
-  `f=${join(tree, "once")}; if [ -e "$f" ]; then echo 'ok 1 passed'; else touch "$f"; echo 'AssertionError'; exit 1; fi`;
+/** Writes a suite runner into the tree and answers the command that drives it.
+ *
+ *  Run with no file named — the whole suite — it prints a vitest failure banner and exits
+ *  1. Run with files named, it passes: the shape of a suite whose tests leak into each
+ *  other, where the accused test is sound and its neighbour is what broke it. Every
+ *  execution is logged, so a test below can say how many there were. */
+function suite(body: string): string {
+  const path = join(dir, "suite.sh");
+  writeFileSync(path, `#!/bin/sh\necho ran >> ${join(dir, "runs.log")}\n${body}\n`);
+  chmodSync(path, 0o755);
+  writeFileSync(join(dir, "leaky.test.ts"), "// a test file, so the tree really has one\n");
+  writeFileSync(join(dir, "runs.log"), "");
+  return `${path}`;
+}
+
+const redThenGreenAlone = (): string =>
+  suite(
+    `if [ $# -eq 0 ]; then
+       echo " FAIL  leaky.test.ts > it counts"
+       echo "AssertionError: expected 1 to be 2"
+       exit 1
+     fi
+     echo "Test Files  1 passed (1)"`,
+  );
+
+const runs = (): number => readFileSync(join(dir, "runs.log"), "utf8").trim().split("\n").filter(Boolean).length;
 
 describe("a failure that passes when re-run alone", () => {
   it("is reported as flaky rather than as a failure", async () => {
-    const { task, taskTest } = readyTask(failsOnceThenPasses(dir));
+    const { task, taskTest } = readyTask(redThenGreenAlone());
 
     const r = await new Examiner(db).runTaskTests(task, dir);
 
@@ -72,55 +93,79 @@ describe("a failure that passes when re-run alone", () => {
     expect(r.passed).toEqual([]);
   });
 
-  it("leaves the test exactly as it stood, because a flake is no verdict either way", async () => {
-    const { task, taskTest } = readyTask(failsOnceThenPasses(dir));
+  it("leaves the test exactly as it stood, because two opposite answers are no verdict", async () => {
+    const { task, taskTest } = readyTask(redThenGreenAlone());
 
     await new Examiner(db).runTaskTests(task, dir);
 
-    // Neither red nor green: the one thing two opposite answers cannot support is a verdict.
     expect(stateOf("task_test", taskTest)).toBe("ready");
   });
 
   it("says so where the board reads it, ahead of what the failing run printed", async () => {
-    const { task, taskTest } = readyTask(failsOnceThenPasses(dir));
+    const { task, taskTest } = readyTask(redThenGreenAlone());
 
     await new Examiner(db).runTaskTests(task, dir);
 
     expect(outputOf("task_test", taskTest)).toContain(FLAKY);
-    // and the red itself is still there to read, not swallowed by the retry's green.
+    // Named, so whoever reads it can run the same thing by hand.
+    expect(outputOf("task_test", taskTest)).toContain("leaky.test.ts");
+    // And the red itself is still there to read, not swallowed by the narrowed green.
     expect(outputOf("task_test", taskTest)).toContain("AssertionError");
   });
 
-  it("is asked again on the next pass rather than settled by the flake", async () => {
-    const { task, taskTest } = readyTask(failsOnceThenPasses(dir));
-    const examiner = new Examiner(db);
+  it("runs the named file alone rather than the same red command twice", async () => {
+    // The whole point: a failing artefact is never simply asked again. The second run is a
+    // different command — the suite narrowed to the file it accused.
+    const { task } = readyTask(redThenGreenAlone());
 
-    await examiner.runTaskTests(task, dir);
-    // The marker is now in the tree, so the same command is green on both of its runs.
-    const second = await examiner.runTaskTests(task, dir);
+    await new Examiner(db).runTaskTests(task, dir);
 
-    expect(second.skipped).toEqual([]);
-    expect(second.passed).toContain(taskTest);
-    expect(stateOf("task_test", taskTest)).toBe("passed");
+    expect(runs()).toBe(2);
   });
 
-  it("leaves a command that fails both times a plain failure", async () => {
-    // A red that reproduces is the work's red. Re-running it must not turn a real failure
-    // into a shrug.
-    const { task, taskTest } = readyTask("echo 'AssertionError'; exit 1");
+  it("leaves a red that names no file a plain failure, run once", async () => {
+    // A command that fails without saying where offers nothing to run alone. Re-running it
+    // would be a second execution of a failing artefact, which proves nothing new.
+    const { task, taskTest } = readyTask(suite(`echo "AssertionError"; exit 1`));
 
     const r = await new Examiner(db).runTaskTests(task, dir);
 
     expect(r.failed).toContain(taskTest);
     expect(r.flaky).toEqual([]);
+    expect(runs()).toBe(1);
     expect(stateOf("task_test", taskTest)).toBe("failed");
     expect(outputOf("task_test", taskTest)).not.toContain(FLAKY);
   });
 
-  it("does not call a red flaky because its re-run selected no test", async () => {
+  it("leaves a red that names a file not in the tree a plain failure, run once", async () => {
+    // The name is stale or is not a path at all. Nothing is put on a command line unread.
+    const { task, taskTest } = readyTask(suite(`echo " FAIL  gone.test.ts"; exit 1`));
+
+    const r = await new Examiner(db).runTaskTests(task, dir);
+
+    expect(r.failed).toContain(taskTest);
+    expect(runs()).toBe(1);
+  });
+
+  it("leaves a failure that reproduces alone a failure", async () => {
+    // A red that survives isolation is the work's red, and must not become a shrug.
+    const { task, taskTest } = readyTask(suite(`echo " FAIL  leaky.test.ts"; exit 1`));
+
+    const r = await new Examiner(db).runTaskTests(task, dir);
+
+    expect(r.failed).toContain(taskTest);
+    expect(r.flaky).toEqual([]);
+    expect(runs()).toBe(2);
+    expect(stateOf("task_test", taskTest)).toBe("failed");
+  });
+
+  it("does not call a red flaky because the narrowed run selected no test", async () => {
     // Exit 0 with nothing selected is not a green, so it disagrees with nothing.
     const { task, taskTest } = readyTask(
-      `f=${join(dir, "empty")}; if [ -e "$f" ]; then echo 'No test files found, exiting with code 0'; else touch "$f"; exit 1; fi`,
+      suite(
+        `if [ $# -eq 0 ]; then echo " FAIL  leaky.test.ts"; exit 1; fi
+         echo "No test files found, exiting with code 0"`,
+      ),
     );
 
     const r = await new Examiner(db).runTaskTests(task, dir);
@@ -130,19 +175,17 @@ describe("a failure that passes when re-run alone", () => {
   });
 
   it("never re-runs a command that passed the first time", async () => {
-    // The second run exists to give a red a second chance, not to give a green one. A
-    // command that counts its own runs stays at one.
-    const counter = join(dir, "runs");
-    const { task, taskTest } = readyTask(`echo x >> ${counter}; echo '1 passed'`);
+    // The narrowed run exists to give a red a second reading, not to give a green one.
+    const { task, taskTest } = readyTask(suite(`echo "Test Files  1 passed (1)"`));
 
     const r = await new Examiner(db).runTaskTests(task, dir);
 
     expect(r.passed).toContain(taskTest);
-    expect(readFileSync(counter, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(runs()).toBe(1);
   });
 
   it("reports an acceptance_test's flake the same way", async () => {
-    const at = make.acceptanceTest(criteria, "proof", "script", failsOnceThenPasses(dir));
+    const at = make.acceptanceTest(criteria, "proof", "script", redThenGreenAlone());
     engine.apply("acceptance_test", at, "deliver", "chief");
     recordRed(db, at);
 

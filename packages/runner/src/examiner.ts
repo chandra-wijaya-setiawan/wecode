@@ -57,11 +57,11 @@ export const NO_TEST_MATCHED = "no test matched";
  *  dies on the first import — which is a fact about the tree, never about the work. */
 export const UNPREPARED = "unrunnable: the tree could not be prepared";
 
-/** Written where the board reads a run's output when the same command failed and then
- *  passed against the same unmoved tree. Two opposite answers from one tree are not a
- *  verdict on the work — the test is telling on itself — so it is said in those words
- *  rather than recorded as the red that happened to come first. */
-export const FLAKY = "flaky: it failed and then passed on the same tree";
+/** Written where the board reads a run's output when the suite's red passed with the file
+ *  it named run by itself. Two opposite answers from one unmoved tree are not a verdict on
+ *  the work — the test is telling on itself — so it is said in those words rather than
+ *  recorded as the red that happened to come first. */
+export const FLAKY = "flaky: it failed in the suite and passed when re-run alone";
 
 /** Where the command that makes a tree runnable is written, relative to the tree it
  *  prepares. It is the project's own onboarding config, so the person who owns the build
@@ -146,6 +146,31 @@ const NO_TESTS: readonly RegExp[] = [
  *  proves nothing, and the one thing it must never do is stand as a pass. */
 export function matchedNoTest(output: string): boolean {
   return NO_TESTS.some((re) => re.test(output));
+}
+
+/** How each runner names the file a failure is in, on the line where it declares it failed.
+ *  Only the runner's own failure banner counts: vitest also lists the files it ran and
+ *  passed, and a file taken off one of those lines would name an innocent test as the
+ *  suspect. */
+const FAILING_FILE: readonly RegExp[] = [
+  /^\s*FAIL\b[^\S\n]+(\S+)/gm, // vitest, jest
+  /^\s*FAILED[^\S\n]+([^\s:]+)/gm, // pytest
+];
+
+/** The files a failing run said the failures were in, deduplicated and in the order the
+ *  output named them. Empty when the output names none — a command that fails without
+ *  saying where offers nothing to re-run alone, and is simply a failure. */
+export function failingFilesOf(output: string): readonly string[] {
+  const found = new Set<string>();
+  for (const re of FAILING_FILE) {
+    for (const [, file] of output.matchAll(re)) {
+      // Only a plain path is ever put back on a command line. Anything carrying shell
+      // punctuation is a word off a progress line, not a file, and re-running it would run
+      // something nobody wrote.
+      if (file !== undefined && !/[;&|><$`(){}*?"'\\]/.test(file)) found.add(file);
+    }
+  }
+  return [...found];
 }
 
 const INTERPRETERS = new Set(["bash", "sh", "zsh", "node", "python", "python3", "tsx", "deno"]);
@@ -401,14 +426,16 @@ export class Examiner {
         continue;
       }
       const out = await this.runOne(row.artefact, cwd);
-      // A red that goes green on the second ask, with nothing between the two runs, is a
-      // fact about the test and not about the tree. Recording it as a failure accuses work
-      // that may be sound; recording it as a pass hides a test nobody can trust. So it is
-      // left exactly as it stands, named for what it is, and asked again next tick.
-      if (!out.ok && (await this.passesAlone(row.artefact, cwd))) {
+      // A suite red whose own named file is green when that file is run by itself is a fact
+      // about the tests and not about the tree: they are leaking into each other. Recording
+      // it as a failure accuses work that may be sound; recording it as a pass hides tests
+      // nobody can trust. So the test is left exactly as it stands, named for what it is,
+      // and asked again next tick.
+      const alone = out.ok ? null : await this.passesAlone(row.artefact, cwd, out.output);
+      if (alone !== null) {
         const at = now();
         this.stamp(entity, row.id, {
-          last_output: `${FLAKY}: ${row.artefact}\n${out.output.slice(-8000)}`,
+          last_output: `${FLAKY}: ${alone}\n${out.output.slice(-8000)}`,
           updated_at: at,
         });
         flaky.push(row.id);
@@ -456,14 +483,22 @@ export class Examiner {
     return { passed, failed, skipped, unrunnable, refused, flaky };
   }
 
-  /** True when a command that has just failed passes on being asked again, by itself,
-   *  against the same tree. The one thing between the two runs is the first run, so a
-   *  disagreement between them belongs to the test: order, a clock, a port, a leftover
-   *  file. A second red — or a green that selected nothing — is no disagreement at all,
-   *  and the failure stands. */
-  private async passesAlone(artefact: string, cwd: string): Promise<boolean> {
-    const again = await this.runOne(artefact, cwd);
-    return again.ok && !matchedNoTest(again.output);
+  /** The command that passed when the failure's own files were run by themselves, or null
+   *  when nothing was run again or the narrowed run agreed with the red.
+   *
+   *  Nothing is re-run blind: the failing run must name the files it failed in, and those
+   *  files must be in the tree, or there is no second command to write and the failure is
+   *  the work's. The narrowed run is a different command from the one that went red — it
+   *  selects those files alone — so a suite red is never simply asked twice.
+   *
+   *  A second red, or a green that selected nothing, is no disagreement at all. */
+  private async passesAlone(artefact: string, cwd: string, output: string): Promise<string | null> {
+    const files = failingFilesOf(output);
+    if (files.length === 0) return null;
+    if (!files.every((f) => existsSync(isAbsolute(f) ? f : resolve(cwd, f)))) return null;
+    const narrowed = `${artefact} ${files.join(" ")}`;
+    const again = await this.runOne(narrowed, cwd);
+    return again.ok && !matchedNoTest(again.output) ? narrowed : null;
   }
 
   /** Makes a tree runnable, and answers with why it could not be — null when it is ready,
