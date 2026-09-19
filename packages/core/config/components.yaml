@@ -117,7 +117,7 @@ components:
     layer: service
     component: true
     owns: checks wecode against itself, heals what it safely can, and proposes the rest as a chore
-    modules: [doctor, healer]
+    modules: [doctor, healer, ceiling]
 
   runner surface:
     package: runner
