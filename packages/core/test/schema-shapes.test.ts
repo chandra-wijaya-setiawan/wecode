@@ -77,6 +77,21 @@ describe("every entity row shape against pragma_table_info", () => {
     expect(sorted(tablesOf(db))).toEqual(sorted([...Object.keys(ROW_FIELDS), ...UNCLAIMED]));
   });
 
+  /** The pass row, as the typed layer in packages/cli/src/doctor.ts declares it. That
+   *  declaration names four columns; if the migration ever built fewer, or different ones,
+   *  the first pass to be recorded would fail on a write rather than here. */
+  it("builds doctor_run with the four columns a pass records", () => {
+    const db = freshDb();
+    expect(columnsOf(db, "doctor_run")).toEqual(["at", "duration_ms", "checks_run", "checks_failed"]);
+  });
+
+  /** `doctor_pass` is the runner's, one row per check, created at runtime by its own
+   *  `CREATE TABLE IF NOT EXISTS`. A migration that took the name would silence that and
+   *  leave the runner inserting into a table of the wrong grain. */
+  it("leaves doctor_pass to the runner", () => {
+    expect(tablesOf(freshDb())).not.toContain("doctor_pass");
+  });
+
   it("renames only what it must, and renames it to a column that exists", () => {
     const db = freshDb();
     const assignment = columnsOf(db, "assignment");

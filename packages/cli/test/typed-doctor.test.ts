@@ -124,6 +124,9 @@ describe("the doctor module, ported onto the typed layer", () => {
     expect(declared.map((d) => d.name).sort()).toEqual([
       "acceptance_criteria",
       "acceptance_test",
+      // 014's `doctor_run`: one row per pass, appended by this module. Declared here like any
+      // other table it reads or writes, so the loop below holds it against the migration.
+      "doctor_run",
       "epic",
       "landed_branch",
       "ledger",
