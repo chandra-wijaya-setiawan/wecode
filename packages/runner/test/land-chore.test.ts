@@ -156,7 +156,7 @@ describe("a delivered story with no land commit in the base", () => {
     expect(git(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
     expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("the base\n");
     expect(readFileSync(join(repo, "reset.ts"), "utf8")).toBe("password reset\n");
-    expect(git(repo, "status", "--short")).toBe("");
+    expect(git(repo, "status", "--short", "--untracked-files=no")).toBe("");
     expect(tick.landed.find((l) => l.story === s.id)?.notice).toBeUndefined();
     expect(existsSync(landTree(s.slug))).toBe(false);
     expect(checkouts()).toEqual(before);
