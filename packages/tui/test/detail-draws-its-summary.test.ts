@@ -87,13 +87,20 @@ function crowd(db: DatabaseSync, states: readonly string[]): void {
 describe("the summary block at the top of a record's screen", () => {
   beforeEach(fromTheOutline);
 
-  it("names the record, one field to a line, and how its children stand on the title", () => {
+  it("leads with the record's own title and state, not with its entity and key", () => {
     descendTo("storefront");
     const out = lines();
-    expect(out[0]).toContain(`─ project #${tree.project} · in_progress 1`);
-    expect(summary(out)).toEqual([
+    expect(out[0]).toContain("─ storefront · in_progress ");
+    expect(out[0]).not.toContain(`project #${tree.project}`);
+  });
+
+  it("names the record, one field to a line, the title and the state among them", () => {
+    descendTo("storefront");
+    expect(summary(lines())).toEqual([
       "entity    project",
       `id        #${tree.project}`,
+      "title     storefront",
+      "state     in_progress",
       "children  1",
     ]);
   });
@@ -111,8 +118,15 @@ describe("the summary block at the top of a record's screen", () => {
     descendTo("storefront", "1.0.0", "account recovery", "password reset");
     descendTo("one link, one change", "a link is emailed", "the mail arrives");
     const out = lines();
-    expect(out[0]).toContain("─ acceptance_test #1 · ready 3 · done 1");
-    expect(summary(out)).toEqual(["entity    acceptance_test", "id        #1", "children  4"]);
+    expect(out[0]).toContain("─ the mail arrives · planned ");
+    expect(out.join("\n")).toContain("─ children (4) · ready 3 · done 1");
+    expect(summary(out)).toEqual([
+      "entity    acceptance_test",
+      "id        #1",
+      "title     the mail arrives",
+      "state     planned",
+      "children  4",
+    ]);
   });
 
   it("says so with a dash when the record has nothing under it", () => {
@@ -120,17 +134,18 @@ describe("the summary block at the top of a record's screen", () => {
     descendTo("one link, one change", "a link is emailed", "the mail arrives");
     descendTo("send the reset mail", "the mailer is called");
     const out = lines();
-    expect(out[0]).toContain("─ task_test #1 · —");
-    expect(summary(out)[2]).toBe("children  0");
+    expect(out[0]).toContain("─ the mailer is called · ready ");
+    expect(out.join("\n")).toContain("─ children (0) · —");
+    expect(summary(out)[4]).toBe("children  0");
   });
 
   it("is drawn whole before the children get a line, however short the terminal", () => {
     descendTo("storefront");
-    for (const height of [8, 10, 24]) {
+    for (const height of [9, 10, 24]) {
       const out = lines(100, height);
       expect(out).toHaveLength(height);
-      expect(summary(out)).toHaveLength(3);
-      expect(out[0]).toContain("· in_progress 1");
+      expect(summary(out)).toHaveLength(5);
+      expect(out[0]).toContain("storefront · in_progress");
     }
   });
 

@@ -71,7 +71,15 @@ export type Screen =
   | { readonly kind: "dashboard" }
   | { readonly kind: "box"; readonly view: View }
   | { readonly kind: "outline" }
-  | { readonly kind: "node"; readonly entity: StatefulEntity; readonly id: number }
+  /** A record in the tree, with the row it was opened from. The tree node carries the
+   *  children; the row carries what the record is called and how it stands, and a screen
+   *  that had only the entity and the id would have to name itself `task #3`. */
+  | {
+      readonly kind: "node";
+      readonly entity: StatefulEntity;
+      readonly id: number;
+      readonly row: Row;
+    }
   /** An assignment, drawn from the board row it was opened from. An assignment hangs off
    *  the tree rather than in it — `tree()` walks project → task_test and stops — so the
    *  row the board built is the whole of what this screen knows, and it carries it. */
@@ -762,11 +770,19 @@ export class App {
       this.status = `assignment #${item.row.id}`;
       return;
     }
-    if (this.find(item.entity, item.row.id) === null) {
+    const node = this.find(item.entity, item.row.id);
+    if (node === null) {
       this.status = `${item.entity} #${item.row.id} has nothing under it`;
       return;
     }
-    this.push({ kind: "node", entity: item.entity, id: item.row.id });
+    // The carried row is the tree's, not the line the cursor was on: an outline line leads
+    // with the guide it is drawn under, and `- storefront` is a drawing, not a title.
+    this.push({
+      kind: "node",
+      entity: item.entity,
+      id: item.row.id,
+      row: { id: node.id, what: node.label, state: node.state, detail: item.row.detail },
+    });
     this.status = `${item.entity} #${item.row.id}`;
   }
 
