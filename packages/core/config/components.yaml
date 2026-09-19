@@ -140,6 +140,13 @@ components:
     owns: the questions wecode asks about a repository — what a file defines and exports, what it imports, who references a symbol, and the evidence of what a module is for. The index behind it is an adapter, replaceable without a caller noticing
     modules: [adapters/codegraph, index, ports]
 
+  view-index:
+    package: ui
+    layer: client
+    component: true
+    owns: the screens a person reads stated as ports — what the index of boxes must say, said once and without naming a renderer. The ink adapter behind it draws those lines and decides nothing
+    modules: [adapters/ink, index, ports]
+
   tui:
     package: tui
     layer: client
