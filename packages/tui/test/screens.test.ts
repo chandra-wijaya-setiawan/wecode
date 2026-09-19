@@ -11,7 +11,7 @@ import { loadMachines, open } from "@wecode/core";
 import { App } from "../src/app.js";
 import { tmp } from "../../core/test/tmpdir.js";
 import { Cockpit } from "../src/screens.js";
-import { loadViews, ViewError } from "../src/views.js";
+import { loadOffPage, loadViews, ViewError } from "../src/views.js";
 import { loadServices } from "../src/services.js";
 import { seed, T, ins } from "./seed.js";
 
@@ -322,6 +322,27 @@ describe("views", () => {
     // and the fold. `running` is its own box again and `projects` is off the page — the
     // outline is the way back out to the workspace.
     expect(views.map((v) => v.name)).toEqual(["needs_human", "open", "running", "cooking"]);
+  });
+
+  /** Off the page is not gone. `projects` was cut from the dashboard for the height it
+   *  took, and the height is the whole of what it cost — the letter that opened it is worth
+   *  nothing to the three boxes that stayed, so it keeps it. */
+  it("keeps the projects box off the page and still declared", () => {
+    expect(views.map((v) => v.name)).not.toContain("projects");
+    expect(loadOffPage().map((v) => v.name)).toEqual(["projects"]);
+    expect(loadOffPage().find((v) => v.name === "projects")?.filter).toBe("projects");
+  });
+
+  it("refuses an off-page box whose filter the code does not know", () => {
+    const p = join(tmp("wecode-views-"), "views.yaml");
+    writeFileSync(p, "page:\n  order: []\nviews: {}\noff_page:\n  a:\n    filter: nonsense\n");
+    expect(() => loadOffPage(p)).toThrow(/unknown filter nonsense/);
+  });
+
+  it("reads no off-page boxes from a file that declares none", () => {
+    const p = join(tmp("wecode-views-"), "views.yaml");
+    writeFileSync(p, "page:\n  order: [a]\nviews:\n  a:\n    filter: running\n");
+    expect(loadOffPage(p)).toEqual([]);
   });
 
   /** The rename has to reach the whitelist too: a box named `open` whose filter the code

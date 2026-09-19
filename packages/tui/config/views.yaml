@@ -28,6 +28,20 @@
 page:
   order: [needs_human, open, running, cooking]
 
+# Off the page, not gone. A box here is drawn by nothing on the dashboard and is still
+# opened by `v` and its letter — the cost a box was cut for is the height it took from the
+# boxes beside it, and a page it is not on costs none of that.
+#
+# `projects` is the one: a flat list of every project, which is what `v p` has always meant
+# and what the outline answers at more length. Keeping the letter alive is the difference
+# between moving a box and taking the door off.
+off_page:
+  projects:
+    title: Projects
+    filter: projects
+    rows: 8
+    empty: no projects — wecode project create --parent <workspace> <name>
+
 # The services box is not one of the views: it is not a filter over the board, `v` does not
 # open it, and its four rows are four different questions rather than one query's rows. What
 # it still shares with a view is that none of the words in it belong in a .tsx file.

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { loadMachines, open } from "@wecode/core";
 import { App, boxKeys } from "../src/app.js";
-import { loadViews } from "../src/views.js";
+import { loadOffPage, loadViews } from "../src/views.js";
 
 const views = loadViews();
 const machines = loadMachines();
@@ -149,6 +149,31 @@ describe("v, then a box's letter", () => {
 
     expect(app.screen).toMatchObject({ kind: "box" });
     expect(whats()).toEqual(["send the reset mail"]);
+  });
+
+  /** The point of cutting a box from the page was the height it took from the boxes beside
+   *  it. Its letter took none of that, so `v p` still opens the projects the dashboard no
+   *  longer draws — the box is off the page, not taken away. */
+  it("opens an off-page box on its letter, and offers it", () => {
+    expect(whats()).not.toContain("storefront");
+
+    app.key("v");
+    expect(app.status).toContain("Projects");
+    app.key("p");
+
+    expect(app.screen).toMatchObject({ kind: "box" });
+    expect(whats()).toEqual(["storefront"]);
+    app.key("enter");
+    expect(app.screen).toMatchObject({ kind: "node", entity: "project" });
+  });
+
+  /** An off-page box may not take a letter one of the four on the page wants: the page is
+   *  what an operator reads all day, and its letters are the ones spent from memory. */
+  it("lets the page's boxes take their letters first", () => {
+    const page = boxKeys(views);
+    const all = boxKeys([...views, ...loadOffPage()]);
+    for (const [k, v] of page) expect(all.get(k)?.name).toBe(v.name);
+    expect(all.size).toBe(page.size + loadOffPage().length);
   });
 
   it("refuses a letter no box claims, and stays where it was", () => {
