@@ -1,6 +1,5 @@
-/** One reusable list at three sizes — see config/tui-contract.yaml. The arithmetic is the
- *  part worth keeping: Ink lays the boxes out, but what a cell says once it will not fit,
- *  and which rows a height can show, are still decisions this file makes. */
+/** One reusable list at three sizes — see config/tui-contract.yaml. Ink lays the boxes out;
+ *  what a cell says when it will not fit, and which rows a height shows, are this file's. */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Box, Text } from "ink";
@@ -20,46 +19,39 @@ export interface Row {
   readonly what: string;
   readonly state: string;
   readonly detail: string;
-  /** Only a running row carries these. Absent is not zero: a spend with no allowance
-   *  beside it gets no gauge, because a bar with no denominator is a picture of nothing. */
+  /** Only a running row carries these. Absent is not zero: no allowance, no gauge. */
   readonly budget?: Spend;
   readonly spent?: Spend;
 }
 
-/** The row contract: a code, a state, a description, in that order, on every screen. This
- *  file is the only thing that decides it, so a screen cannot invent its own layout. */
+/** The row contract, on every screen: this file alone decides it. */
 export const COLUMNS = ["code", "state", "description"] as const;
 
-/** The three, plus the names screens used to pass. The old names are still a type so that a
- *  screen naming them compiles; naming any of them changes nothing that is drawn. */
+/** The three, plus the names screens used to pass; naming one changes nothing drawn. */
 export type Column = (typeof COLUMNS)[number] | "#" | "what" | "detail";
 
 /** A detail that is only an entity's name is the row's kind, not anything to read. */
 const KINDS: ReadonlySet<string> = new Set<string>(STATEFUL);
 
-/** The row's short identity as a person would say it aloud. The kind is said only where the
- *  screen does not already say it — a roadmap box and a node's children mix kinds, and the
- *  board marks those rows by putting the kind in the detail. */
+/** The row's short identity, said aloud. The kind is said only where the screen does not,
+ *  which the board marks by putting the kind in the detail. */
 export const code = (row: Row): string =>
   KINDS.has(row.detail) ? `${row.detail.replace(/_/g, " ")} #${row.id}` : `#${row.id}`;
 
-/** What is left once the code and the state have taken theirs: the label, and the detail
- *  where the code did not already spend it. */
+/** What is left once code and state have taken theirs: the label, and the unspent detail. */
 export const description = (row: Row): string =>
   row.detail === "" || KINDS.has(row.detail) ? row.what : `${row.what} · ${row.detail}`;
 
 /** Two spaces between columns; a terminal has no rules to lean on. */
 const GAP = "  ";
 
-/** Colour carries state and nothing else. Ink reads "" as no colour, so a state with
- *  nothing to say about itself is drawn plain. */
+/** Colour carries state and nothing else; Ink reads "" as no colour. */
 const PLAIN = "";
 
 export class CookingError extends Error {}
 
-/** One answer to "why is this row in flight", and how a row that has that answer is drawn.
- *  Every word of it — the why, the mark, the colour and which states earn it — is declared
- *  in views.yaml, because none of them is something this file can work out. */
+/** Why a row is in flight, and how a row with that answer is drawn. Every word of it is
+ *  declared in views.yaml: none is something this file can work out. */
 export interface CookingGroup {
   readonly name: string;
   readonly why: string;
@@ -103,8 +95,7 @@ export function loadCooking(path: string = CONFIG): CookingConfig {
     };
   });
 
-  // A state in two groups is two whys for one row, and which one you get would come down to
-  // the order of the file. Refuse to start rather than draw whichever won.
+  // A state in two groups is two whys for one row, decided by the order of the file.
   const seen = new Set<string>();
   for (const g of loaded) {
     for (const s of g.states) {
@@ -123,9 +114,8 @@ export function loadCooking(path: string = CONFIG): CookingConfig {
   };
 }
 
-/** Read once, and not at import: list.tsx is pulled in by every screen there is, and a read
- *  at module scope would make the config a condition of loading the module rather than of
- *  drawing a row. */
+/** Read once, and not at import: every screen pulls this module in, and a read at module
+ *  scope makes the config a condition of loading it rather than of drawing a row. */
 let cached: CookingConfig | null = null;
 export const cooking = (): CookingConfig => (cached ??= loadCooking());
 
@@ -137,8 +127,7 @@ export const forgetCooking = (): void => {
 export const groupOf = (state: string): CookingGroup | undefined =>
   cooking().groups.find((g) => g.states.includes(state));
 
-/** Every cooking row has a why. A state no group claims still answers the question — with
- *  its own word, which is the most that can honestly be said about it. */
+/** Every cooking row has a why. A state no group claims answers with its own word. */
 export const why = (row: Row): string =>
   groupOf(row.state)?.why ?? row.state.replace(/_/g, " ");
 
@@ -148,8 +137,8 @@ export function stateColour(state: string): string {
   return groupOf(state)?.colour ?? cooking().ungrouped.colour;
 }
 
-/** Grouped: the rows gathered by their why, in the order views.yaml declares the groups,
- *  and inside a group in the order they arrived. The rows no group claims come last. */
+/** Grouped by why, in the order views.yaml declares the groups and, inside one, the order
+ *  the rows arrived. The rows no group claims come last. */
 export function groupCooking(rows: readonly Row[]): readonly Row[] {
   const order = cooking().groups.map((g) => g.name);
   const rank = (row: Row): number => {
@@ -174,20 +163,14 @@ export function clip(text: string, width: number): string {
 
 const pad = (text: string, width: number): string => text.padEnd(width, " ");
 
-/** How wide each column has to be to hold every row given. Passed down from the screen so
- *  that every box on it shares one set of widths and the columns line up down the whole
- *  screen; a list given none sizes itself to the rows it can see. A caller may still name
- *  columns, and they are ignored: the set is this file's, so a screen cannot lay itself
- *  out. The parameter is here only so callers that still pass one keep compiling. */
+/** How wide each column must be to hold every row given. Passed down so every box on a
+ *  screen shares one set; a list given none sizes itself. `_columns` is ignored. */
 export function columnWidths(rows: readonly Row[], _columns?: readonly Column[]): number[] {
   return COLUMNS.map((c) => Math.max(...rows.map((r) => cell(r, c).length), 0));
 }
 
-/**
- * Rows the height can show, scrolled so the cursor is among them. Without the scroll a
- * cursor past the fold is marked on a line nobody can see. `per` is how many lines one row
- * costs, so a list whose rows are taller than a line counts its fold in rows all the same.
- */
+/** Rows the height can show, scrolled so the cursor is among them — else a cursor past the
+ *  fold is marked on a line nobody can see. `per` is what one row costs. */
 function window(count: number, height: number, cursor: number | null, per = 1): [number, number] {
   if (count <= Math.floor(height / per)) return [0, count];
   // One line goes to the "… and N more" tally.
@@ -197,8 +180,8 @@ function window(count: number, height: number, cursor: number | null, per = 1): 
   return [first, first + shown];
 }
 
-/** A drawn line: the text, whether the cursor is on it, and the state its colour comes
- *  from. The tally at the foot is a line with no row behind it, so it has neither. */
+/** A drawn line: the text, the cursor, and the state its colour comes from. A tally has
+ *  no row behind it, so it has neither. */
 export interface Line {
   readonly text: string;
   readonly state: string;
@@ -206,10 +189,7 @@ export interface Line {
 }
 
 export function listLines(
-  rows: readonly Row[],
-  height: number,
-  cursor: number | null,
-  width: number,
+  rows: readonly Row[], height: number, cursor: number | null, width: number,
   widths?: readonly number[],
 ): Line[] {
   if (height <= 0) return [];
@@ -217,9 +197,8 @@ export function listLines(
   const visible = rows.slice(first, last);
   const sizes = widths ?? columnWidths(visible);
 
-  // Columns are padded to a shared width; the composed line is what the terminal cuts. A
-  // line, not a cell, is what has to fit, and the description is what the cut reaches first
-  // because it is last.
+  // Columns pad to a shared width; the line is what the terminal cuts, and the description
+  // is what the cut reaches first because it is last.
   const lines = visible.map((row, i) => ({
     text: clip(COLUMNS.map((c, j) => pad(cell(row, c), sizes[j] ?? 0)).join(GAP).trimEnd(), width),
     state: row.state,
@@ -233,43 +212,69 @@ export function listLines(
   return lines;
 }
 
-/** The cooking box's lines. Same arithmetic as any other list — the grouping, the mark and
- *  the why are the whole difference, and they are all read off views.yaml.
- *
- *  The mark leads the line and the why closes it, so the two things a person scans for are
- *  at the two edges and the row itself is between them. The why column is as wide as the
- *  widest why on the whole list rather than on the visible slice, so scrolling does not slide
- *  the column sideways under the reader.
- *
- *  The cursor still indexes the rows given; it is the grouped order they are drawn in, so a
- *  caller that moves a cursor must move it over `groupCooking(rows)`. */
+/** The cooking box's lines. The grouping, the mark and the why are the whole difference,
+ *  and all three are read off views.yaml. The mark leads and the why closes, so what a
+ *  person scans for is at the two edges; the why column is as wide as the widest why on the
+ *  whole list, not the visible slice, so scrolling does not slide it sideways. The cursor
+ *  indexes the rows in grouped order — move one over `groupCooking(rows)`. */
 export function cookingLines(
-  rows: readonly Row[],
-  height: number,
-  cursor: number | null,
-  width: number,
+  rows: readonly Row[], height: number, cursor: number | null, width: number,
 ): Line[] {
   const grouped = groupCooking(rows);
   const whys = Math.max(...grouped.map((row) => why(row).length), 0);
   const [first, last] = window(grouped.length, height, cursor);
-  // The mark and its space, and the gap before the why: what is left is the row's own.
+  // The mark, its space and the gap before the why: what is left is the row's own.
   const body = Math.max(width - whys - 2 - GAP.length, 0);
   return listLines(grouped, height, cursor, body).map((line, i) => {
-    // One line past the visible rows is the "… and N more" tally: it has no row behind it,
-    // so it has neither a group to mark nor a why to give, and it is left as it was drawn.
+    // The "… and N more" tally has no row behind it: no group to mark, no why to give.
     if (first + i >= last) return line;
     const row = grouped[first + i] as Row;
-    // Clipped once more at the end: on a narrow box the why is what the cut reaches first,
-    // which is the right thing to lose — the row is still the row.
+    // Clipped again: on a narrow box the why is what the cut reaches first, and losing it
+    // is right — the row is still the row.
     const text = `${mark(row)} ${pad(line.text, body)}${GAP}${why(row)}`.trimEnd();
     return { ...line, text: clip(text, width) };
   });
 }
 
+/** The one group in views.yaml a list knows by name: the rows there is nothing left to do
+ *  about. Which states are in it stays in the file. */
+const SETTLED = "settled";
+
+export const isSettled = (state: string): boolean => groupOf(state)?.name === SETTLED;
+
+export interface SectionProps extends ListProps {
+  /** The caller's sentence for holding nothing: a box's own words are in views.yaml. */
+  readonly empty: string;
+}
+
+/** A list in two sections: what is still open, then one line standing for everything
+ *  settled — twenty finished rows are one fact, not twenty, and the height they were
+ *  spending goes back to the rows that still want something. An empty section is one line
+ *  too: the tally where there is one, `empty` where there is not. The cursor indexes the
+ *  open rows, a number having no row to sit a cursor on. */
+export function sectionLines(
+  rows: readonly Row[], height: number, cursor: number | null, width: number,
+  empty: string, widths?: readonly number[],
+): Line[] {
+  if (height <= 0) return [];
+  const open = rows.filter((r) => !isSettled(r.state));
+  const done = rows.filter((r) => isSettled(r.state));
+  const one = done[0];
+  const tally: Line[] = one === undefined ? [] : [
+    { text: clip(`${mark(one)} ${done.length} ${SETTLED}`, width), state: one.state, cursor: false },
+  ];
+  // Both want the last line; the open rows take it, being the ones that still want something.
+  const room = height - tally.length;
+  const body =
+    open.length > 0 ? listLines(open, Math.max(room, 1), cursor, width, widths)
+    : room > 0 && tally.length === 0 ? [{ text: clip(empty, width), state: PLAIN, cursor: false }]
+    : [];
+  return [...body, ...tally].slice(0, height);
+}
+
 /** Break text at its spaces so no line runs past `width`, into at most `max` lines. A word
- *  too wide for a line of its own is cut like any other cell, and whatever is unsaid when
- *  the last line fills takes the same ellipsis — a title that ended reads differently from
- *  one that was stopped. */
+ *  too wide for its own line is cut like any cell, and what is unsaid when the last line
+ *  fills takes the same ellipsis — an ended title reads differently from a stopped one. */
 export function wrap(text: string, width: number, max: number): string[] {
   if (width <= 0 || max <= 0) return [];
   const out = [""];
@@ -277,9 +282,8 @@ export function wrap(text: string, width: number, max: number): string[] {
     const at = out.length - 1;
     const line = out[at] as string;
     const next = line === "" ? word : `${line} ${word}`;
-    // On the last line the overflow is clipped and the rest goes unsaid. Anywhere else the
-    // word starts a line — cut where it stands if it is wider than a line of its own, and
-    // there is nothing to push it off the one it is on.
+    // On the last line the overflow is clipped and the rest goes unsaid; anywhere else the
+    // word starts a line, cut where it stands if it is wider than a line of its own.
     if (next.length <= width) out[at] = next;
     else if (out.length === max) { out[at] = clip(next, width); break; }
     else if (line === "") out[at] = clip(word, width);
@@ -291,12 +295,11 @@ export function wrap(text: string, width: number, max: number): string[] {
 /** Wide enough to read a tenth off, narrow enough to leave the numbers room beside it. */
 const BAR = 10;
 
-/** How far through its allowance a row is, drawn. Two things run out — the tokens and the
- *  clock — and the one worth a bar is whichever is nearer the end, so that is the one shown
- *  and it says which it is. An allowance of zero is not a full bar, it is a budget nobody
- *  set, so a row with neither dimension allowed draws no gauge at all. The bar stops at
- *  full and the percentage does not: an overspend is a fact, and a bar that cannot show
- *  one is why the number is beside it. */
+/** How far through its allowance a row is. Two things run out — tokens and the clock — and
+ *  the one worth a bar is whichever is nearer the end, so that is the one shown and it says
+ *  which it is. An allowance of zero is a budget nobody set, not a full bar, so a row with
+ *  neither allowed draws no gauge. The bar stops at full and the percentage does not: an
+ *  overspend is a fact, and a bar that cannot show one is why the number is beside it. */
 export function gauge(row: Row): string {
   const { budget, spent } = row;
   if (budget === undefined || spent === undefined) return "";
@@ -311,18 +314,15 @@ export function gauge(row: Row): string {
   return `[${"█".repeat(on)}${"░".repeat(BAR - on)}] ${Math.round((used / given) * 100)}% ${name}`;
 }
 
-/** A running row is three lines, always three. The fixed height is what lets the cursor
- *  and the fold go on counting in rows, and what stops the box reflowing under a reader
- *  every time a title gains a word. */
+/** A running row is three lines, always three: the fixed height lets the cursor and the
+ *  fold count in rows, and stops the box reflowing when a title gains a word. */
 export const RUNNING_LINES = 3;
 
-/** Ink gives an empty Text no height at all, so one space is what holds a row's empty
- *  line open. */
+/** Ink gives an empty Text no height, so one space holds a row's empty line open. */
 const held = (text: string, width: number): string => (text === "" && width > 0 ? " " : text);
 
 /** One running row: the code and the state lead, the title wraps under them, and the foot
- *  carries the gauge and the row's own detail — who has it, how long they have. Only the
- *  title wraps, because only the title is a sentence; the rest read the same clipped. */
+ *  carries the gauge and the detail. Only the title wraps, because only it is a sentence. */
 function runningRow(row: Row, width: number, sizes: readonly number[]): string[] {
   const head = `${pad(code(row), sizes[0] ?? 0)}${GAP}${pad(row.state, sizes[1] ?? 0)}${GAP}`;
   const title = wrap(row.what, Math.max(width - head.length, 0), RUNNING_LINES - 1);
@@ -335,8 +335,8 @@ function runningRow(row: Row, width: number, sizes: readonly number[]): string[]
 }
 
 /** The running box's lines. The fold counts in rows, so a height that cannot hold a whole
- *  row does not draw two thirds of one. The cursor inverts all three lines of its row:
- *  the row is what is selected, and inverting one line would read as a fourth row. */
+ *  row draws none of it; the cursor inverts all three lines, because the row is what is
+ *  selected and inverting one line would read as a fourth row. */
 export function runningLines(
   rows: readonly Row[], height: number, cursor: number | null, width: number,
 ): Line[] {
@@ -344,8 +344,7 @@ export function runningLines(
   const [first, last] = window(rows.length, height, cursor, RUNNING_LINES);
   const visible = rows.slice(first, last);
   // The code and the state keep their columns, so every head lines up and the title block
-  // under it starts at one column down the box. The description is no longer a column of
-  // its own — it is the two lines below.
+  // starts one column down. The description is not a column — it is the two lines below.
   const widest = (of: (r: Row) => string): number => Math.max(...visible.map((r) => of(r).length), 0);
   const sizes = [widest(code), widest((r) => r.state)];
   const lines = visible.flatMap((row, i) =>
@@ -373,15 +372,18 @@ export interface ListProps {
   readonly widths?: readonly number[];
 }
 
-/** The cursor row is inverted rather than marked with a character: a gutter costs a column
- *  on every line for one row's sake. */
+/** The cursor row is inverted, not marked: a gutter costs a column on every line for one. */
 export function List({ rows, height, cursor, width, widths }: ListProps) {
   return <Lines lines={listLines(rows, height, cursor, width, widths)} />;
 }
 
-/** The running box: the same list, three lines to a row. Same props as any other list so
- *  a screen can swap one for the other; `widths` is ignored, because a running row shares
- *  no description column with anything to line up against. */
+/** The same list, drawn in sections: the open rows, then the settled ones as one tally. */
+export function SectionList({ rows, height, cursor, width, widths, empty }: SectionProps) {
+  return <Lines lines={sectionLines(rows, height, cursor, width, empty, widths)} />;
+}
+
+/** The running box: the same list, three lines to a row. Same props so a screen can swap
+ *  one for the other; `widths` is ignored, a running row having no column to line up. */
 export function RunningList({ rows, height, cursor, width }: ListProps) {
   return <Lines lines={runningLines(rows, height, cursor, width)} />;
 }

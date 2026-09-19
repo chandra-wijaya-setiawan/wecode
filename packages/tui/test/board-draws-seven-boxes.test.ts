@@ -120,11 +120,12 @@ afterEach(cleanup);
 const lines = (width = 100, height = 90): string[] =>
   plain(render(createElement(Cockpit, { app, width, height })).lastFrame() ?? "").split("\n");
 
-/** Every box the frame draws, titled, top to bottom. A box is a top border with its title
- *  sat in it — `┌─ Cooking (1) [c] ───┐` — and the count and the letter come off. */
+/** Every region the frame draws, titled, top to bottom. A region is a rule with its title
+ *  sat in it — `── Cooking (1) [c] ─────` — and the count and the letter come off. The
+ *  borders these titles used to sit in are gone; see test/no-section-is-boxed.test.ts. */
 const drawn = (out: readonly string[]): string[] =>
   out
-    .filter((l) => l.startsWith("┌"))
+    .filter((l) => l.startsWith("──"))
     .map((l) => /─ (.*?) ─/.exec(l)?.[1] ?? "")
     .map((t) => t.replace(/ \(\d+\)/, "").replace(/ \[.\]$/, "").trim());
 
@@ -133,12 +134,13 @@ const drawn = (out: readonly string[]): string[] =>
 const boxes = (out: readonly string[]): string[] =>
   drawn(out).filter((t) => t !== services.title);
 
-/** The lines inside the box titled `title`, without their borders. */
+/** The lines under the rule titled `title`, down to the next rule or the end of the page. */
 function inside(out: readonly string[], title: string): string {
-  const at = out.findIndex((l) => l.startsWith(`┌─ ${title} (`));
+  const at = out.findIndex((l) => l.startsWith(`── ${title} (`));
   expect(at, `no box titled ${title}`).toBeGreaterThanOrEqual(0);
-  const end = out.findIndex((l, i) => i > at && l.startsWith("└"));
-  return out.slice(at + 1, end).join("\n");
+  const rest = out.slice(at + 1);
+  const end = rest.findIndex((l) => l.startsWith("──") || l.trim() === "");
+  return (end < 0 ? rest : rest.slice(0, end)).join("\n");
 }
 
 const titleOf = (filter: string): string => {
@@ -180,17 +182,17 @@ describe("the board draws seven boxes, in order", () => {
     expect(app.screen).toMatchObject({ kind: "box", view: { name: "open" } });
   });
 
-  it("draws each of them as a closed box, titled, with its count and its key", () => {
+  /** Each is ruled off rather than boxed in, and the rule carries everything the border
+   *  carried: the title, the count, and the letter `v` opens it by. */
+  it("rules each of them off, titled, with its count and its key", () => {
     const out = lines();
     for (const view of views) {
-      const at = out.findIndex((l) => l.startsWith(`┌─ ${view.title} (`));
+      const at = out.findIndex((l) => l.startsWith(`── ${view.title} (`));
       expect(at, `no box titled ${view.title}`).toBeGreaterThanOrEqual(0);
-      expect(out[at]).toMatch(new RegExp(`^┌─ ${view.title} \\(\\d+\\) \\[.\\] ─+┐$`));
-      // A title over lines that never close is not a box. Four sides, or it is not one.
-      let bottom = at + 1;
-      while (out[bottom]?.startsWith("│")) bottom += 1;
-      expect(out[bottom]?.startsWith("└"), `${view.title} has no bottom border`).toBe(true);
-      for (const line of out.slice(at + 1, bottom)) expect(line.endsWith("│")).toBe(true);
+      expect(out[at]).toMatch(new RegExp(`^── ${view.title} \\(\\d+\\) \\[.\\] ─+$`));
+      expect((out[at] as string).length).toBe(100);
+      // And the rows under it are rows, not the sides of a box the rule replaced.
+      expect(inside(out, view.title)).not.toMatch(/[│┌┐└┘]/);
     }
   });
 
@@ -203,7 +205,7 @@ describe("the board draws seven boxes, in order", () => {
   });
 
   it("draws each row once, on one box and no other", () => {
-    const body = lines().filter((l) => l.startsWith("│"));
+    const body = lines().filter((l) => !l.startsWith("──") && l.trim() !== "");
     for (const what of Object.values(rows)) {
       const holding = body.filter((l) => l.includes(what));
       expect(holding.length, `${what} is drawn on ${holding.length} boxes`).toBe(1);
