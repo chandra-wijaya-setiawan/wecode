@@ -287,11 +287,13 @@ export function Assignment({
   );
 }
 
-/** The summary block, then the record's children as a list. The block's fields are what an
- *  App knows about the record it is on — App exposes the screen's entity and id, not the row
- *  it was opened from, so the label and state are not among them. What the children add up
- *  to goes on the block's title rather than into a field of its own: it is the part you came
- *  to the screen for, and the title is the line the eye lands on first. */
+/** The summary block, then the record's children as a list. The screen carries the row it
+ *  was opened from, so the block leads with what the record is called and how it stands:
+ *  `task #3` named a screen after its key rather than after its work, and the reader who
+ *  pressed enter on a line already knows the id — what they came for is the title.
+ *
+ *  What the children add up to goes on the children box's title, next to the count it
+ *  refines, rather than on the summary's, which the record's own state now holds. */
 export function Node({
   app,
   screen,
@@ -299,9 +301,12 @@ export function Node({
   height,
 }: ScreenProps & { readonly screen: Screen & { kind: "node" } }) {
   const rows = app.lines();
+  const { row } = screen;
   const fields: [string, string][] = [
     ["entity", screen.entity],
     ["id", `#${screen.id}`],
+    ["title", row.what],
+    ["state", row.state],
     ["children", String(rows.length)],
   ];
   const inner = width - BORDER;
@@ -310,13 +315,17 @@ export function Node({
   return (
     <>
       <Panel
-        title={`${screen.entity} #${screen.id} · ${tally(rows)}`}
+        title={`${row.what} · ${row.state}`}
         width={width}
         height={fields.length + BORDER}
       >
         <Fields fields={fields} width={inner} />
       </Panel>
-      <Panel title={`children (${rows.length})`} width={width} height={children + BORDER}>
+      <Panel
+        title={`children (${rows.length}) · ${tally(rows)}`}
+        width={width}
+        height={children + BORDER}
+      >
         {rows.length === 0 ? (
           <Empty what="nothing under it" width={inner} />
         ) : (
