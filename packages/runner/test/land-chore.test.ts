@@ -144,46 +144,63 @@ describe("a delivered story with no land commit in the base", () => {
     expect(board(db).chores).toEqual([]);
   });
 
-  it("never writes in the checkout that holds the base, and leaves no tree standing", async () => {
+  it("brings a clean primary checkout forward after landing, and leaves no tree standing", async () => {
     const s = story("password reset", "reset.ts");
     const before = checkouts();
 
-    await runner().tick();
+    const tick = await runner().tick();
 
-    // docs/design/14: the tree holding the base is not something wecode writes to. The
-    // merge happens in a detached tree of wecode's own, and that tree is gone afterwards.
+    // The merge still happens in a detached tree of wecode's own, and that tree is gone
+    // afterwards. Once the base ref has moved, a primary checkout that was clean at the old
+    // tip is brought forward too, so the operator does not see staged inverse changes.
     expect(git(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
     expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("the base\n");
-    expect(existsSync(join(repo, "reset.ts"))).toBe(false);
+    expect(readFileSync(join(repo, "reset.ts"), "utf8")).toBe("password reset\n");
+    expect(git(repo, "status", "--short")).toBe("");
+    expect(tick.landed.find((l) => l.story === s.id)?.notice).toBeUndefined();
     expect(existsSync(landTree(s.slug))).toBe(false);
     expect(checkouts()).toEqual(before);
   });
 
-  it("is not silent about it either: the untouched checkout is told the command", async () => {
+  it("does not bring the primary checkout forward over operator work, and says the command", async () => {
     const s = story("password reset", "reset.ts");
+    writeFileSync(join(repo, "README.md"), "operator notes\n");
 
     const tick = await runner().tick();
 
-    // Not writing the operator's tree is only half of it. The other half is saying the tree
-    // is behind, and how to bring it forward, in the path it is to be run in.
+    expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("operator notes\n");
+    expect(existsSync(join(repo, "reset.ts"))).toBe(false);
     const notice = tick.landed.find((l) => l.story === s.id)?.notice ?? "";
     expect(notice).toContain(repo);
+    expect(notice).toContain("README.md");
     expect(notice).toContain("git restore --source=HEAD --staged --worktree .");
   });
 
-  it("has no drift it answers by writing: every one is current or an instruction", () => {
-    const drifts = [true, false].flatMap((wasTheOldTip) =>
-      [[], ["README.md"]].map((ownWork) => ({
+  it("answers primary drift by syncing only the clean old-tip checkout", () => {
+    expect(
+      updatePrimary({
         path: "/w/repo",
         base: "main",
         onBase: true,
         alreadyCurrent: false,
-        wasTheOldTip,
-        ownWork,
-      })),
-    );
+        wasTheOldTip: true,
+        ownWork: [],
+      }),
+    ).toEqual({ kind: "sync" });
+
+    const drifts = [
+      { wasTheOldTip: false, ownWork: [] },
+      { wasTheOldTip: true, ownWork: ["README.md"] },
+      { wasTheOldTip: false, ownWork: ["README.md"] },
+    ];
     for (const drift of drifts) {
-      const verdict = updatePrimary(drift);
+      const verdict = updatePrimary({
+        path: "/w/repo",
+        base: "main",
+        onBase: true,
+        alreadyCurrent: false,
+        ...drift,
+      });
       expect(verdict.kind).toBe("tell");
       if (verdict.kind === "tell") expect(verdict.instruction).toContain("/w/repo");
     }
