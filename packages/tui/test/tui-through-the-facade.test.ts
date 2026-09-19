@@ -36,16 +36,26 @@ beforeEach(() => {
   app = new App(db, views, machines);
 });
 
+/** The outline, which is where a project is reached now that the dashboard has no projects
+ *  box: its four are what waits on you, the open work, what is running and the fold. */
+const fromTheOutline = (): void => {
+  app.key("v");
+  app.key("t");
+  expect(app.screen).toMatchObject({ kind: "outline" });
+};
+
 /** Put the cursor on a row by what it says. Ids repeat across tables, so the label is what
- *  names a row on a board whose boxes are queries over different ones. */
+ *  names a row on a board whose boxes are queries over different ones. `endsWith` because
+ *  an outline row leads with the tree guide it is drawn under; a board row does not. */
 const cursorOn = (what: string): void => {
-  const at = app.lines().findIndex((r) => r.what === what);
+  const at = app.lines().findIndex((r) => r.what === what || r.what.endsWith(` ${what}`));
   expect(at, `no row ${what}`).toBeGreaterThanOrEqual(0);
   app.cursor = at;
 };
 
 describe("the verbs the cockpit offers are the facade's methods", () => {
   it("offers exactly the methods the facade has for the row's entity and state", () => {
+    fromTheOutline();
     cursorOn("storefront"); // a project in_progress
     const expected = TRANSITIONS.filter(
       (t) => t.entity === "project" && t.method !== null && t.from.includes("in_progress"),
@@ -76,6 +86,7 @@ describe("the verbs the cockpit offers are the facade's methods", () => {
 
 describe("a verb the cockpit applies is the facade method", () => {
   it("leaves the record and the ledger as the facade method would", () => {
+    fromTheOutline();
     cursorOn("storefront");
     app.key("a");
     app.key("h");
