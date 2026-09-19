@@ -1,9 +1,8 @@
 /** What an App looks like — see config/tui-contract.yaml. Nothing here decides anything:
  *  every component is a pure function of the App's state, so a screen can be asserted on
- *  by rendering it rather than by driving a terminal.
- *
- *  The widths are Yoga's problem now. What is left to this file is which boxes there are,
- *  what each is called, and which one holds the cursor. */
+ *  by rendering it rather than by driving a terminal. The widths are Yoga's problem now;
+ *  what is left to this file is which regions there are, what each is called, which one
+ *  holds the cursor, and which of them is worth a border. */
 import type { ReactNode } from "react";
 import { Box, Text } from "ink";
 // By path, as app.ts imports it: index.ts names what board.ts offers one export at a time.
@@ -24,10 +23,9 @@ export const COLUMNS: readonly Column[] = ["#", "what", "state", "detail"];
 
 /** The keys each screen answers, in the order a reader scans them. App.key handles j k g G
  *  + - enter esc q r v a; esc and +/- are the two a screen can lack, because the dashboard
- *  has nothing to pop and only the outline folds. Everything else is on every screen.
- *
- *  A function rather than a constant: the outline names its own key, and this module and
- *  that one each draw part of the other, so the list cannot be built at import time. */
+ *  has nothing to pop and only the outline folds. Everything else is on every screen. A
+ *  function rather than a constant: the outline names its own key, and this module and that
+ *  one each draw part of the other, so the list cannot be built at import time. */
 const KEYS = (): readonly (readonly [string, string])[] => [
   ["j/k", "move"],
   ["g/G", "top/end"],
@@ -41,7 +39,6 @@ const KEYS = (): readonly (readonly [string, string])[] => [
   ["q", "quit"],
 ];
 
-
 /** Whether a key does anything on this screen. Only these two are ever dropped: the rest
  *  are on every bar, because a key the bar omits is a screen with no way in. */
 const answered = (key: string, kind: Screen["kind"]): boolean => {
@@ -52,6 +49,9 @@ const answered = (key: string, kind: Screen["kind"]): boolean => {
 
 /** A border costs a column each side. */
 const BORDER = 2;
+
+/** A rule costs one line, where a border costs two and two columns with it. */
+const RULE = 1;
 
 interface PanelProps {
   readonly title: string;
@@ -65,8 +65,7 @@ interface PanelProps {
  *  `v` opens it by. The title is drawn absolutely one row above the content, which is the
  *  border row — Ink has no title of its own, and this is the whole of the arithmetic. */
 export function Panel({ title, letter, width, height, children }: PanelProps) {
-  const named = letter === undefined ? "" : ` [${letter}]`;
-  const label = clip(` ${title}${named} `, Math.max(width - 4, 0));
+  const head = clip(` ${label(title, letter)} `, Math.max(width - 4, 0));
   return (
     <Box
       borderStyle="single"
@@ -76,8 +75,32 @@ export function Panel({ title, letter, width, height, children }: PanelProps) {
       height={height}
     >
       <Box position="absolute" marginTop={-1} marginLeft={1}>
-        <Text wrap="truncate">{label}</Text>
+        <Text wrap="truncate">{head}</Text>
       </Box>
+      {children}
+    </Box>
+  );
+}
+
+/** The title of a region, in the words the box pages put in their border: the name, the
+ *  letter `v` opens it by, and the count the caller has already folded into the title. */
+const label = (title: string, letter: string | undefined): string =>
+  `${title}${letter === undefined ? "" : ` [${letter}]`}`;
+
+/** A dashboard section: its name on a rule, and its rows under it at the full width.
+ *
+ *  A border would cost two lines and two columns to say the same thing. Eight of them cost
+ *  the dashboard sixteen lines — more than the Cooking box is allowed to draw — to repeat a
+ *  separation the rule already makes, and the two columns come off every row on the page.
+ *  So the chrome is one line and the height goes back to the rows. The name sits in the
+ *  rule rather than above it, for the same reason a border's sat in its top edge: a section
+ *  holding nothing is then one line of chrome and not two. The full-height pages keep their
+ *  borders — two lines once is not sixteen, and it is what tells a page from the bar. */
+function Section({ title, letter, width, height, children }: PanelProps) {
+  const head = clip(`── ${label(title, letter)} `, width);
+  return (
+    <Box flexDirection="column" flexShrink={0} width={width} height={height}>
+      <Text wrap="truncate">{head + "─".repeat(Math.max(width - head.length, 0))}</Text>
       {children}
     </Box>
   );
@@ -134,47 +157,50 @@ interface ScreenProps {
 }
 
 /** What is holding the workspace up, then every box in config order, each trimmed to the
- *  height it declares.
+ *  height it declares. Each is a section — a rule with its name in it — and not a box: see
+ *  Section for what the borders cost and what the page bought with them back.
  *
- *  The services box is first because a dead runner or a schema this build cannot read is
- *  the reason every box under it is wrong, and reading the board before that is reading a
- *  board that may have stopped moving an hour ago. It is not in `page.order`: it is not a
+ *  The services section is first because a dead runner or a schema this build cannot read
+ *  is the reason every box under it is wrong, and reading the board before that is reading
+ *  a board that may have stopped moving an hour ago. It is not in `page.order`: it is not a
  *  filter over the board, it holds no rows the cursor can reach, and `v` does not open it. */
 export function Dashboard({ app, width }: ScreenProps) {
   const rows = app.lines();
   const widths = columnWidths(boardRows(app), COLUMNS);
   const key = letters(app);
-  const inner = width - BORDER;
+  // Sized from the rows it will draw: services.tsx adds a pulse line per project on top of
+  // its four fixed ones, and a section shorter than its children draws them over the rule.
+  const serviceRows = SERVICE_ROWS + app.boardNow().projects.length;
   return (
     <>
-      <Panel title={SERVICES.title} width={width} height={SERVICE_ROWS + BORDER}>
-        <Services app={app} width={inner} config={SERVICES} />
-      </Panel>
+      <Section title={SERVICES.title} width={width} height={serviceRows + RULE}>
+        <Services app={app} width={width} config={SERVICES} />
+      </Section>
       {boxes(app, rows).map((box) => {
         // The cursor runs over every box's rows at once; only the box holding it draws one.
         const local = app.cursor - box.at;
         const cursor = local >= 0 && local < box.rows.length ? local : null;
         return (
-          <Panel
+          <Section
             key={box.name}
             title={`${box.title} (${box.rows.length})`}
             letter={key.get(box.name)}
             width={width}
-            height={box.height + BORDER}
+            height={box.height + RULE}
           >
             {box.rows.length === 0 ? (
-              <Empty what={box.empty} width={inner} />
+              <Empty what={box.empty} width={width} />
             ) : (
               <List
                 rows={box.rows}
                 columns={COLUMNS}
                 height={box.height}
                 cursor={cursor}
-                width={inner}
+                width={width}
                 widths={widths}
               />
             )}
-          </Panel>
+          </Section>
         );
       })}
     </>
@@ -217,10 +243,8 @@ export function BoxPage({
 /** How the children stand, most of them first and ties by name, as `ready 2 · done 1`.
  *  A count per state rather than the states in row order: the block is read to learn
  *  whether the record is waiting on one thing or on twenty, and a list that repeated
- *  `ready` twenty times would answer that only by being counted.
- *
- *  An em dash when there are none, because a blank line reads as a line that failed to
- *  draw rather than as a record with nothing under it. */
+ *  `ready` twenty times would answer that only by being counted. An em dash when there are
+ *  none, because a blank line reads as a line that failed to draw. */
 export function tally(rows: readonly Row[]): string {
   const counts = new Map<string, number>();
   for (const row of rows) counts.set(row.state, (counts.get(row.state) ?? 0) + 1);
@@ -263,10 +287,9 @@ function fold(value: string, width: number): string[] {
 
 /** A record's facts as text: `name  value`, names left-aligned into a gutter as wide as the
  *  longest of them. Every detail screen's block is this, so the blocks line up with each
- *  other rather than each choosing its own gutter.
- *
- *  `wrap` is what a page with the whole terminal to itself does with a value too long for
- *  one line; a block sized to `fields.length` cannot afford it and clips instead. */
+ *  other rather than each choosing its own gutter. `wrap` is what a page with the whole
+ *  terminal to itself does with a value too long for one line; a block sized to
+ *  `fields.length` cannot afford it and clips instead. */
 export function fieldLines(fields: readonly Field[], width: number, wrap = false): string[] {
   const gutter = Math.max(...fields.map(([k]) => k.length));
   return fields.flatMap(([k, v]) => {
@@ -298,11 +321,8 @@ function Fields({
 /** How long an assignment may say nothing and still be called alive. The runner ticks
  *  every 15 seconds by default and writes `last_seen` on each observation it makes, so a
  *  minute is four missed ticks: long enough that a slow tick is not an alarm, short enough
- *  that a worker who died is not still being called alive a coffee later.
- *
- *  A literal here and not in views.yaml only because that file declares boxes and this is
- *  not one. It is a threshold, so it belongs beside the other view configuration the day
- *  the page has any. */
+ *  that a worker who died is not still being called alive a coffee later. A literal here
+ *  and not in views.yaml only because that file declares boxes and this is not one. */
 export const ALIVE_FOR_MS = 4 * 15_000;
 
 /** Tokens as the board writes them, `2.0k`, so the page and the running box's detail count
@@ -364,12 +384,10 @@ export function fit(lines: readonly string[], rows: number, width: number): stri
  *  columns had no room for: what it was allowed, what it has used, and when it last spoke.
  *  Neither half restates the other, so neither can contradict it.
  *
- *  The values wrap rather than clip. A question is the whole reason the page exists for a
+ *  The values wrap rather than clip: a question is the whole reason the page exists for a
  *  waiting assignment, and half a question with an ellipsis on it is a page you have to
- *  leave to read.
- *
- *  No children box. An assignment is the leaf the board points at, and an empty box saying
- *  so would cost two lines to say nothing. */
+ *  leave to read. No children box — an assignment is the leaf the board points at, and an
+ *  empty box saying so would cost two lines to say nothing. */
 export function Assignment({
   screen,
   facts,
@@ -408,10 +426,8 @@ export function Assignment({
 /** The summary block, then the record's children as a list. The screen carries the row it
  *  was opened from, so the block leads with what the record is called and how it stands:
  *  `task #3` named a screen after its key rather than after its work, and the reader who
- *  pressed enter on a line already knows the id — what they came for is the title.
- *
- *  What the children add up to goes on the children box's title, next to the count it
- *  refines, rather than on the summary's, which the record's own state now holds. */
+ *  pressed enter on a line already knows the id — what they came for is the title. What the
+ *  children add up to goes on the children box's title, next to the count it refines. */
 export function Node({
   app,
   screen,
@@ -432,11 +448,7 @@ export function Node({
   const children = Math.max(height - fields.length - 2 * BORDER, 1);
   return (
     <>
-      <Panel
-        title={`${row.what} · ${row.state}`}
-        width={width}
-        height={fields.length + BORDER}
-      >
+      <Panel title={`${row.what} · ${row.state}`} width={width} height={fields.length + BORDER}>
         <Fields fields={fields} width={inner} />
       </Panel>
       <Panel
@@ -447,13 +459,7 @@ export function Node({
         {rows.length === 0 ? (
           <Empty what="nothing under it" width={inner} />
         ) : (
-          <List
-            rows={rows}
-            columns={COLUMNS}
-            height={children}
-            cursor={app.cursor}
-            width={inner}
-          />
+          <List rows={rows} columns={COLUMNS} height={children} cursor={app.cursor} width={inner} />
         )}
       </Panel>
     </>
@@ -463,14 +469,8 @@ export function Node({
 /** The bar is the last line and names every key the screen answers. A key it omits is a
  *  way in nobody can find, so the only thing it drops is esc, and only where esc is
  *  refused. It is not a box: a border round it would cost two of the lines it exists to
- *  leave for the work. */
-export function KeyBar({
-  screen,
-  width,
-}: {
-  readonly screen: Screen;
-  readonly width: number;
-}) {
+ *  leave for the work — which is the argument the dashboard's sections now make too. */
+export function KeyBar({ screen, width }: { readonly screen: Screen; readonly width: number }) {
   const keys = KEYS().filter(([k]) => answered(k, screen.kind));
   return (
     <Text wrap="truncate">{clip(keys.map(([k, what]) => `${k} ${what}`).join("  "), width)}</Text>

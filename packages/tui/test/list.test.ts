@@ -194,3 +194,22 @@ describe("the list's colour", () => {
     expect(out).toContain("… and 2 more");
   });
 });
+
+describe("the plain list is not the sectioned one", () => {
+  // `sectionLines` collapses the settled rows and gives an empty list a line of its own —
+  // see settled-is-one-line.test.ts. A plain `List` does neither: a screen that wants a row
+  // per row, cursor and all, still gets exactly that, so asking for sections stays a choice
+  // a caller makes rather than something this module does to every list on the board.
+  it("draws a settled row on a line of its own, like any other", () => {
+    const rows = [row(1, "shipped", "delivered"), row(2, "landed", "released")];
+
+    expect(lines(rows, 5, null, 80)).toEqual([
+      "#1  delivered  shipped",
+      "#2  released   landed",
+    ]);
+  });
+
+  it("draws no line at all when it has no rows", () => {
+    expect(lines([], 5, null, 80)).toEqual([]);
+  });
+});
