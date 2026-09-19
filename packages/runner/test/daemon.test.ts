@@ -133,10 +133,17 @@ describe("a task branch lands once", () => {
 
 describe("a task that keeps failing stops", () => {
   it("gives up once its attempts are spent, rather than being retried forever", async () => {
-    /** A worker that writes nothing, so the task_test never passes. */
+    // A worker that writes the wrong thing, rather than nothing: an attempt that commits
+    // nothing is refunded its retry, so only a tree with work in it spends one.
+    // Fresh content every attempt, so the second attempt commits too rather than being
+    // refunded for leaving the branch where it was.
+    let n = 0;
     const idle: WorkerAdapter = {
       kind: "agent",
-      start: async () => ({ phase: "succeeded", session: "s", spent: { tokens: 1, seconds: 0 }, commit: null }),
+      start: async (w: Work) => {
+        writeFileSync(join(w.worktree, "mail.ts"), `export const send = () => ${(n += 1)};\n`);
+        return { phase: "succeeded" as const, session: "s", spent: { tokens: 1, seconds: 0 }, commit: null };
+      },
       poll: async () => ({ phase: "running", session: "s", spent: { tokens: 0, seconds: 0 } }),
       answer: async () => ({ phase: "running", session: "s", spent: { tokens: 0, seconds: 0 } }),
       kill: async () => {},
