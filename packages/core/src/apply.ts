@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { cascadeDrop } from "./cascade.js";
 import { registry } from "./checks.js";
 import { queries, table, type Dialect } from "./db.js";
 import { attributedTo, type Actor } from "./facade-gen.js";
@@ -172,6 +173,7 @@ export class Engine {
    *  and fires, so nothing waits for an event that already happened. */
   settle(): readonly Change[] {
     const changes: Change[] = [];
+    this.abandonTestsOfDroppedTasks(changes);
 
     for (let pass = 0; pass < SWEEP.length; pass++) {
       let moved = false;
@@ -203,6 +205,30 @@ export class Engine {
       if (!moved) break;
     }
     return changes;
+  }
+
+  /** A task_test under a dropped task is dispatchable work nobody means to do.
+   *
+   *  `task.drop` carries no guard, so a task may be dropped with its tests still `ready` —
+   *  and nothing brings them down. cascade.ts is the downward walk, but only a caller who
+   *  remembers to run it; `wecode task drop` did and the daemon's own drops did not, so the
+   *  tests sat there unsettled and the task's test column read as live work. The sweep is
+   *  the level-triggered half, so it is where the omission is repaired rather than at each
+   *  of the sites that has to remember.
+   *
+   *  It goes through cascadeDrop for the two things that file already decides: a drop must
+   *  not fire an upward completion transition on its way down, and a `passed` task_test is
+   *  a success the machine will not undo. A test it keeps is not reported as a change,
+   *  because nothing about it changed. */
+  private abandonTestsOfDroppedTasks(changes: Change[]): void {
+    for (const row of this.q.selectFrom(task).select([...NODE]).all()) {
+      if (row.state !== "dropped") continue;
+      const done = cascadeDrop(this.db, "task", row.id, this.machines);
+      if (!done.ok) continue;
+      for (const d of done.dropped) {
+        changes.push({ ...d, automatic: true, actor: CASCADE, reason: null });
+      }
+    }
   }
 
   /** Walk up from a settled child, firing any automatic transition whose guard now holds. */
