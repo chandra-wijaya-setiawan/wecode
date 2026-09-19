@@ -137,8 +137,8 @@ components:
     package: explorer
     layer: service
     component: true
-    owns: the questions wecode asks about a repository — what a file defines and exports, what it imports, who references a symbol, the evidence of what a module is for, which files sit under a box of the architecture, and where the model of which node may reach which converges with, diverges from or is absent in the import graph. The index behind it is an adapter, replaceable without a caller noticing
-    modules: [adapters/codegraph, architecture, coverage, index, ports, reflexion]
+    owns: the questions wecode asks about a repository — what a file defines and exports, what it imports, who references a symbol, the evidence of what a module is for, which files sit under a box of the architecture, and where the model of which node may reach which converges with, diverges from or is absent in the import graph, and what map that same import graph would propose if nobody had written one. The index behind it is an adapter, replaceable without a caller noticing
+    modules: [adapters/codegraph, architecture, coverage, index, ports, propose, reflexion]
 
   view-index:
     package: ui
