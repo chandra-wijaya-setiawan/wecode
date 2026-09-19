@@ -33,13 +33,17 @@ describe("the built cockpit, driven in a terminal", () => {
   it("draws the board it was pointed at", async () => {
     await drive(async (cockpit) => {
       const frame = cockpit.frame();
-      // The four boxes the page draws now: no Projects box — the outline is the way out
-      // to the workspace — and Running back on the page with a box of its own.
-      expect(frame).toContain("Open (2) [o]");
-      expect(frame).toContain("password reset");
+      // The seven boxes the page draws now, in order: no Projects box — the outline is the
+      // way out to the workspace — and the seed's ready task in Queue, which is a box of its
+      // own again rather than a row folded in with what has given up.
+      expect(frame).toContain("Needs you (0) [n]");
       expect(frame).toContain("Running (0) [r]");
-      expect(frame).toContain("Cooking (1) [c]");
+      expect(frame).toContain("Queue (1) [q]");
       expect(frame).toContain("send the reset mail");
+      expect(frame).toContain("Cooking (0) [c]");
+      expect(frame).toContain("Planned (0) [p]");
+      expect(frame).toContain("Delivered (0) [d]");
+      expect(frame).toContain("Dropped (0) [x]");
       expect(frame).toContain("j/k move");
     });
   }, 30_000);
