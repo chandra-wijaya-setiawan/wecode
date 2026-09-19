@@ -1704,6 +1704,14 @@ function usage(): number {
       "  two tasks whose write scopes overlap will not run at the same time",
       "  a failing test is the answer — make another task, do not edit the code by hand",
       "",
+      "WHAT WECODE WILL NOT DO",
+      "  it will not decide what to build — you write the requirement, it holds you to it",
+      "  it will not judge work by an agent's word — only a test that ran says done",
+      "  it will not let an agent widen its own scope — a scope is set before the work starts",
+      "  it will not edit your code itself — every change arrives as a task an agent ran",
+      "  it will not push, release or deploy — landing stops at a merge into your branch",
+      "  it will not replace your test runner, vcs or ci — it drives the ones you have",
+      "",
     ].join("\n"),
   );
   return 0;
