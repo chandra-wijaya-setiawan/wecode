@@ -10,6 +10,10 @@ import { loadViews } from "../src/views.js";
 import { OUTLINE, scopeTitle, splitTree } from "../src/outline.js";
 import { seed, T, ins } from "./seed.js";
 
+/** chalk's `gray` is the bright-black foreground, and it closes with the same reset any
+ *  other colour does — so `coloured` reads it like the rest. */
+const DIM = 90;
+
 const views = loadViews();
 const machines = loadMachines();
 
@@ -110,16 +114,23 @@ describe("the box", () => {
 
   it("uses colour for state and for nothing else", () => {
     ins(db, "INSERT INTO project (slug,workspace_id,name,repo,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", "dead", 1, "abandoned", "/repo", "dropped", T, T);
+    ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", "shipped", tree.epic, "shipped last week", "delivered", T, T);
     app.refresh();
-    // A dropped project is settled work, so the scope the outline opens on has already
-    // dropped it: widen to all before asking what the state colours are doing.
+    // Both rows are settled work, so the scope the outline opens on has already dropped
+    // them: widen to all before asking what the state colours are doing.
     app.key("f");
     app.key("a");
+    // Red is spent on the one row that cannot move until a person moves it, and nothing
+    // in a tree of work is that row — the ask a person owes is an assignment's, drawn in
+    // Needs you. A dropped project is the machine's own end of the line, not an alarm.
     const red = coloured(frame(), RED);
-    expect(red).toHaveLength(1);
-    expect(red[0]).toContain("abandoned");
-    // The rows in states with nothing to say about themselves are drawn plain.
+    expect(red).toHaveLength(0);
+    // Settled is dim rather than bright: twenty finished rows are not the thing to look at.
+    const dim = coloured(frame(), DIM);
+    expect(dim.some((r) => r.includes("shipped last week")), "a delivered row is not dim").toBe(true);
     expect(coloured(frame(), GREEN)).toHaveLength(0);
+    // The rows in states with nothing to say about themselves are drawn plain.
+    expect(dim.some((r) => r.includes("account recovery")), "an in-progress row is dim").toBe(false);
   });
 });
 
