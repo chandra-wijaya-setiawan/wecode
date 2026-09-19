@@ -24,6 +24,9 @@ import {
   type Outcome,
   type StatefulEntity,
 } from "@wecode/core";
+// By path, as the runner imports the dialect: index.ts names what board.ts offers one
+// export at a time, and the assignment page's half of the record is not on that list.
+import { assignmentFacts, type AssignmentFacts } from "@wecode/core/dist/board.js";
 import type { Row } from "./list.js";
 import {
   atDepth,
@@ -301,6 +304,17 @@ export class App {
   /** The board as of the last refresh, for screens.ts to draw the boxes from. */
   boardNow(): Board {
     return this.snapshot ?? board(this.db);
+  }
+
+  /** The open assignment's allowance, spend and last beat, read now rather than at the
+   *  last refresh. How long an agent has been silent grows without anything being written,
+   *  so a beat carried from the last keystroke would say a dead worker was alive for as
+   *  long as nobody pressed a key. One indexed row, on a screen that draws nothing else.
+   *
+   *  Null off an assignment screen, and null for a record that has since been deleted. */
+  factsNow(): AssignmentFacts | null {
+    const screen = this.screen;
+    return screen.kind === "assignment" ? assignmentFacts(this.db, screen.id) : null;
   }
 
   /** The verbs the row under the cursor may take, read off the facade. Automatic
