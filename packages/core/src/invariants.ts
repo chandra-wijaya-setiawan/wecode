@@ -283,13 +283,16 @@ export function allChildrenDroppedIsNotSuccess(s: Snapshot): readonly Violation[
  *  because `PARENTS` is keyed by the entities that have a child. */
 const LEAF_SUCCESS: Readonly<Record<string, string>> = { task_test: "passed" };
 
-/** The one state that means this entity succeeded, or undefined for an entity no invariant
- *  here speaks about. */
-const successOf = (entity: string): string | undefined => PARENTS[entity]?.success ?? LEAF_SUCCESS[entity];
+/** The one state that means this entity succeeded. `PARENTS` already carries it for every
+ *  entity that has children, so this reads it back rather than keeping a second copy;
+ *  task_test is the leaf of the chain and is the only row `LEAF_SUCCESS` has to add. */
+export const successOf = (entity: Checked): string => (PARENTS[entity]?.success ?? LEAF_SUCCESS[entity])!;
 
-/** Settled: nothing more will be done to it. The success state or `dropped`, which is the
- *  same set `checks.ts` cascades on — a cascade fires when every child is settled. */
-const isSettled = (n: RecordNode): boolean => n.state === "dropped" || n.state === successOf(n.entity);
+/** Settled is succeeded or dropped: the two ways of being finished with. Every other state
+ *  — planned, in_progress, on_hold, ready, failed — is open, and `failed` is open on
+ *  purpose: a red test is work outstanding, not work concluded. It is the same set
+ *  `checks.ts` cascades on — a cascade fires when every child is settled. */
+export const isSettled = (n: RecordNode): boolean => n.state === "dropped" || n.state === successOf(n.entity);
 
 /** The automatic settlement of each parent: the state the cascade departs from, and the verb
  *  that takes it. Read straight off the `automatic: true` transitions of
@@ -359,6 +362,39 @@ export function unsettledParentIsNamed(s: Snapshot): readonly Violation[] {
       ),
     ];
   });
+}
+
+/** Said of a child still open beneath a parent that has finished with it. */
+export const ITS_PARENT_HAS_FINISHED = "its parent is settled and it is not";
+
+/** Nothing is open under a settled parent — the same sentence as the others, read upwards.
+ *
+ *  Every invariant above looks down: it takes a parent and asks whether its children bear
+ *  out the claim the parent makes. This one starts at the child. A parent settles on a
+ *  guard over the children it could see, so a child that arrived after the settlement, or
+ *  that was reopened under it, is a child no guard ever weighed: the task is `ready` and
+ *  will be dispatched, the acceptance_test is `failed` and nobody is answering it, and the
+ *  story above says delivered. The downward checks are all silent about it, because from
+ *  the parent's side nothing is missing.
+ *
+ *  It names the child, once per child, and not the parent: a settled parent with four
+ *  strays has four separate pieces of work still loose under it, and a single finding
+ *  against the parent would let three of them be healed by closing one. That is what the
+ *  doctor needs to see every one of. */
+export function nothingIsOpenUnderASettledParent(s: Snapshot): readonly Violation[] {
+  return s.nodes
+    .filter(isSettled)
+    .flatMap((p) =>
+      childrenOf(s, p)
+        .filter((c) => !isSettled(c))
+        .map((c) =>
+          violation(
+            "nothing_is_open_under_a_settled_parent",
+            c,
+            `${c.state} under ${p.entity} ${p.slug} #${p.id}, which is ${p.state} — ${ITS_PARENT_HAS_FINISHED}`,
+          ),
+        ),
+    );
 }
 
 /** A `ready` acceptance_test has been observed red at its base: a test nobody has seen fail
@@ -527,6 +563,7 @@ export const INVARIANTS: readonly { readonly name: string; readonly check: (s: S
   { name: "story_in_progress_has_a_requirement", check: storyInProgressHasARequirement },
   { name: "all_children_dropped_is_not_success", check: allChildrenDroppedIsNotSuccess },
   { name: "unsettled_parent_is_named", check: unsettledParentIsNamed },
+  { name: "nothing_is_open_under_a_settled_parent", check: nothingIsOpenUnderASettledParent },
   { name: "ready_acceptance_test_was_red_at_base", check: readyAcceptanceTestWasRedAtBase },
   { name: "role_with_ready_work_has_a_worker", check: roleWithReadyWorkHasAWorker },
   { name: "ready_task_has_a_ready_task_test", check: readyTaskHasAReadyTaskTest },
