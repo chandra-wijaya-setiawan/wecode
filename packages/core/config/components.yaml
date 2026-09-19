@@ -119,6 +119,13 @@ components:
     owns: checks wecode against itself, heals what it safely can, and proposes the rest as a chore
     modules: [doctor, healer, ceiling, screens-check]
 
+  heartbeat:
+    package: runner
+    layer: service
+    component: true
+    owns: saying the runner process is alive, on a clock of its own — so a long tick is never read as a dead runner
+    modules: [heartbeat]
+
   runner surface:
     package: runner
     layer: surface
@@ -144,8 +151,8 @@ components:
     package: ui
     layer: client
     component: true
-    owns: the screens a person reads stated as ports — what the index of boxes must say, said once and without naming a renderer. The renderers behind it — ink for a terminal, wireframe for a picture — draw those lines and decide nothing. It also judges what was drawn — whether one capture of a screen is self-consistent, and what is different between two of them
-    modules: [adapters/ink, check, diff, expected, index, ports, wireframe]
+    owns: the screens a person reads stated as ports — what the index of boxes must say, said once and without naming a renderer. The renderers behind it — ink for a terminal, CDP for a web page, wireframe for a picture — draw those lines and decide nothing. It also judges what was drawn — whether one capture of a screen is self-consistent, and what is different between two of them
+    modules: [adapters/cdp, adapters/ink, check, diff, expected, index, ports, wireframe]
 
   tui:
     package: tui
