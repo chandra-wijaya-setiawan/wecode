@@ -54,6 +54,8 @@ interface PanelProps {
   /** A section's glyph, from views.yaml. A Panel has none: a page is one thing. */
   readonly mark?: string | undefined;
   readonly letter?: string | undefined;
+  /** How many rows the region holds, drawn at a Section's far end. A Panel has none. */
+  readonly count?: number | undefined;
   readonly width: number;
   readonly height: number;
   readonly children: ReactNode;
@@ -79,30 +81,22 @@ export function Panel({ title, letter, width, height, children }: PanelProps) {
   );
 }
 
-/** A region's name, with the letter `v` opens it by; the count is already in `title`. The
- *  letter is not capitalised with the name: it is the key a person types, not a word. */
+/** A region's name, with the letter `v` opens it by. The letter is not capitalised with
+ *  the name: it is the key a person types, not a word. */
 const label = (title: string, letter: string | undefined): string =>
   `${title}${letter === undefined ? "" : ` [${letter}]`}`;
 
-/** A dashboard section: its name on a rule, and its rows under it at the full width.
- *
- *  A border would cost two lines and two columns to say the same thing. Eight of them cost
- *  the dashboard sixteen lines — more than the Cooking box is allowed to draw — to repeat a
- *  separation the rule already makes, and the two columns come off every row on the page.
- *  So the chrome is one line and the height goes back to the rows. The name sits in the
- *  rule rather than above it, for the same reason a border's sat in its top edge: a section
- *  holding nothing is then one line of chrome and not two. The full-height pages keep their
- *  borders — two lines once is not sixteen, and it is what tells a page from the bar.
- *
- *  The head is a glyph and then the name in capitals. Eight rules down a page all begin
- *  `── ` and then a word in the same case as the words under them, and a reader scanning
- *  for where a section starts was reading the words to find out. The capitals answer that
- *  without being read, and the glyph is the section's own — the same one its rows carry. */
-function Section({ title, mark, letter, width, height, children }: PanelProps) {
-  const head = clip(`── ${mark} ${label(title.toUpperCase(), letter)} `, width);
+/** A dashboard section: a rule carrying the section's own glyph, its name in capitals and,
+ *  at the far end, its count; its rows under it at the full width. A border would repeat,
+ *  for two lines and two columns, a separation the rule already makes. The count is pushed
+ *  to the width: the numbers down a page of eight are then a column to compare, and the
+ *  dashes are the fill that holds each in place. */
+function Section({ title, mark, letter, count, width, height, children }: PanelProps) {
+  const tail = count === undefined ? "" : ` ${count}`;
+  const head = clip(`── ${mark} ${label(title.toUpperCase(), letter)} `, width - tail.length);
   return (
     <Box flexDirection="column" flexShrink={0} width={width} height={height}>
-      <Text wrap="truncate">{head + "─".repeat(Math.max(width - head.length, 0))}</Text>
+      <Text wrap="truncate">{head.padEnd(width - tail.length, "─") + tail}</Text>
       {children}
     </Box>
   );
@@ -189,7 +183,8 @@ export function Dashboard({ app, width }: ScreenProps) {
         return (
           <Section
             key={box.name}
-            title={`${box.title} (${box.rows.length})`}
+            title={box.title}
+            count={box.rows.length}
             mark={sectionMark(box.name)}
             letter={key.get(box.name)}
             width={width}
@@ -247,7 +242,12 @@ export function BoxPage({
   );
 }
 
-/** How the children stand, most first and ties by name, as `ready 2 · done 1`. A count per
+/** A count in the digits that say it belongs to the word before it: `ready²` is one token,
+ *  where in `ready 2` the eye must decide whether the 2 opens the next pair. */
+const superscript = (n: number): string =>
+  String(n).replace(/\d/g, (d) => "⁰¹²³⁴⁵⁶⁷⁸⁹"[Number(d)] as string);
+
+/** How the children stand, most first and ties by name, as `ready² · done¹`. A count per
  *  state, not the states in row order: the block is read to learn whether the record waits
  *  on one thing or twenty. An em dash for none — a blank line reads as a failed draw. */
 export function tally(rows: readonly Row[]): string {
@@ -256,7 +256,7 @@ export function tally(rows: readonly Row[]): string {
   if (counts.size === 0) return "—";
   return [...counts]
     .sort(([a, m], [b, n]) => n - m || a.localeCompare(b))
-    .map(([state, n]) => `${state} ${n}`)
+    .map(([state, n]) => `${state}${superscript(n)}`)
     .join(" · ");
 }
 
