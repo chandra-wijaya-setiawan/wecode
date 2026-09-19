@@ -51,6 +51,16 @@ head:
   box: "── {mark} {title} [{key}] "
   count: " {count}"
   count_at: width
+  # One box's count is a fraction, because its rows are not just rows: a running row is
+  # holding one of the fleet's seats. `3` says how much is moving and nothing about whether
+  # the machine is full — three of four seats is a workspace with nothing spare, three of
+  # twenty is nineteen workers standing idle, and the operator's next move is different in
+  # each. So the seated box says `held/seats`, and every other box says the plain count.
+  # A workspace with no workers has no seats to be short of and falls back to the count.
+  seated:
+    box: running
+    of: workers
+    count: " {held}/{seats}"
 
 # A screen given the whole terminal for one thing keeps its border: two lines once is not
 # sixteen, and the border is what tells that page from the bars under it.
