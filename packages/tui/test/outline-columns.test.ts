@@ -130,8 +130,10 @@ describe("the lines it draws", () => {
   ];
 
   it("starts every line with the tree, so the guide runs down the left edge", () => {
+    // A root has no guide to run, and its marker is held right against the id instead —
+    // see a-marker-sits-against-its-id — so what leads its line is the padding.
     for (const line of outlineLines(rows, 10, null, 120)) {
-      expect(line.text.startsWith("- ") || /^[│ ]*[├└]─/.test(line.text)).toBe(true);
+      expect(/^[│ ]*(?:[├└]─)? *[-+ ] {2}#/.test(line.text), line.text).toBe(true);
     }
   });
 
@@ -165,7 +167,7 @@ describe("the lines it draws", () => {
   it("cuts a line too wide for the box rather than wrapping it", () => {
     // The guide survives the cut and the label is what goes: a line too narrow for both is
     // still a line whose place in the tree can be read.
-    expect(outlineLines(rows, 10, null, 8)[0]?.text).toBe("-    #1…");
+    expect(outlineLines(rows, 10, null, 8)[0]?.text).toBe("  -  #1…");
   });
 });
 
@@ -173,7 +175,9 @@ describe("on the real tree", () => {
   it("draws the guide flush left and the abbreviated words after it", () => {
     const drawn = screen();
     const storefront = drawn.find((l) => l.includes("storefront")) ?? "";
-    expect(storefront).toMatch(/^[-+ ]\s+#\d+\s+proj\s+work\s+storefront/);
+    // A root's guide is empty, so what stands on the left edge is the padding its depth
+    // did not spend; the marker it ends with sits against the id.
+    expect(storefront).toMatch(/^ *[-+ ]\s+#\d+\s+proj\s+work\s+storefront/);
     expect(storefront).not.toContain("project #");
   });
 
