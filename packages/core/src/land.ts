@@ -219,11 +219,12 @@ export interface PrimaryDrift {
   readonly ownWork: readonly string[];
 }
 
-/** Either the primary checkout is already showing the landing, or it is behind and the
- *  operator is told the command. Never a third thing, and never silence — and never wecode
- *  writing the files itself. */
+/** Either the primary checkout is already showing the landing, or it is clean at the old
+ *  tip and wecode brings it forward itself, or it holds something of the operator's and
+ *  they are told the command. Never silence. */
 export type PrimaryUpdate =
   | { readonly kind: "current" }
+  | { readonly kind: "sync" }
   | { readonly kind: "tell"; readonly instruction: string };
 
 /** docs/design/14. A landing merge made in a tree of wecode's own moves `refs/heads/<base>`
@@ -233,22 +234,21 @@ export type PrimaryUpdate =
  *  landed paths reading as staged deletions, because HEAD moved under an index that never
  *  saw them. It reads exactly like lost work.
  *
- *  So the ref moving is never the end of it — but the answer is words, not a write. The
- *  checkout that holds the base is the operator's, and wecode writing it is the same class
- *  of surprise as the silence was: a tree that changed under somebody while they were in
- *  it. Even "clean and at the old tip" is only clean as far as git can see, and it is not
- *  wecode's to reset. So every drift that is not already current is an instruction, naming
- *  the command in full and the path it is to be run in. The one thing not allowed is
+ *  So the ref moving is never the end of it. A checkout that is on the base, behind, and
+ *  still exactly the commit the base was landed from holds nothing of anybody's: bringing
+ *  it forward can lose nothing, and leaving it stale is the surprise. That one is synced.
+ *  Every other drift — operator work in the tree, or a tree at some commit the landing was
+ *  not made from — is words, naming the command in full and the path it is to be run in,
+ *  because there wecode writing the files is the surprise. The one thing not allowed is
  *  neither. */
 export function updatePrimary(drift: PrimaryDrift): PrimaryUpdate {
   const { path, base, onBase, alreadyCurrent, wasTheOldTip, ownWork } = drift;
   if (!onBase || alreadyCurrent) return { kind: "current" };
+  if (ownWork.length === 0 && wasTheOldTip) return { kind: "sync" };
   const what =
     ownWork.length > 0
       ? `${path} has work of yours that bringing it forward would write over:\n${indent(ownWork)}`
-      : wasTheOldTip
-        ? `${path} holds nothing but the files ${base} pointed at before the landing`
-        : `${path} is not at the commit ${base} was landed from`;
+      : `${path} is not at the commit ${base} was landed from`;
   return {
     kind: "tell",
     instruction:
