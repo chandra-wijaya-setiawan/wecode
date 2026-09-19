@@ -24,9 +24,9 @@ const attempted = (times: number): void => {
 const stateOf = (table: string, id: number): string =>
   (db.prepare(`SELECT state FROM ${table} WHERE id = ?`).get(id) as { state: string }).state;
 
-/** Where a project is reached from. The dashboard has no projects box — its four boxes are
- *  what waits on you, the open work, what is running and the fold — and the outline is the
- *  way out to the whole workspace, so every chain that starts at a project starts here. */
+/** Where a project is reached from. The dashboard has no projects box — its seven are needs
+ *  you, running, queue, cooking, planned, delivered and dropped — and the outline is the way
+ *  out to the whole workspace, so every chain that starts at a project starts here. */
 const fromTheOutline = (): void => {
   app.key("v");
   app.key("t");
