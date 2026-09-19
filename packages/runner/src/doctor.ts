@@ -16,6 +16,7 @@ import {
 // path core builds it to, which is the one specifier that resolves without widening that
 // barrel for every consumer.
 import { excluded, queries, table, type Dialect } from "@wecode/core/dist/db.js";
+import { fileCeilingInvariant } from "./ceiling.js";
 import { execFileSync } from "node:child_process";
 import type { DatabaseSync } from "node:sqlite";
 
@@ -71,10 +72,10 @@ export const readyTaskCanBeDispatched: Invariant = {
   },
 };
 
-/** The set the tick runs: core's, plus the checks that are the runner's own.
- *
- *  `runChecks` and `checksOf` still default to core's set, which is the one the command and
- *  the tick are held to agreeing on. A caller that passes its own set gets exactly it. */
+/** The pure set: core's, plus the checks that are the runner's own. The file-length check is
+ *  not here — it reads a tree rather than the record, so it is built per repository and
+ *  added to the Doctor's own default below. `runChecks` and `checksOf` still default to
+ *  core's set, which is the one the command and the tick are held to agreeing on. */
 export const RUNNER_INVARIANTS: readonly Invariant[] = [...INVARIANTS, readyTaskCanBeDispatched];
 
 /** The columns this module reads, and only those. A narrow declaration is not a second copy
@@ -354,10 +355,9 @@ export interface Pass {
 export class Doctor {
   constructor(
     private readonly db: DatabaseSync,
-    /** Defaults to the tick's set: core's, plus the runner's own. A caller passes its own
-     *  only to test the boundary itself: the point being proven is that one bad check
-     *  cannot take the tick with it. */
-    private readonly invariants: readonly Invariant[] = RUNNER_INVARIANTS,
+    /** The tick's set: the pure ones, plus the tree read against the repository the record
+     *  names. A caller passes its own only to test the boundary itself. */
+    private readonly invariants: readonly Invariant[] = [...RUNNER_INVARIANTS, fileCeilingInvariant(repoOf(db))],
     /** How the ancestry question gets asked. The runner is the half that may read the
      *  world, so `delivered_story_has_landed` is only ever reported here after git has
      *  been asked whether the branch is in the base. */
