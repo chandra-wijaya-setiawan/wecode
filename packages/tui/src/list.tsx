@@ -9,11 +9,21 @@ import { STATEFUL } from "@wecode/core";
 
 const CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
 
+/** An allowance, or a spend against one, in the two dimensions that run out. */
+export interface Spend {
+  readonly tokens: number;
+  readonly seconds: number;
+}
+
 export interface Row {
   readonly id: number;
   readonly what: string;
   readonly state: string;
   readonly detail: string;
+  /** Only a running row carries these. Absent is not zero: a spend with no allowance
+   *  beside it gets no gauge, because a bar with no denominator is a picture of nothing. */
+  readonly budget?: Spend;
+  readonly spent?: Spend;
 }
 
 /** The row contract: a code, a state, a description, in that order, on every screen. This
@@ -175,12 +185,13 @@ export function columnWidths(rows: readonly Row[], _columns?: readonly Column[])
 
 /**
  * Rows the height can show, scrolled so the cursor is among them. Without the scroll a
- * cursor past the fold is marked on a line nobody can see.
+ * cursor past the fold is marked on a line nobody can see. `per` is how many lines one row
+ * costs, so a list whose rows are taller than a line counts its fold in rows all the same.
  */
-function window(count: number, height: number, cursor: number | null): [number, number] {
-  if (count <= height) return [0, count];
+function window(count: number, height: number, cursor: number | null, per = 1): [number, number] {
+  if (count <= Math.floor(height / per)) return [0, count];
   // One line goes to the "… and N more" tally.
-  const shown = Math.max(height - 1, 0);
+  const shown = Math.max(Math.floor((height - 1) / per), 0);
   if (cursor === null || cursor < shown) return [0, shown];
   const first = Math.min(cursor - shown + 1, count - shown);
   return [first, first + shown];
@@ -255,6 +266,103 @@ export function cookingLines(
   });
 }
 
+/** Break text at its spaces so no line runs past `width`, into at most `max` lines. A word
+ *  too wide for a line of its own is cut like any other cell, and whatever is unsaid when
+ *  the last line fills takes the same ellipsis — a title that ended reads differently from
+ *  one that was stopped. */
+export function wrap(text: string, width: number, max: number): string[] {
+  if (width <= 0 || max <= 0) return [];
+  const out = [""];
+  for (const word of text.split(/\s+/).filter((w) => w !== "")) {
+    const at = out.length - 1;
+    const line = out[at] as string;
+    const next = line === "" ? word : `${line} ${word}`;
+    // On the last line the overflow is clipped and the rest goes unsaid. Anywhere else the
+    // word starts a line — cut where it stands if it is wider than a line of its own, and
+    // there is nothing to push it off the one it is on.
+    if (next.length <= width) out[at] = next;
+    else if (out.length === max) { out[at] = clip(next, width); break; }
+    else if (line === "") out[at] = clip(word, width);
+    else out.push(clip(word, width));
+  }
+  return out;
+}
+
+/** Wide enough to read a tenth off, narrow enough to leave the numbers room beside it. */
+const BAR = 10;
+
+/** How far through its allowance a row is, drawn. Two things run out — the tokens and the
+ *  clock — and the one worth a bar is whichever is nearer the end, so that is the one shown
+ *  and it says which it is. An allowance of zero is not a full bar, it is a budget nobody
+ *  set, so a row with neither dimension allowed draws no gauge at all. The bar stops at
+ *  full and the percentage does not: an overspend is a fact, and a bar that cannot show
+ *  one is why the number is beside it. */
+export function gauge(row: Row): string {
+  const { budget, spent } = row;
+  if (budget === undefined || spent === undefined) return "";
+  const both = [
+    ["tokens", spent.tokens, budget.tokens],
+    ["time", spent.seconds, budget.seconds],
+  ] as const;
+  const live = both.filter(([, , given]) => given > 0);
+  if (live.length === 0) return "";
+  const [name, used, given] = live.reduce((a, b) => (b[1] / b[2] > a[1] / a[2] ? b : a));
+  const on = Math.round(Math.min(used / given, 1) * BAR);
+  return `[${"█".repeat(on)}${"░".repeat(BAR - on)}] ${Math.round((used / given) * 100)}% ${name}`;
+}
+
+/** A running row is three lines, always three. The fixed height is what lets the cursor
+ *  and the fold go on counting in rows, and what stops the box reflowing under a reader
+ *  every time a title gains a word. */
+export const RUNNING_LINES = 3;
+
+/** Ink gives an empty Text no height at all, so one space is what holds a row's empty
+ *  line open. */
+const held = (text: string, width: number): string => (text === "" && width > 0 ? " " : text);
+
+/** One running row: the code and the state lead, the title wraps under them, and the foot
+ *  carries the gauge and the row's own detail — who has it, how long they have. Only the
+ *  title wraps, because only the title is a sentence; the rest read the same clipped. */
+function runningRow(row: Row, width: number, sizes: readonly number[]): string[] {
+  const head = `${pad(code(row), sizes[0] ?? 0)}${GAP}${pad(row.state, sizes[1] ?? 0)}${GAP}`;
+  const title = wrap(row.what, Math.max(width - head.length, 0), RUNNING_LINES - 1);
+  const bar = gauge(row);
+  const indent = " ".repeat(head.length);
+  const foot = bar === "" ? row.detail : `${bar}${GAP}${row.detail}`;
+  return [`${head}${title[0] ?? ""}`, `${indent}${title[1] ?? ""}`, `${indent}${foot}`].map(
+    (line) => held(clip(line.trimEnd(), width), width),
+  );
+}
+
+/** The running box's lines. The fold counts in rows, so a height that cannot hold a whole
+ *  row does not draw two thirds of one. The cursor inverts all three lines of its row:
+ *  the row is what is selected, and inverting one line would read as a fourth row. */
+export function runningLines(
+  rows: readonly Row[], height: number, cursor: number | null, width: number,
+): Line[] {
+  if (height <= 0) return [];
+  const [first, last] = window(rows.length, height, cursor, RUNNING_LINES);
+  const visible = rows.slice(first, last);
+  // The code and the state keep their columns, so every head lines up and the title block
+  // under it starts at one column down the box. The description is no longer a column of
+  // its own — it is the two lines below.
+  const widest = (of: (r: Row) => string): number => Math.max(...visible.map((r) => of(r).length), 0);
+  const sizes = [widest(code), widest((r) => r.state)];
+  const lines = visible.flatMap((row, i) =>
+    runningRow(row, width, sizes).map((text) => ({
+      text,
+      state: row.state,
+      cursor: cursor !== null && first + i === cursor,
+    })),
+  );
+
+  const hidden = rows.length - visible.length;
+  if (hidden > 0) {
+    lines.push({ text: clip(`… and ${hidden} more`, width), state: PLAIN, cursor: false });
+  }
+  return lines;
+}
+
 export interface ListProps {
   readonly rows: readonly Row[];
   /** Ignored, and accepted only so a screen that still names columns keeps compiling. */
@@ -268,13 +376,22 @@ export interface ListProps {
 /** The cursor row is inverted rather than marked with a character: a gutter costs a column
  *  on every line for one row's sake. */
 export function List({ rows, height, cursor, width, widths }: ListProps) {
-  return (
-    <Box flexDirection="column">
-      {listLines(rows, height, cursor, width, widths).map((line, i) => (
-        <Text key={i} wrap="truncate" inverse={line.cursor} color={stateColour(line.state)}>
-          {line.text}
-        </Text>
-      ))}
-    </Box>
-  );
+  return <Lines lines={listLines(rows, height, cursor, width, widths)} />;
 }
+
+/** The running box: the same list, three lines to a row. Same props as any other list so
+ *  a screen can swap one for the other; `widths` is ignored, because a running row shares
+ *  no description column with anything to line up against. */
+export function RunningList({ rows, height, cursor, width }: ListProps) {
+  return <Lines lines={runningLines(rows, height, cursor, width)} />;
+}
+
+const Lines = ({ lines }: { readonly lines: readonly Line[] }) => (
+  <Box flexDirection="column">
+    {lines.map((line, i) => (
+      <Text key={i} wrap="truncate" inverse={line.cursor} color={stateColour(line.state)}>
+        {line.text}
+      </Text>
+    ))}
+  </Box>
+);
