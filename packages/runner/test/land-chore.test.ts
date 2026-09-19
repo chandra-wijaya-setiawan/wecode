@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -14,9 +14,6 @@ import {
   open,
   type RoleConfig,
 } from "@wecode/core";
-// Imported by path: the landing rules belong to core but nothing exports them from the
-// barrel.
-import { updatePrimary } from "../../core/src/land.js";
 import { DEFAULT_BUDGET, Runner } from "../src/index.js";
 import { attemptLanding, isLanded, LAND_CHECK } from "../src/land-chore.js";
 
@@ -127,7 +124,7 @@ describe("a delivered story with no land commit in the base", () => {
     const tick = await runner().tick();
 
     // toMatchObject, not toEqual: every landing now also carries the notice for the
-    // checkout that holds the base, which the test below is about.
+    // checkout that holds the base, which `land-chore-brings-the-checkout-forward` is about.
     expect(tick.landed).toMatchObject([{ story: s.id, sha: git(repo, "rev-parse", "main") }]);
     expect(subjects("main")[0]).toBe(`land story/${s.slug}`);
     expect(git(repo, "ls-tree", "--name-only", "main")).toContain("reset.ts");
@@ -142,73 +139,6 @@ describe("a delivered story with no land commit in the base", () => {
     expect(tick.chores).toEqual([]);
     expect(choreFor(db, "land", "story", s.id)).toBeNull();
     expect(board(db).chores).toEqual([]);
-  });
-
-  it("brings a clean primary checkout forward after landing, and leaves no tree standing", async () => {
-    const s = story("password reset", "reset.ts");
-    const before = checkouts();
-
-    const tick = await runner().tick();
-
-    // The merge still happens in a detached tree of wecode's own, and that tree is gone
-    // afterwards. Once the base ref has moved, a primary checkout that was clean at the old
-    // tip is brought forward too, so the operator does not see staged inverse changes.
-    expect(git(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
-    expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("the base\n");
-    expect(readFileSync(join(repo, "reset.ts"), "utf8")).toBe("password reset\n");
-    expect(git(repo, "status", "--short", "--untracked-files=no")).toBe("");
-    expect(tick.landed.find((l) => l.story === s.id)?.notice).toBeUndefined();
-    expect(existsSync(landTree(s.slug))).toBe(false);
-    expect(checkouts()).toEqual(before);
-  });
-
-  it("does not bring the primary checkout forward over operator work, and says the command", async () => {
-    const s = story("password reset", "reset.ts");
-    writeFileSync(join(repo, "README.md"), "operator notes\n");
-
-    const tick = await runner().tick();
-
-    expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("operator notes\n");
-    expect(existsSync(join(repo, "reset.ts"))).toBe(false);
-    const notice = tick.landed.find((l) => l.story === s.id)?.notice ?? "";
-    expect(notice).toContain(repo);
-    expect(notice).toContain("README.md");
-    expect(notice).toContain("git restore --source=HEAD --staged --worktree .");
-  });
-
-  it("answers primary drift by syncing only the clean old-tip checkout", () => {
-    expect(
-      updatePrimary({
-        path: "/w/repo",
-        base: "main",
-        onBase: true,
-        alreadyCurrent: false,
-        wasTheOldTip: true,
-        ownWork: [],
-      }),
-    ).toEqual({ kind: "sync" });
-
-    const drifts = [
-      { wasTheOldTip: false, ownWork: [] },
-      { wasTheOldTip: true, ownWork: ["README.md"] },
-      { wasTheOldTip: false, ownWork: ["README.md"] },
-    ];
-    for (const drift of drifts) {
-      const verdict = updatePrimary({
-        path: "/w/repo",
-        base: "main",
-        onBase: true,
-        alreadyCurrent: false,
-        ...drift,
-      });
-      expect(verdict.kind).toBe("tell");
-      if (verdict.kind === "tell") expect(verdict.instruction).toContain("/w/repo");
-    }
-    // And a checkout that is not on the base, or already holds the landing, is left in peace
-    // without a word — there is nothing there that is stale.
-    const quiet = { path: "/w/repo", base: "main", alreadyCurrent: false, wasTheOldTip: false, ownWork: [] };
-    expect(updatePrimary({ ...quiet, onBase: false })).toEqual({ kind: "current" });
-    expect(updatePrimary({ ...quiet, onBase: true, alreadyCurrent: true })).toEqual({ kind: "current" });
   });
 
   it("lands it once: the tick after reads it as already there", async () => {
