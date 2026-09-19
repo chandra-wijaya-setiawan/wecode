@@ -98,7 +98,7 @@ describe("down the drawn tree", () => {
 
   it("puts the id, type and state between the guide and the label on the real tree", () => {
     for (const line of screen()) {
-      expect(line, line).toMatch(/^[│ ]*(?:[├└]─)?[-+ ]\s+#\d+\s+\w{3,4}\s+\w{3,4}\s+\S/);
+      expect(line, line).toMatch(/^[│ ]*(?:[├└]─)? *[-+ ] {2}#\d+\s+\w{3,4}\s+\w{3,4}\s+\S/);
     }
   });
 });
