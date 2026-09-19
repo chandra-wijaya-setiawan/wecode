@@ -28,6 +28,12 @@ export interface ScriptReport {
   readonly unrunnable?: readonly number[];
   /** Tests whose script said one thing and the engine refused it. Never a pass. */
   readonly refused?: readonly Refused[];
+  /** Why the tree could not be made runnable, in the build's own words, or absent when it
+   *  built. A tree that does not build proves nothing about the work in it — not even the
+   *  verdicts already standing against it — so this is said on every report, including the
+   *  one where there was no test left to run. Whoever would settle the task reads it here
+   *  and refuses. */
+  readonly unprepared?: string;
 }
 
 const nothing: ScriptReport = { passed: [], failed: [], skipped: [], unrunnable: [], refused: [] };
@@ -341,7 +347,6 @@ export class Examiner {
     cwd: string,
     against: RunAgainst,
   ): Promise<ScriptReport> {
-    if (rows.length === 0) return nothing;
     const passed: number[] = [];
     const failed: number[] = [];
     const skipped: number[] = [];
@@ -351,6 +356,10 @@ export class Examiner {
     // The tree is made runnable before a word of it is proved. A suite that dies on a
     // missing dependency exits non-zero exactly as a broken one does, so without this the
     // first test in a fresh worktree fails for the tree it was handed.
+    //
+    // Asked before the "nothing left to run" shortcut, and not after: a task whose tests
+    // have all passed already has no row here, and answering such a pass with a clean
+    // report is how a broken tree gets settled as done.
     const unprepared = await this.readyTree(cwd, tip);
     if (unprepared !== null) {
       const at = now();
@@ -360,8 +369,9 @@ export class Examiner {
         this.stamp(entity, row.id, { last_output: `${UNPREPARED}\n${unprepared}`, updated_at: at });
         unrunnable.push(row.id);
       }
-      return { passed, failed, skipped, unrunnable, refused };
+      return { passed, failed, skipped, unrunnable, refused, unprepared };
     }
+    if (rows.length === 0) return nothing;
     // Stamped beside every verdict this pass takes: what the test was run against, not just
     // when. A pass that cannot say which sources it proves is a pass nobody can check.
     const provenance = await this.treeSha(cwd);
