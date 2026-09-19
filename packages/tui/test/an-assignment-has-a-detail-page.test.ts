@@ -61,13 +61,16 @@ afterEach(cleanup);
 const lines = (width = 100, height = 40): string[] =>
   plain(render(createElement(Cockpit, { app, width, height })).lastFrame() ?? "").split("\n");
 
-/** The rows of the first box on screen, without its borders. */
+/** The rows of the first box on screen, without its borders and without the blank rows the
+ *  page leaves under its fields — the box is as tall as the screen now, so everything it
+ *  has to say is followed by however much room was left over. */
 function summary(out: string[]): string[] {
   const rows: string[] = [];
   for (const line of out.slice(1)) {
     if (!line.startsWith("│")) break;
     rows.push(line.slice(1, -1).trimEnd());
   }
+  while (rows.at(-1) === "") rows.pop();
   return rows;
 }
 
@@ -107,6 +110,9 @@ describe("enter on an assignment row reaches the assignment", () => {
       `id         #${id}`,
       "objective  send the reset mail",
       "state      running",
+      "budget     0.0k of 1.0k tokens (0%) · 0s of 60s (0%)",
+      "beat       no beat yet · dispatched and not started",
+      "worktree   /wt/send-mail",
       `detail     ${row?.detail}`,
     ]);
     expect(row?.detail).toContain("claude");
@@ -173,7 +179,8 @@ describe("enter on an assignment row reaches the assignment", () => {
     } as const;
 
     const out = plain(
-      render(createElement(Assignment, { screen, width: 40 })).lastFrame() ?? "",
+      render(createElement(Assignment, { screen, facts: null, width: 40, height: 12 })).lastFrame() ??
+        "",
     ).split("\n");
 
     expect(summary(out)).toContain("detail     —");
