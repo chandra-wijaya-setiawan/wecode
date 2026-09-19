@@ -335,6 +335,20 @@ export function abbreviate(word: string, config: OutlineConfig = OUTLINE): strin
 
 const GAP = "  ";
 
+/** The tree cell in its column: the guide flush left, the fold marker flush right, and the
+ *  padding the depth did not spend between them.
+ *
+ *  The column is as wide as the deepest row, so padding it on the right strands a shallow
+ *  row's marker whole levels away from the id it belongs to — on the real tree that is a
+ *  dozen blank columns between the `+` and the `#`, and the two have to be read as one
+ *  thing: the marker says what pressing does to *that* row. The guide is what has to stay
+ *  left, because a rail only means anything in the column its parent drew it in. So the
+ *  gap goes where nothing is read — inside the row's own indent. */
+export function padTree(cell: string, size: number): string {
+  if (cell === "") return "".padEnd(size, " ");
+  return `${cell.slice(0, -1).padEnd(size - 1, " ")}${cell.slice(-1)}`;
+}
+
 /** A detail whose first part is an entity's name is that row's kind, put there by
  *  `outlineRows`; what follows it is the rollup and is nobody's column. */
 const KINDS: ReadonlySet<string> = new Set<string>(STATEFUL);
@@ -405,7 +419,9 @@ export function outlineLines(
   const lines = rows.slice(first, last).map((row, i) => ({
     text: clip(
       outlineCells(row, config)
-        .map((c, j) => c.padEnd(sizes[j] ?? 0, " "))
+        .map((c, j) =>
+          config.columns[j] === "tree" ? padTree(c, sizes[j] ?? 0) : c.padEnd(sizes[j] ?? 0, " "),
+        )
         .join(GAP)
         .trimEnd(),
       width,
