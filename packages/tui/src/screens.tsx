@@ -3,7 +3,6 @@
  *  by rendering it rather than by driving a terminal. The widths are Yoga's problem now; what
  *  is left here is which regions there are, what they are called, which holds the cursor, and which is worth a border. */
 import type { ReactNode } from "react";
-import type { DatabaseSync } from "node:sqlite";
 import { Box, Text } from "ink";
 // By path, as app.ts imports it: index.ts names what board.ts offers one export at a time.
 import type { AssignmentFacts } from "@wecode/core/dist/board.js";
@@ -142,19 +141,20 @@ function boxes(
   });
 }
 
-/** Which box's rows sit in a worker's seat, and how many seats the fleet has. A row in any
- *  other box — waiting, finished, abandoned — is holding nothing. App keeps the database
- *  private because no box of work has ever needed it; this is the one number on the board
- *  about what the workspace runs work *with* and not about the work, so the reach is here,
- *  named, and once, the way services.tsx makes the same reach for the same reason. */
+/** Which box's rows sit in a worker's seat. A row in any other box — waiting, finished,
+ *  abandoned — is holding nothing. */
 const SEATED = "running";
-const seats = (app: App): number =>
-  ((app as unknown as { db: DatabaseSync }).db.prepare("SELECT count(*) AS n FROM worker").get() as unknown as { n: number }).n;
 
 /** How many of the fleet's seats the seated box's rows hold. `3` alone answers nothing an
  *  operator asks of it: three of four seats is a workspace nearly full, three of twenty is
  *  one standing idle. No workers is no seats to be short of, and the head falls back to the
- *  plain count every other box says. */
+ *  plain count every other box says.
+ *
+ *  Both numbers are the App's, as of its last refresh. This file draws and decides nothing,
+ *  and the seats it once counted for itself — reaching past App's private database on the
+ *  way — were counted at draw time, which is a later instant than the rows they were drawn
+ *  beside. A fraction whose halves are from two instants is a fraction of nothing: a seat
+ *  freed between the refresh and the frame read as a seat the running rows never held. */
 const held = (rows: number, of: number): number | string => (of > 0 ? `${rows}/${of}` : rows);
 
 interface ScreenProps {
@@ -176,7 +176,7 @@ export function Dashboard({ app, width }: ScreenProps) {
   // Sized from the rows it will draw: services.tsx adds a pulse line per project on top of
   // its four fixed ones, and a section shorter than its children draws them over the rule.
   const serviceRows = SERVICE_ROWS + app.boardNow().projects.length;
-  const fleet = seats(app);
+  const fleet = app.seats();
   return (
     <>
       <Section
