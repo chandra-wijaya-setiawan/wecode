@@ -607,7 +607,8 @@ export class Runner {
 
         const trees = this.treesFor(slugs.repo);
         const sha = await trees.commitAttempt(row.worktree, `task/${slugs.task}`, `${slugs.task}: attempt`);
-        if (sha !== null) {
+        if (sha === null) this.refundAttempt(row.task);
+        else {
           queries(this.db).update(tbl.assignment).set({ commit_sha: sha }).where("id", "=", row.id).run();
           committed.push(row.id);
         }
@@ -617,6 +618,20 @@ export class Runner {
       }
     }
     return { committed, scripts: { passed, failed, skipped, refused } };
+  }
+
+  /** Give back the retry the foreman counted, when the attempt committed nothing.
+   *
+   *  The foreman counts every attempt, because a session can exit cleanly having proved
+   *  nothing. But an attempt that left no commit left no work to judge either: the agent
+   *  never started, or the harness died before it wrote. The retry limit is there to stop a
+   *  task that keeps getting it wrong, and spending it on a tree nobody touched exhausts a
+   *  task no one has attempted. Floored at zero, so a refund never invents an attempt. */
+  private refundAttempt(task: number): void {
+    const q = queries(this.db);
+    const t = q.selectFrom(tbl.task).select(["attempts"]).where("id", "=", task).get();
+    if (t === null || t.attempts <= 0) return;
+    q.update(tbl.task).set({ attempts: t.attempts - 1 }).where("id", "=", task).run();
   }
 
   /** Every task that has used its attempts while its story is still open.
@@ -1089,21 +1104,14 @@ export class Runner {
       target_id: story.id,
       check: "the base is an ancestor of the branch",
     });
-    // One row, two voices, and only one of them is worth an operator's attention.
-    //
-    // `chore_refusal` holds a single sentence per chore. This one is the note that raised the
-    // chore — why the work is owed — and the chore's own existence, kind and check already
-    // say that. The dispatcher's and the judge's sentences say the thing the record does not:
-    // no worker free, no slot, the tree would not open, the attempt proved nothing. Written
-    // unconditionally, this note landed on top of one of those on every tick, which cost two
-    // readings at once: the dispatch refusal's `since` and `passes` were reset each pass, so
-    // a chore held for half an hour read as first-seen-now; and a `failed` chore out of
-    // `max_retry` — the one row nothing ever comes back to rewrite — lost its verdict to
-    // "does not contain" for good.
-    //
-    // So it seeds an empty row and never overwrites. Nothing is lost by that: the row is
-    // empty on the first raise, and `reraiseChore` clears it whenever the condition comes
-    // back, which is the only other moment this note is the newest thing known.
+    // One row, two voices, and only one is worth an operator's attention. `chore_refusal`
+    // holds one sentence per chore. This one — why the work is owed — is already said by the
+    // chore's kind and check; the dispatcher's and the judge's say what the record does not:
+    // no worker free, no slot, no tree, nothing proved. Written unconditionally it landed on
+    // top of those every tick, resetting a held dispatch refusal's `since`/`passes` to
+    // first-seen-now, and costing a `failed` chore out of `max_retry` its verdict for good.
+    // So it seeds an empty row and never overwrites: the row is empty on the first raise,
+    // and `reraiseChore` clears it whenever the condition comes back.
     if (choreRefusal(this.db, raised.id) === null) recordChoreRefusal(this.db, why, raised.id);
     return raised.state === "done" ? [] : [raised.id];
   }
@@ -1457,23 +1465,15 @@ export class Runner {
 
   /** What a refresh has thrown away, or null when it has thrown nothing away.
    *
-   *  A refresh is asked for one thing — put the base into the story branch — and it is
-   *  judged by one question, "is the base an ancestor of the branch". `git reset --hard base`
-   *  answers that question perfectly and does the opposite of the work: every commit the
-   *  story was carrying stops being reachable from its branch, and the check still passes.
-   *  So does a rebase that drops a commit, and a force-push of a tree built from the base.
-   *  The attempts are still in the object store for a while, and they are nowhere a person
-   *  will look; by the time the story's tests are re-run the only evidence is that the work
-   *  is gone.
+   *  "Is the base an ancestor of the branch" is the whole check, and `git reset --hard base`
+   *  passes it while doing the opposite of the work — as does a rebase that drops a commit.
+   *  The lost attempts linger in the object store where nobody looks.
    *
-   *  The commits this defends are the ones wecode itself put on the branch: `landed_branch`
-   *  records, per task, the task-branch tip that `landDoneTasks` merged into the story — the
-   *  attempt's commit, and a fact the runner wrote rather than one it was told. Each of them
-   *  was reachable from the story branch the moment it was recorded, so any of them that is
-   *  not reachable now was dropped by whatever last rewrote the branch.
-   *
-   *  An empty `sha` is skipped: it means the tip could not be read at merge time, and an
-   *  unknown commit is not evidence that a known one is missing. */
+   *  What this defends are the commits wecode itself put there: `landed_branch` records, per
+   *  task, the tip `landDoneTasks` merged in. Each was reachable when recorded, so one that
+   *  is not reachable now was dropped by whatever last rewrote the branch. An empty `sha` is
+   *  skipped: the tip could not be read at merge time, and an unknown commit is not evidence
+   *  that a known one is missing. */
   private async orphanedBy(repo: string, branch: string, storyId: number): Promise<string | null> {
     const lost: string[] = [];
     for (const row of this.landedAttempts(storyId)) {
