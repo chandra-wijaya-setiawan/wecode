@@ -96,7 +96,7 @@ describe("the frame", () => {
    *  border. A tally against views.length broke the moment the services block arrived. */
   it("is laid out, not printed: every region on it is ruled off", () => {
     const out = lines();
-    for (const title of [services.title, ...views.map((v) => `${v.title} (`)]) {
+    for (const title of [services.title, ...views.map((v) => v.title)]) {
       const at = titled(out, title);
       expect(at, `no region titled ${title}`).toBeGreaterThanOrEqual(0);
       expect(out[at]?.startsWith("──"), `${title} has no rule`).toBe(true);
@@ -121,7 +121,7 @@ describe("the dashboard", () => {
       "doctor",
     ]);
     // And it is above the first box views.yaml orders.
-    expect(titled(out, `${views[0]?.title} (`)).toBeGreaterThan(0);
+    expect(titled(out, `${views[0]?.title}`)).toBeGreaterThan(0);
   });
 
   it("keeps the services box off a box page and a node screen", () => {
@@ -136,25 +136,25 @@ describe("the dashboard", () => {
 
   it("draws every box in config order", () => {
     const out = lines();
-    const titles = views.map((v) => titled(out, `${v.title} (`));
+    const titles = views.map((v) => titled(out, v.title));
     expect(titles.every((i) => i >= 0)).toBe(true);
     expect([...titles].sort((a, b) => a - b)).toEqual(titles);
   });
 
-  it("carries each box's count and the letter that opens it in its title", () => {
-    const out = lines().join("\n");
-    // Every one of the seven, with the mark and the letter views.yaml declares for it.
-    // The seed fills exactly one; the other six say zero, an empty box being an answer.
-    const heads = ["Needs you (0) [n]", "Running (0) [r]", "Queue (1) [q]",
-      "Cooking (0) [c]", "Planned (0) [p]", "Delivered (0) [d]", "Dropped (0) [x]"];
-    for (const [i, head] of heads.entries()) {
-      expect(out).toContain(`─ ${sectionMark(views[i]?.name ?? "")} ${said(head)} ─`);
+  it("names each box with the letter that opens it, and counts it at the width", () => {
+    const out = lines();
+    // Every one of the seven, with the mark and the letter views.yaml declares for it, and
+    // its count at the far end. The seed fills one; the other six say zero, an answer too.
+    for (const [i, count] of [0, 0, 1, 0, 0, 0, 0].entries()) {
+      const name = said(`${views[i]?.title} [${views[i]?.key}]`);
+      const rule = `── ${sectionMark(views[i]?.name ?? "")} ${name} ─`;
+      expect(out.find((l) => l.startsWith(rule)) ?? "").toMatch(new RegExp(`─ ${count}$`));
     }
   });
 
   it("says what an empty box is empty of, in that box's own words", () => {
     const out = lines();
-    const at = titled(out, "Needs you (0)");
+    const at = titled(out, "Needs you");
     expect(inside(out, at), `no box titled Needs you`).toEqual(["nothing waits on you"]);
   });
 
@@ -164,14 +164,14 @@ describe("the dashboard", () => {
     }
     app.refresh();
     const out = lines();
-    const at = titled(out, "Planned (12)");
+    const at = titled(out, "Planned");
     const declared = views.find((v) => v.name === "planned")?.rows ?? 0;
     const rows = inside(out, at);
     expect(rows).toHaveLength(declared);
     // The declared rows, the last of which is the tally of what did not fit.
     expect(rows.at(-1)).toContain(`… and ${12 - (declared - 1)} more`);
     // And the next section's rule begins directly under this one's last row.
-    expect(titled(out, "Delivered (0)")).toBe(at + declared + 1);
+    expect(titled(out, "Delivered")).toBe(at + declared + 1);
   });
 
   it("marks the cursor in the box that holds it and in no other", () => {
@@ -196,7 +196,7 @@ describe("a box screen", () => {
     expect(titled(out, "Planned (20) [p]")).toBe(0);
     // Ten lines of rows inside the box — more than the eight it gets on the dashboard —
     // and no other box on the screen.
-    expect(titled(out, "Cooking (")).toBe(-1);
+    expect(titled(out, "Cooking")).toBe(-1);
     // A row begins with its code — a number said as one — behind the kind of thing it is,
     // because Planned holds epics and stories together: "story #12".
     expect(inside(out, 0).filter((l) => /^. story #\d/.test(l)).length).toBeGreaterThan(6);
@@ -206,7 +206,7 @@ describe("a box screen", () => {
   /** The columns stand in the same places on both — not the same string: the page gives
    *  two columns to its border, so the longer row runs past the shorter. */
   it("lines its columns up with the same box on the dashboard", () => {
-    const onDashboard = inside(lines(), titled(lines(), "Queue (1)"))[0] as string;
+    const onDashboard = inside(lines(), titled(lines(), "Queue"))[0] as string;
     app.key("v");
     app.key("q");
     const onPage = inside(lines(), 0)[0] as string;
@@ -442,9 +442,9 @@ describe("the terminal", () => {
     return c;
   };
 
-  const until = async (want: string, ms = 8000): Promise<void> => {
+  const until = async (want: string | RegExp, ms = 8000): Promise<void> => {
     const started = Date.now();
-    while (!out.includes(want)) {
+    while (!(typeof want === "string" ? out.includes(want) : want.test(out))) {
       if (Date.now() - started > ms) throw new Error(`never saw ${JSON.stringify(want)} in:\n${out}`);
       await new Promise((r) => setTimeout(r, 25));
     }
@@ -457,7 +457,7 @@ describe("the terminal", () => {
     start();
     await until("q quit");
     expect(out).toContain(HIDE);
-    expect(out).toContain("QUEUE (1)");
+    expect(out).toMatch(/QUEUE \[q\] ─+ 1/);
     expect(out).toContain("send the reset mail");
     expect(out).toContain("workspace ");
   });
@@ -485,13 +485,13 @@ describe("the terminal", () => {
 
   it("redraws on a timer, without a keystroke", async () => {
     start();
-    await until("PLANNED (0)");
+    await until(/PLANNED \[p\] ─+ 0/);
     const file = open(path);
     file
       .prepare("INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)")
       .run("second", 1, "second story", "planned", T, T);
     file.close();
-    await until("PLANNED (1)");
+    await until(/PLANNED \[p\] ─+ 1/);
   }, 20_000);
 
   it("leaves the terminal clean on q", async () => {
