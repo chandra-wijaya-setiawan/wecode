@@ -144,8 +144,8 @@ components:
     package: ui
     layer: client
     component: true
-    owns: the screens a person reads stated as ports — what the index of boxes must say, said once and without naming a renderer. The renderers behind it — ink for a terminal, wireframe for a picture — draw those lines and decide nothing
-    modules: [adapters/ink, check, diff, expected, index, ports, wireframe]
+    owns: the screens a person reads stated as ports — what the index of boxes must say, said once and without naming a renderer. The renderers behind it — ink for a terminal, CDP for a web page, wireframe for a picture — draw those lines and decide nothing
+    modules: [adapters/cdp, adapters/ink, check, diff, expected, index, ports, wireframe]
 
   tui:
     package: tui
