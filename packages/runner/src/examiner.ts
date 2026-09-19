@@ -28,6 +28,8 @@ export interface ScriptReport {
   readonly unrunnable?: readonly number[];
   /** Tests whose script said one thing and the engine refused it. Never a pass. */
   readonly refused?: readonly Refused[];
+  /** Tests that failed and then passed on the very same tree. Not a verdict either way. */
+  readonly flaky?: readonly number[];
   /** Why the tree could not be made runnable, in the build's own words, or absent when it
    *  built. A tree that does not build proves nothing about the work in it — not even the
    *  verdicts already standing against it — so this is said on every report, including the
@@ -36,7 +38,7 @@ export interface ScriptReport {
   readonly unprepared?: string;
 }
 
-const nothing: ScriptReport = { passed: [], failed: [], skipped: [], unrunnable: [], refused: [] };
+const nothing: ScriptReport = { passed: [], failed: [], skipped: [], unrunnable: [], refused: [], flaky: [] };
 
 /** Written where the board reads a run's output, so a missing script never reads as a
  *  failure with an empty reason. */
@@ -54,6 +56,12 @@ export const NO_TEST_MATCHED = "no test matched";
  *  A fresh worktree has no dependencies installed and nothing built, and a suite run in one
  *  dies on the first import — which is a fact about the tree, never about the work. */
 export const UNPREPARED = "unrunnable: the tree could not be prepared";
+
+/** Written where the board reads a run's output when the suite's red passed with the file
+ *  it named run by itself. Two opposite answers from one unmoved tree are not a verdict on
+ *  the work — the test is telling on itself — so it is said in those words rather than
+ *  recorded as the red that happened to come first. */
+export const FLAKY = "flaky: it failed in the suite and passed when re-run alone";
 
 /** Where the command that makes a tree runnable is written, relative to the tree it
  *  prepares. It is the project's own onboarding config, so the person who owns the build
@@ -138,6 +146,31 @@ const NO_TESTS: readonly RegExp[] = [
  *  proves nothing, and the one thing it must never do is stand as a pass. */
 export function matchedNoTest(output: string): boolean {
   return NO_TESTS.some((re) => re.test(output));
+}
+
+/** How each runner names the file a failure is in, on the line where it declares it failed.
+ *  Only the runner's own failure banner counts: vitest also lists the files it ran and
+ *  passed, and a file taken off one of those lines would name an innocent test as the
+ *  suspect. */
+const FAILING_FILE: readonly RegExp[] = [
+  /^\s*FAIL\b[^\S\n]+(\S+)/gm, // vitest, jest
+  /^\s*FAILED[^\S\n]+([^\s:]+)/gm, // pytest
+];
+
+/** The files a failing run said the failures were in, deduplicated and in the order the
+ *  output named them. Empty when the output names none — a command that fails without
+ *  saying where offers nothing to re-run alone, and is simply a failure. */
+export function failingFilesOf(output: string): readonly string[] {
+  const found = new Set<string>();
+  for (const re of FAILING_FILE) {
+    for (const [, file] of output.matchAll(re)) {
+      // Only a plain path is ever put back on a command line. Anything carrying shell
+      // punctuation is a word off a progress line, not a file, and re-running it would run
+      // something nobody wrote.
+      if (file !== undefined && !/[;&|><$`(){}*?"'\\]/.test(file)) found.add(file);
+    }
+  }
+  return [...found];
 }
 
 const INTERPRETERS = new Set(["bash", "sh", "zsh", "node", "python", "python3", "tsx", "deno"]);
@@ -352,6 +385,7 @@ export class Examiner {
     const skipped: number[] = [];
     const unrunnable: number[] = [];
     const refused: Refused[] = [];
+    const flaky: number[] = [];
     const tip = await this.tip(cwd);
     // The tree is made runnable before a word of it is proved. A suite that dies on a
     // missing dependency exits non-zero exactly as a broken one does, so without this the
@@ -369,7 +403,7 @@ export class Examiner {
         this.stamp(entity, row.id, { last_output: `${UNPREPARED}\n${unprepared}`, updated_at: at });
         unrunnable.push(row.id);
       }
-      return { passed, failed, skipped, unrunnable, refused, unprepared };
+      return { passed, failed, skipped, unrunnable, refused, flaky, unprepared };
     }
     if (rows.length === 0) return nothing;
     // Stamped beside every verdict this pass takes: what the test was run against, not just
@@ -392,6 +426,21 @@ export class Examiner {
         continue;
       }
       const out = await this.runOne(row.artefact, cwd);
+      // A suite red whose own named file is green when that file is run by itself is a fact
+      // about the tests and not about the tree: they are leaking into each other. Recording
+      // it as a failure accuses work that may be sound; recording it as a pass hides tests
+      // nobody can trust. So the test is left exactly as it stands, named for what it is,
+      // and asked again next tick.
+      const alone = out.ok ? null : await this.passesAlone(row.artefact, cwd, out.output);
+      if (alone !== null) {
+        const at = now();
+        this.stamp(entity, row.id, {
+          last_output: `${FLAKY}: ${alone}\n${out.output.slice(-8000)}`,
+          updated_at: at,
+        });
+        flaky.push(row.id);
+        continue;
+      }
       // A command that exited 0 having selected no test proves nothing about the tree. The
       // exit code alone cannot tell that apart from a suite that ran and passed, so the
       // output is read too, and a run that matched nothing fails.
@@ -431,7 +480,25 @@ export class Examiner {
       (ok ? passed : failed).push(row.id);
     }
 
-    return { passed, failed, skipped, unrunnable, refused };
+    return { passed, failed, skipped, unrunnable, refused, flaky };
+  }
+
+  /** The command that passed when the failure's own files were run by themselves, or null
+   *  when nothing was run again or the narrowed run agreed with the red.
+   *
+   *  Nothing is re-run blind: the failing run must name the files it failed in, and those
+   *  files must be in the tree, or there is no second command to write and the failure is
+   *  the work's. The narrowed run is a different command from the one that went red — it
+   *  selects those files alone — so a suite red is never simply asked twice.
+   *
+   *  A second red, or a green that selected nothing, is no disagreement at all. */
+  private async passesAlone(artefact: string, cwd: string, output: string): Promise<string | null> {
+    const files = failingFilesOf(output);
+    if (files.length === 0) return null;
+    if (!files.every((f) => existsSync(isAbsolute(f) ? f : resolve(cwd, f)))) return null;
+    const narrowed = `${artefact} ${files.join(" ")}`;
+    const again = await this.runOne(narrowed, cwd);
+    return again.ok && !matchedNoTest(again.output) ? narrowed : null;
   }
 
   /** Makes a tree runnable, and answers with why it could not be — null when it is ready,
