@@ -36,6 +36,39 @@ export function landingReport(branch: string, base: string, landing: Landing): s
     : `nothing to land: ${branch} is already in ${base}`;
 }
 
+/** What a retry finds already on its branch. A rejected attempt still commits, so the tree
+ *  a retry is cut into is not the base: some of the history is a previous attempt's work and
+ *  the rest is what the story was at when the task was cut. Those two are indistinguishable
+ *  from inside the tree — `git log` shows one list — and a retry that cannot tell them apart
+ *  either redoes work that is already there or "fixes" the base. */
+export interface Inherited {
+  /** The story tip the task branch was cut from: the last commit that is not an attempt's. */
+  readonly base: { readonly ref: string; readonly sha: string };
+  /** The previous attempts' commits, newest first. */
+  readonly commits: readonly { readonly sha: string; readonly subject: string }[];
+}
+
+const short = (sha: string): string => sha.slice(0, 12);
+
+/** One vocabulary for it, so whatever tells a retry cannot describe the branch differently
+ *  from what `inherited` read. The base is named by sha and not only by ref: the ref moves
+ *  under the branch as siblings merge, and `git diff story/s` next week is a different diff. */
+export function inheritedReport(branch: string, inherited: Inherited): string {
+  const { ref, sha } = inherited.base;
+  const at = `${ref} ${short(sha)}`;
+  if (inherited.commits.length === 0) {
+    return `${branch} has no commits of its own: all of it is the base, ${at}.`;
+  }
+  const lines = inherited.commits.map((c) => `  ${short(c.sha)} ${c.subject}`).join("\n");
+  const n = inherited.commits.length;
+  const oldest = inherited.commits[n - 1]?.sha ?? sha;
+  return (
+    `${branch} carries ${n} commit${n === 1 ? "" : "s"} from a previous attempt, newest first:\n` +
+    `${lines}\nEverything below ${short(oldest)} is the base, ${at}. ` +
+    `Diff against ${short(sha)} to see only the attempt's work.`
+  );
+}
+
 /** What cleanup did, and what it refused to do. The refusals are the half that matters:
  *  they are what the board reports instead of a deletion. */
 export interface LandingCleanup {
@@ -146,6 +179,31 @@ export class Trees {
       : out
           .split("\n")
           .sort((a, b) => Number(a.slice(prefix.length)) - Number(b.slice(prefix.length)));
+  }
+
+  /** Split the task branch into what a previous attempt wrote and what it was cut from.
+   *
+   *  The boundary is the merge base with the story branch, not the story tip: the story
+   *  moves under a task branch every time a sibling merges, so "everything not in the story
+   *  tip" would count a sibling's landed work as this attempt's, and "the story tip" is a
+   *  commit the branch may not even contain. The merge base is the last commit both agree
+   *  on, which is exactly the base the attempt built on.
+   *
+   *  A branch that does not exist yet is not an error — it is the first attempt, and the
+   *  answer is the base with nothing on top. */
+  async inherited(taskSlug: string, storySlug: string): Promise<Inherited> {
+    const branch = `task/${taskSlug}`;
+    const story = `story/${storySlug}`;
+    const ref = (await this.has(story)) ? story : await this.integrationBranch();
+    const tip = await git(this.repo, ["rev-parse", ref]);
+    if (!(await this.has(branch))) return { base: { ref, sha: tip }, commits: [] };
+    const sha = await git(this.repo, ["merge-base", ref, branch]).catch(() => tip);
+    const log = await git(this.repo, ["log", "--format=%H %s", `${sha}..${branch}`]);
+    const commits = log === "" ? [] : log.split("\n").map((line) => ({
+      sha: line.slice(0, line.indexOf(" ")),
+      subject: line.slice(line.indexOf(" ") + 1),
+    }));
+    return { base: { ref, sha }, commits };
   }
 
   /** A fresh tree at the task branch tip. A retry is an agent with no memory; it must not
