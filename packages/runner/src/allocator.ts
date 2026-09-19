@@ -25,6 +25,12 @@ export interface Pass {
   readonly refused: readonly Refusal[];
 }
 
+/** What a whole tick started, and why it stopped. */
+export interface Fill {
+  readonly created: readonly number[];
+  readonly refused: readonly Refusal[];
+}
+
 /** Where an attempt would run. */
 export interface Placement {
   readonly worker_id: number;
@@ -97,6 +103,25 @@ function sharingOnlyAppendOnly(
     admitted.push(c);
   }
   return { admitted, refused: kept };
+}
+
+/** A whole tick: allocate until the seats or the queue run out.
+ *
+ *  One assignment per tick meant the fleet filled at one seat per tick however many were
+ *  idle, and a tick that proves anything takes minutes. So a pass is repeated until it
+ *  creates nothing more — no seat free, nothing ready, or the open limit reached. Each
+ *  repetition re-reads the open assignments, so a task overlapping one this same tick just
+ *  created is refused by exactly the check that refuses one from an earlier tick.
+ *
+ *  The refusals reported are the last pass's: they are the reasons the tick stopped, not
+ *  the ones an earlier pass had before it freed the task by placing something else. */
+export async function fill(db: DatabaseSync, config: BudgetConfig, place: Place): Promise<Fill> {
+  const created: number[] = [];
+  for (;;) {
+    const pass = await allocate(db, config, place);
+    if (pass.created === null) return { created, refused: pass.refused };
+    created.push(pass.created);
+  }
 }
 
 /** One pass of docs/design/10. Creates at most one assignment: a pass that filled every
