@@ -45,11 +45,18 @@ afterEach(() => {
 
 /** A story with a requirement, a criteria, an acceptance_test and a task under it: the whole
  *  chain the doctor's join used to walk. */
-function storyWithTask(title: string): { story: number; task: number } {
+function storyWithTask(title: string): {
+  story: number;
+  requirement: number;
+  criteria: number;
+  acceptance: number;
+  task: number;
+} {
   const story = make.story(epic, title);
-  const criteria = make.criteria(make.requirement(story, `${title} works`), `${title} is accepted`);
+  const requirement = make.requirement(story, `${title} works`);
+  const criteria = make.criteria(requirement, `${title} is accepted`);
   const at = make.acceptanceTest(criteria, `${title} passes`, "manual");
-  return { story, task: make.task(at, `build ${title}`, { role: "engineer" }) };
+  return { story, requirement, criteria, acceptance: at, task: make.task(at, `build ${title}`, { role: "engineer" }) };
 }
 
 /** The lander's own table, beside the record the way the runner creates it. */
@@ -235,9 +242,18 @@ describe("the snapshot, through the layer", () => {
 });
 
 describe("the heal's writes, through the layer", () => {
+  /** A delivered story with the whole chain beneath it in its own success state. Delivering
+   *  the story alone would leave a `ready` task and task_test open under a settled parent —
+   *  drift the upward invariant names, and drift no test here is about, so the fixture does
+   *  not create it. */
   const delivered = (title: string): { story: number; task: number } => {
     const made = storyWithTask(title);
     db.prepare("UPDATE story SET state = 'delivered' WHERE id = ?").run(made.story);
+    db.prepare("UPDATE requirement SET state = 'met' WHERE id = ?").run(made.requirement);
+    db.prepare("UPDATE acceptance_criteria SET state = 'accepted' WHERE id = ?").run(made.criteria);
+    db.prepare("UPDATE acceptance_test SET state = 'passed' WHERE id = ?").run(made.acceptance);
+    db.prepare("UPDATE task SET state = 'done' WHERE id = ?").run(made.task);
+    db.prepare("UPDATE task_test SET state = 'passed' WHERE parent_id = ?").run(made.task);
     return made;
   };
 
