@@ -1589,10 +1589,10 @@ export class Runner {
    *  refresh gets a scope that says what it writes, and `**` stops being the standing
    *  authority of every chore.
    *
-   *  The role's scope is still the ceiling — this only ever narrows — and the fallback is
-   *  the role's own. A merge-tree that cannot answer (no conflict to name, git too old, a
-   *  ref that is gone) must not turn into an empty scope, which would forbid the very
-   *  resolution the chore exists for. */
+   *  A refresh that conflicts on nothing claims nothing: git makes that merge by itself and
+   *  there is no file for a worker to settle. The role's scope is still the ceiling — this
+   *  only ever narrows — and it is the fallback for the one case that is not an answer: a
+   *  merge-tree that could not be asked (git too old, a ref that is gone). */
   private async claimedScope(chore: Chore, repo: string, branch: string, role: Scope): Promise<Scope> {
     if (chore.kind !== "refresh") return role;
     let base: string;
@@ -1602,26 +1602,26 @@ export class Runner {
       return role;
     }
     const conflicted = await this.conflictedPaths(repo, branch, base);
-    return conflicted.length === 0 ? role : { ...role, write: conflicted };
+    return conflicted === null ? role : { ...role, write: conflicted };
   }
 
-  /** The paths a base-into-branch merge would conflict on, read off the object store rather
-   *  than off a working tree: `merge-tree` writes no files and needs no checkout, so asking
-   *  costs nothing and cannot wedge the tree the worker is about to be handed.
+  /** The paths a base-into-branch merge would conflict on: empty when it conflicts on none,
+   *  null when merge-tree gave no answer. Read off the object store, which writes no files
+   *  and cannot wedge the tree the worker is about to be handed.
    *
-   *  Exit 1 is the answer, not the failure — it is what git returns when the merge conflicts
+   *  Exit 1 is an answer, not the failure — it is what git returns when the merge conflicts
    *  — and with `--name-only --no-messages` stdout is the written tree's oid on the first
-   *  line and one conflicting path on each line after it. Any other exit is no answer. */
-  private async conflictedPaths(repo: string, branch: string, base: string): Promise<string[]> {
+   *  line and one conflicting path on each line after it. Exit 0 is the other answer, the
+   *  clean merge, and it names no paths because there are none. Only some other exit —
+   *  git too old, a ref that is gone — settled nothing, and only it is no answer. */
+  private async conflictedPaths(repo: string, branch: string, base: string): Promise<string[] | null> {
     const args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", branch, base];
     const out = await exec("git", args, { cwd: repo })
       .then(() => "")
-      .catch((err: { code?: number; stdout?: string }) => (err.code === 1 ? (err.stdout ?? "") : ""));
-    return out
-      .split("\n")
-      .slice(1)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
+      .catch((err: { code?: number; stdout?: string }) => (err.code === 1 ? (err.stdout ?? "") : null));
+    if (out === null) return null;
+    const lines = out.split("\n").slice(1);
+    return lines.map((line) => line.trim()).filter((line) => line.length > 0);
   }
 
   /** One read per repository per tick. A tick dispatches every planned chore, and six of
