@@ -1,9 +1,13 @@
 /** The board asks two questions, and only one of them is a person's: what waits on you, and
- *  what is cooking. `needs_human` is the first; the five machine-side panels fold into the
+ *  what is cooking. `needs_human` is the first; the four machine-side panels fold into the
  *  second — one list, oldest first, every row carrying how long it has been sitting.
  *
- *  `projects` and `open` are on neither side of that: they are the tree the dashboard is
- *  navigated by rather than a report on the machine, so they keep boxes of their own and
+ *  `running` is on neither side of it. The fold ranks by age, which is the question to ask
+ *  of a row nobody is holding; a running row is held, and what it is asked is who has it
+ *  and how much they have spent. So it keeps a box of its own and the fold leaves it alone.
+ *
+ *  `projects` and `open` are on neither side of that either: they are the tree the dashboard
+ *  is navigated by rather than a report on the machine, so they keep boxes of their own and
  *  the fold leaves them alone.
  *
  *  What is held here is the fold itself: that it covers every machine-side panel and nothing
@@ -89,9 +93,20 @@ beforeEach(() => {
 });
 
 describe("the fold covers the machine side and nothing else", () => {
-  it("names the five panels that are the machine's business, and not the one that is yours", () => {
-    expect([...MACHINE_SIDE]).toEqual(["running", "stale", "queued", "failed", "delivered"]);
+  it("names the four panels that are the machine's business, and not the one that is yours", () => {
+    expect([...MACHINE_SIDE]).toEqual(["stale", "queued", "failed", "delivered"]);
     expect([...MACHINE_SIDE]).not.toContain("needs_human");
+  });
+
+  it("leaves running out of the fold, and keeps its rows whole on its own panel", () => {
+    // A worker has it: the question is who and how much, not how long it has sat, and a
+    // row ranked by age lands at the far end of the list from where it is looked for.
+    expect([...MACHINE_SIDE]).not.toContain("running");
+
+    const a = assign("a1", { created_at: ago(7), spent: JSON.stringify({ tokens: 2500 }), worker_id: worker("claude-1") });
+
+    expect(board(db).running.map((r) => r.id)).toEqual([a]);
+    expect(cooking(db).some((r) => r.what === "send the reset mail")).toBe(false);
   });
 
   it("leaves the two boxes that are the tree out of the fold", () => {
@@ -109,10 +124,9 @@ describe("the fold covers the machine side and nothing else", () => {
   });
 
   it("keeps every row of every machine-side panel, and exactly as many rows as they hold", () => {
-    // Five rows off four of the five panels — running, stale, queued and delivered — so
-    // the count cannot be one panel's.
+    // Six rows off three of the four panels — stale, queued and delivered — so the count
+    // cannot be one panel's.
     refusedSince("no worker free", ago(200));
-    assign("a1", { created_at: ago(7) });
     storyIn(tree.epic, "shipped", "delivered", ago(30));
     storyIn(tree.epic, "also-shipped", "delivered", ago(31));
     storyIn(tree.epic, "shipped-too", "delivered", ago(32));
@@ -185,14 +199,16 @@ describe("oldest first", () => {
       .filter((what) => whats.includes(what));
 
   it("orders the whole fold by age, whatever panel a row came from", () => {
-    // Three rows off three panels — delivered, running and delivered again — so the order
-    // cannot be the panels' order and cannot be an id order either.
+    // Four rows off three panels — delivered, queued, stale and delivered again — so the
+    // order cannot be the panels' order and cannot be an id order either. The refused task
+    // is two rows, because queued and stale say different things about it.
     storyIn(tree.epic, "newest", "delivered", ago(5));
-    assign("a1", { created_at: ago(40) });
+    refusedSince("no worker free", ago(40));
     storyIn(tree.epic, "oldest", "delivered", ago(600));
 
     expect(order("newest", "oldest", "send the reset mail")).toEqual([
       "oldest",
+      "send the reset mail",
       "send the reset mail",
       "newest",
     ]);
@@ -227,8 +243,7 @@ describe("oldest first", () => {
 
 describe("every cooking row says its age", () => {
   it("leads the detail with the minutes, on every row there is", () => {
-    db.prepare("UPDATE task SET state = 'ready' WHERE id = ?").run(tree.task);
-    assign("a1", { created_at: ago(7) });
+    refusedSince("no worker free", ago(7));
     storyIn(tree.epic, "shipped", "delivered", ago(30));
 
     for (const row of cooking(db)) {
@@ -261,13 +276,6 @@ describe("every cooking row says its age", () => {
   });
 
   it("says the same minutes once, where the panel already said them", () => {
-    assign("a1", { created_at: ago(7), spent: JSON.stringify({ tokens: 2500 }), worker_id: worker("claude-1") });
-
-    expect(board(db).running[0]?.detail).toBe("claude-1 · 7m · 2k");
-    expect(cooking(db).find((r) => r.what === "send the reset mail")?.detail).toBe("7m · claude-1 · 2k");
-  });
-
-  it("says them once on a stale row too, whose detail ended with them", () => {
     refusedSince("no worker free", ago(45));
 
     expect(board(db).stale.some((r) => r.detail === "no worker free · 3 passes · 45m")).toBe(true);

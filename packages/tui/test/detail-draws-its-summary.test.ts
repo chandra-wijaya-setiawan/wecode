@@ -41,10 +41,20 @@ function summary(out: string[]): string[] {
   return rows;
 }
 
-/** Down the chain, the way the other screen tests do it. */
+/** Where a project is reached from. The dashboard has no projects box — its four boxes are
+ *  what waits on you, the open work, what is running and the fold — and the outline is the
+ *  way out to the whole workspace, so every chain that starts at a project starts here. */
+const fromTheOutline = (): void => {
+  app.key("v");
+  app.key("t");
+  expect(app.screen).toMatchObject({ kind: "outline" });
+};
+
+/** Down the chain, the way the other screen tests do it. `endsWith` because an outline row
+ *  leads with the tree guide it is drawn under; a node's children list does not. */
 const descendTo = (...steps: string[]): void => {
   for (const step of steps) {
-    const at = app.lines().findIndex((r) => r.what === step);
+    const at = app.lines().findIndex((r) => r.what === step || r.what.endsWith(` ${step}`));
     expect(at, `no row ${step}`).toBeGreaterThanOrEqual(0);
     app.cursor = at;
     app.key("enter");
@@ -75,6 +85,8 @@ function crowd(db: DatabaseSync, states: readonly string[]): void {
 }
 
 describe("the summary block at the top of a record's screen", () => {
+  beforeEach(fromTheOutline);
+
   it("names the record, one field to a line, and how its children stand on the title", () => {
     descendTo("storefront");
     const out = lines();

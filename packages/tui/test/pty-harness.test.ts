@@ -33,8 +33,11 @@ describe("the built cockpit, driven in a terminal", () => {
   it("draws the board it was pointed at", async () => {
     await drive(async (cockpit) => {
       const frame = cockpit.frame();
-      expect(frame).toContain("Projects (1) [p]");
-      expect(frame).toContain("storefront");
+      // The four boxes the page draws now: no Projects box — the outline is the way out
+      // to the workspace — and Running back on the page with a box of its own.
+      expect(frame).toContain("Open (2) [o]");
+      expect(frame).toContain("password reset");
+      expect(frame).toContain("Running (0) [r]");
       expect(frame).toContain("Cooking (1) [c]");
       expect(frame).toContain("send the reset mail");
       expect(frame).toContain("j/k move");

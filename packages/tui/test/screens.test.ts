@@ -11,7 +11,7 @@ import { loadMachines, open } from "@wecode/core";
 import { App } from "../src/app.js";
 import { tmp } from "../../core/test/tmpdir.js";
 import { Cockpit } from "../src/screens.js";
-import { loadViews, ViewError } from "../src/views.js";
+import { loadOffPage, loadViews, ViewError } from "../src/views.js";
 import { loadServices } from "../src/services.js";
 import { seed, T, ins } from "./seed.js";
 
@@ -51,10 +51,21 @@ function inside(out: string[], at: number): string[] {
   return rows;
 }
 
+/** Rows a project is reached from. The dashboard has no projects box any more — the
+ *  outline is the way out to the whole workspace — so a walk that starts at a project
+ *  opens the outline first and descends from the row there. */
+const fromTheOutline = (): void => {
+  app.key("v");
+  app.key("t");
+  expect(app.screen).toEqual({ kind: "outline" });
+};
+
 /** Down the chain, the way the App's tests do it. */
 const descendTo = (...steps: string[]): void => {
   for (const step of steps) {
-    const at = app.lines().findIndex((r) => r.what === step);
+    // `endsWith` because an outline row leads with the tree guide it is drawn under; on a
+    // board row and a node's children list the label is the whole of `what`.
+    const at = app.lines().findIndex((r) => r.what === step || r.what.endsWith(` ${step}`));
     expect(at, `no row ${step}`).toBeGreaterThanOrEqual(0);
     app.cursor = at;
     app.key("enter");
@@ -64,6 +75,7 @@ const descendTo = (...steps: string[]): void => {
 describe("the frame", () => {
   it("is exactly as tall as the terminal, whatever the screen", () => {
     for (const height of [3, 10, 24, 60]) expect(lines(100, height)).toHaveLength(height);
+    fromTheOutline();
     descendTo("storefront");
     for (const height of [3, 10, 24, 60]) expect(lines(100, height)).toHaveLength(height);
   });
@@ -112,9 +124,10 @@ describe("the dashboard", () => {
 
   it("keeps the services box off a box page and a node screen", () => {
     app.key("v");
-    app.key("p");
+    app.key("n");
     expect(titled(lines(100, 12), "Services")).toBe(-1);
     app.key("esc");
+    fromTheOutline();
     descendTo("storefront");
     expect(titled(lines(100, 20), "Services")).toBe(-1);
   });
@@ -128,11 +141,12 @@ describe("the dashboard", () => {
 
   it("carries each box's count and the letter that opens it in its title", () => {
     const out = lines().join("\n");
-    expect(out).toContain("─ Projects (1) [p] ─");
-    // The fold, holding the row the Queue box used to, and the one box on the page that
-    // can still be empty with a seeded database.
+    expect(out).toContain("─ Open (2) [o] ─");
+    // The fold, holding the row the Queue box used to, and the two boxes on the page that
+    // can still be empty with a seeded database — running is one of them again.
     expect(out).toContain("─ Cooking (1) [c] ─");
     expect(out).toContain("─ Needs you (0) [n] ─");
+    expect(out).toContain("─ Running (0) [r] ─");
   });
 
   it("says what an empty box is empty of, in that box's own words", () => {
@@ -144,20 +158,21 @@ describe("the dashboard", () => {
 
   it("trims a box to the rows it declares and says how many it dropped", () => {
     for (let i = 0; i < 12; i += 1) {
-      ins(db, "INSERT INTO project (slug,workspace_id,name,repo,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", `p${i}`, 1, `project ${i}`, "/repo", "in_progress", T, T);
+      ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", `s${i}`, tree.epic, `story ${i}`, "in_progress", T, T);
     }
     app.refresh();
     const out = lines();
-    const at = titled(out, "Projects (13)");
-    const declared = views.find((v) => v.name === "projects")?.rows ?? 0;
+    // The seed's epic and story, and the twelve.
+    const at = titled(out, "Open (14)");
+    const declared = views.find((v) => v.name === "open")?.rows ?? 0;
     const rows = inside(out, at);
 
     expect(rows).toHaveLength(declared);
     // The declared rows, the last of which is the tally of what did not fit.
-    expect(rows.at(-1)).toContain(`… and ${13 - (declared - 1)} more`);
+    expect(rows.at(-1)).toContain(`… and ${14 - (declared - 1)} more`);
     // And the next box begins directly under this one's bottom border.
     expect(out[at + declared + 1]?.startsWith("└")).toBe(true);
-    expect(titled(out, "Needs you (0)")).toBe(at + declared + 2);
+    expect(titled(out, "Running (0)")).toBe(at + declared + 2);
   });
 
   it("marks the cursor in the box that holds it and in no other", () => {
@@ -171,17 +186,17 @@ describe("the dashboard", () => {
 describe("a box screen", () => {
   it("draws one filter, at full height, with the cursor", () => {
     for (let i = 0; i < 20; i += 1) {
-      ins(db, "INSERT INTO project (slug,workspace_id,name,repo,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", `p${i}`, 1, `project ${i}`, "/repo", "in_progress", T, T);
+      ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", `s${i}`, tree.epic, `story ${i}`, "in_progress", T, T);
     }
     app.refresh();
     app.key("v");
-    app.key("p");
+    app.key("o");
     expect(app.screen).toMatchObject({ kind: "box" });
 
     const out = lines(100, 12);
-    expect(titled(out, "Projects (21) [p]")).toBe(0);
-    // Ten lines of rows inside the box — more than the six it gets on the dashboard — and
-    // no other box on the screen.
+    expect(titled(out, "Open (22) [o]")).toBe(0);
+    // Ten lines of rows inside the box — more than the eight it gets on the dashboard —
+    // and no other box on the screen.
     expect(titled(out, "Cooking (")).toBe(-1);
     // A row begins with its code, which is a number said as one: "#12".
     expect(inside(out, 0).filter((l) => /^#\d/.test(l)).length).toBeGreaterThan(6);
@@ -207,7 +222,10 @@ describe("a box screen", () => {
 });
 
 describe("a node screen", () => {
-  beforeEach(() => descendTo("storefront"));
+  beforeEach(() => {
+    fromTheOutline();
+    descendTo("storefront");
+  });
 
   it("draws the record's fields, then its children as a list", () => {
     const out = lines(100, 20);
@@ -253,7 +271,12 @@ describe("the key bar", () => {
   });
 
   it("names esc once a screen has something to go back to", () => {
+    fromTheOutline();
     descendTo("storefront");
+    expect(bar()).toContain("esc back");
+    // Two screens deep now that a project is reached through the outline: the first esc
+    // lands back on it, and only the second is home.
+    app.key("esc");
     expect(bar()).toContain("esc back");
     app.key("esc");
     expect(bar()).not.toContain("esc");
@@ -263,7 +286,7 @@ describe("the key bar", () => {
     // Every key App.key branches on. Whatever the bar omits is a way in with no sign.
     const answered = ["j", "k", "g", "G", "enter", "q", "r", "v", "a"];
     const named = (s: string): string[] => s.split("  ").flatMap((p) => (p.split(" ")[0] ?? "").split("/"));
-    for (const screen of [() => {}, () => descendTo("storefront")]) {
+    for (const screen of [() => {}, () => { fromTheOutline(); descendTo("storefront"); }]) {
       screen();
       const keys = named(bar());
       for (const k of answered) expect(keys, `${k} is not on the bar`).toContain(k);
@@ -295,10 +318,31 @@ describe("the key bar", () => {
  *  screen is. These moved here when render.ts went. */
 describe("views", () => {
   it("loads every box the page orders", () => {
-    // Four, in the page's order: the two questions the board asks a person, and the two
-    // boxes that are the tree rather than a report. The five machine-side panels are one
-    // box now, `cooking`.
-    expect(views.map((v) => v.name)).toEqual(["projects", "needs_human", "open", "cooking"]);
+    // Four, in the page's order: what waits on you, the open work, who is holding what,
+    // and the fold. `running` is its own box again and `projects` is off the page — the
+    // outline is the way back out to the workspace.
+    expect(views.map((v) => v.name)).toEqual(["needs_human", "open", "running", "cooking"]);
+  });
+
+  /** Off the page is not gone. `projects` was cut from the dashboard for the height it
+   *  took, and the height is the whole of what it cost — the letter that opened it is worth
+   *  nothing to the three boxes that stayed, so it keeps it. */
+  it("keeps the projects box off the page and still declared", () => {
+    expect(views.map((v) => v.name)).not.toContain("projects");
+    expect(loadOffPage().map((v) => v.name)).toEqual(["projects"]);
+    expect(loadOffPage().find((v) => v.name === "projects")?.filter).toBe("projects");
+  });
+
+  it("refuses an off-page box whose filter the code does not know", () => {
+    const p = join(tmp("wecode-views-"), "views.yaml");
+    writeFileSync(p, "page:\n  order: []\nviews: {}\noff_page:\n  a:\n    filter: nonsense\n");
+    expect(() => loadOffPage(p)).toThrow(/unknown filter nonsense/);
+  });
+
+  it("reads no off-page boxes from a file that declares none", () => {
+    const p = join(tmp("wecode-views-"), "views.yaml");
+    writeFileSync(p, "page:\n  order: [a]\nviews:\n  a:\n    filter: running\n");
+    expect(loadOffPage(p)).toEqual([]);
   });
 
   /** The rename has to reach the whitelist too: a box named `open` whose filter the code
@@ -372,8 +416,8 @@ describe("the terminal", () => {
     start();
     await until("q quit");
     expect(out).toContain(HIDE);
-    expect(out).toContain("Projects (1)");
-    expect(out).toContain("storefront");
+    expect(out).toContain("Open (2)");
+    expect(out).toContain("password reset");
     expect(out).toContain("workspace ");
   });
 
@@ -390,7 +434,7 @@ describe("the terminal", () => {
     await until("q quit");
     c.stdin?.write("v");
     await until("box?");
-    c.stdin?.write("p");
+    c.stdin?.write("o");
     // The box screen: one filter, and esc on the bar because there is now something to pop.
     await until("esc back");
     expect(out).not.toContain("no box on");
@@ -398,13 +442,13 @@ describe("the terminal", () => {
 
   it("redraws on a timer, without a keystroke", async () => {
     start();
-    await until("Projects (1)");
+    await until("Open (2)");
     const file = open(path);
     file
-      .prepare("INSERT INTO project (slug,workspace_id,name,repo,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
-      .run("second", 1, "second", "/repo", "in_progress", T, T);
+      .prepare("INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+      .run("second", 1, "second story", "in_progress", T, T);
     file.close();
-    await until("Projects (2)");
+    await until("Open (3)");
   }, 20_000);
 
   it("leaves the terminal clean on q", async () => {
