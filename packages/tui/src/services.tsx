@@ -1,7 +1,7 @@
 /** What is holding the workspace up, drawn above the work it is holding up.
  *
- *  Four rows, and every one of them is read from the record. Nothing here asks the machine
- *  the cockpit happens to be running on: no `ps`, no pid probe, no socket. The cockpit is
+ *  A pulse line per project and four service rows, every one of them read from the record.
+ *  Nothing here asks the machine the cockpit runs on: no `ps`, no pid probe, no socket. The cockpit is
  *  opened wherever the operator is standing — over ssh, on a laptop, beside a runner that
  *  is on another host entirely — so a process this host cannot see is not a process that is
  *  not running. The lease is the runner's own claim about itself, written where both hosts
@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { Text } from "ink";
 import { parse } from "yaml";
 import {
+  board,
   leaseAgeMs,
   leaseIsStale,
   now,
@@ -27,6 +28,9 @@ import {
   SCHEMA_VERSION,
   STALE_INTERVALS,
 } from "@wecode/core";
+// Through the module, because index.ts publishes the composed board and not board.ts's
+// own exports — the same reach `app.ts` makes for `assignmentFacts`.
+import { silence } from "@wecode/core/dist/board.js";
 import type { App } from "./app.js";
 import { clip } from "./list.js";
 
@@ -43,11 +47,24 @@ export interface ServicesConfig {
   readonly doctor: { readonly version: string; readonly state: string; readonly detail: string };
 }
 
-/** These four rows are always the four rows, so the box's height is not negotiable and its
- *  title carries no count. */
+/** The four service rows are always the four service rows. The box is taller than that by
+ *  one pulse line per project, so `services()` returns `SERVICE_ROWS` plus one row per
+ *  project.
+ *
+ *  Which means this constant is no longer the box's height, and whatever draws the panel
+ *  has to size it from the rows it is given — `screens.tsx` still writes
+ *  `height={SERVICE_ROWS + BORDER}`, and a panel shorter than its rows does not clip them,
+ *  it draws them over one another. That one line is the whole of what is left. */
 export const SERVICE_ROWS = 4;
 
+/** What this workspace has, rather than what one project has. */
+export const WORKSPACE = "workspace";
+
 export interface ServiceRow {
+  /** What the row is about: `workspace`, or the project a pulse line beats for. The box
+   *  holds two kinds of row now, and a reader scanning it down the left has to be able to
+   *  tell which without reading the rest of the line. */
+  readonly tag: string;
   readonly what: string;
   readonly state: string;
   readonly detail: string;
@@ -168,6 +185,7 @@ function runner(db: DatabaseSync, queued: number, at: string): ServiceRow {
   const lease = readLease(db);
   if (lease === null) {
     return {
+      tag: WORKSPACE,
       what: "runner",
       state: queued === 0 ? "idle" : "none",
       detail: `no runner holds this workspace · ${waiting}`,
@@ -181,6 +199,7 @@ function runner(db: DatabaseSync, queued: number, at: string): ServiceRow {
   // with code the operator has already replaced. Dead, the restart is owed anyway.
   if (!stale) {
     return {
+      tag: WORKSPACE,
       what: "runner",
       state: build.owed ? "stale build" : "alive",
       detail: withBuild(`${lease.holder} · ${beat}`, build),
@@ -188,6 +207,7 @@ function runner(db: DatabaseSync, queued: number, at: string): ServiceRow {
     };
   }
   return {
+    tag: WORKSPACE,
     what: "runner",
     state: queued === 0 ? "idle" : "dead",
     detail: withBuild(`${lease.holder} · ${beat} · ${STALE_INTERVALS} intervals missed · ${waiting}`, build),
@@ -204,6 +224,7 @@ function schema(db: DatabaseSync): ServiceRow {
   const found = row?.version ?? 0;
   const same = found === SCHEMA_VERSION;
   return {
+    tag: WORKSPACE,
     what: "schema",
     state: same ? "current" : found > SCHEMA_VERSION ? "ahead" : "behind",
     detail: `database ${found} · this build understands ${SCHEMA_VERSION}`,
@@ -223,6 +244,7 @@ function fleet(db: DatabaseSync, busyPhases: readonly string[]): ServiceRow {
   const busy = workers.reduce((n, w) => n + w.busy, 0);
   const all = workers.reduce((n, w) => n + w.all, 0);
   return {
+    tag: WORKSPACE,
     what: "fleet",
     state: starved.length > 0 ? "short" : all === 0 ? "none" : `${busy}/${all} busy`,
     detail: [...none, ...per].join(" · ") || "no workers",
@@ -234,14 +256,49 @@ function fleet(db: DatabaseSync, busyPhases: readonly string[]): ServiceRow {
  *  it is planned for and the word `not built`. A lamp here — of any colour — would be this
  *  box asserting something about a program nobody has written. */
 const doctor = (cfg: ServicesConfig): ServiceRow => ({
+  tag: WORKSPACE,
   what: "doctor",
   state: cfg.doctor.state,
   detail: `${cfg.doctor.version} · ${cfg.doctor.detail}`,
   alarm: false,
 });
 
-/** The four rows, in the order a reader scans them: who is running this workspace, whether
- *  this build may read it at all, what it has to run work with, and what is not there yet.
+/** A line per project, saying whether it is beating.
+ *
+ *  Here rather than in a box of its own because it is the same question this box already
+ *  asks: a runner that is alive over a project nothing has moved in two hours is only an
+ *  answer when the two are read together. Counted off the composed board — the one the
+ *  boxes underneath are drawn from — so a pulse and the box below it cannot disagree.
+ *
+ *  Red when nothing is running and something is waiting: that is a project the machine has
+ *  stopped carrying, and it is the one state here worth crossing the room for. A project
+ *  with no work is quiet, not red, by the same rule that keeps an idle runner plain. */
+function pulses(db: DatabaseSync, at: string): ServiceRow[] {
+  const then = Date.parse(at);
+  const silent = silence(db, Number.isNaN(then) ? Date.now() : then);
+  return board(db).projects.map((p) => {
+    const groups = board(db, p.id);
+    const running = groups.running.length;
+    const waiting = groups.queued.length + groups.cooking.length;
+    const beat = silent.get(p.id);
+    return {
+      tag: p.what,
+      what: "pulse",
+      state: running > 0 ? "beating" : waiting > 0 ? "still" : "quiet",
+      detail:
+        `${running} running · ${groups.queued.length} queued · ${groups.cooking.length} stuck · ` +
+        (beat === undefined ? "never moved" : `moved ${ago(beat)} ago`),
+      alarm: running === 0 && waiting > 0,
+    };
+  });
+}
+
+/** The pulse lines, then the four service rows in the order a reader scans them: what each
+ *  project is doing, then who is running this workspace, whether this build may read it at
+ *  all, what it has to run work with, and what is not there yet.
+ *
+ *  The projects come first because they are what the board is about; the four rows under
+ *  them are why a project's line might be wrong.
  *
  *  `queued` is passed in rather than counted here: it is the Queue box's number, and the
  *  runner row saying `idle` while the Queue box shows three would be the box disagreeing
@@ -253,15 +310,17 @@ export function services(
   cfg: ServicesConfig,
   at: string = now(),
 ): ServiceRow[] {
-  return [runner(db, queued, at), schema(db), fleet(db, cfg.busyPhases), doctor(cfg)];
+  return [...pulses(db, at), runner(db, queued, at), schema(db), fleet(db, cfg.busyPhases), doctor(cfg)];
 }
 
-/** The rows as text, columns padded to line up the way every list on the screen does. */
+/** The rows as text, columns padded to line up the way every list on the screen does. The
+ *  tag leads, because it is the column that says which of the two kinds of row this is. */
 export function serviceLines(rows: readonly ServiceRow[], width: number): string[] {
+  const tag = Math.max(...rows.map((r) => r.tag.length));
   const what = Math.max(...rows.map((r) => r.what.length));
   const state = Math.max(...rows.map((r) => r.state.length));
   return rows.map((r) =>
-    clip(`${r.what.padEnd(what)}  ${r.state.padEnd(state)}  ${r.detail}`, width),
+    clip(`${r.tag.padEnd(tag)}  ${r.what.padEnd(what)}  ${r.state.padEnd(state)}  ${r.detail}`, width),
   );
 }
 
@@ -288,7 +347,7 @@ export function Services({
   return (
     <>
       {serviceLines(rows, width).map((line, i) => (
-        <Text key={rows[i]?.what ?? i} wrap="truncate" color={rows[i]?.alarm === true ? "red" : ""}>
+        <Text key={`${rows[i]?.tag ?? ""}/${rows[i]?.what ?? i}`} wrap="truncate" color={rows[i]?.alarm === true ? "red" : ""}>
           {line}
         </Text>
       ))}
