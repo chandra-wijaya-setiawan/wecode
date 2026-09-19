@@ -62,8 +62,8 @@ export const WORKSPACE = "workspace";
 
 export interface ServiceRow {
   /** What the row is about: `workspace`, or the project a pulse line beats for. The box
-   *  holds two kinds of row now, and a reader scanning it down the left has to be able to
-   *  tell which without reading the rest of the line. */
+   *  holds two kinds of row now, and a reader scanning it has to be able to tell which
+   *  without reading the rest of the line. */
   readonly tag: string;
   readonly what: string;
   readonly state: string;
@@ -313,14 +313,20 @@ export function services(
   return [...pulses(db, at), runner(db, queued, at), schema(db), fleet(db, cfg.busyPhases), doctor(cfg)];
 }
 
-/** The rows as text, columns padded to line up the way every list on the screen does. The
- *  tag leads, because it is the column that says which of the two kinds of row this is. */
+/** The rows as text, columns padded to line up the way every list on the screen does.
+ *
+ *  What the row is about leads, and the tag is the column beside it: the leftmost column of
+ *  this box has always been the name of the thing — `runner`, `schema` — and the board's
+ *  other boxes are read down that same edge. A tag column in front of it would move every
+ *  service row sideways to say `workspace` four times, which is the least informative word
+ *  on the line. Second, the tag still separates the two kinds of row at a glance, and it is
+ *  the column that varies where the first one repeats. */
 export function serviceLines(rows: readonly ServiceRow[], width: number): string[] {
   const tag = Math.max(...rows.map((r) => r.tag.length));
   const what = Math.max(...rows.map((r) => r.what.length));
   const state = Math.max(...rows.map((r) => r.state.length));
   return rows.map((r) =>
-    clip(`${r.tag.padEnd(tag)}  ${r.what.padEnd(what)}  ${r.state.padEnd(state)}  ${r.detail}`, width),
+    clip(`${r.what.padEnd(what)}  ${r.tag.padEnd(tag)}  ${r.state.padEnd(state)}  ${r.detail}`, width),
   );
 }
 

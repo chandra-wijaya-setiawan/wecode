@@ -176,13 +176,19 @@ describe("every row carries a tag", () => {
     expect(rows().every((r) => r.tag !== "")).toBe(true);
   });
 
-  it("draws the tag first, in a column every row lines up in", () => {
+  it("draws the tag beside the name, in a column every row lines up in", () => {
     project("a-much-longer-project-name", "a-much-longer-project-name");
     const drawn = serviceLines(rows(), 200);
-    const tag = "a-much-longer-project-name".length;
-    expect(drawn.every((l) => l.slice(0, tag + 2).endsWith("  "))).toBe(true);
-    expect(drawn.some((l) => l.startsWith(`${WORKSPACE.padEnd(tag)}  runner`))).toBe(true);
-    expect(drawn.some((l) => l.startsWith("a-much-longer-project-name  pulse"))).toBe(true);
+    const what = "runner".length;
+    expect(drawn.every((l) => l.slice(0, what + 2).endsWith("  "))).toBe(true);
+    expect(drawn.some((l) => l.startsWith(`runner  ${WORKSPACE}`))).toBe(true);
+    expect(drawn.some((l) => l.startsWith("pulse   a-much-longer-project-name  "))).toBe(true);
+  });
+
+  it("leaves the name of the thing in the first column, where the board is read", () => {
+    project("atlas", "atlas");
+    const first = serviceLines(rows(), 200).map((l) => l.split(/ {2,}/)[0]);
+    expect(first.slice(-4)).toEqual(["runner", "schema", "fleet", "doctor"]);
   });
 
   it("still loses a long row's tail to an ellipsis rather than wrapping", () => {
