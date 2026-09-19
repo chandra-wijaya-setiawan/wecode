@@ -46,23 +46,12 @@ export function connector(closed: readonly boolean[]): string {
   return `${rails.join("")}${closed[closed.length - 1] ? ELBOW : TEE}`;
 }
 
-/** The repeating columns the outline can draw, beside the tree itself. Order is config's;
- *  the names are the code's, so a column the config asks for either draws or fails to load. */
-export const OUTLINE_COLUMNS = ["tree", "id", "type", "state"] as const;
-export type OutlineColumn = (typeof OUTLINE_COLUMNS)[number];
-
 export interface OutlineConfig {
   readonly title: string;
   readonly key: string;
   /** The entity the outline is folded to when it opens. */
   readonly depth: string;
   readonly empty: string;
-  /** Left to right, what the line is made of. */
-  readonly columns: readonly OutlineColumn[];
-  /** How many characters the type and the state each get. */
-  readonly abbreviate: number;
-  /** The words a plain cut would not tell apart, shortened by hand. */
-  readonly abbreviations: Readonly<Record<string, string>>;
 }
 
 export class OutlineError extends Error {}
@@ -84,33 +73,8 @@ export function loadOutline(path: string = CONFIG): OutlineConfig {
     key,
     depth: typeof v["depth"] === "string" ? v["depth"] : "story",
     empty: typeof v["empty"] === "string" ? v["empty"] : "-",
-    columns: columnsOf(v["columns"]),
-    abbreviate: typeof v["abbreviate"] === "number" ? v["abbreviate"] : 4,
-    abbreviations: wordsOf(v["abbreviations"]),
   };
 }
-
-/** The declared order, checked against the names this file draws. An unknown column is a
- *  line the code cannot compose, and failing to load says so where it can be fixed. */
-function columnsOf(raw: unknown): readonly OutlineColumn[] {
-  if (raw === undefined) return OUTLINE_COLUMNS;
-  if (!Array.isArray(raw)) throw new OutlineError("outline.columns must be a list");
-  return raw.map((c) => {
-    if (!OUTLINE_COLUMNS.includes(c as OutlineColumn)) {
-      throw new OutlineError(`outline.columns names no column ${String(c)}`);
-    }
-    return c as OutlineColumn;
-  });
-}
-
-const wordsOf = (raw: unknown): Readonly<Record<string, string>> => {
-  const out: Record<string, string> = {};
-  if (raw === null || typeof raw !== "object") return out;
-  for (const [word, short] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof short === "string") out[word] = short;
-  }
-  return out;
-};
 
 export const OUTLINE: OutlineConfig = loadOutline();
 
@@ -353,48 +317,14 @@ export function outlineRows(
   return out;
 }
 
-/** A word in the columns the config gives it: the hand-written short form where there is
- *  one, and otherwise the word's own first characters. Two spaces between columns; the same
- *  gap the shared list keeps. */
-export function abbreviate(word: string, config: OutlineConfig = OUTLINE): string {
-  return config.abbreviations[word] ?? word.slice(0, config.abbreviate);
-}
-
-const GAP = "  ";
-
-/** The horizontal the tee and the elbow already end in, spent again on the columns the
- *  row's depth did not use. */
-const LEADER = "─";
-
-/** The tree cell in its column: the guide flush left, the fold marker flush right, and the
- *  row's own branch drawn across what is between them.
- *
- *  The column is as wide as the deepest row, so padding it on the right strands a shallow
- *  row's marker whole levels away from the id it belongs to — on the real tree that is a
- *  dozen blank columns between the `+` and the `#`. Holding the marker right fixed that and
- *  left the blank inside the cell instead, which is the same defect one column over: the
- *  guide stops, a gap of nothing follows, and the marker reads as belonging to whatever row
- *  the eye lands on next. Filling that gap with the horizontal the connector already ends in
- *  makes the three one run — the branch leaves the parent's rail and arrives at the id of the
- *  row it is the branch of, with nothing to cross in between.
- *
- *  A root is the exception, and deliberately: nothing hangs off it, so there is no branch to
- *  continue and a leader there would draw a parent that does not exist. Its columns stay
- *  blank and its marker still sits against its id. */
-export function padTree(cell: string, size: number): string {
-  if (cell === "") return "".padEnd(size, " ");
-  const guide = cell.slice(0, -1);
-  return `${guide.padEnd(size - 1, guide === "" ? " " : LEADER)}${cell.slice(-1)}`;
-}
-
 /** A detail whose first part is an entity's name is that row's kind, put there by
- *  `outlineRows`; what follows it is the rollup and is nobody's column. */
+ *  `outlineRows`; what follows it is the rollup. */
 const KINDS: ReadonlySet<string> = new Set<string>(STATEFUL);
 
 /** The guide and fold marker a row opens with, and the label after them.
  *
  *  `outlineRows` draws the three as one string because the cursor, the search and the fold
- *  keys all read `what`; the columns split it again here, where the connector's characters
+ *  keys all read `what`; the drawing splits it again here, where the connector's characters
  *  are declared. A row with no guide at all still has its marker. */
 const GUIDE = new RegExp(`^((?:${RAIL}|${CLEAR}|${TEE}|${ELBOW})*[-+ ]) `);
 
@@ -403,35 +333,42 @@ export function splitTree(what: string): [string, string] {
   return hit === null ? ["", what] : [hit[1] ?? "", what.slice(hit[0].length)];
 }
 
-/** A row cut into its declared columns, with the prose the columns did not claim last. The
- *  tree cell is the guide and the fold marker alone: a label inside it is a cell as wide as
- *  the longest name in the tree, and the id it pushes right is then read at a different
- *  column on every row. Out of the cell, the label leads the prose — the one part of the
- *  line whose width is nobody's business but its own. */
-export function outlineCells(row: Row, config: OutlineConfig = OUTLINE): string[] {
-  const parts = row.detail === "" ? [] : row.detail.split(" · ");
-  const kind = parts.length > 0 && KINDS.has(parts[0] ?? "") ? parts[0] ?? "" : "";
-  const [guide, label] = splitTree(row.what);
-  const cell: Readonly<Record<OutlineColumn, string>> = {
-    tree: guide,
-    id: `#${row.id}`,
-    type: kind === "" ? "" : abbreviate(kind, config),
-    state: abbreviate(row.state, config),
-  };
-  const prose = [label, ...parts.slice(kind === "" ? 0 : 1)].filter((s) => s !== "");
-  return [...config.columns.map((c) => cell[c]), prose.join(" · ")];
+/** What the parts of a sentence are joined by — the separator the rollup and the rest of
+ *  the screen's prose already use, so the whole line reads as one list of things. */
+const JOIN = " · ";
+
+/** How deep a row sits, read back off the guide `outlineRows` drew it with: two columns per
+ *  level above it, and the fold marker after them. The guide is the depth written down, so
+ *  the indent does not have to be counted a second way. */
+export function depthOf(guide: string): number {
+  return Math.max(Math.floor((guide.length - 1) / INDENT), 0);
 }
 
-/** How wide each declared column has to be to hold every row: one set for the whole tree,
- *  so the columns line up down all of it rather than per screenful. */
-export function outlineWidths(rows: readonly Row[], config: OutlineConfig = OUTLINE): number[] {
-  const cells = rows.map((r) => outlineCells(r, config));
-  return config.columns.map((_, j) => Math.max(...cells.map((c) => (c[j] ?? "").length), 0));
+/** One row as one sentence, indented by its depth.
+ *
+ *  It was four columns — a tree cell, an id, a four-letter type and a four-letter state —
+ *  and every one of them was as wide as the widest row anywhere in the tree. That is what a
+ *  column is: a shallow row pays the deepest row's width, and the line it buys with it is
+ *  mostly blank. The cut to four characters was the same cost again, paid by the reader:
+ *  `stor`, `rels` and `requ` are words nobody knows until they have learned this screen.
+ *
+ *  A sentence spends nothing it does not use. The indent says the depth — which is all the
+ *  rail said, in two columns a level rather than none — the marker says what pressing does,
+ *  and the label leads, because the label is what the row is. The row's particulars follow
+ *  it in full words. Nothing here is padded, so a line is as long as it has something to
+ *  say and no longer, and the width the columns used to hold goes to the labels. */
+export function sentence(row: Row): string {
+  const parts = row.detail === "" ? [] : row.detail.split(JOIN);
+  const kind = parts.length > 0 && KINDS.has(parts[0] ?? "") ? parts[0] ?? "" : "";
+  const [guide, label] = splitTree(row.what);
+  const head = guide === "" ? label : `${guide.slice(-1)} ${label}`;
+  const rest = [`#${row.id}`, kind, row.state, ...parts.slice(kind === "" ? 0 : 1)];
+  return `${" ".repeat(depthOf(guide) * INDENT)}${[head, ...rest].filter((s) => s !== "").join(JOIN)}`;
 }
 
 /** Rows the height can show, scrolled so the cursor is among them. The shared list does
- *  this arithmetic too, and fixes the column order with it; the outline keeps the order and
- *  pays for the window again. */
+ *  this arithmetic too, and fixes its own line shape with it; the outline draws its own
+ *  line and pays for the window again. */
 function window(count: number, height: number, cursor: number | null): [number, number] {
   if (count <= height) return [0, count];
   // One line goes to the "… and N more" tally.
@@ -441,29 +378,20 @@ function window(count: number, height: number, cursor: number | null): [number, 
   return [first, first + shown];
 }
 
-/** The outline's own lines, in the declared order. It does not go through the shared list
+/** The outline's own lines, one sentence each. It does not go through the shared list
  *  because that list's contract is the code and the state first and the description last —
- *  right for a box of unrelated rows, and for a tree it buries the guide mid-line. */
+ *  right for a box of unrelated rows, and for a tree it puts two columns of repeated words
+ *  where the indent that says where the row sits has to be. */
 export function outlineLines(
   rows: readonly Row[],
   height: number,
   cursor: number | null,
   width: number,
-  config: OutlineConfig = OUTLINE,
 ): Line[] {
   if (height <= 0) return [];
-  const sizes = outlineWidths(rows, config);
   const [first, last] = window(rows.length, height, cursor);
   const lines = rows.slice(first, last).map((row, i) => ({
-    text: clip(
-      outlineCells(row, config)
-        .map((c, j) =>
-          config.columns[j] === "tree" ? padTree(c, sizes[j] ?? 0) : c.padEnd(sizes[j] ?? 0, " "),
-        )
-        .join(GAP)
-        .trimEnd(),
-      width,
-    ),
+    text: clip(sentence(row), width),
     state: row.state,
     cursor: cursor !== null && first + i === cursor,
   }));
@@ -473,8 +401,7 @@ export function outlineLines(
 }
 
 /** One box, titled with its scope, its count and the letter that opens it, holding every
- *  visible row at one set of column widths so the ids and states line up down the whole
- *  tree.
+ *  visible row as one sentence indented by its depth.
  *
  *  The scope is in the title rather than only in the status line, because the status line is
  *  the last thing that happened and this is what you are looking at: a narrowed outline is
