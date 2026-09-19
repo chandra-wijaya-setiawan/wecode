@@ -234,6 +234,7 @@ function help(): string {
     `A criteria naming no test of its own gets an extra ${AUTHORS} task that writes one.`,
     `A task's tools come from its role, or ${DEFAULT_TOOLS.join(", ")} when there are no roles.`,
     "Two tasks under one story must not spell a scope path that both can write.",
+    `A story adding a new packages/*/src module must have ${OWNERS} in some task's scope.`,
     "A requirement given as an id joins that requirement, which must be one of the joined story's.",
     `An epic holds ${CHILDREN.epic}, a release holds ${CHILDREN.release}; only the root joins an existing row by id.`,
     "",
@@ -333,7 +334,10 @@ function read(doc: unknown, config: ProjectConfig | null, roles: RoleConfig | nu
   }
 
   const top = level(m, root, "the file", config, roles, say);
-  if (top !== null) collisions(top, say);
+  if (top !== null) {
+    collisions(top, say);
+    owners(top, say);
+  }
   return { root, join: top?.id ?? id(m[root]), parent, top };
 }
 
@@ -352,6 +356,37 @@ function collisions(l: Level, say: string[]): void {
       if (path !== null) {
         say.push(`story ${story}: ${a.title} and ${b.title} both write ${path}; two tasks under one story share no path`);
       }
+    }
+  }
+}
+
+/** Where the tree says which component owns which module. A repository without this file
+ *  claims nothing, so it has no owner to go missing and the rule below never fires. */
+const OWNERS = "packages/core/config/components.yaml";
+
+/** A scope path that spells one new module: a literal file — no wildcard, so the plan means
+ *  this file and not a shape — under some package's `src/`, which is not there yet. A path
+ *  already on disk is an edit, and an edit needs no new row. */
+function newModules(scope: readonly string[]): readonly string[] {
+  return scope.filter(
+    (p) => !p.includes("*") && /^packages\/[^/]+\/src\/.+\.tsx?$/.test(p) && !existsSync(resolve(process.cwd(), p)),
+  );
+}
+
+/** A module whose owner nobody may write is a module with no owner: the map that says which
+ *  component a file belongs to is checked by a test, so the story goes red on a row its own
+ *  scope forbids it to add. The story is the unit because any task under it may carry the
+ *  map — one hand adds the module, another may add the row. Refused here, where scoping one
+ *  more file costs a line, rather than at pass time, where it costs the story. */
+function owners(l: Level, say: string[]): void {
+  for (const c of l.children) owners(c, say);
+  if (l.kind !== "story" || !existsSync(resolve(process.cwd(), OWNERS))) return;
+  const tasks = l.requirements.flatMap((r) => r.criteria.flatMap((c) => c.tasks));
+  if (tasks.some((t) => t.scope.some((g) => matchesGlob(OWNERS, g)))) return;
+  const story = l.name ?? `#${String(l.id)}`;
+  for (const t of tasks) {
+    for (const module of newModules(t.scope)) {
+      say.push(`story ${story}: ${t.title} adds ${module}, and no task here may write ${OWNERS}`);
     }
   }
 }
