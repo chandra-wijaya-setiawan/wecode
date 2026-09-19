@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { loadMachines, open } from "@wecode/core";
 import { App, boxKeys } from "../src/app.js";
-import { loadViews } from "../src/views.js";
+import { loadOffPage, loadViews } from "../src/views.js";
 
 const views = loadViews();
 const machines = loadMachines();
@@ -46,10 +46,26 @@ beforeEach(() => {
 
 const whats = (): string[] => app.lines().map((r) => r.what);
 
+/** The outline, which is how a project is reached now that the board has no projects box:
+ *  the four boxes are what waits on you, the open work, what is running and the fold. */
+const fromTheOutline = (): void => {
+  app.key("v");
+  app.key("t");
+  expect(app.screen).toEqual({ kind: "outline" });
+};
+
+/** Put the cursor on a row by what it says, wherever the screen came from. An outline row
+ *  leads with the tree guide it is drawn under; a board row and a child row do not. */
+const cursorOn = (what: string): void => {
+  const at = app.lines().findIndex((r) => r.what === what || r.what.endsWith(` ${what}`));
+  expect(at, `no row ${what}`).toBeGreaterThanOrEqual(0);
+  app.cursor = at;
+};
+
 /** Down the chain to the screen listing this entity's siblings. */
 const descendTo = (...steps: string[]): void => {
   for (const step of steps) {
-    const at = app.lines().findIndex((r) => r.what === step);
+    const at = app.lines().findIndex((r) => r.what === step || r.what.endsWith(` ${step}`));
     expect(at, `no row ${step}`).toBeGreaterThanOrEqual(0);
     app.cursor = at;
     app.key("enter");
@@ -58,12 +74,11 @@ const descendTo = (...steps: string[]): void => {
 
 describe("the dashboard", () => {
   it("lists every box's rows in the order the page declares", () => {
-    // Projects, needs_human, open, cooking — the page is four boxes now, and the queued
-    // task is no longer a box of its own: it is a row in the fold, which the page draws
-    // last. So the same four rows come back in a different order, and that order is the
-    // page's, not the board's.
+    // needs_human, open, running, cooking — the page is four boxes, and neither the
+    // project nor the queued task is a box of its own: the project is reached through the
+    // outline, and the task is a row in the fold, which the page draws last. So the rows
+    // come back in the page's order, not the board's.
     expect(whats()).toEqual([
-      "storefront",
       "password reset",
       "account recovery",
       "send the reset mail",
@@ -99,8 +114,8 @@ describe("the keys that move", () => {
   it("q quits and r re-reads the database", () => {
     expect(whats()).not.toContain("checkout");
     db.prepare(
-      "INSERT INTO project (slug,workspace_id,name,repo,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-    ).run("checkout", 1, "checkout", "/repo", "in_progress", T, T);
+      "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+    ).run("checkout", tree.epic, "checkout", "in_progress", T, T);
 
     app.key("r");
     expect(app.status).toBe("refreshed");
@@ -136,6 +151,31 @@ describe("v, then a box's letter", () => {
     expect(whats()).toEqual(["send the reset mail"]);
   });
 
+  /** The point of cutting a box from the page was the height it took from the boxes beside
+   *  it. Its letter took none of that, so `v p` still opens the projects the dashboard no
+   *  longer draws — the box is off the page, not taken away. */
+  it("opens an off-page box on its letter, and offers it", () => {
+    expect(whats()).not.toContain("storefront");
+
+    app.key("v");
+    expect(app.status).toContain("Projects");
+    app.key("p");
+
+    expect(app.screen).toMatchObject({ kind: "box" });
+    expect(whats()).toEqual(["storefront"]);
+    app.key("enter");
+    expect(app.screen).toMatchObject({ kind: "node", entity: "project" });
+  });
+
+  /** An off-page box may not take a letter one of the four on the page wants: the page is
+   *  what an operator reads all day, and its letters are the ones spent from memory. */
+  it("lets the page's boxes take their letters first", () => {
+    const page = boxKeys(views);
+    const all = boxKeys([...views, ...loadOffPage()]);
+    for (const [k, v] of page) expect(all.get(k)?.name).toBe(v.name);
+    expect(all.size).toBe(page.size + loadOffPage().length);
+  });
+
   it("refuses a letter no box claims, and stays where it was", () => {
     app.key("v");
     app.key("2");
@@ -154,7 +194,7 @@ describe("v, then a box's letter", () => {
 describe("esc, and the stack it pops", () => {
   it("comes back to the row it left", () => {
     app.key("j");
-    const p = [...boxKeys(views)].find(([, v]) => v.name === "projects")?.[0] as string;
+    const p = [...boxKeys(views)].find(([, v]) => v.name === "open")?.[0] as string;
     app.key("v");
     app.key(p);
     expect(app.cursor).toBe(0);
@@ -165,11 +205,15 @@ describe("esc, and the stack it pops", () => {
   });
 
   it("pops one screen at a time", () => {
+    fromTheOutline();
     descendTo("storefront", "1.0.0");
     expect(app.screen).toMatchObject({ kind: "node", entity: "release" });
 
     app.key("esc");
     expect(app.screen).toMatchObject({ kind: "node", entity: "project" });
+    // One at a time all the way out: the outline the project was opened from, then home.
+    app.key("esc");
+    expect(app.screen).toEqual({ kind: "outline" });
     app.key("esc");
     expect(app.screen).toEqual({ kind: "dashboard" });
   });
@@ -194,6 +238,7 @@ describe("enter, and the descent", () => {
       ["send the reset mail", "task_test"],
     ];
 
+    fromTheOutline();
     for (const [row, child] of chain) {
       descendTo(row);
       expect(app.lines().map((r) => r.detail)).toContain(child);
@@ -202,6 +247,7 @@ describe("enter, and the descent", () => {
   });
 
   it("shows a child's id and state, which is what a verb is judged from", () => {
+    fromTheOutline();
     descendTo("storefront");
     expect(app.lines()).toEqual([
       { id: tree.release, what: "1.0.0", state: "in_progress", detail: "release" },
@@ -209,6 +255,7 @@ describe("enter, and the descent", () => {
   });
 
   it("says there is nothing under a leaf rather than opening an empty screen", () => {
+    fromTheOutline();
     descendTo("storefront", "1.0.0", "account recovery", "password reset");
     descendTo("one link, one change", "a link is emailed", "the mail arrives");
     descendTo("send the reset mail", "the mailer is called");
@@ -223,18 +270,22 @@ describe("enter, and the descent", () => {
 
 describe("verbs, read off the row's state machine", () => {
   it("offers what the machine allows from the state the row is in", () => {
+    fromTheOutline();
+    cursorOn("storefront");
     expect(app.verbs()).toEqual(["hold", "drop"]); // a project in_progress
   });
 
   it("never offers a transition no actor may invoke", () => {
+    fromTheOutline();
     descendTo("storefront", "1.0.0", "account recovery");
-    app.cursor = app.lines().findIndex((r) => r.what === "password reset");
+    cursorOn("password reset");
 
     expect(app.verbs()).toContain("hold");
     expect(app.verbs()).not.toContain("deliver"); // automatic: the cascade fires it
   });
 
   it("offers none on a row nothing may be done to", () => {
+    fromTheOutline();
     descendTo("storefront", "1.0.0", "account recovery", "password reset");
     descendTo("one link, one change", "a link is emailed");
     app.cursor = app.lines().findIndex((r) => r.id === tree.dropped);
@@ -247,16 +298,19 @@ describe("verbs, read off the row's state machine", () => {
 
 describe("a, then a verb's initial", () => {
   it("applies the one verb that letter names", () => {
+    fromTheOutline();
+    cursorOn("storefront");
     app.key("a");
     expect(app.status).toContain("hold");
     app.key("h");
 
     expect(stateOf(db, "project", tree.project)).toBe("on_hold");
     expect(app.status).toContain("on_hold");
-    expect(app.lines()[0]?.state).toBe("on_hold");
+    expect(app.lines()[app.cursor]?.state).toBe("on_hold");
   });
 
   it("refuses an ambiguous letter rather than guessing", () => {
+    fromTheOutline();
     descendTo("storefront", "1.0.0", "account recovery", "password reset");
     descendTo("one link, one change", "a link is emailed");
     app.cursor = app.lines().findIndex((r) => r.id === tree.acceptance);
@@ -270,6 +324,8 @@ describe("a, then a verb's initial", () => {
   });
 
   it("says so when no verb starts with that letter", () => {
+    fromTheOutline();
+    cursorOn("storefront");
     app.key("a");
     app.key("z");
 
@@ -278,6 +334,7 @@ describe("a, then a verb's initial", () => {
   });
 
   it("reports a refusal from the machine rather than writing anything", () => {
+    fromTheOutline();
     descendTo("storefront");
     app.cursor = 0; // the release, whose drop is guarded
     app.key("a");

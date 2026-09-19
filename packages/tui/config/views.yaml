@@ -5,18 +5,42 @@
 # Rearranging, renaming or resizing the board is an edit to this file. A new filter is not.
 
 # Four boxes. Eight was eight places to look for the one row that has stopped moving, and
-# five of those eight were the machine reporting on itself — running, stale, queued, failed
-# and delivered are now one box, `cooking`, folded oldest-first by core/board.ts (see
-# MACHINE_SIDE there). Oldest-first is the point of folding them: what has stopped moving
-# is at the top of one list instead of somewhere in five.
+# four of those eight were the machine reporting on itself with nobody holding it — stale,
+# queued, failed and delivered are one box, `cooking`, folded oldest-first by core/board.ts
+# (see MACHINE_SIDE there). Oldest-first is the point of folding them: what has stopped
+# moving is at the top of one list instead of somewhere in four.
 #
-# The four that are left are the two questions the board asks a person — what waits on you,
-# and what is cooking — and the two boxes that are not a report at all but the tree: the
-# projects are the way back out to the whole workspace, and the open epics and stories are
-# what `enter` descends from. Neither is foldable; a folded row is off five tables and can
-# no longer say which entity it is.
+# `running` is not one of them and has its own box again. A row in the fold is a row nobody
+# is holding, read for how long it has sat; a running row is the opposite — a worker has it
+# right now, and what is asked of it is who and how much, not how old. Folding the two
+# together put the one box an operator watches while work is in flight at the bottom of a
+# list sorted by staleness, which is the far end from where it was looked for.
+#
+# The other two are the second question the board asks a person — what waits on you — and
+# the open epics and stories, which are not a report at all but the tree `enter` descends
+# from. Neither is foldable; a folded row is off five tables and can no longer say which
+# entity it is.
+#
+# `projects` is off the page. It was the way back out to the whole workspace, and the
+# outline (`t`) is that way now: it draws every project with its tree under it, which is
+# more than a flat box of names ever did. A box costs the height it takes from the three
+# that answer a question.
 page:
-  order: [projects, needs_human, open, cooking]
+  order: [needs_human, open, running, cooking]
+
+# Off the page, not gone. A box here is drawn by nothing on the dashboard and is still
+# opened by `v` and its letter — the cost a box was cut for is the height it took from the
+# boxes beside it, and a page it is not on costs none of that.
+#
+# `projects` is the one: a flat list of every project, which is what `v p` has always meant
+# and what the outline answers at more length. Keeping the letter alive is the difference
+# between moving a box and taking the door off.
+off_page:
+  projects:
+    title: Projects
+    filter: projects
+    rows: 8
+    empty: no projects — wecode project create --parent <workspace> <name>
 
 # The services box is not one of the views: it is not a filter over the board, `v` does not
 # open it, and its four rows are four different questions rather than one query's rows. What
@@ -111,11 +135,6 @@ outline:
     succeeded: succ
 
 views:
-  projects:
-    title: Projects
-    filter: projects
-    rows: 6
-    empty: no projects — wecode project create --parent <workspace> <name>
   needs_human:
     title: Needs you
     filter: needs_human
@@ -126,8 +145,16 @@ views:
     filter: open
     rows: 8
     empty: no epics or stories open
-  # The five folded panels in one list, oldest first. It gets the height the five used to
-  # share between them, because it is now the whole of the machine's side of the board.
+  # Who is holding what, right now. Out of the fold and back on the page: this is the box
+  # read while work is in flight, and it is short because a workspace has as many running
+  # rows as it has workers.
+  running:
+    title: Running
+    filter: running
+    rows: 6
+    empty: nothing is running
+  # The four folded panels in one list, oldest first. It gets the height the four used to
+  # share between them, because it is the whole of the machine's unheld side of the board.
   cooking:
     title: Cooking
     filter: cooking
