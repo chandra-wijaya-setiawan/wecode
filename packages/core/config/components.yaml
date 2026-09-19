@@ -74,8 +74,8 @@ components:
     package: runner
     layer: service
     component: true
-    owns: picks the next ready work, binds a worker, creates the assignment — within the attention budget
-    modules: [allocator, budget]
+    owns: picks the next ready work, binds a worker, creates the assignment — within the attention budget, and under a scope resolved through the map when the task named a node rather than a path
+    modules: [allocator, budget, scope]
 
   foreman:
     package: runner
