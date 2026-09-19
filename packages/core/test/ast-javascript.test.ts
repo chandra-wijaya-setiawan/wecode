@@ -84,6 +84,23 @@ describe("the timeout every reading case declares", () => {
     expect(all.filter((c) => c.timeout === DEFAULT_TIMEOUT).map((c) => c.name)).toEqual([]);
     expect(new Set(all.map((c) => c.timeout))).toEqual(new Set([READING]));
   }, READING);
+
+  it("declares a cost with room over the measured 6-7s the reading takes", () => {
+    expect(READING).toBeGreaterThan(DEFAULT_TIMEOUT);
+    expect(READING).toBeGreaterThanOrEqual(15_000);
+  }, READING);
+
+  it("declares it on the .mjs, .cjs and .jsx case that started this", (ctx) => {
+    const reading = cases(ctx.task.file as unknown as Case).filter((c) =>
+      c.name.startsWith("reads .mjs"),
+    );
+
+    expect(reading.map((c) => c.timeout)).toEqual([READING]);
+  }, READING);
+
+  it("gives the run the cost the case declared, not the default", (ctx) => {
+    expect((ctx.task as unknown as Case).timeout).toBe(READING);
+  }, READING);
 });
 
 describe("readExports of a file that does not parse", () => {
