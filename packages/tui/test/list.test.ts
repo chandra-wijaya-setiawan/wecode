@@ -40,7 +40,7 @@ describe("the row contract", () => {
   it("is a code, then a state, then a description, in that order", () => {
     const rows = [row(7, "cut the worktree", "running", "claude-1")];
 
-    expect(lines(rows, 5, null, 80)).toEqual(["#7  running  cut the worktree · claude-1"]);
+    expect(lines(rows, 5, null, 80)).toEqual(["> #7  running  cut the worktree · claude-1"]);
   });
 
   it("says the kind in the code where the screen does not say it", () => {
@@ -49,14 +49,14 @@ describe("the row contract", () => {
     const rows = [row(3, "the cockpit", "open", "epic"), row(4, "a list", "open", "story")];
 
     expect(lines(rows, 5, null, 80)).toEqual([
-      "epic #3   open  the cockpit",
-      "story #4  open  a list",
+      "  epic #3   open  the cockpit",
+      "  story #4  open  a list",
     ]);
   });
 
   it("says a two-word kind the way a person would say it aloud", () => {
     expect(lines([row(9, "it must line up", "met", "acceptance_criteria")], 5, null, 80)).toEqual([
-      "acceptance criteria #9  met  it must line up",
+      "+ acceptance criteria #9  met  it must line up",
     ]);
   });
 
@@ -65,7 +65,7 @@ describe("the row contract", () => {
     // A caller naming columns is honoured in nothing: the three are drawn as they always are.
     const out = plain(frame({ rows, columns: ["description"], height: 5, cursor: null, width: 80 }));
 
-    expect(out).toBe("#1  ready  a · claude-1");
+    expect(out).toBe("  #1  ready  a · claude-1");
   });
 
   it("draws nothing when there is no height", () => {
@@ -78,8 +78,8 @@ describe("the list's columns", () => {
     const rows = [row(1, "a", "ready"), row(2222, "longer", "running")];
 
     expect(lines(rows, 5, null, 80)).toEqual([
-      "#1     ready    a",
-      "#2222  running  longer",
+      "  #1     ready    a",
+      "> #2222  running  longer",
     ]);
   });
 
@@ -89,7 +89,7 @@ describe("the list's columns", () => {
 
     expect(lines(rows, 5, null, 80, widths)).toEqual([
       // Five columns for an id it does not have, eleven for a state it does not have.
-      "#1     ready        a",
+      "  #1     ready        a",
     ]);
   });
 });
@@ -98,18 +98,18 @@ describe("the list's width", () => {
   it("truncates the description, which is the column that gives way", () => {
     const out = lines([row(1, "a very long thing indeed", "ready")], 5, null, 20);
 
-    expect(out).toEqual(["#1  ready  a very l…"]);
+    expect(out).toEqual(["  #1  ready  a very…"]);
     expect(out[0]).toHaveLength(20);
   });
 
   it("leaves a line that already fits alone", () => {
-    expect(lines([row(1, "short", "ready")], 5, null, 40)).toEqual(["#1  ready  short"]);
+    expect(lines([row(1, "short", "ready")], 5, null, 40)).toEqual(["  #1  ready  short"]);
   });
 
   it("truncates the tally too", () => {
     const rows = [row(1, "a"), row(2, "b"), row(3, "c")];
 
-    expect(lines(rows, 2, null, 6)).toEqual(["#1  r…", "… and…"]);
+    expect(lines(rows, 2, null, 6)).toEqual(["  #1 …", "… and…"]);
   });
 });
 
@@ -118,8 +118,8 @@ describe("the rows the height hides", () => {
     const rows = [1, 2, 3, 4, 5].map((i) => row(i, `thing ${i}`));
 
     expect(lines(rows, 3, null, 80)).toEqual([
-      "#1  ready  thing 1",
-      "#2  ready  thing 2",
+      "  #1  ready  thing 1",
+      "  #2  ready  thing 2",
       "… and 3 more",
     ]);
   });
@@ -127,8 +127,8 @@ describe("the rows the height hides", () => {
   it("says nothing when every row fits", () => {
     const rows = [row(1, "a"), row(2, "b")];
 
-    expect(lines(rows, 2, null, 80)).toEqual(["#1  ready  a", "#2  ready  b"]);
-    expect(lines(rows, 9, null, 80)).toEqual(["#1  ready  a", "#2  ready  b"]);
+    expect(lines(rows, 2, null, 80)).toEqual(["  #1  ready  a", "  #2  ready  b"]);
+    expect(lines(rows, 9, null, 80)).toEqual(["  #1  ready  a", "  #2  ready  b"]);
   });
 
   it("gives the whole height to the tally when nothing else fits", () => {
@@ -141,9 +141,10 @@ describe("the list's cursor", () => {
     const rows = [row(1, "a"), row(2, "b"), row(3, "c")];
     const out = list(rows, 5, 1, 80);
 
-    expect(inverted(out)).toEqual(["#2  ready  b"]);
-    // No gutter: the rows start at the first column whether the cursor is on them or not.
-    expect(plain(out).split("\n")).toEqual(["#1  ready  a", "#2  ready  b", "#3  ready  c"]);
+    expect(inverted(out)).toEqual(["  #2  ready  b"]);
+    // The glyph column is the row's, not the cursor's: the rows start where they started
+    // whether the cursor is on them or not.
+    expect(plain(out).split("\n")).toEqual(["  #1  ready  a", "  #2  ready  b", "  #3  ready  c"]);
   });
 
   it("inverts nothing when the cursor is null", () => {
@@ -155,11 +156,11 @@ describe("the list's cursor", () => {
     const out = list(rows, 3, 4, 80);
 
     expect(plain(out).split("\n")).toEqual([
-      "#4  ready  thing 4",
-      "#5  ready  thing 5",
+      "  #4  ready  thing 4",
+      "  #5  ready  thing 5",
       "… and 3 more",
     ]);
-    expect(inverted(out)).toEqual(["#5  ready  thing 5"]);
+    expect(inverted(out)).toEqual(["  #5  ready  thing 5"]);
   });
 });
 
@@ -176,21 +177,21 @@ describe("the list's colour", () => {
 
     // Red is the row that cannot move until a person moves it, and nothing else — a
     // failed row is the runner's own, so it is drawn as plain as an in_progress one.
-    expect(coloured(out, RED)).toEqual(["#1  approval     land it?"]);
-    expect(coloured(out, YELLOW)).toEqual(["#2  waiting      waits"]);
+    expect(coloured(out, RED)).toEqual(["? #1  approval     land it?"]);
+    expect(coloured(out, YELLOW)).toEqual(["! #2  waiting      waits"]);
     expect(coloured(out, GREEN)).toEqual([]);
-    expect(coloured(out, DIM)).toEqual(["#3  delivered    shipped"]);
+    expect(coloured(out, DIM)).toEqual(["+ #3  delivered    shipped"]);
     // A state with nothing to say about itself is drawn plain, and so is the tally.
-    expect(plain(out).split("\n")[3]).toBe("#4  in_progress  going");
-    expect(out).toContain("#4  in_progress  going");
-    expect(out).toContain("#5  failed       gave up");
+    expect(plain(out).split("\n")[3]).toBe("  #4  in_progress  going");
+    expect(out).toContain("  #4  in_progress  going");
+    expect(out).toContain("x #5  failed       gave up");
   });
 
   it("leaves the tally uncoloured, whatever the rows it counts were", () => {
     const rows = [1, 2, 3].map((i) => row(i, `t${i}`, "approval"));
     const out = list(rows, 2, null, 80);
 
-    expect(coloured(out, RED)).toEqual(["#1  approval  t1"]);
+    expect(coloured(out, RED)).toEqual(["? #1  approval  t1"]);
     expect(out).toContain("… and 2 more");
   });
 });
@@ -204,8 +205,8 @@ describe("the plain list is not the sectioned one", () => {
     const rows = [row(1, "shipped", "delivered"), row(2, "landed", "released")];
 
     expect(lines(rows, 5, null, 80)).toEqual([
-      "#1  delivered  shipped",
-      "#2  released   landed",
+      "+ #1  delivered  shipped",
+      "+ #2  released   landed",
     ]);
   });
 

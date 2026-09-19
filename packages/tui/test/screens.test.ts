@@ -13,6 +13,7 @@ import { tmp } from "../../core/test/tmpdir.js";
 import { Cockpit } from "../src/screens.js";
 import { loadOffPage, loadViews, ViewError } from "../src/views.js";
 import { loadServices } from "../src/services.js";
+import { sectionMark } from "../src/list.js";
 import { seed, T, ins } from "./seed.js";
 
 const views = loadViews();
@@ -37,11 +38,17 @@ const frame = (width = 100, height = 60): string =>
 
 const lines = (width = 100, height = 60): string[] => plain(frame(width, height)).split("\n");
 
-/** Where a region's title is: a box's top border, or a dashboard section's rule. */
-const titled = (out: string[], title: string): number =>
-  out.findIndex((l) => l.includes(`─ ${title}`));
+/** A section's name as its rule says it: capitals, but `v`'s letter as a person types it. */
+const said = (title: string): string =>
+  title.toUpperCase().replace(/\[(.)\]/, (_, k: string) => `[${k.toLowerCase()}]`);
 
-/** The rows of the region at `at`: a box page's inside its side borders, a section's bare. */
+/** A region's title: on a box's border, or on a section's rule behind its glyph. */
+const titled = (out: string[], title: string): number =>
+  out.findIndex(
+    (l) => l.includes(`─ ${title}`) || (l.startsWith("──") && l.includes(` ${said(title)}`)),
+  );
+
+/** The rows of the region at `at`: a page's inside its borders, a section's bare. */
 function inside(out: string[], at: number): string[] {
   const ruled = out[at]?.startsWith("──") === true;
   const rows: string[] = [];
@@ -53,9 +60,8 @@ function inside(out: string[], at: number): string[] {
   return rows;
 }
 
-/** Rows a project is reached from. The dashboard has no projects box any more — the
- *  outline is the way out to the whole workspace — so a walk that starts at a project
- *  opens the outline first and descends from the row there. */
+/** The dashboard has no projects box any more, so a walk that starts at a project opens
+ *  the outline first and descends from the row there. */
 const fromTheOutline = (): void => {
   app.key("v");
   app.key("t");
@@ -86,11 +92,8 @@ describe("the frame", () => {
     for (const line of lines(28, 40)) expect(line.length).toBeLessThanOrEqual(28);
   });
 
-  /** Every region the dashboard is supposed to draw, named. A tally against views.length
-   *  said the same thing only for as long as views.yaml was the whole dashboard: the
-   *  services block is in no view, so the count broke the moment it arrived. What is wanted
-   *  is that each region is there and is drawn rather than printed — so each is asked for by
-   *  name and by its chrome, which is a rule now and not a border. */
+  /** Every region the dashboard draws, by name and by its chrome — a rule now, not a
+   *  border. A tally against views.length broke the moment the services block arrived. */
   it("is laid out, not printed: every region on it is ruled off", () => {
     const out = lines();
     for (const title of [services.title, ...views.map((v) => `${v.title} (`)]) {
@@ -99,7 +102,7 @@ describe("the frame", () => {
       expect(out[at]?.startsWith("──"), `${title} has no rule`).toBe(true);
       expect((out[at] as string).length, `${title}'s rule is short`).toBe(100);
     }
-    // And nothing on the page is boxed, which is the whole of the chrome the rules replaced.
+    // And nothing on the page is boxed: the whole of the chrome the rules replaced.
     expect(out.filter((l) => /[┌┐└┘│]/.test(l))).toEqual([]);
   });
 });
@@ -108,9 +111,8 @@ describe("the dashboard", () => {
   it("draws the services box first, above every box of work", () => {
     const out = lines();
     expect(titled(out, "Services")).toBe(0);
-    // The seed's one project's pulse line, then the four fixed rows. The pulse used to be
-    // drawn over `doctor` and never seen: the box was sized from a constant that did not
-    // count it, where a section is sized from the rows it is given.
+    // The pulse line, then the four fixed rows: a section is sized from the rows it is
+    // given, where the box was sized from a constant that did not count the pulse.
     expect(inside(out, 0).map((l) => l.split(/ {2,}/)[0])).toEqual([
       "pulse",
       "runner",
@@ -141,12 +143,12 @@ describe("the dashboard", () => {
 
   it("carries each box's count and the letter that opens it in its title", () => {
     const out = lines().join("\n");
-    // Every one of the seven, with the letter views.yaml declares for it. The seed puts a
-    // row in exactly one of them — the ready task is Queue's — and the other six say zero,
-    // which is the point of carrying the count: an empty box is an answer.
-    for (const said of ["Needs you (0) [n]", "Running (0) [r]", "Queue (1) [q]",
-      "Cooking (0) [c]", "Planned (0) [p]", "Delivered (0) [d]", "Dropped (0) [x]"]) {
-      expect(out).toContain(`─ ${said} ─`);
+    // Every one of the seven, with the mark and the letter views.yaml declares for it.
+    // The seed fills exactly one; the other six say zero, an empty box being an answer.
+    const heads = ["Needs you (0) [n]", "Running (0) [r]", "Queue (1) [q]",
+      "Cooking (0) [c]", "Planned (0) [p]", "Delivered (0) [d]", "Dropped (0) [x]"];
+    for (const [i, head] of heads.entries()) {
+      expect(out).toContain(`─ ${sectionMark(views[i]?.name ?? "")} ${said(head)} ─`);
     }
   });
 
@@ -197,13 +199,12 @@ describe("a box screen", () => {
     expect(titled(out, "Cooking (")).toBe(-1);
     // A row begins with its code — a number said as one — behind the kind of thing it is,
     // because Planned holds epics and stories together: "story #12".
-    expect(inside(out, 0).filter((l) => /^story #\d/.test(l)).length).toBeGreaterThan(6);
+    expect(inside(out, 0).filter((l) => /^. story #\d/.test(l)).length).toBeGreaterThan(6);
     expect(inverted(frame(100, 12))).toHaveLength(1);
   });
 
-  /** The columns stand in the same places on both — not the same string, because the
-   *  dashboard's section has the whole width where the page gives two columns to its
-   *  border, so the longer row runs past the shorter and is otherwise identical to it. */
+  /** The columns stand in the same places on both — not the same string: the page gives
+   *  two columns to its border, so the longer row runs past the shorter. */
   it("lines its columns up with the same box on the dashboard", () => {
     const onDashboard = inside(lines(), titled(lines(), "Queue (1)"))[0] as string;
     app.key("v");
@@ -456,17 +457,16 @@ describe("the terminal", () => {
     start();
     await until("q quit");
     expect(out).toContain(HIDE);
-    expect(out).toContain("Queue (1)");
+    expect(out).toContain("QUEUE (1)");
     expect(out).toContain("send the reset mail");
     expect(out).toContain("workspace ");
   });
 
-  /** The acceptance test greps the running binary for a box-drawing character, because a
-   *  cockpit of plain lines passes every other test in this file's first half. The
-   *  dashboard's are its rules now; the corners come from the first box page opened. */
+  /** The acceptance greps the binary for a box-drawing character; a cockpit of plain
+   *  lines passes everything else here. The corners come from a box page. */
   it("draws rules and boxes, not plain lines, when it is watched through a pipe", async () => {
     const c = start();
-    await until("── Services ─");
+    await until(`── ${sectionMark("services")} SERVICES ─`);
     c.stdin?.write("vq");
     await until("esc back");
     for (const corner of ["┌", "┐", "└", "┘", "│", "─"]) expect(out).toContain(corner);
@@ -485,13 +485,13 @@ describe("the terminal", () => {
 
   it("redraws on a timer, without a keystroke", async () => {
     start();
-    await until("Planned (0)");
+    await until("PLANNED (0)");
     const file = open(path);
     file
       .prepare("INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)")
       .run("second", 1, "second story", "planned", T, T);
     file.close();
-    await until("Planned (1)");
+    await until("PLANNED (1)");
   }, 20_000);
 
   it("leaves the terminal clean on q", async () => {

@@ -15,6 +15,7 @@ import { App } from "../src/app.js";
 import { Cockpit } from "../src/screens.js";
 import { loadServices, services, serviceLines, SERVICE_ROWS } from "../src/services.js";
 import { loadViews } from "../src/views.js";
+import { sectionMark } from "../src/list.js";
 import { seed, T, ins } from "./seed.js";
 
 const views = loadViews();
@@ -200,24 +201,27 @@ describe("the box", () => {
     expect(rows()["runner"]?.state).toBe("alive");
   });
 
-  it("is bordered, titled, and above every box of work", () => {
+  /** Ruled rather than boxed, and headed the way every section is: the mark views.yaml
+   *  gives it, then its name in capitals. The rows are under the rule at the left edge —
+   *  a border is not taking a column off them any more. */
+  it("is ruled, marked, titled in capitals, and above every section of work", () => {
     const out = lines();
-    const at = out.findIndex((l) => l.includes(`─ ${config.title}`));
-    expect(at).toBe(0);
-    expect(out[at]?.startsWith("┌")).toBe(true);
+    const at = out.findIndex((l) => l.startsWith(`── ${sectionMark("services")} ${config.title.toUpperCase()} `));
+    expect(at, "no rule heads the services section").toBe(0);
 
-    const inside = out.slice(at + 1, at + 1 + SERVICE_ROWS);
-    expect(inside.every((l) => l.startsWith("│") && l.endsWith("│"))).toBe(true);
-    expect(inside.map((l) => l.slice(1).trimStart().split(" ")[0])).toEqual([
+    // A pulse line per project leads the four fixed rows; nothing here is inside a border.
+    const drawn = services(db, 1, config, AT).length;
+    const inside = out.slice(at + 1, at + 1 + drawn);
+    expect(inside.every((l) => !l.startsWith("│") && !l.startsWith(" "))).toBe(true);
+    expect(inside.map((l) => l.split(" ")[0]).slice(-SERVICE_ROWS)).toEqual([
       "runner",
       "schema",
       "fleet",
       "doctor",
     ]);
-    expect(out[at + SERVICE_ROWS + 1]?.startsWith("└")).toBe(true);
 
-    const first = out.findIndex((l) => l.includes(`─ ${views[0]?.title} (`));
-    expect(first).toBeGreaterThan(at + SERVICE_ROWS);
+    const first = out.findIndex((l) => l.includes(` ${(views[0]?.title ?? "").toUpperCase()} (`));
+    expect(first).toBeGreaterThan(at + drawn);
   });
 
   it("colours an alarming row red and leaves every quiet row plain", () => {

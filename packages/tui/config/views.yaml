@@ -39,12 +39,14 @@ page:
 off_page:
   open:
     title: Open
+    mark: "o"
     filter: open
     key: o
     rows: 8
     empty: no epics or stories open
   projects:
     title: Projects
+    mark: "#"
     filter: projects
     rows: 8
     empty: no projects — wecode project create --parent <workspace> <name>
@@ -57,6 +59,7 @@ off_page:
 # is planned for — docs/design/19 — and when it ships, this is the line that changes.
 services:
   title: Services
+  mark: "="
   busy_phases: [pending, running, waiting]
   doctor:
     version: 0.0.2
@@ -161,9 +164,16 @@ outline:
 # first letters between them — delivered and dropped want the same one — and which letter
 # a box answers to is the one thing about it an operator holds in their hands, so it is
 # written down beside the title instead of falling out of the page's order.
+#
+# `mark` is the glyph the section is headed with, and it is declared here for the same
+# reason: what stands for *waiting its turn* is a judgement about this board, not something
+# a name can be shortened into. Where a section's rows already answer to one of cooking's
+# marks the section borrows it — `?` wants you, `>` a worker has it, `+` settled, `x` put
+# down — so a glyph means one thing whether it is read on a head or on a row.
 views:
   needs_human:
     title: Needs you
+    mark: "?"
     filter: needs_human
     key: n
     rows: 5
@@ -172,6 +182,7 @@ views:
   # it has workers.
   running:
     title: Running
+    mark: ">"
     filter: running
     key: r
     rows: 6
@@ -180,6 +191,7 @@ views:
   # and reading it beside one that gave up said neither thing clearly.
   queued:
     title: Queue
+    mark: "-"
     filter: queued
     key: q
     rows: 6
@@ -188,6 +200,7 @@ views:
   # moving is at the top of one box instead of somewhere in two.
   cooking:
     title: Cooking
+    mark: "*"
     filter: cooking
     key: c
     rows: 10
@@ -196,6 +209,7 @@ views:
   # in flight is read off Running and off the outline.
   planned:
     title: Planned
+    mark: "."
     filter: planned
     key: p
     rows: 8
@@ -204,6 +218,7 @@ views:
   # of its own and not a green tail on the end of the fold.
   delivered:
     title: Delivered
+    mark: "+"
     filter: delivered
     key: d
     rows: 5
@@ -212,6 +227,7 @@ views:
   # costs the least height and sits where the eye stops.
   dropped:
     title: Dropped
+    mark: "x"
     filter: dropped
     key: x
     rows: 3
