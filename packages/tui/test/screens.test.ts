@@ -37,16 +37,18 @@ const frame = (width = 100, height = 60): string =>
 
 const lines = (width = 100, height = 60): string[] => plain(frame(width, height)).split("\n");
 
-/** A box's top border, which is where its title is. */
+/** Where a region's title is: a box's top border, or a dashboard section's rule. */
 const titled = (out: string[], title: string): number =>
   out.findIndex((l) => l.includes(`─ ${title}`));
 
-/** The rows inside the box that starts at `at`, without their side borders. */
+/** The rows of the region at `at`: a box page's inside its side borders, a section's bare. */
 function inside(out: string[], at: number): string[] {
+  const ruled = out[at]?.startsWith("──") === true;
   const rows: string[] = [];
   for (const line of out.slice(at + 1)) {
-    if (!line.startsWith("│")) break;
-    rows.push(line.slice(1, -1).trimEnd());
+    if (line.startsWith("│")) rows.push(line.slice(1, -1).trimEnd());
+    else if (ruled && line.trim() !== "" && !line.startsWith("──")) rows.push(line.trimEnd());
+    else break;
   }
   return rows;
 }
@@ -84,27 +86,21 @@ describe("the frame", () => {
     for (const line of lines(28, 40)) expect(line.length).toBeLessThanOrEqual(28);
   });
 
-  /** Every box the dashboard is supposed to draw, named. A tally against views.length said
-   *  the same thing only for as long as views.yaml was the whole dashboard: the services
-   *  box is not a filter over the board and is in no view, so the count broke the moment it
-   *  arrived while every box on the screen was still perfectly well bordered. What is
-   *  wanted is that each box that should be there is, and is a box — so each is asked for
-   *  by name, and the tops and bottoms are only checked to pair up. */
-  it("is laid out, not printed: every box on it is bordered", () => {
+  /** Every region the dashboard is supposed to draw, named. A tally against views.length
+   *  said the same thing only for as long as views.yaml was the whole dashboard: the
+   *  services block is in no view, so the count broke the moment it arrived. What is wanted
+   *  is that each region is there and is drawn rather than printed — so each is asked for by
+   *  name and by its chrome, which is a rule now and not a border. */
+  it("is laid out, not printed: every region on it is ruled off", () => {
     const out = lines();
     for (const title of [services.title, ...views.map((v) => `${v.title} (`)]) {
       const at = titled(out, title);
-      expect(at, `no box titled ${title}`).toBeGreaterThanOrEqual(0);
-      expect(out[at]?.startsWith("┌"), `${title} has no top border`).toBe(true);
-      const bottom = at + inside(out, at).length + 1;
-      expect(out[bottom]?.startsWith("└"), `${title} has no bottom border`).toBe(true);
+      expect(at, `no region titled ${title}`).toBeGreaterThanOrEqual(0);
+      expect(out[at]?.startsWith("──"), `${title} has no rule`).toBe(true);
+      expect((out[at] as string).length, `${title}'s rule is short`).toBe(100);
     }
-    expect(out.filter((l) => l.startsWith("┌")).length).toBe(
-      out.filter((l) => l.startsWith("└")).length,
-    );
-    for (const line of out.filter((l) => l.startsWith("│"))) {
-      expect(line.endsWith("│")).toBe(true);
-    }
+    // And nothing on the page is boxed, which is the whole of the chrome the rules replaced.
+    expect(out.filter((l) => /[┌┐└┘│]/.test(l))).toEqual([]);
   });
 });
 
@@ -112,7 +108,11 @@ describe("the dashboard", () => {
   it("draws the services box first, above every box of work", () => {
     const out = lines();
     expect(titled(out, "Services")).toBe(0);
+    // The seed's one project's pulse line, then the four fixed rows. The pulse used to be
+    // drawn over `doctor` and never seen: the box was sized from a constant that did not
+    // count it, where a section is sized from the rows it is given.
     expect(inside(out, 0).map((l) => l.split(/ {2,}/)[0])).toEqual([
+      "pulse",
       "runner",
       "schema",
       "fleet",
@@ -144,20 +144,16 @@ describe("the dashboard", () => {
     // Every one of the seven, with the letter views.yaml declares for it. The seed puts a
     // row in exactly one of them — the ready task is Queue's — and the other six say zero,
     // which is the point of carrying the count: an empty box is an answer.
-    expect(out).toContain("─ Needs you (0) [n] ─");
-    expect(out).toContain("─ Running (0) [r] ─");
-    expect(out).toContain("─ Queue (1) [q] ─");
-    expect(out).toContain("─ Cooking (0) [c] ─");
-    expect(out).toContain("─ Planned (0) [p] ─");
-    expect(out).toContain("─ Delivered (0) [d] ─");
-    expect(out).toContain("─ Dropped (0) [x] ─");
+    for (const said of ["Needs you (0) [n]", "Running (0) [r]", "Queue (1) [q]",
+      "Cooking (0) [c]", "Planned (0) [p]", "Delivered (0) [d]", "Dropped (0) [x]"]) {
+      expect(out).toContain(`─ ${said} ─`);
+    }
   });
 
   it("says what an empty box is empty of, in that box's own words", () => {
     const out = lines();
     const at = titled(out, "Needs you (0)");
-    expect(at).toBeGreaterThanOrEqual(0);
-    expect(inside(out, at)).toEqual(["nothing waits on you"]);
+    expect(inside(out, at), `no box titled Needs you`).toEqual(["nothing waits on you"]);
   });
 
   it("trims a box to the rows it declares and says how many it dropped", () => {
@@ -169,13 +165,11 @@ describe("the dashboard", () => {
     const at = titled(out, "Planned (12)");
     const declared = views.find((v) => v.name === "planned")?.rows ?? 0;
     const rows = inside(out, at);
-
     expect(rows).toHaveLength(declared);
     // The declared rows, the last of which is the tally of what did not fit.
     expect(rows.at(-1)).toContain(`… and ${12 - (declared - 1)} more`);
-    // And the next box begins directly under this one's bottom border.
-    expect(out[at + declared + 1]?.startsWith("└")).toBe(true);
-    expect(titled(out, "Delivered (0)")).toBe(at + declared + 2);
+    // And the next section's rule begins directly under this one's last row.
+    expect(titled(out, "Delivered (0)")).toBe(at + declared + 1);
   });
 
   it("marks the cursor in the box that holds it and in no other", () => {
@@ -207,12 +201,18 @@ describe("a box screen", () => {
     expect(inverted(frame(100, 12))).toHaveLength(1);
   });
 
+  /** The columns stand in the same places on both — not the same string, because the
+   *  dashboard's section has the whole width where the page gives two columns to its
+   *  border, so the longer row runs past the shorter and is otherwise identical to it. */
   it("lines its columns up with the same box on the dashboard", () => {
-    const onDashboard = inside(lines(), titled(lines(), "Queue (1)"))[0];
+    const onDashboard = inside(lines(), titled(lines(), "Queue (1)"))[0] as string;
     app.key("v");
     app.key("q");
-    expect(app.screen).toMatchObject({ kind: "box" });
-    expect(inside(lines(), 0)[0]).toBe(onDashboard);
+    const onPage = inside(lines(), 0)[0] as string;
+    const shared = Math.min(onDashboard.length, onPage.length);
+    // `…` is where a row was clipped, and the two are clipped at different widths.
+    const upTo = (s: string): string => s.slice(0, shared).replace(/…$/, "");
+    expect(upTo(onPage)).toBe(upTo(onDashboard));
   });
 
   it("says the box is empty rather than drawing nothing", () => {
@@ -342,12 +342,9 @@ describe("views", () => {
     ]);
   });
 
-  /** Off the page is not gone. `projects` was cut from the dashboard for the height it
-   *  took, and the height is the whole of what it cost — a letter costs the boxes that
-   *  stayed nothing, so it keeps one. */
-  /** Two boxes are off the page now: `projects`, and `open` since `planned` took its place
-   *  among the seven. Both are asserted by name, because "off the page" is the one state a
-   *  box can be in that nothing on the dashboard would show. */
+  /** Off the page is not gone: `projects` was cut for the height it took, and `open` since
+   *  `planned` took its place among the seven. Both are asserted by name, because "off the
+   *  page" is the one state a box can be in that nothing on the dashboard would show. */
   it("keeps the projects and open boxes off the page and still declared", () => {
     for (const name of ["projects", "open"]) {
       expect(views.map((v) => v.name)).not.toContain(name);
@@ -465,10 +462,13 @@ describe("the terminal", () => {
   });
 
   /** The acceptance test greps the running binary for a box-drawing character, because a
-   *  cockpit of plain lines passes every other test in this file's first half. */
-  it("draws boxes, not lines, when it is watched through a pipe", async () => {
-    start();
-    await until("q quit");
+   *  cockpit of plain lines passes every other test in this file's first half. The
+   *  dashboard's are its rules now; the corners come from the first box page opened. */
+  it("draws rules and boxes, not plain lines, when it is watched through a pipe", async () => {
+    const c = start();
+    await until("── Services ─");
+    c.stdin?.write("vq");
+    await until("esc back");
     for (const corner of ["┌", "┐", "└", "┘", "│", "─"]) expect(out).toContain(corner);
   });
 
