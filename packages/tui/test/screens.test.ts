@@ -233,11 +233,17 @@ describe("a node screen", () => {
 
   it("draws the record's fields, then its children as a list", () => {
     const out = lines(100, 20);
-    expect(titled(out, `project #${tree.project}`)).toBe(0);
-    expect(inside(out, 0)).toEqual(["entity    project", `id        #${tree.project}`, "children  1"]);
+    expect(titled(out, "storefront · in_progress")).toBe(0);
+    expect(inside(out, 0)).toEqual([
+      "entity    project",
+      `id        #${tree.project}`,
+      "title     storefront",
+      "state     in_progress",
+      "children  1",
+    ]);
 
     const at = titled(out, "children (1)");
-    expect(at).toBeGreaterThan(3);
+    expect(at).toBeGreaterThan(5);
     const rows = inside(out, at);
     expect(rows[0]).toContain("1.0.0");
     expect(rows[0]).toContain("release");
