@@ -123,13 +123,10 @@ const ENTITY: Readonly<Record<keyof Board, StatefulEntity | null>> = {
   cooking: null,
 };
 
-/** What a row on a box is a row of. A box whose rows are all one kind says so above; the
- *  two that hold more than one kind are answered from the row.
- *
- *  `open` and `planned` tag epic or story in their detail. The fold cannot: its detail leads
- *  with the age, and it carries more than one panel's rows. So the panels themselves are
- *  asked — a folded row is still on exactly the panel it came from, and that panel does name
- *  one kind. Matched on id, words and state together, because an id alone is shared across
+/** What a row on a box is a row of. A box whose rows are all one kind says so above; the two
+ *  that hold more than one are answered from the row. `open` and `planned` tag epic or story in
+ *  their detail; the fold cannot, so its panels are asked instead — a folded row is still on the
+ *  panel it came from. Matched on id, words and state, because an id alone is shared across
  *  tables and the fold rewrites the detail to put the age in front of it. */
 const entityOf = (filter: keyof Board, row: Row, now: Board): StatefulEntity => {
   const named = ENTITY[filter];
@@ -241,6 +238,10 @@ export class App {
   private items: Item[] = [];
   private forest: readonly Node[] = [];
   private snapshot: Board | null = null;
+  /** How many seats the fleet has, read with the snapshot and not when a frame is drawn: the
+   *  running box's head says how many of them its rows hold, and a denominator from a later
+   *  instant than its numerator is a fraction of nothing. A seat is a worker, any role, busy or not. */
+  private fleet = 0;
   /** Which outline nodes are open. It belongs to the screen and outlives nothing else:
    *  folding is not a descent, so it must not cost an esc to undo. */
   private expanded: ReadonlySet<string> = new Set();
@@ -292,6 +293,7 @@ export class App {
    *  you should not move the row you were about to act on further than it has to. */
   refresh(): void {
     this.snapshot = board(this.db);
+    this.fleet = (this.db.prepare("SELECT count(*) AS n FROM worker").get() as { n: number }).n;
     this.forest = tree(this.db);
     this.items = this.itemsOf(this.screen);
     this.cursor = this.cursor;
@@ -306,12 +308,16 @@ export class App {
     return this.snapshot ?? board(this.db);
   }
 
-  /** The open assignment's allowance, spend and last beat, read now rather than at the
-   *  last refresh. How long an agent has been silent grows without anything being written,
-   *  so a beat carried from the last keystroke would say a dead worker was alive for as
-   *  long as nobody pressed a key. One indexed row, on a screen that draws nothing else.
-   *
-   *  Null off an assignment screen, and null for a record that has since been deleted. */
+  /** The fleet's seats, as of the same refresh `boardNow` is as of. */
+  seats(): number {
+    return this.fleet;
+  }
+
+  /** The open assignment's allowance, spend and last beat, read now rather than at the last
+   *  refresh. How long an agent has been silent grows without anything being written, so a beat
+   *  carried from the last keystroke would say a dead worker was alive for as long as nobody
+   *  pressed a key. One indexed row, on a screen that draws nothing else. Null off an assignment
+   *  screen, and null for a record that has since been deleted. */
   factsNow(): AssignmentFacts | null {
     const screen = this.screen;
     return screen.kind === "assignment" ? assignmentFacts(this.db, screen.id) : null;
@@ -348,12 +354,9 @@ export class App {
     return out.ok ? null : out.why;
   }
 
-  /** The attempts a task has had and the wall they run into, as rows to read under the
-   *  record's summary. A task nobody has attempted yet has no attempts to list, so it gets
-   *  none: the count is evidence of how a task got where it is, and zero is not evidence.
-   *
-   *  They carry no entity, so `a` offers nothing on them and `enter` opens nothing: an
-   *  attempt count is a fact about the task above, not a row of its own. */
+  /** The attempts a task has had and the wall they run into, as rows under the record's summary.
+   *  A task nobody has attempted gets none: the count is evidence of how a task got where it is,
+   *  and zero is not evidence. They carry no entity — `a` and `enter` offer nothing on a fact. */
   private evidence(screen: Screen & { kind: "node" }): Item[] {
     if (screen.entity !== "task") return [];
     const tries = this.repo.taskRetry(screen.id);
@@ -520,12 +523,9 @@ export class App {
   }
 
   /** Commit a query: filter the tree down to the rows that answer it and land on the first.
-   *
-   *  Filtering is the point. A search that only moved the cursor left the other hundred rows
-   *  on screen, so finding the second match meant reading past them; the outline is for
-   *  seeing where a row hangs, and the rows above a match are the only ones that say so.
-   *  Those ancestors are also expanded, because a match kept behind a fold is a search that
-   *  told you the row exists and not where. */
+   *  Filtering is the point — a search that only moved the cursor left the other hundred rows on
+   *  screen, so finding the second match meant reading past them. The ancestors are kept, and
+   *  expanded: a match behind a fold says the row exists and not where it hangs. */
   private seek(query: string): void {
     this.query = query;
     if (query === "") {

@@ -113,13 +113,7 @@ describe("the dashboard", () => {
     expect(titled(out, "Services")).toBe(0);
     // The pulse line, then the four fixed rows: a section is sized from the rows it is
     // given, where the box was sized from a constant that did not count the pulse.
-    expect(inside(out, 0).map((l) => l.split(/ {2,}/)[0])).toEqual([
-      "pulse",
-      "runner",
-      "schema",
-      "fleet",
-      "doctor",
-    ]);
+    expect(inside(out, 0).map((l) => l.split(/ {2,}/)[0])).toEqual(["pulse", "runner", "schema", "fleet", "doctor"]);
     // And it is above the first box views.yaml orders.
     expect(titled(out, `${views[0]?.title}`)).toBeGreaterThan(0);
   });
@@ -159,9 +153,7 @@ describe("the dashboard", () => {
   });
 
   it("trims a box to the rows it declares and says how many it dropped", () => {
-    for (let i = 0; i < 12; i += 1) {
-      ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", `s${i}`, tree.epic, `story ${i}`, "planned", T, T);
-    }
+    for (let i = 0; i < 12; i += 1) ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", `s${i}`, tree.epic, `story ${i}`, "planned", T, T);
     app.refresh();
     const out = lines();
     const at = titled(out, "Planned");
@@ -182,11 +174,34 @@ describe("the dashboard", () => {
   });
 });
 
+/** The running head says held of seats. Its numerator is the board as of the last refresh, so
+ *  its denominator has to be as of that same refresh: counted while the frame was drawn it came
+ *  from a later instant, and a seat enrolled between the two read as one the rows were short of. */
+describe("the running head's fraction", () => {
+  const enrol = (slug: string): void => {
+    ins(db, "INSERT INTO worker (slug,name,role,kind,created_at,updated_at) VALUES (?,?,?,?,?,?)", slug, slug, "engineer", "agent", T, T);
+  };
+  const running = (): string => lines().find((l) => l.startsWith("──") && l.includes(" RUNNING ")) ?? "";
+
+  it("says the seats the board it draws was refreshed with, and no others", () => {
+    enrol("eng-1");
+    app.refresh();
+    expect(app.seats()).toBe(1);
+    expect(running().endsWith(" 0/1"), running()).toBe(true);
+
+    // A worker enrolled with nobody pressing a key: the two halves move together or not at all.
+    enrol("eng-2");
+    expect(app.seats()).toBe(1);
+    expect(running().endsWith(" 0/1"), running()).toBe(true);
+
+    app.refresh();
+    expect(running().endsWith(" 0/2"), running()).toBe(true);
+  });
+});
+
 describe("a box screen", () => {
   it("draws one filter, at full height, with the cursor", () => {
-    for (let i = 0; i < 20; i += 1) {
-      ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", `s${i}`, tree.epic, `story ${i}`, "planned", T, T);
-    }
+    for (let i = 0; i < 20; i += 1) ins(db, "INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)", `s${i}`, tree.epic, `story ${i}`, "planned", T, T);
     app.refresh();
     app.key("v");
     app.key("p");
@@ -332,15 +347,7 @@ describe("views", () => {
     // Seven, in the page's order: what wants you, what is moving, what waits its turn,
     // what is stuck, what is not begun, what is finished but not landed, and what was put
     // down. `projects` is off the page — the outline is the way back out to the workspace.
-    expect(views.map((v) => v.name)).toEqual([
-      "needs_human",
-      "running",
-      "queued",
-      "cooking",
-      "planned",
-      "delivered",
-      "dropped",
-    ]);
+    expect(views.map((v) => v.name)).toEqual(["needs_human", "running", "queued", "cooking", "planned", "delivered", "dropped"]);
   });
 
   /** Off the page is not gone: `projects` was cut for the height it took, and `open` since
@@ -375,15 +382,8 @@ describe("views", () => {
   /** The letters are the file's. Seven names do not have seven distinct first letters, so
    *  which box answers to which key stopped being something the page's order could decide. */
   it("gives every box on the page the letter views.yaml declares for it", () => {
-    expect(views.map((v) => `${v.name}:${v.key ?? ""}`)).toEqual([
-      "needs_human:n",
-      "running:r",
-      "queued:q",
-      "cooking:c",
-      "planned:p",
-      "delivered:d",
-      "dropped:x",
-    ]);
+    expect(views.map((v) => `${v.name}:${v.key ?? ""}`))
+      .toEqual(["needs_human:n", "running:r", "queued:q", "cooking:c", "planned:p", "delivered:d", "dropped:x"]);
   });
 
   it("refuses a declared letter that is not one letter", () => {
