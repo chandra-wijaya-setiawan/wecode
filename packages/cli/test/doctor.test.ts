@@ -49,6 +49,18 @@ const setState = (table: string, id: number, state: string): void => {
   db.prepare(`UPDATE ${table} SET state = ? WHERE id = ?`).run(state, id);
 };
 
+/** The seed's whole chain put into its own success state. A story is only quietly delivered
+ *  when the work under it finished too; leaving the seed's `ready` task and task_test open
+ *  under a delivered story is a different piece of drift — one the upward invariant names —
+ *  and the tests that want silence have to not create it. */
+const settleUnderTheStory = (): void => {
+  setState("requirement", ids.requirement, "met");
+  setState("acceptance_criteria", ids.criteria, "accepted");
+  setState("acceptance_test", ids.acceptance, "passed");
+  setState("task", ids.task, "done");
+  db.prepare("UPDATE task_test SET state = 'passed' WHERE parent_id = ?").run(ids.task);
+};
+
 describe("wecode doctor", () => {
   it("says nothing and exits zero when the record holds", () => {
     expect(run(["doctor"])).toBe(0);
@@ -67,6 +79,7 @@ describe("wecode doctor", () => {
 
   it("is quiet about a delivered story once something under it is recorded as landed", () => {
     setState("story", ids.story, "delivered");
+    settleUnderTheStory();
     recordLanded(ids.task);
 
     expect(run(["doctor"])).toBe(0);
@@ -100,9 +113,17 @@ describe("wecode doctor", () => {
     // The story that does have a requirement under it is not accused of being empty.
     expect(text).not.toContain(`story #${ids.story}`);
 
+    // Dropping the criteria leaves its failed acceptance_test open beneath it, and marking
+    // the task done leaves its task_test open beneath that: two children of settled parents,
+    // named one each, which is what the upward check is for.
+    expect(text).toContain("nothing_is_open_under_a_settled_parent");
+    expect(text).toContain(`acceptance_test #${ids.acceptance}`);
+    expect(text).toContain("task_test #");
+
     // Grouped: each invariant is named once, with its entities beneath it.
     expect(text.match(/story_in_progress_has_a_requirement/g)).toHaveLength(1);
-    expect(text).toContain("3 entities breaking 3 invariants");
+    expect(text.match(/nothing_is_open_under_a_settled_parent/g)).toHaveLength(1);
+    expect(text).toContain("5 entities breaking 4 invariants");
   });
 
   it("names the role of a ready task when nobody fills it", () => {
