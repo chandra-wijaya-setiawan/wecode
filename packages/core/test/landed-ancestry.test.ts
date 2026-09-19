@@ -43,12 +43,26 @@ beforeEach(() => {
   epic = make.epic(make.release(make.project(ws, "storefront", repo), "1.0.0"), "recovery");
 });
 
-/** A story `delivered` on the record with a task under it to carry a marker, and no marker. */
+/** A story `delivered` on the record with a task under it to carry a marker, and no marker.
+ *
+ *  The chain under it is settled with it. A delivered story over a `ready` task is a second
+ *  and unrelated piece of drift — the child nothing weighed — and these tests are about the
+ *  marker alone, so the fixture does not leave one lying around. */
 function deliveredStory(title: string): { story: number; slug: string } {
   const story = make.story(epic, title);
   const criteria = make.criteria(make.requirement(story, "it works"), `${title} is accepted`);
   make.task(make.acceptanceTest(criteria, `${title} passes`, "manual"), `build ${title}`);
   db.prepare("UPDATE story SET state = 'delivered' WHERE id = ?").run(story);
+  db.prepare("UPDATE requirement SET state = 'met' WHERE story_id = ?").run(story);
+  db.prepare(
+    "UPDATE acceptance_criteria SET state = 'accepted' WHERE requirement_id IN (SELECT id FROM requirement WHERE story_id = ?)",
+  ).run(story);
+  db.prepare(
+    "UPDATE acceptance_test SET state = 'passed' WHERE parent_id IN (SELECT ac.id FROM acceptance_criteria ac JOIN requirement r ON r.id = ac.requirement_id WHERE r.story_id = ?)",
+  ).run(story);
+  db.prepare(
+    "UPDATE task SET state = 'done' WHERE acceptance_test_id IN (SELECT at.id FROM acceptance_test at JOIN acceptance_criteria ac ON ac.id = at.parent_id JOIN requirement r ON r.id = ac.requirement_id WHERE r.story_id = ?)",
+  ).run(story);
   const slug = (db.prepare("SELECT slug FROM story WHERE id = ?").get(story) as { slug: string }).slug;
   return { story, slug };
 }
