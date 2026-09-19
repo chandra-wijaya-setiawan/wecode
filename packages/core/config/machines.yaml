@@ -97,6 +97,10 @@ task:
   terminal: [done, dropped]
   transitions:
     - { verb: start,   from: [planned], to: ready, guard: task_may_be_attempted }
+    # `finish` asks two questions under one name: every task_test settled, and the task's
+    # branch holding a commit of its own. A transition names one guard, so the registry
+    # builds this one from both — a task whose tests were all dropped settles them all and
+    # would otherwise finish on an empty branch.
     - { verb: finish,  from: [ready],   to: done,  guard: every_task_test_settled, automatic: true }
     - { verb: give_up, from: [ready],   to: failed, guard: max_retry_reached }
     - { verb: retry,   from: [failed],  to: ready }
