@@ -25,12 +25,11 @@ import type { DatabaseSync } from "node:sqlite";
  *  The invariant set is core's and is run here once a tick. What comes back is written to
  *  one runner-owned table so a view can say what drifted without running eight queries of
  *  its own. Nothing else is written: no entity is touched, no state moves, no chore is
- *  proposed. Healing is the next slice, and this one is allowed to be wrong in public.
+ *  proposed.
  *
- *  A doctor failure never stops a tick. The work of the tick is the point; a check that
- *  could take the runner down with it would be a worse problem than the drift it looks
- *  for, so every invariant runs inside its own boundary and a throw becomes a line in the
- *  report rather than an exception in the caller. */
+ *  A doctor failure never stops a tick: a check that could take the runner down with it
+ *  would be a worse problem than the drift it looks for, so every invariant runs inside its
+ *  own boundary and a throw becomes a line in the report rather than an exception. */
 
 /** One invariant: the sentence and the function that finds who breaks it. */
 export interface Invariant {
@@ -42,14 +41,12 @@ export interface Invariant {
  *
  *  The allocator refuses a task it cannot place with `no worker free for role <role>`, and
  *  clears that reason on the next tick. When the workforce holds nobody of the role at all
- *  the sentence is true again every pass and for ever: the task sits `ready` for ever,
- *  refused for ever, and the refusal reads like a queue rather than a stop. `system` is the
- *  live case — `config/roles.yaml` declares the role and no worker holds it.
+ *  the sentence is true every pass and for ever: the task sits `ready` for ever, and the
+ *  refusal reads like a queue rather than a stop. `system` is the live case.
  *
- *  Pure over the snapshot, because the record already says both halves: the task's role, and
- *  every worker's. So this is an invariant like any other. It is the runner's rather than
- *  core's only because core's set is what `wecode doctor` and the tick share verbatim, and
- *  the parity of those two is checked against that set exactly. */
+ *  Pure over the snapshot — the record says both the task's role and every worker's — so
+ *  this is an invariant like any other. It is the runner's rather than core's only because
+ *  core's set is what `wecode doctor` and the tick are held to sharing verbatim. */
 export const READY_TASK_CHECK = "ready_task_can_be_dispatched";
 
 export const readyTaskCanBeDispatched: Invariant = {
@@ -73,9 +70,9 @@ export const readyTaskCanBeDispatched: Invariant = {
 };
 
 /** The pure set: core's, plus the checks that are the runner's own. The file-length check is
- *  not here — it reads a tree rather than the record, so it is built per repository and
- *  added to the Doctor's own default below. `runChecks` and `checksOf` still default to
- *  core's set, which is the one the command and the tick are held to agreeing on. */
+ *  not here — it reads a tree rather than the record, so it is built per repository and added
+ *  to the Doctor's own default below. `runChecks` and `checksOf` still default to core's set,
+ *  the one the command and the tick are held to agreeing on. */
 export const RUNNER_INVARIANTS: readonly Invariant[] = [...INVARIANTS, readyTaskCanBeDispatched];
 
 /** The columns this module reads, and only those. A narrow declaration is not a second copy
@@ -112,7 +109,8 @@ const acceptanceTest = table<{
   state: string;
   parent_id: number;
   red_at_base_sha: string | null;
-}>("acceptance_test", ["id", "slug", "state", "parent_id", "red_at_base_sha"]);
+  script_path: string | null;
+}>("acceptance_test", ["id", "slug", "state", "parent_id", "red_at_base_sha", "script_path"]);
 const taskTable = table<{
   id: number;
   slug: string;
@@ -149,16 +147,7 @@ interface LedgerRow {
   actor: string;
   at: string;
 }
-const ledger = table<LedgerRow>("ledger", [
-  "id",
-  "entity",
-  "entity_id",
-  "verb",
-  "from_state",
-  "to_state",
-  "actor",
-  "at",
-]);
+const ledger = table<LedgerRow>("ledger", ["id", "entity", "entity_id", "verb", "from_state", "to_state", "actor", "at"]);
 
 /** `rowid` is the order this table is read back in and is a real column of it; `table_info`
  *  does not list it, which is why the test that holds these lists against the schema names
@@ -212,11 +201,9 @@ const hasTable = (db: DatabaseSync, name: string): boolean =>
     .some((r) => SELECTABLE.includes(r.type));
 
 /** Where each entity's rows come from, flattened to the node shape. The one place in the
- *  runner that knows the shape of the tables; the invariants see only flattened nodes.
- *
- *  Closures rather than a table name and a foreign key name, because `parent_id` is an alias
- *  and the dialect has none: each entity says which of its own columns is the parent, in the
- *  one place that can be checked against the column actually declared above. */
+ *  runner that knows the shape of the tables. Closures rather than a table name and a foreign
+ *  key name, because `parent_id` is an alias and the dialect has none: each entity says which
+ *  of its own columns is the parent, where it can be checked against the column declared. */
 type Node = Omit<RecordNode, "entity">;
 
 const TABLES: readonly { entity: RecordNode["entity"]; nodes: (q: Dialect) => readonly Node[] }[] = [
@@ -260,9 +247,9 @@ const step = <T>(
     }),
   );
 
-/** Every task, against the story it proves. The four joins the two queries below used to
- *  each spell, walked once here: the dialect has no JOIN, and one walk is one copy of the
- *  chain rather than two that have to agree. */
+/** Every task, against the story it proves. The four joins the two queries below used to each
+ *  spell, walked once here: the dialect has no JOIN, and one walk is one copy of the chain
+ *  rather than two that have to agree. */
 function storyOfTask(q: Dialect): Map<number, number> {
   const byRequirement = new Map(
     q
@@ -305,9 +292,8 @@ function landedShas(db: DatabaseSync): Map<number, string> {
   return shas;
 }
 
-/** By id, as every query here used to ask for. The dialect has no ORDER BY, and the order is
- *  the invariants' — a report whose lines moved between two identical passes reads as drift
- *  that is not there. */
+/** By id, as every query here used to ask for. The dialect has no ORDER BY, and a report whose
+ *  lines moved between two identical passes reads as drift that is not there. */
 const byId = <T extends { id: number }>(rows: readonly T[]): T[] => [...rows].sort((a, b) => a.id - b.id);
 
 /** One plain object, no live handle: everything the invariants are allowed to see. */
@@ -347,11 +333,9 @@ export interface Pass {
   readonly looked: readonly LookedAt[];
 }
 
-/** The check, wired to a record.
- *
- *  Runner-owned, like `landed_branch`: the ledger says what is true of the work, this says
- *  what this pass observed about it. Rewritten whole every tick, because a violation that
- *  has been fixed is not history worth keeping — the record is. */
+/** The check, wired to a record. Runner-owned, like `landed_branch`: the ledger says what is
+ *  true of the work, this says what this pass observed about it. Rewritten whole every tick —
+ *  a violation that has been fixed is not history worth keeping. */
 export class Doctor {
   constructor(
     private readonly db: DatabaseSync,
@@ -448,12 +432,11 @@ export class Doctor {
  *  `delivered_story_has_landed` has been broken for five stories that did land: the marker
  *  is written only on the path that merges from now on, and theirs merged before that path
  *  existed. Their land commits are in the base, one each, subject `land story/<slug>`, so
- *  the sha is not guessed — it is read off the world and copied onto the record.
+ *  the sha is read off the world and copied onto the record rather than guessed.
  *
- *  Read-only on git, additive on the record, and a ledger line for every marker written.
- *  The ambiguous cases are refused rather than resolved: no such commit, or more than one,
- *  is drift to report. A heal that picked one of two commits would be inventing the answer,
- *  and an unexplained fix is worse than visible drift. */
+ *  Read-only on git, additive on the record, a ledger line for every marker written, and
+ *  the ambiguous cases — no such commit, or more than one — refused rather than resolved:
+ *  an unexplained fix is worse than visible drift. */
 
 /** git, read-only, as the heal is allowed to see it: argv in, stdout out. */
 export type Git = (args: readonly string[]) => string;
@@ -496,10 +479,9 @@ export const checksOf = (
 ): readonly { readonly name: string; readonly world: boolean }[] =>
   invariants.map((i) => ({ name: i.name, world: i.name === WORLD_CHECK }));
 
-/** git as the checks are allowed to see it, and whether it was there to be asked at all.
- *  The two are separate facts: with no repository to hand every branch answers `no-branch`,
- *  which is indistinguishable from a story that never had one, so the pass carries the
- *  difference instead of letting the report imply the stronger claim. */
+/** git as the checks are allowed to see it, and whether it was there to be asked at all. The
+ *  two are separate facts: with no repository to hand every branch answers `no-branch`, which
+ *  is indistinguishable from a story that never had one. */
 export interface World {
   readonly ancestry: (branch: string) => Ancestry;
   readonly reachable: boolean;
@@ -516,12 +498,9 @@ export function worldOf(git: Git, base = "HEAD"): World {
 }
 
 /** One pass: core's pure set, each check inside its own boundary, then the one question that
- *  needs the world. The tick and `wecode doctor` run exactly this, which is the whole of the
- *  answer the two are supposed to share.
- *
- *  A check that throws is not silently dropped: it becomes a violation naming itself,
- *  because an invariant nobody can evaluate is a thing a person needs to see as much as one
- *  that failed. */
+ *  needs the world. The tick and `wecode doctor` run exactly this. A check that throws is not
+ *  silently dropped — it becomes a violation naming itself, because an invariant nobody can
+ *  evaluate needs seeing as much as one that failed. */
 export function runChecks(
   s: Snapshot,
   world: World,
@@ -591,10 +570,8 @@ export interface HealReport {
 }
 
 /** The safe heal for `delivered_story_has_landed`, applied to what a check already found.
- *
- *  The check is the other half and stays the other half: this takes its violations as an
- *  argument rather than running a pass of its own, so nothing here can change what was
- *  reported. */
+ *  This takes its violations as an argument rather than running a pass of its own, so
+ *  nothing here can change what was reported. */
 export function healLandedMarkers(
   db: DatabaseSync,
   found: readonly Violation[],
@@ -613,9 +590,8 @@ export function healLandedMarkers(
       written.push({ story: v.id, slug: v.slug, sha: shas[0] as string });
       continue;
     }
-    // No commit to copy, but the branch is in: the story did reach the base, inside
-    // somebody else's merge. There is no sha that is the answer, so the ledger carries
-    // what is true and the marker stays empty.
+    // No commit to copy, but the branch is in: the story reached the base inside somebody
+    // else's merge. No sha is the answer, so the ledger carries what is true instead.
     if (ancestryOf(git, base)(storyBranch(v.slug)) === "in") {
       writeReached(db, v.id);
       reached.push({ story: v.id, slug: v.slug });
@@ -626,9 +602,8 @@ export function healLandedMarkers(
   return { written, reached, left };
 }
 
-/** The ledger line for a story that is in the base with nothing to name. Said once: a
- *  second heal of the same story would be the same sentence again, and the fact it records
- *  is git's, not the record's. */
+/** The ledger line for a story that is in the base with nothing to name. Said once: a second
+ *  heal of the same story would be the same sentence again. */
 function writeReached(db: DatabaseSync, storyId: number): void {
   const q = queries(db);
   const said = q
@@ -655,8 +630,7 @@ const healed = (storyId: number, to: string, at: string): LedgerRow => ({
 });
 
 /** Commits in the base whose subject is exactly `land story/<slug>`. `--grep` narrows, the
- *  comparison decides: a grep is a substring match, and `land story/a` is a substring of
- *  `land story/ab`. */
+ *  comparison decides: `land story/a` is a substring of `land story/ab`. */
 function landCommits(git: Git, base: string, slug: string): readonly string[] {
   const subject = `land story/${slug}`;
   const out = git(["log", "--format=%H%x1f%s", "--fixed-strings", `--grep=${subject}`, base]);
@@ -685,9 +659,9 @@ function tasksOf(db: DatabaseSync, storyId: number): readonly number[] {
     .sort((a, b) => a - b);
 }
 
-/** The marker the lander writes, written the same way, plus the line that says it was the
- *  doctor who wrote it and what it read the sha off. One transaction: a marker with no
- *  ledger line behind it is exactly the unexplained fix 19 forbids. */
+/** The marker the lander writes, written the same way, plus the line saying the doctor wrote
+ *  it and what it read the sha off. One transaction: a marker with no ledger line behind it
+ *  is exactly the unexplained fix 19 forbids. */
 function writeMarker(db: DatabaseSync, storyId: number, slug: string, sha: string): void {
   // DDL, which the dialect does not spell and should not: a table this module owns is
   // created by this module, and there is no column name here for a typecheck to catch.
@@ -755,4 +729,30 @@ export function violations(db: DatabaseSync): readonly Violation[] {
     .all()
     .sort((a, b) => (a.rowid ?? 0) - (b.rowid ?? 0))
     .map((r) => ({ invariant: r.invariant, entity: r.entity, id: r.entity_id, slug: r.slug, detail: r.detail }));
+}
+
+/** A file the base has already been watched failing on. Each ready acceptance test is run
+ *  once at the commit its story was cut from, and red there is what makes it proof. The
+ *  record keeps that sha on the test; a scope author needs the other end of it — which
+ *  file — so a gate never names one that is red before anybody has touched it. */
+export interface RedFile {
+  readonly file: string;
+  /** The acceptance test whose run at the base was red, and the commit it was red at. */
+  readonly test: string;
+  readonly sha: string;
+}
+
+/** What a view reads to say which files fail at the base. The file is the one the plan
+ *  spec'd — `script_path`, which migration 005 added so a scope is written against a path
+ *  rather than guessed off a command line — so a red test that never said where its script
+ *  lives names no file here, and is left out rather than guessed at. One row per file, by
+ *  the first test that proved it: two tests over one file is one fact about the file. */
+export function redAtBase(db: DatabaseSync): readonly RedFile[] {
+  if (!hasTable(db, "acceptance_test")) return [];
+  const found = new Map<string, RedFile>();
+  for (const t of byId(queries(db).selectFrom(acceptanceTest).all())) {
+    if (t.red_at_base_sha === null || t.script_path === null || found.has(t.script_path)) continue;
+    found.set(t.script_path, { file: t.script_path, test: t.slug, sha: t.red_at_base_sha });
+  }
+  return [...found.values()];
 }
