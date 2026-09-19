@@ -51,52 +51,84 @@ export function candidates(db: DatabaseSync): readonly Candidate[] {
  *  file re-opens that one verdict and nothing else. */
 const OVERLAP = "overlaps";
 
-/** Paths declared `collision.append_only` in budget.yaml.
+/** How hard a path holds the tasks that share it.
  *
- *  A file that is only ever appended to — one line per new module, as the component map
- *  is — is not a lock: two tasks adding different lines never touch the same one, and
- *  refusing the second serialises work that shares no code. Which paths those are is the
- *  operator's to say, so it is config, read from the same budget.yaml the ceilings come
- *  from: beside the workspace database, else the project's own. */
-export function appendOnly(db: DatabaseSync): readonly string[] {
+ *  - `exclusive` — the default, and what every undeclared path is: one writer at a time.
+ *  - `append_only` — the file is only ever appended to, one line per new module as the
+ *    component map is, so two tasks adding different lines never touch the same one.
+ *  - `optimistic` — the file *can* conflict, but rarely enough that serialising every task
+ *    that names it costs more than the occasional merge does. The risk is accepted. */
+export type CollisionClass = "exclusive" | "append_only" | "optimistic";
+
+/** The classes that are declared. A path absent from it is `exclusive`; nothing has to be
+ *  written down to get the safe answer. */
+export type Classes = ReadonlyMap<string, CollisionClass>;
+
+const CLASSES: readonly CollisionClass[] = ["exclusive", "append_only", "optimistic"];
+
+/** Paths declared under `collision` in budget.yaml, by class.
+ *
+ *  Which paths are which is the operator's to say, so it is config, read from the same
+ *  budget.yaml the ceilings come from: beside the workspace database, else the project's
+ *  own. Keys that are not class names (`scope_overlap`) are left alone — this reads the
+ *  three classes and does not own the rest of the block. */
+export function collisionClasses(db: DatabaseSync): Classes {
   const here = db.location();
   const beside = here === null ? null : join(dirname(here), "budget.yaml");
   const path =
     beside !== null && existsSync(beside) ? beside : resolve(process.cwd(), "config/budget.yaml");
-  if (!existsSync(path)) return [];
+  if (!existsSync(path)) return new Map();
 
   const raw: unknown = parse(readFileSync(path, "utf8"));
   const top = (raw ?? {}) as Record<string, unknown>;
   const collision = (top["collision"] ?? {}) as Record<string, unknown>;
-  const declared = collision["append_only"];
-  return Array.isArray(declared) ? declared.filter((p): p is string => typeof p === "string") : [];
+  const out = new Map<string, CollisionClass>();
+  for (const name of CLASSES) {
+    const declared = collision[name];
+    if (!Array.isArray(declared)) continue;
+    for (const p of declared) if (typeof p === "string") out.set(p, name);
+  }
+  return out;
 }
 
-/** Whether two write scopes lock each other once append-only paths are discounted.
- *
- *  A pair is discounted only when *both* globs name a declared path verbatim: one task
- *  appending a line to the map and another that may rewrite the directory it sits in are
- *  still exclusive, so `packages/core/**` keeps holding the map it reaches over. */
-const locks = (a: readonly string[], b: readonly string[], free: readonly string[]): boolean =>
-  a.some((x) => b.some((y) => collides([x], [y]) && !(free.includes(x) && free.includes(y))));
+/** The paths declared `append_only`, in declaration order. */
+export function appendOnly(db: DatabaseSync): readonly string[] {
+  return [...collisionClasses(db)].filter(([, k]) => k === "append_only").map(([p]) => p);
+}
 
-/** Candidates core refused only for an overlap that is entirely append-only. Nothing else
- *  is reconsidered: a role at its ceiling, a chore nobody can take and a real overlap are
- *  all still refused, in core's words. */
-function sharingOnlyAppendOnly(
+/** Whether one colliding pair of globs still locks.
+ *
+ *  `append_only` is discounted only when *both* globs name a declared path verbatim: the
+ *  claim is about the file's shape, and a task that may rewrite the directory the map sits
+ *  in is not appending to it, so `packages/core/**` keeps holding the map it reaches over.
+ *  `optimistic` is a claim about the cost of being wrong instead, so one side naming the
+ *  path is enough — a glob reaching over it inherits the same accepted risk. */
+const held = (x: string, y: string, k: Classes): boolean => {
+  if (k.get(x) === "optimistic" || k.get(y) === "optimistic") return false;
+  return !(k.get(x) === "append_only" && k.get(y) === "append_only");
+};
+
+/** Whether two write scopes lock each other once the declared classes are discounted. */
+const locks = (a: readonly string[], b: readonly string[], k: Classes): boolean =>
+  a.some((x) => b.some((y) => collides([x], [y]) && held(x, y, k)));
+
+/** Candidates core refused only for an overlap no declared class holds. Nothing else is
+ *  reconsidered: a role at its ceiling, a chore nobody can take and an exclusive overlap
+ *  are all still refused, in core's words. */
+function sharingOnlyDiscounted(
   db: DatabaseSync,
   config: BudgetConfig,
   refused: readonly Refusal[],
-  free: readonly string[],
+  classes: Classes,
 ): { readonly admitted: readonly Candidate[]; readonly refused: readonly Refusal[] } {
-  const held = currentLoad(db, config.max_open_per_role).held;
+  const load = currentLoad(db, config.max_open_per_role).held;
   const byId = new Map(readyCandidates(db).map((c) => [c.id, c]));
 
   const admitted: Candidate[] = [];
   const kept: Refusal[] = [];
   for (const r of refused) {
     const c = byId.get(r.id);
-    if (c === undefined || !r.why.includes(OVERLAP) || locks(c.scope.write, held, free)) {
+    if (c === undefined || !r.why.includes(OVERLAP) || locks(c.scope.write, load, classes)) {
       kept.push(r);
       continue;
     }
@@ -142,11 +174,11 @@ export async function allocate(
   }
 
   const { ordered, refused: ruledOut } = nextUp(db, config);
-  const free = appendOnly(db);
+  const classes = collisionClasses(db);
   const second =
-    free.length === 0
+    classes.size === 0
       ? { admitted: [], refused: ruledOut }
-      : sharingOnlyAppendOnly(db, config, ruledOut, free);
+      : sharingOnlyDiscounted(db, config, ruledOut, classes);
   // Re-sorted as one list rather than appended: a task let back in takes its own place in
   // core's order, not a place behind everything that was never refused.
   const walk = second.admitted.length === 0 ? ordered : inOrder([...ordered, ...second.admitted], config.order);
