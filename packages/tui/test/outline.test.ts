@@ -7,7 +7,7 @@ import { board, loadMachines, open } from "@wecode/core";
 import { App, outlineOpensOn } from "../src/app.js";
 import { Cockpit } from "../src/screens.js";
 import { loadViews } from "../src/views.js";
-import { OUTLINE, scopeTitle, splitTree } from "../src/outline.js";
+import { INDENT, OUTLINE, scopeTitle } from "../src/outline.js";
 import { seed, T, ins } from "./seed.js";
 
 const views = loadViews();
@@ -99,13 +99,13 @@ describe("the box", () => {
     expect(out.filter((l) => l.startsWith("└"))).toHaveLength(1);
   });
 
-  it("lines its columns up down the whole tree", () => {
-    // The id, because it is the first column past the tree: what the labels used to cost
-    // the line, they now cost the prose at the end of it.
+  it("draws each row as one sentence rather than as a set of columns", () => {
+    // Nothing on the line is held to a column, so the id sits wherever the label it
+    // follows leaves it — see a-row-is-a-sentence for why that is the point.
     const at = (what: string): number => row(what).indexOf("#");
     expect(at("storefront")).toBeGreaterThan(0);
-    expect(at("account recovery")).toBe(at("storefront"));
-    expect(at("password reset")).toBe(at("storefront"));
+    expect(new Set(["storefront", "account recovery", "password reset"].map(at)).size)
+      .toBeGreaterThan(1);
   });
 
   it("uses colour for state and for nothing else", () => {
@@ -138,24 +138,26 @@ describe("what it opens at", () => {
   });
 
   it("indents each level under its parent", () => {
-    // The guide carries the whole indent now that the label is out of the tree cell, so
-    // the depth is read off the connector rather than off where the label starts — and
-    // off the connector alone, the marker having been pulled right against the id.
-    const indent = (what: string): number =>
-      (/^(?:[│ ]{2})*(?:[├└]─)?/.exec(row(what))?.[0] ?? "").trimEnd().length;
-    expect(indent("1.0.0")).toBeGreaterThan(indent("storefront"));
-    expect(indent("account recovery")).toBeGreaterThan(indent("1.0.0"));
-    expect(indent("password reset")).toBeGreaterThan(indent("account recovery"));
+    // The indent is the whole of the guide: a row is a sentence moved right by its depth,
+    // with no rail drawn down the space it moved across.
+    const indent = (what: string): number => {
+      const line = row(what);
+      return line.length - line.trimStart().length;
+    };
+    expect(indent("storefront")).toBe(0);
+    expect(indent("1.0.0")).toBe(indent("storefront") + INDENT);
+    expect(indent("account recovery")).toBe(indent("1.0.0") + INDENT);
+    expect(indent("password reset")).toBe(indent("account recovery") + INDENT);
   });
 
-  it("shows every row's id and state beside it", () => {
+  it("shows every row's id, kind and state beside it, in full", () => {
     // A code, not a bare number — the outline draws rows through the same contract as
     // every other list, and list.tsx is the one place that decides what a code looks like.
-    // The tree cell is the guide and the marker alone, so the code is the first column
-    // after it and the label follows the four columns views.yaml declares.
-    expect(row("storefront")).toMatch(new RegExp(`#${tree.project}\\s+proj\\s+work\\s+storefront`));
-    expect(splitTree(row("storefront"))[1].trimStart()).toMatch(new RegExp(`^#${tree.project}\\b`));
-    expect(row("password reset")).toMatch(/\bstor\b/);
+    // The label leads the sentence and the particulars follow it.
+    expect(row("storefront")).toMatch(
+      new RegExp(`^- storefront · #${tree.project} · project · in_progress\\b`),
+    );
+    expect(row("password reset")).toContain(" · story · ");
   });
 });
 
