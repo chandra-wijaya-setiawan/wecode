@@ -21,6 +21,7 @@ import { loadMachines, Maker, open } from "@wecode/core";
 import { App } from "../src/app.js";
 import { Cockpit } from "../src/screens.js";
 import { loadViews } from "../src/views.js";
+import { mark as rowMark, sectionMark } from "../src/list.js";
 import { loadServices } from "../src/services.js";
 import { seed, T, ins } from "./seed.js";
 
@@ -37,9 +38,17 @@ interface Design {
     readonly chrome: string;
     readonly chrome_lines_per_section: number;
     readonly rows_begin_at_column: number;
+    readonly row_leads_with: string;
     readonly forbidden: readonly string[];
   };
-  readonly head: { readonly glyph: string; readonly section: string; readonly box: string };
+  readonly head: {
+    readonly glyph: string;
+    readonly case: string;
+    readonly section: string;
+    readonly box: string;
+    readonly count: string;
+    readonly count_at: string;
+  };
   readonly pages: { readonly chrome: string; readonly bordered: readonly string[] };
   readonly bars: { readonly key_bar: string; readonly status: string };
   readonly key_bar: { readonly gap: string; readonly entry: string; readonly keys: readonly Key[] };
@@ -74,10 +83,23 @@ const lines = (width = 100, height = 90): string[] =>
 const fill = (template: string, holes: Record<string, string>): string =>
   template.replace(/\{(\w+)\}/g, (_, name: string) => holes[name] ?? `{${name}}`);
 
-/** A head as the design writes it: the template, then the rule out to the full width. */
-const head = (template: string, holes: Record<string, string>, width: number): string => {
-  const written = fill(template, holes);
-  return written + design.head.glyph.repeat(Math.max(width - written.length, 0));
+/** A name in the case the design writes heads in. */
+const cased = (title: string): string =>
+  design.head.case === "upper" ? title.toUpperCase() : title;
+
+/** A head as the design writes it: the template in the design's case, the rule out to the
+ *  full width, and — where there is a count — that count standing at the far end of it. */
+const head = (
+  template: string,
+  holes: Record<string, string>,
+  width: number,
+  count?: number,
+): string => {
+  expect(design.head.count_at).toBe("width");
+  const tail = count === undefined ? "" : fill(design.head.count, { count: String(count) });
+  const written = fill(template, { ...holes, title: cased(holes["title"] ?? "") });
+  const fillTo = Math.max(width - tail.length - written.length, 0);
+  return written + design.head.glyph.repeat(fillTo) + tail;
 };
 
 /** Every line the dashboard gives to chrome, in the order it draws them. */
@@ -134,9 +156,13 @@ describe("the page is ordered the way the design orders it", () => {
     expect(design.page.lead).toBe("services");
     // The order is views.yaml's, and this file says so rather than keeping a second copy.
     expect(design.page.boxes).toBe("views.yaml#page.order");
-    const titles = [services.title, ...views.map((v) => v.title)];
-    const drawn = chrome(lines()).map((l) => /^──+ (.+?) [([─]/.exec(l)?.[1] ?? l);
-    expect(drawn).toEqual(titles);
+    // The mark and the name, read back off the head the way the design writes them.
+    const named = [
+      ["services", services.title] as const,
+      ...views.map((v) => [v.name, v.title] as const),
+    ];
+    const drawn = chrome(lines()).map((l) => /^── (.) (.+?) [([─]/.exec(l)?.slice(1, 3) ?? [l]);
+    expect(drawn).toEqual(named.map(([name, title]) => [sectionMark(name), cased(title)]));
   });
 
   it("spends the design's one line of chrome on each section, and never a blank one", () => {
@@ -159,7 +185,7 @@ describe("a section is chromed the way the design chromes it", () => {
 
   it("writes the lead section's head as design.yaml writes it", () => {
     expect(chrome(lines())[0]).toBe(
-      head(design.head.section, { title: services.title }, 100),
+      head(design.head.section, { title: services.title, mark: sectionMark("services") }, 100),
     );
   });
 
@@ -170,23 +196,35 @@ describe("a section is chromed the way the design chromes it", () => {
       views.map((v) =>
         head(
           design.head.box,
-          {
-            title: v.title,
-            count: String(board[v.filter].length),
-            key: v.key ?? "",
-          },
+          { title: v.title, mark: sectionMark(v.name), key: v.key ?? "" },
           100,
+          board[v.filter].length,
         ),
       ),
     );
   });
 
+  it("stands every count at the width, on the fill rather than beside the name", () => {
+    expect(design.head.count_at).toBe("width");
+    const board = app.boardNow();
+    const drawn = chrome(lines()).slice(1);
+    drawn.forEach((line, i) => {
+      const view = views[i];
+      const tail = fill(design.head.count, { count: String(board[view!.filter].length) });
+      expect(line).toHaveLength(100);
+      expect(line.endsWith(design.head.glyph + tail), `${view!.title} head: ${line}`).toBe(true);
+    });
+  });
+
   it("begins a row at the column the design gives it, with none spent on chrome", () => {
     const out = lines();
-    const at = out.findIndex((l) => l.includes("Queue"));
+    const at = out.findIndex((l) => l.includes(cased("Queue")));
     const row = out[at + 1] ?? "";
     expect(row).toContain("send the reset mail");
-    expect(row.length - row.trimStart().length).toBe(design.dashboard.rows_begin_at_column);
+    // The row starts where the rule starts; its first two columns are its own mark.
+    expect(design.dashboard.row_leads_with).toBe("mark");
+    const line = app.lines().find((r) => r.what === "send the reset mail");
+    expect(row.indexOf(`${rowMark(line!)} `)).toBe(design.dashboard.rows_begin_at_column);
   });
 });
 
