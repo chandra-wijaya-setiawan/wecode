@@ -61,14 +61,15 @@ describe("master was merged into this branch", () => {
   });
 
   /** The other side of the resolution: master's screens test counted borders, this branch's
-   *  asks for each box by name and was the stronger of the two. It survived, and it now takes
-   *  the services title from views.yaml rather than repeating it. */
-  it("kept this branch's per-box border assertion, sourced from views.yaml", () => {
+   *  asks for each region by name and was the stronger of the two. It survived, and it now
+   *  takes the services title from views.yaml rather than repeating it. A later master ruled
+   *  the sections off instead of boxing them in, so the chrome it names is a rule; the shape
+   *  of the assertion — one named region at a time, named from config — is what is kept. */
+  it("kept this branch's per-region chrome assertion, sourced from views.yaml", () => {
     const src = at("HEAD:packages/tui/test/screens.test.ts");
     expect(src).toContain("const services = loadServices();");
     expect(src).toContain("for (const title of [services.title,");
-    expect(src).toContain("has no top border");
-    expect(src).toContain("has no bottom border");
+    expect(src).toContain("has no rule");
   });
 
   /** And the work this story is actually about, which a merge is very able to lose. */
