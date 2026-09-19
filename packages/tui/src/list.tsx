@@ -33,8 +33,7 @@ export type Column = (typeof COLUMNS)[number] | "#" | "what" | "detail";
 /** A detail that is only an entity's name is the row's kind, not anything to read. */
 const KINDS: ReadonlySet<string> = new Set<string>(STATEFUL);
 
-/** The row's short identity, said aloud. The kind is said only where the screen does not,
- *  which the board marks by putting the kind in the detail. */
+/** The row's short identity, said aloud — with the kind where the screen omits it. */
 export const code = (row: Row): string =>
   KINDS.has(row.detail) ? `${row.detail.replace(/_/g, " ")} #${row.id}` : `#${row.id}`;
 
@@ -50,8 +49,8 @@ const PLAIN = "";
 
 export class CookingError extends Error {}
 
-/** Why a row is in flight, and how a row with that answer is drawn. Every word of it is
- *  declared in views.yaml: none is something this file can work out. */
+/** Why a row is in flight, and how one with that answer is drawn. Every word is in
+ *  views.yaml: none of it is something this file can work out. */
 export interface CookingGroup {
   readonly name: string;
   readonly why: string;
@@ -114,14 +113,29 @@ export function loadCooking(path: string = CONFIG): CookingConfig {
   };
 }
 
-/** Read once, and not at import: every screen pulls this module in, and a read at module
- *  scope makes the config a condition of loading it rather than of drawing a row. */
+/** Read once, and not at import: a read at module scope makes the config a condition of
+ *  loading this module rather than of drawing a row. */
 let cached: CookingConfig | null = null;
 export const cooking = (): CookingConfig => (cached ??= loadCooking());
 
 /** For tests, and for a config reloaded under a running board. */
 export const forgetCooking = (): void => {
   cached = null;
+  marks = null;
+};
+
+let marks: ReadonlyMap<string, string> | null = null;
+
+/** The glyph a section is headed with, by the name views.yaml declares it under — a view,
+ *  an off-page box, or `services`. Declared there, like the title, because what stands for
+ *  a section is a word about the board; read here because this file reads that file. */
+export const sectionMark = (name: string, path: string = CONFIG): string => {
+  if (marks === null) {
+    const doc = (parse(readFileSync(path, "utf8")) ?? {}) as Record<string, Record<string, Record<string, unknown>>>;
+    const said = { ...doc["views"], ...doc["off_page"], services: doc["services"] };
+    marks = new Map(Object.entries(said).map(([n, v]) => [n, String(v?.["mark"] ?? " ")]));
+  }
+  return marks.get(name) ?? " ";
 };
 
 export const groupOf = (state: string): CookingGroup | undefined =>
@@ -137,8 +151,8 @@ export function stateColour(state: string): string {
   return groupOf(state)?.colour ?? cooking().ungrouped.colour;
 }
 
-/** Grouped by why, in the order views.yaml declares the groups and, inside one, the order
- *  the rows arrived. The rows no group claims come last. */
+/** Grouped by why, in views.yaml's order and, inside a group, arrival order; ungrouped
+ *  rows last. */
 export function groupCooking(rows: readonly Row[]): readonly Row[] {
   const order = cooking().groups.map((g) => g.name);
   const rank = (row: Row): number => {
@@ -163,14 +177,12 @@ export function clip(text: string, width: number): string {
 
 const pad = (text: string, width: number): string => text.padEnd(width, " ");
 
-/** How wide each column must be to hold every row given. Passed down so every box on a
- *  screen shares one set; a list given none sizes itself. `_columns` is ignored. */
+/** How wide each column must be. Passed down so a screen's boxes share one set. */
 export function columnWidths(rows: readonly Row[], _columns?: readonly Column[]): number[] {
   return COLUMNS.map((c) => Math.max(...rows.map((r) => cell(r, c).length), 0));
 }
 
-/** Rows the height can show, scrolled so the cursor is among them — else a cursor past the
- *  fold is marked on a line nobody can see. `per` is what one row costs. */
+/** Rows the height can show, scrolled so the cursor is among them. `per` is a row's cost. */
 function window(count: number, height: number, cursor: number | null, per = 1): [number, number] {
   if (count <= Math.floor(height / per)) return [0, count];
   // One line goes to the "… and N more" tally.
@@ -180,13 +192,15 @@ function window(count: number, height: number, cursor: number | null, per = 1): 
   return [first, first + shown];
 }
 
-/** A drawn line: the text, the cursor, and the state its colour comes from. A tally has
- *  no row behind it, so it has neither. */
+/** A drawn line: text, cursor, and the state its colour comes from. A tally has neither. */
 export interface Line {
   readonly text: string;
   readonly state: string;
   readonly cursor: boolean;
 }
+
+/** The glyph and the space after it, off the front of every row's own width. */
+const GLYPH = 2;
 
 export function listLines(
   rows: readonly Row[], height: number, cursor: number | null, width: number,
@@ -196,11 +210,12 @@ export function listLines(
   const [first, last] = window(rows.length, height, cursor);
   const visible = rows.slice(first, last);
   const sizes = widths ?? columnWidths(visible);
+  const body = Math.max(width - GLYPH, 0);
 
-  // Columns pad to a shared width; the line is what the terminal cuts, and the description
-  // is what the cut reaches first because it is last.
+  // Columns pad to a shared width and the description gives way first, being last. The
+  // glyph leads: what a row is doing is scanned down a column, not read out of a word.
   const lines = visible.map((row, i) => ({
-    text: clip(COLUMNS.map((c, j) => pad(cell(row, c), sizes[j] ?? 0)).join(GAP).trimEnd(), width),
+    text: `${mark(row)} ${clip(COLUMNS.map((c, j) => pad(cell(row, c), sizes[j] ?? 0)).join(GAP).trimEnd(), body)}`.trimEnd(),
     state: row.state,
     cursor: cursor !== null && first + i === cursor,
   }));
@@ -212,32 +227,28 @@ export function listLines(
   return lines;
 }
 
-/** The cooking box's lines. The grouping, the mark and the why are the whole difference,
- *  and all three are read off views.yaml. The mark leads and the why closes, so what a
- *  person scans for is at the two edges; the why column is as wide as the widest why on the
- *  whole list, not the visible slice, so scrolling does not slide it sideways. The cursor
- *  indexes the rows in grouped order — move one over `groupCooking(rows)`. */
+/** The cooking box's lines: the grouping and the why, both read off views.yaml. The glyph
+ *  leading each row is the one this box used to add itself. The why closes, and its column
+ *  is sized from the whole list so scrolling does not slide it sideways. */
 export function cookingLines(
   rows: readonly Row[], height: number, cursor: number | null, width: number,
 ): Line[] {
   const grouped = groupCooking(rows);
   const whys = Math.max(...grouped.map((row) => why(row).length), 0);
   const [first, last] = window(grouped.length, height, cursor);
-  // The mark, its space and the gap before the why: what is left is the row's own.
-  const body = Math.max(width - whys - 2 - GAP.length, 0);
+  // The gap before the why, and the why: what is left is the row's own.
+  const body = Math.max(width - whys - GAP.length, 0);
   return listLines(grouped, height, cursor, body).map((line, i) => {
-    // The "… and N more" tally has no row behind it: no group to mark, no why to give.
+    // The "… and N more" tally has no row behind it: no why to give.
     if (first + i >= last) return line;
-    const row = grouped[first + i] as Row;
     // Clipped again: on a narrow box the why is what the cut reaches first, and losing it
     // is right — the row is still the row.
-    const text = `${mark(row)} ${pad(line.text, body)}${GAP}${why(row)}`.trimEnd();
+    const text = `${pad(line.text, body)}${GAP}${why(grouped[first + i] as Row)}`.trimEnd();
     return { ...line, text: clip(text, width) };
   });
 }
 
-/** The one group in views.yaml a list knows by name: the rows there is nothing left to do
- *  about. Which states are in it stays in the file. */
+/** The one group a list knows by name; which states are in it stays in views.yaml. */
 const SETTLED = "settled";
 
 export const isSettled = (state: string): boolean => groupOf(state)?.name === SETTLED;
@@ -247,11 +258,9 @@ export interface SectionProps extends ListProps {
   readonly empty: string;
 }
 
-/** A list in two sections: what is still open, then one line standing for everything
- *  settled — twenty finished rows are one fact, not twenty, and the height they were
- *  spending goes back to the rows that still want something. An empty section is one line
- *  too: the tally where there is one, `empty` where there is not. The cursor indexes the
- *  open rows, a number having no row to sit a cursor on. */
+/** A list in two sections: the open rows, then one line standing for everything settled —
+ *  twenty finished rows are one fact, and the height goes back to what still wants
+ *  something. An empty section is one line too. The cursor indexes the open rows. */
 export function sectionLines(
   rows: readonly Row[], height: number, cursor: number | null, width: number,
   empty: string, widths?: readonly number[],
@@ -273,8 +282,7 @@ export function sectionLines(
 }
 
 /** Break text at its spaces so no line runs past `width`, into at most `max` lines. A word
- *  too wide for its own line is cut like any cell, and what is unsaid when the last line
- *  fills takes the same ellipsis — an ended title reads differently from a stopped one. */
+ *  too wide for a line is cut like any cell, and an overrun takes the same ellipsis. */
 export function wrap(text: string, width: number, max: number): string[] {
   if (width <= 0 || max <= 0) return [];
   const out = [""];
@@ -295,11 +303,9 @@ export function wrap(text: string, width: number, max: number): string[] {
 /** Wide enough to read a tenth off, narrow enough to leave the numbers room beside it. */
 const BAR = 10;
 
-/** How far through its allowance a row is. Two things run out — tokens and the clock — and
- *  the one worth a bar is whichever is nearer the end, so that is the one shown and it says
- *  which it is. An allowance of zero is a budget nobody set, not a full bar, so a row with
- *  neither allowed draws no gauge. The bar stops at full and the percentage does not: an
- *  overspend is a fact, and a bar that cannot show one is why the number is beside it. */
+/** How far through its allowance a row is: whichever of tokens and the clock is nearer the
+ *  end, named. An allowance of zero is a budget nobody set, not a full bar, so a row with
+ *  neither draws none. The bar stops at full and the percentage does not. */
 export function gauge(row: Row): string {
   const { budget, spent } = row;
   if (budget === undefined || spent === undefined) return "";
@@ -314,15 +320,14 @@ export function gauge(row: Row): string {
   return `[${"█".repeat(on)}${"░".repeat(BAR - on)}] ${Math.round((used / given) * 100)}% ${name}`;
 }
 
-/** A running row is three lines, always three: the fixed height lets the cursor and the
- *  fold count in rows, and stops the box reflowing when a title gains a word. */
+/** A running row is three lines, always: the cursor and the fold count in rows. */
 export const RUNNING_LINES = 3;
 
 /** Ink gives an empty Text no height, so one space holds a row's empty line open. */
 const held = (text: string, width: number): string => (text === "" && width > 0 ? " " : text);
 
-/** One running row: the code and the state lead, the title wraps under them, and the foot
- *  carries the gauge and the detail. Only the title wraps, because only it is a sentence. */
+/** One running row: code and state lead, the title wraps under them, the foot carries the
+ *  gauge and the detail. Only the title wraps, because only it is a sentence. */
 function runningRow(row: Row, width: number, sizes: readonly number[]): string[] {
   const head = `${pad(code(row), sizes[0] ?? 0)}${GAP}${pad(row.state, sizes[1] ?? 0)}${GAP}`;
   const title = wrap(row.what, Math.max(width - head.length, 0), RUNNING_LINES - 1);
@@ -335,8 +340,7 @@ function runningRow(row: Row, width: number, sizes: readonly number[]): string[]
 }
 
 /** The running box's lines. The fold counts in rows, so a height that cannot hold a whole
- *  row draws none of it; the cursor inverts all three lines, because the row is what is
- *  selected and inverting one line would read as a fourth row. */
+ *  row draws none of it; the cursor inverts all three, the row being what is selected. */
 export function runningLines(
   rows: readonly Row[], height: number, cursor: number | null, width: number,
 ): Line[] {
@@ -372,18 +376,15 @@ export interface ListProps {
   readonly widths?: readonly number[];
 }
 
-/** The cursor row is inverted, not marked: a gutter costs a column on every line for one. */
 export function List({ rows, height, cursor, width, widths }: ListProps) {
   return <Lines lines={listLines(rows, height, cursor, width, widths)} />;
 }
 
-/** The same list, drawn in sections: the open rows, then the settled ones as one tally. */
 export function SectionList({ rows, height, cursor, width, widths, empty }: SectionProps) {
   return <Lines lines={sectionLines(rows, height, cursor, width, empty, widths)} />;
 }
 
-/** The running box: the same list, three lines to a row. Same props so a screen can swap
- *  one for the other; `widths` is ignored, a running row having no column to line up. */
+/** The running box: the same list, three lines to a row. `widths` is ignored. */
 export function RunningList({ rows, height, cursor, width }: ListProps) {
   return <Lines lines={runningLines(rows, height, cursor, width)} />;
 }
