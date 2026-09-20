@@ -16,387 +16,455 @@
 # screens.tsx — and so they gate nothing the code could fail. Where the two disagree the
 # proposal wins, and the drawn key is retired as the board reaches it. A design is what
 # the screen must become, never a transcript of what it already draws.
-
+#
+# ── The split ────────────────────────────────────────────────────────────────────────────
+#
+# One design, two renderers. The tree `views.ts` builds out of this file is read twice: by
+# the ink gate, which holds the terminal to it, and by the SVG projector, which draws a
+# picture of it for someone to sign. A file that does not say which of its statements each
+# renderer is answerable for makes the two renderers argue — the projector is held to a
+# rule character it cannot draw, or the terminal is excused a decision that was never
+# about characters at all.
+#
+# So the file is in two halves and an index:
+#
+#   renderers:  what one renderer draws and the other does not. A `─` filled to the width,
+#               a border spent on a page, which line the bar is pinned to — these are a
+#               terminal's way of saying "box", and an SVG says it with a rectangle.
+#   shared:     what the screen *is*, which both renderers are given unchanged: which
+#               sections there are, what a record's page holds, what a row of the tree
+#               says, which keys the screen answers, and the proposal that was signed.
+#   (the tail): the top-level names the gate's tests still read. Aliases, not copies —
+#               every block below is defined exactly once, in the half it belongs to, and
+#               the tail points at that one definition. Deleting the tail is a rename in
+#               the tests and nothing else.
+#
 # Nothing in this file repeats views.yaml. The section names, their order and their letters
 # are read from there; `lead` is the one section that is not a box and so has no row there.
-page:
-  # Drawn above the boxes: a dead runner or an unreadable schema is the reason every box
-  # under it is wrong, so it is read before the board and not after it.
-  lead: services
-  # The rest of the page, in order, is views.yaml `page.order`. It is not copied here.
-  boxes: views.yaml#page.order
 
-# A dashboard section is a rule with its name in it. A border would cost two lines and two
-# columns to make the same separation: eight sections at two lines is sixteen — more height
-# than the Cooking box is allowed to draw — and the columns come off every row on the page.
-# So the chrome is one line, the name sits in the rule rather than above it, and every row
-# starts at the terminal's left edge.
-dashboard:
-  chrome: rule
-  chrome_lines_per_section: 1
-  rows_begin_at_column: 0
-  # What a row spends its first two columns on is its own state's mark from views.yaml —
-  # the same vocabulary the heads are marked in — and not chrome. A state no group claims
-  # marks with a space, which is why a row can read as indented and is not.
-  row_leads_with: mark
-  # What a box is made of. The rule keeps `─`, which is why it is not here: what a box
-  # costs is these two lines and these two columns.
-  forbidden: ["┌", "┐", "└", "┘", "│", "├", "┤"]
+renderers:
+  # The terminal. Everything here is a decision about characters, lines and columns, and
+  # every one of them is void on a renderer that has shapes instead.
+  terminal:
+    # A dashboard section is a rule with its name in it. A border would cost two lines and
+    # two columns to make the same separation: eight sections at two lines is sixteen —
+    # more height than the Cooking box is allowed to draw — and the columns come off every
+    # row on the page. So the chrome is one line, the name sits in the rule rather than
+    # above it, and every row starts at the terminal's left edge.
+    dashboard: &dashboard
+      chrome: rule
+      chrome_lines_per_section: 1
+      rows_begin_at_column: 0
+      # What a row spends its first two columns on is its own state's mark from views.yaml
+      # — the same vocabulary the heads are marked in — and not chrome. A state no group
+      # claims marks with a space, which is why a row can read as indented and is not.
+      row_leads_with: mark
+      # What a box is made of. The rule keeps `─`, which is why it is not here: what a box
+      # costs is these two lines and these two columns.
+      forbidden: ["┌", "┐", "└", "┘", "│", "├", "┤"]
 
-# How a head is written, and then filled with `glyph` to the full width. It opens with the
-# section's own `mark` from views.yaml and writes the name in capitals: the mark and the
-# case are what tell a head from a row at a glance, on a page whose chrome is one rule.
-# A box carries the letter `v` opens it by, and the count of what it is holding pushed to
-# the far end — the numbers down a page of eight are then a column to compare, and the fill
-# is what holds each of them there. The lead section is neither a filter nor keyed, so it
-# carries neither letter nor count.
-head:
-  glyph: "─"
-  case: upper
-  section: "── {mark} {title} "
-  box: "── {mark} {title} [{key}] "
-  count: " {count}"
-  count_at: width
-  # One box's count is a fraction, because its rows are not just rows: a running row is
-  # holding one of the fleet's seats. `3` says how much is moving and nothing about whether
-  # the machine is full — three of four seats is a workspace with nothing spare, three of
-  # twenty is nineteen workers standing idle, and the operator's next move is different in
-  # each. So the seated box says `held/seats`, and every other box says the plain count.
-  # A workspace with no workers has no seats to be short of and falls back to the count.
-  seated:
-    box: running
-    of: workers
-    count: " {held}/{seats}"
+    # How a head is written, and then filled with `glyph` to the full width. It opens with
+    # the section's own `mark` from views.yaml and writes the name in capitals: the mark
+    # and the case are what tell a head from a row at a glance, on a page whose chrome is
+    # one rule. A box carries the letter `v` opens it by, and the count of what it is
+    # holding pushed to the far end — the numbers down a page of eight are then a column to
+    # compare, and the fill is what holds each of them there. The lead section is neither a
+    # filter nor keyed, so it carries neither letter nor count.
+    head: &head
+      glyph: "─"
+      case: upper
+      section: "── {mark} {title} "
+      box: "── {mark} {title} [{key}] "
+      count: " {count}"
+      count_at: width
+      # One box's count is a fraction, because its rows are not just rows: a running row is
+      # holding one of the fleet's seats. `3` says how much is moving and nothing about
+      # whether the machine is full — three of four seats is a workspace with nothing
+      # spare, three of twenty is nineteen workers standing idle, and the operator's next
+      # move is different in each. So the seated box says `held/seats`, and every other box
+      # says the plain count. A workspace with no workers has no seats to be short of and
+      # falls back to the count.
+      seated:
+        box: running
+        of: workers
+        count: " {held}/{seats}"
 
-# A screen given the whole terminal for one thing keeps its border: two lines once is not
-# sixteen, and the border is what tells that page from the bars under it.
-pages:
-  chrome: border
-  bordered: [box, outline, node, assignment]
+    # A screen given the whole terminal for one thing keeps its border: two lines once is
+    # not sixteen, and the border is what tells that page from the bars under it.
+    pages: &pages
+      chrome: border
+      bordered: [box, outline, node, assignment]
 
-# What a record's own screen looks like, declared beside the cockpit rather than left in
-# screens.tsx. The cockpit answers what is happening; a detail page answers what one record
-# is, and until now the only way to ask what it is supposed to show was to read the code
-# that shows it. Two screens are records — a node and an assignment — and they share one
-# block so the blocks line up with each other instead of each choosing its own gutter.
-detail:
-  screens: [node, assignment]
-  chrome: border
-  # A page is named after its work and its state, never after its key: the reader who
-  # pressed enter already knows the id, so a title of `task #3` spends its line saying
-  # what they just typed. The assignment is the one record with no work of its own to be
-  # named by, so it falls back to the id.
-  title:
-    node: "{what} · {state}"
-    assignment: "assignment #{id} · {state}"
-  # The block: `name  value`, names left-aligned into a gutter as wide as the longest of
-  # them, and a value nobody wrote reading as a dash rather than as a gap.
-  block:
-    entry: "{name}  {value}"
-    gutter: longest_name
-    align: left
-    empty: "—"
-    # A page given the whole terminal wraps; a block sized to its own fields clips, because
-    # it has no line to wrap onto. A wrapped value continues under the value, never under
-    # the name.
-    overflow:
-      node: clip
-      assignment: wrap
-    wrap_under: value
-  # What each record says about itself. Neither list restates the other's half: the board
-  # already decided what a row is worth saying, and what the four columns had no room for
-  # is the rest.
-  fields:
-    node: [entity, id, title, state, children]
-    assignment: [entity, id, objective, state, budget, beat, worktree, detail]
-  # A node is a branch, so its screen carries the list under it. An assignment is a leaf
-  # and carries none.
-  children:
-    of: node
-    title: "children ({count}) · {tally}"
-    columns: ["#", what, state, detail]
-    empty: "nothing under it"
-  # The four rungs the outline stops short of. They are proof, not work: they say what a
-  # story owes and what a task was accepted on, and the only moment that answer is wanted is
-  # the moment someone is looking at that story or that task. So they are a second section
-  # on the node page, under the children and read the same way — the page the row already
-  # opens to, not a page of their own, because proof with its subject off-screen is a
-  # statement about nothing.
-  proof:
-    of: node
-    under: children
-    # A story owes a requirement, which owes its criteria, which owe their tests; a task is
-    # proven by its own tests. Both are one section, and the nesting is the same indent the
-    # outline spends on depth rather than three titled sub-sections.
-    entities:
-      story: [requirement, acceptance_criteria, acceptance_test]
-      task: [task_test]
-    nesting: indent
-    indent: 2
-    title: "proof ({count}) · {tally}"
-    columns: [mark, statement, state]
-    empty: "nothing proves it yet"
+    # The last line is the bar, and the one line the App has to say anything on sits
+    # directly above it. Both always have to be readable, which is why the body states its
+    # height rather than flexing into whatever is left. A terminal has a last line; a
+    # picture has a bottom edge and no notion of which line is final, which is why this is
+    # here and not in the half both renderers read.
+    bars: &bars
+      key_bar: last
+      status: above_key_bar
 
-  # A page drawing past its own border overwrites the two lines that must stay readable,
-  # so what will not fit is dropped and counted rather than drawn.
-  overrun: "… and {count} more"
+  # The SVG projection of the same tree, which is how a design is shown to a person before
+  # any of it is drawn in a terminal. It draws one rectangle per box and the box's own
+  # name, and it draws nothing else — so every statement the terminal half makes is one it
+  # cannot honour and is not asked to. A rule filled to the width is a line; capitals are a
+  # way of making a head louder in a medium with one typeface; a bar pinned to the last
+  # line is a box at the bottom. Saying so here is what stops a renderer being marked down
+  # for declining to be a terminal.
+  wireframe:
+    chrome: outline
+    draws: [box, title]
+    glyphs: none
+    fill: none
+    case: as_written
+    bars: as_boxes
 
-  # The foot of a detail page is two lines, not one. The cockpit's bar is a flat list
-  # because every key on it does the same thing wherever the cursor is; a record's page
-  # answers two different questions at once — what can be done to this record, and how to
-  # get back out — and a single line runs them together, so the key that acts on the record
-  # sits between the key that leaves the page and the key that quits the program. The two
-  # levels split them, and nothing else about the bar changes: same gap, same entry.
-  footer:
-    lines: 2
-    sits: last
+shared:
+  page: &page
+    # Drawn above the boxes: a dead runner or an unreadable schema is the reason every box
+    # under it is wrong, so it is read before the board and not after it.
+    lead: services
+    # The rest of the page, in order, is views.yaml `page.order`. It is not copied here.
+    boxes: views.yaml#page.order
+
+  # What a record's own screen looks like, declared beside the cockpit rather than left in
+  # screens.tsx. The cockpit answers what is happening; a detail page answers what one
+  # record is, and until now the only way to ask what it is supposed to show was to read
+  # the code that shows it. Two screens are records — a node and an assignment — and they
+  # share one block so the blocks line up with each other instead of each choosing its own
+  # gutter.
+  detail: &detail
+    screens: [node, assignment]
+    chrome: border
+    # A page is named after its work and its state, never after its key: the reader who
+    # pressed enter already knows the id, so a title of `task #3` spends its line saying
+    # what they just typed. The assignment is the one record with no work of its own to be
+    # named by, so it falls back to the id.
+    title:
+      node: "{what} · {state}"
+      assignment: "assignment #{id} · {state}"
+    # The block: `name  value`, names left-aligned into a gutter as wide as the longest of
+    # them, and a value nobody wrote reading as a dash rather than as a gap.
+    block:
+      entry: "{name}  {value}"
+      gutter: longest_name
+      align: left
+      empty: "—"
+      # A page given the whole terminal wraps; a block sized to its own fields clips,
+      # because it has no line to wrap onto. A wrapped value continues under the value,
+      # never under the name.
+      overflow:
+        node: clip
+        assignment: wrap
+      wrap_under: value
+    # What each record says about itself. Neither list restates the other's half: the board
+    # already decided what a row is worth saying, and what the four columns had no room for
+    # is the rest.
+    fields:
+      node: [entity, id, title, state, children]
+      assignment: [entity, id, objective, state, budget, beat, worktree, detail]
+    # A node is a branch, so its screen carries the list under it. An assignment is a leaf
+    # and carries none.
+    children:
+      of: node
+      title: "children ({count}) · {tally}"
+      columns: ["#", what, state, detail]
+      empty: "nothing under it"
+    # The four rungs the outline stops short of. They are proof, not work: they say what a
+    # story owes and what a task was accepted on, and the only moment that answer is wanted
+    # is the moment someone is looking at that story or that task. So they are a second
+    # section on the node page, under the children and read the same way — the page the row
+    # already opens to, not a page of their own, because proof with its subject off-screen
+    # is a statement about nothing.
+    proof:
+      of: node
+      under: children
+      # A story owes a requirement, which owes its criteria, which owe their tests; a task
+      # is proven by its own tests. Both are one section, and the nesting is the same
+      # indent the outline spends on depth rather than three titled sub-sections.
+      entities:
+        story: [requirement, acceptance_criteria, acceptance_test]
+        task: [task_test]
+      nesting: indent
+      indent: 2
+      title: "proof ({count}) · {tally}"
+      columns: [mark, statement, state]
+      empty: "nothing proves it yet"
+
+    # A page drawing past its own border overwrites the two lines that must stay readable,
+    # so what will not fit is dropped and counted rather than drawn.
+    overrun: "… and {count} more"
+
+    # The foot of a detail page is two lines, not one. The cockpit's bar is a flat list
+    # because every key on it does the same thing wherever the cursor is; a record's page
+    # answers two different questions at once — what can be done to this record, and how to
+    # get back out — and a single line runs them together, so the key that acts on the
+    # record sits between the key that leaves the page and the key that quits the program.
+    # The two levels split them, and nothing else about the bar changes: same gap, same
+    # entry.
+    footer:
+      lines: 2
+      sits: last
+      gap: "  "
+      entry: "{key} {does}"
+      # The global level is drawn last, on the terminal's final line, because that is where
+      # it is on every other screen: a key whose position moves with the page is a key the
+      # reader has to look for. The record level is the one that changes, so it is the one
+      # that moves, and it sits above.
+      order: [record, global]
+      global_level: last_line
+      levels:
+        # What this page can do to the record it is showing, including moving the cursor
+        # through the children it lists.
+        - level: record
+          keys: ["j/k", "g/G", enter, a]
+        # What means the same thing on every screen, in the order the cockpit's bar already
+        # names them.
+        - level: global
+          keys: [esc, v, "v t", r, q]
+      # Neither level invents a key. Every key here is one `key_bar` already declares, and
+      # a key `key_bar` withholds from this screen is withheld here too — the detail page
+      # does not fold, so `+/-` appears on neither level.
+      keys_from: key_bar
+      omits: ["+/-"]
+
+    # An approval is an assignment whose objective is a design, and the operator is being
+    # asked to sign a picture. The page names the design and stops there, so the signature
+    # is asked for with no way to look at what is being signed. It is the assignment page
+    # with one line added — the path the mockup was written to — and that line is a path
+    # because the operator opens the file in something that can draw an SVG.
+    approval:
+      of: assignment
+      adds: [mockup]
+      # Not a second rendering. A terminal cannot draw an SVG, and a text projection beside
+      # the file would be a second answer to what the design looks like — the one the
+      # operator signed would then be whichever they happened to read.
+      projection: none
+      projects_inline: false
+      forbidden: [wireframe, svg, ascii, thumbnail]
+      # One entry of the same block every other field is drawn in: no gutter of its own, no
+      # alignment of its own, the path as its value. A design nobody has projected yet has
+      # no path, and says so rather than offering a line that opens nothing.
+      mockup:
+        name: mockup
+        value: path
+        entry: "{name}  {path}"
+        opens: file
+        empty: "not projected yet"
+
+  # The tree's own page, declared here for the same reason the detail page is: the cockpit
+  # and a record both had a design and the outline had none, so what a row of the tree is
+  # supposed to say was whatever outline.tsx happened to say it said — and what it says
+  # today is the description first, with the id, the entity and the state buried behind
+  # however long that description ran and the description itself cut at the right edge.
+  #
+  # A column is a shallow row paying the deepest row's width. Four of them — a tree cell, an
+  # id, a kind and a state — spent the tree's whole width on every row, and bought a line
+  # that is mostly blank; the kind and the state only fit their columns once they were cut
+  # to four characters, which is the same cost again paid by the reader. So the row is one
+  # string: the label leads because the label is what the row is, and its particulars follow
+  # it in full words, joined by the separator the rest of the screen's prose already uses.
+  # Nothing is padded, so a line is as long as it has something to say and no longer.
+  outline: &outline
+    chrome: border
+    # What a row is made of. `order` is the order the one string is written in, not a set of
+    # columns — there are none.
+    row:
+      as: sentence
+      order: [marker, label, id, kind, state, rollup]
+      entry: "{marker} {label} · #{id} · {kind} · {state} · {rollup}"
+      leads_with: label
+      join: " · "
+      # A column is the thing this row is not. Nothing is padded to anything.
+      columns: none
+      pad: false
+      # A row is a sentence, so it is not cut at the right edge: what will not fit continues
+      # under where the label began. Three lines is where that stops — a row allowed to run
+      # on is a row that can push the rest of the tree off the page — and the third line
+      # ends in the elision rather than mid-word.
+      overflow: wrap
+      wrap_under: label
+      truncate: false
+      max_lines: 3
+      elide: "…"
+      # A part with nothing to say is dropped with its separator, never written empty.
+      omit_empty: true
+
+    # How far down the tree goes. The ledger is nine levels deep, and four of them are not
+    # work at all — a requirement, its criteria, the tests that accept it and the tests a
+    # task is proven by are the proof that a story was done, not things being done. Drawn as
+    # rows they outnumber the work: one story with three requirements carries a dozen rows
+    # under it before a single task appears, and the operator scrolling for what is moving
+    # scrolls past all of them. So the tree stops at the five levels that are work, and the
+    # proof is read on the page of the row it proves, where it is being asked for.
+    levels:
+      count: 5
+      shows: [project, release, epic, story, task]
+      # Not hidden behind a fold. A folded row still costs its line and still says there is
+      # something under it; these are on another page entirely.
+      omits: [requirement, acceptance_criteria, acceptance_test, task_test]
+      omitted_to: detail
+      fold_reaches: task
+
+    # Depth is the indent and nothing else. The rail said what the indent was already
+    # saying, at two columns a level on every level above the row — at depth nine that is
+    # eighteen columns of the label's width spent repeating the label's position.
+    depth:
+      as: indent
+      every_row: true
+      indent: 2
+      # Sibling roots are separate trees rather than one branch, so a root is not indented.
+      root: flush
+
+    # The one mark a row carries, and it is carried only by the rows it says something
+    # about: a row with children can be opened or closed, so it shows which of the two it is
+    # and therefore what pressing the fold key does. A row with no children has nothing to
+    # fold, so it is marked with nothing — a mark on every row would say only "this is a
+    # row", which the row already says.
+    marker:
+      on: parents
+      leads_row: true
+      width: 1
+      open: "-"
+      closed: "+"
+      leaf: " "
+      says: fold_key
+
+  # Every key the screen answers, in the order a reader scans them. A key the bar omits is a
+  # way in nobody can find, so a key is dropped only where the screen refuses it: the
+  # dashboard has nothing to pop, and only the outline folds. Which keys a screen answers is
+  # the screen, not the drawing of it — a picture that left one out would be a picture of a
+  # different product — so the list is shared and only the two strings that write it out on
+  # a line of characters are the terminal's.
+  key_bar: &key_bar
     gap: "  "
     entry: "{key} {does}"
-    # The global level is drawn last, on the terminal's final line, because that is where
-    # it is on every other screen: a key whose position moves with the page is a key the
-    # reader has to look for. The record level is the one that changes, so it is the one
-    # that moves, and it sits above.
-    order: [record, global]
-    global_level: last_line
-    levels:
-      # What this page can do to the record it is showing, including moving the cursor
-      # through the children it lists.
-      - level: record
-        keys: ["j/k", "g/G", enter, a]
-      # What means the same thing on every screen, in the order the cockpit's bar already
-      # names them.
-      - level: global
-        keys: [esc, v, "v t", r, q]
-    # Neither level invents a key. Every key here is one `key_bar` already declares, and a
-    # key `key_bar` withholds from this screen is withheld here too — the detail page does
-    # not fold, so `+/-` appears on neither level.
-    keys_from: key_bar
-    omits: ["+/-"]
-
-  # An approval is an assignment whose objective is a design, and the operator is being
-  # asked to sign a picture. The page names the design and stops there, so the signature is
-  # asked for with no way to look at what is being signed. It is the assignment page with
-  # one line added — the path the mockup was written to — and that line is a path because
-  # the operator opens the file in something that can draw an SVG.
-  approval:
-    of: assignment
-    adds: [mockup]
-    # Not a second rendering. A terminal cannot draw an SVG, and a text projection beside
-    # the file would be a second answer to what the design looks like — the one the operator
-    # signed would then be whichever they happened to read.
-    projection: none
-    projects_inline: false
-    forbidden: [wireframe, svg, ascii, thumbnail]
-    # One entry of the same block every other field is drawn in: no gutter of its own, no
-    # alignment of its own, the path as its value. A design nobody has projected yet has no
-    # path, and says so rather than offering a line that opens nothing.
-    mockup:
-      name: mockup
-      value: path
-      entry: "{name}  {path}"
-      opens: file
-      empty: "not projected yet"
-
-# The tree's own page, declared here for the same reason the detail page is: the cockpit
-# and a record both had a design and the outline had none, so what a row of the tree is
-# supposed to say was whatever outline.tsx happened to say it said — and what it says today
-# is the description first, with the id, the entity and the state buried behind however
-# long that description ran and the description itself cut at the right edge.
-#
-# A column is a shallow row paying the deepest row's width. Four of them — a tree cell, an
-# id, a kind and a state — spent the tree's whole width on every row, and bought a line
-# that is mostly blank; the kind and the state only fit their columns once they were cut to
-# four characters, which is the same cost again paid by the reader. So the row is one
-# string: the label leads because the label is what the row is, and its particulars follow
-# it in full words, joined by the separator the rest of the screen's prose already uses.
-# Nothing is padded, so a line is as long as it has something to say and no longer.
-outline:
-  chrome: border
-  # What a row is made of. `order` is the order the one string is written in, not a set of
-  # columns — there are none.
-  row:
-    as: sentence
-    order: [marker, label, id, kind, state, rollup]
-    entry: "{marker} {label} · #{id} · {kind} · {state} · {rollup}"
-    leads_with: label
-    join: " · "
-    # A column is the thing this row is not. Nothing is padded to anything.
-    columns: none
-    pad: false
-    # A row is a sentence, so it is not cut at the right edge: what will not fit continues
-    # under where the label began. Three lines is where that stops — a row allowed to run
-    # on is a row that can push the rest of the tree off the page — and the third line ends
-    # in the elision rather than mid-word.
-    overflow: wrap
-    wrap_under: label
-    truncate: false
-    max_lines: 3
-    elide: "…"
-    # A part with nothing to say is dropped with its separator, never written empty.
-    omit_empty: true
-
-  # How far down the tree goes. The ledger is nine levels deep, and four of them are not
-  # work at all — a requirement, its criteria, the tests that accept it and the tests a task
-  # is proven by are the proof that a story was done, not things being done. Drawn as rows
-  # they outnumber the work: one story with three requirements carries a dozen rows under it
-  # before a single task appears, and the operator scrolling for what is moving scrolls past
-  # all of them. So the tree stops at the five levels that are work, and the proof is read on
-  # the page of the row it proves, where it is being asked for.
-  levels:
-    count: 5
-    shows: [project, release, epic, story, task]
-    # Not hidden behind a fold. A folded row still costs its line and still says there is
-    # something under it; these are on another page entirely.
-    omits: [requirement, acceptance_criteria, acceptance_test, task_test]
-    omitted_to: detail
-    fold_reaches: task
-
-  # Depth is the indent and nothing else. The rail said what the indent was already
-  # saying, at two columns a level on every level above the row — at depth nine that is
-  # eighteen columns of the label's width spent repeating the label's position.
-  depth:
-    as: indent
-    every_row: true
-    indent: 2
-    # Sibling roots are separate trees rather than one branch, so a root is not indented.
-    root: flush
-
-  # The one mark a row carries, and it is carried only by the rows it says something
-  # about: a row with children can be opened or closed, so it shows which of the two it is
-  # and therefore what pressing the fold key does. A row with no children has nothing to
-  # fold, so it is marked with nothing — a mark on every row would say only "this is a
-  # row", which the row already says.
-  marker:
-    on: parents
-    leads_row: true
-    width: 1
-    open: "-"
-    closed: "+"
-    leaf: " "
-    says: fold_key
-
-# The last line is the bar, and the one line the App has to say anything on sits directly
-# above it. Both always have to be readable, which is why the body states its height rather
-# than flexing into whatever is left.
-bars:
-  key_bar: last
-  status: above_key_bar
-
-# Every key the screen answers, in the order a reader scans them. A key the bar omits is a
-# way in nobody can find, so a key is dropped only where the screen refuses it: the
-# dashboard has nothing to pop, and only the outline folds.
-key_bar:
-  gap: "  "
-  entry: "{key} {does}"
-  keys:
-    - { key: "j/k", does: move }
-    - { key: "g/G", does: top/end }
-    - { key: "+/-", does: fold, only_on: [outline] }
-    - { key: "enter", does: open }
-    - { key: "esc", does: back, except_on: [dashboard] }
-    - { key: "v", does: box }
-    - { key: "v t", does: outline }
-    - { key: "a", does: act }
-    - { key: "r", does: refresh }
-    - { key: "q", does: quit }
-
-# The signed-off screen. Every element the proposal shows is named here, so the board can
-# be gated against a picture the code did not write.
-proposal:
-  # One frame around the whole cockpit, and the two rails of that frame are the only
-  # chrome that is allowed to hold anything: what workspace this is and whether the
-  # machine is alive above, how to move below.
-  frame:
-    outer: border
-    top_rail: [workspace, projects, beat]
-    bottom_rail: [keys]
-    top_rail_entry: "{workspace}  {projects} projects  beat {beat}"
-    bottom_rail_entry: "{key} {does}"
-
-  # One line per project, read before any section. It answers how fast the project is
-  # moving and what is blocking it without opening anything.
-  pulse:
-    per: project
-    line: "{tag} {name} {version}  {seats}  {throughput} {rate}  {flags} {crosses}"
-    parts: [tag, name, version, seats, throughput, rate, flags, crosses]
-    seats: { as: dots, held: "●", free: "○" }
-    throughput: { as: sparkline, blocks: 10, glyphs: "▁▂▃▄▅▆▇█" }
-    rate: "{done}/h"
-    flags: { of: needs_you, mark: "⚑", key: n }
-    crosses: { of: failed, mark: "✗", key: f }
-    # A count carries the key that opens it, raised, so the number and the way in are one
-    # token and neither costs a word.
-    count: "{count}{key}"
-    key_as: superscript
-
-  # Each section's mark is its state in one glyph. A head opens with that glyph in column
-  # zero — no dashes before it, none after — and pushes its count to the right edge.
-  marks:
-    needs_you: "⚑"
-    running: "●"
-    queue: "⧖"
-    cooking: "✳"
-    planned: "○"
-    delivered: "✓"
-    dropped: "✗"
-  head:
-    opens_with: mark
-    begins_at_column: 0
-    dashes: none
-    case: upper
-    line: "{mark} {title}"
-    count_at: right
-    count: "{count}{key}"
-    key_as: superscript
-    # The hint is on every head, not on the heads whose count happened to be worth raising.
-    # A head with no letter on it is a section the operator can see and cannot open, and
-    # which sections those are would then be decided by which ones had rows that day.
-    hint_on: every_head
-    hint: "{key}"
-    # Which letter is not decided here. views.yaml already gave each box one, and a second
-    # copy of the seven letters is two lists that must agree with nothing checking them. The
-    # proposal names two sections in shorter words than the board does, so what is written
-    # here is which box each head is — the letter is read from there.
     keys:
-      from: views.yaml#views.*.key
-      sections:
-        needs_you: needs_human
-        running: running
-        queue: queued
-        cooking: cooking
-        planned: planned
-        delivered: delivered
-        dropped: dropped
+      - { key: "j/k", does: move }
+      - { key: "g/G", does: top/end }
+      - { key: "+/-", does: fold, only_on: [outline] }
+      - { key: "enter", does: open }
+      - { key: "esc", does: back, except_on: [dashboard] }
+      - { key: "v", does: box }
+      - { key: "v t", does: outline }
+      - { key: "a", does: act }
+      - { key: "r", does: refresh }
+      - { key: "q", does: quit }
 
-  # A row is a sentence, so it is not cut: what will not fit continues on the next line,
-  # indented to where the text began and never under the mark. What it cost sits at the
-  # end as a gauge, because a number alone does not say how near the end it is.
-  row:
-    leads_with: mark
-    overflow: wrap
-    wrap_under: text
-    truncate: false
-    spend:
-      as: gauge
-      blocks: 8
-      glyphs: "█░"
-      shows: [tokens, scope]
-      entry: "{gauge} {tokens} {scope}"
+  # The signed-off screen. Every element the proposal shows is named here, so the board can
+  # be gated against a picture the code did not write. It is shared because it is what was
+  # signed: the operator put their name to the screen, not to one renderer's way of getting
+  # there, and a proposal filed under a renderer would be a signature on a drawing.
+  proposal: &proposal
+    # One frame around the whole cockpit, and the two rails of that frame are the only
+    # chrome that is allowed to hold anything: what workspace this is and whether the
+    # machine is alive above, how to move below.
+    frame:
+      outer: border
+      top_rail: [workspace, projects, beat]
+      bottom_rail: [keys]
+      top_rail_entry: "{workspace}  {projects} projects  beat {beat}"
+      bottom_rail_entry: "{key} {does}"
 
-  # Every section gets its own head. Queue and cooking used to share one line to save the
-  # line, and what that line cost was the pair's two counts and two hints collapsed into
-  # one: `q` and `c` open different boxes, and a head that names both sections can only
-  # carry one of the letters, so half the pair was unopenable from the head that named it.
-  # Waiting for a slot and being stuck are also two different questions, and a shared head
-  # reads as one. A hint on every head is what a head is for, so no two sections share one.
-  heads: per_section
-  shared_heads: []
+    # One line per project, read before any section. It answers how fast the project is
+    # moving and what is blocking it without opening anything.
+    pulse:
+      per: project
+      line: "{tag} {name} {version}  {seats}  {throughput} {rate}  {flags} {crosses}"
+      parts: [tag, name, version, seats, throughput, rate, flags, crosses]
+      seats: { as: dots, held: "●", free: "○" }
+      throughput: { as: sparkline, blocks: 10, glyphs: "▁▂▃▄▅▆▇█" }
+      rate: "{done}/h"
+      flags: { of: needs_you, mark: "⚑", key: n }
+      crosses: { of: failed, mark: "✗", key: f }
+      # A count carries the key that opens it, raised, so the number and the way in are one
+      # token and neither costs a word.
+      count: "{count}{key}"
+      key_as: superscript
 
-  # The foot of the board is the whole tree in one line: what is planned, what came out,
-  # what was dropped, and the two ways in to all of it.
-  tally:
-    line: one
-    entries: [planned, delivered, dropped, tree, all]
-    entry: "{title} {count}{key}"
-    key_as: superscript
-    keys: { planned: p, delivered: d, dropped: x, tree: t, all: a }
+    # Each section's mark is its state in one glyph. A head opens with that glyph in column
+    # zero — no dashes before it, none after — and pushes its count to the right edge.
+    marks:
+      needs_you: "⚑"
+      running: "●"
+      queue: "⧖"
+      cooking: "✳"
+      planned: "○"
+      delivered: "✓"
+      dropped: "✗"
+    head:
+      opens_with: mark
+      begins_at_column: 0
+      dashes: none
+      case: upper
+      line: "{mark} {title}"
+      count_at: right
+      count: "{count}{key}"
+      key_as: superscript
+      # The hint is on every head, not on the heads whose count happened to be worth
+      # raising. A head with no letter on it is a section the operator can see and cannot
+      # open, and which sections those are would then be decided by which ones had rows
+      # that day.
+      hint_on: every_head
+      hint: "{key}"
+      # Which letter is not decided here. views.yaml already gave each box one, and a second
+      # copy of the seven letters is two lists that must agree with nothing checking them.
+      # The proposal names two sections in shorter words than the board does, so what is
+      # written here is which box each head is — the letter is read from there.
+      keys:
+        from: views.yaml#views.*.key
+        sections:
+          needs_you: needs_human
+          running: running
+          queue: queued
+          cooking: cooking
+          planned: planned
+          delivered: delivered
+          dropped: dropped
+
+    # A row is a sentence, so it is not cut: what will not fit continues on the next line,
+    # indented to where the text began and never under the mark. What it cost sits at the
+    # end as a gauge, because a number alone does not say how near the end it is.
+    row:
+      leads_with: mark
+      overflow: wrap
+      wrap_under: text
+      truncate: false
+      spend:
+        as: gauge
+        blocks: 8
+        glyphs: "█░"
+        shows: [tokens, scope]
+        entry: "{gauge} {tokens} {scope}"
+
+    # Every section gets its own head. Queue and cooking used to share one line to save the
+    # line, and what that line cost was the pair's two counts and two hints collapsed into
+    # one: `q` and `c` open different boxes, and a head that names both sections can only
+    # carry one of the letters, so half the pair was unopenable from the head that named it.
+    # Waiting for a slot and being stuck are also two different questions, and a shared head
+    # reads as one. A hint on every head is what a head is for, so no two sections share one.
+    heads: per_section
+    shared_heads: []
+
+    # The foot of the board is the whole tree in one line: what is planned, what came out,
+    # what was dropped, and the two ways in to all of it.
+    tally:
+      line: one
+      entries: [planned, delivered, dropped, tree, all]
+      entry: "{title} {count}{key}"
+      key_as: superscript
+      keys: { planned: p, delivered: d, dropped: x, tree: t, all: a }
+
+# The names the gate's tests still reach a block by. Aliases of the one definition above,
+# never a second copy of it: `page:` here and `shared.page` are the same node, so an edit to
+# either is an edit to both and the two can never drift. They stay until the files that read
+# them are in a scope that can rename them.
+page: *page
+detail: *detail
+outline: *outline
+key_bar: *key_bar
+proposal: *proposal
+dashboard: *dashboard
+head: *head
+pages: *pages
+bars: *bars
