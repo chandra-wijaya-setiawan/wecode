@@ -72,13 +72,15 @@ describe("the look is declared, not written into the pages", () => {
   });
 
   it("names the palette, the type and the way round the surface is", () => {
-    expect(LOOK.scheme).toBe("dark");
+    // Which way round is the mockup's; `the-look-is-the-signed-mockup.test.ts` holds the
+    // values themselves to it.
+    expect(LOOK.scheme).toBe("light");
     // Named by what they are for. A rule that wanted a new colour would have to say what
     // the colour is for before it could spend it.
     expect(Object.keys(LOOK.palette)).toContain("ink");
     expect(Object.keys(LOOK.palette)).toContain("faint");
     expect(Object.keys(LOOK.palette)).toContain("mark");
-    expect(LOOK.type["family"]).toContain("monospace");
+    expect(LOOK.type["mono"]).toContain("monospace");
   });
 
   it("declares a block for every page the package serves, and none for a page it does not", () => {
@@ -90,7 +92,7 @@ describe("the look is declared, not written into the pages", () => {
   });
 
   it("restyles the surface when the design is edited", () => {
-    const at = edited(`        ink: "#ddd"`, `        ink: "#0f0"`);
+    const at = edited(`        ink: "#1f2328"`, `        ink: "#0f0"`);
     expect(loadLook(at).palette["ink"]).toBe("#0f0");
     expect(stylesheet(loadLook(at))).toContain("--ink: #0f0");
     expect(SHEET).not.toContain("--ink: #0f0");
