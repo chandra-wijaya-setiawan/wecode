@@ -5,8 +5,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { Trees } from "../src/index.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
-/** The `@wecode/ui` → `@wecode/lens` rename moved every tracked file out of `packages/ui`, and
- *  the directory was still there afterwards: `node_modules` and `dist` live in it, git neither
+/** The rename that gave the view package its current name moved every tracked file out of the
+ *  old directory, and it was still there afterwards: `node_modules` and `dist` live in it, git neither
  *  tracks them nor deletes them, so the merge that removed the last tracked file left the folder
  *  standing. A ghost package — nothing in it anybody wrote, a stale `dist` that imports resolve
  *  into, a tree audit still counting the component. So a merge that empties a directory of
@@ -40,7 +40,8 @@ beforeEach(() => {
   run(root, "config", "user.email", "test@localhost");
   commit(root, {
     ".gitignore": "node_modules/\ndist/\n",
-    "packages/ui/package.json": '{"name":"@wecode/ui"}\n',
+    // A made-up package in a temporary tree: the name is a fixture, not this repository's.
+    "packages/ui/package.json": '{"name":"@fixture/ui"}\n',
     "packages/ui/src/panel.ts": "export const panel = 1;\n",
     "packages/core/src/core.ts": "export const core = 1;\n",
   });
