@@ -6,8 +6,8 @@ import { Maker, open } from "@wecode/core";
 import { run } from "../src/run.js";
 import * as rungs from "../src/verbs/tree.js";
 import * as work from "../src/verbs/work.js";
-import * as see from "../src/verbs/run-and-see.js";
-import * as read from "../src/verbs/read.js";
+import * as act from "../src/verbs/run-and-see.js";
+import * as see from "../src/verbs/see.js";
 import { recordRed } from "../../core/test/helpers.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
@@ -754,11 +754,10 @@ describe("the work verbs", () => {
   });
 });
 
-/** The eleven verbs that run something or show you something live in
- *  `verbs/run-and-see.ts`, one exported function each, and run.ts is the dispatch that
- *  calls them. Proved from three sides: the module exports exactly those eleven names,
- *  run.ts no longer holds their bodies, and the command an operator types still answers
- *  the way it did before the move. */
+/** The six verbs that act live in `verbs/run-and-see.ts`, one exported function each, and
+ *  run.ts is the dispatch that calls them. Proved from three sides: the module exports
+ *  exactly those six names, run.ts no longer holds their bodies, and the command an
+ *  operator types still answers the way it did before the move. */
 describe("the run-and-see verbs", () => {
   const source = (f: string): string => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
 
@@ -773,9 +772,8 @@ describe("the run-and-see verbs", () => {
   };
 
   it("exports one function per verb, and nothing else", () => {
-    expect(Object.keys(see).sort()).toEqual([
-      "answer", "ask", "board", "delivered", "design", "doctor", "explore", "land",
-      "onboard", "plan", "worker",
+    expect(Object.keys(act).sort()).toEqual([
+      "answer", "ask", "land", "onboard", "plan", "worker",
     ]);
   });
 
@@ -788,7 +786,7 @@ describe("the run-and-see verbs", () => {
       expect(run_ts).not.toContain(gone);
     }
     for (const dispatched of [
-      "see.plan(", "see.land(", "see.ask(", "see.answer(", "see.onboard(", "see.worker(",
+      "act.plan(", "act.land(", "act.ask(", "act.answer(", "act.onboard(", "act.worker(",
     ]) {
       expect(run_ts).toContain(dispatched);
     }
@@ -797,7 +795,7 @@ describe("the run-and-see verbs", () => {
   it("makes a worker when called directly, the way `wecode worker create` does", () => {
     run(["init"]);
     const make = new Maker(open(process.env["WECODE_DB"] as string));
-    expect(see.worker({ make, text: "ada", role: "operator", kind: "human" })).toBe(1);
+    expect(act.worker({ make, text: "ada", role: "operator", kind: "human" })).toBe(1);
     expect(run(["worker", "create", "grace", "--role", "engineer"])).toBe(0);
     expect(said()).toContain("worker #2");
   });
@@ -843,23 +841,34 @@ describe("the run-and-see verbs", () => {
     // The context is what run.ts lends; the module reads `at.args` and never process.argv.
     expect(source("verbs/run-and-see.ts")).not.toContain("process.argv");
   });
+
+  it("has lost the reading verbs' lines, bodies and re-exports alike", () => {
+    const acting = source("verbs/run-and-see.ts");
+    // `board`'s body went: the only call of core's board query is see.ts's.
+    expect(acting).not.toContain("boardOf");
+    expect(acting).not.toContain("export function board(");
+    // And the four names it used to forward for the modules of their own.
+    for (const gone of ['from "../doctor.js"', 'from "../delivered.js"', 'from "../explore.js"', 'from "../ui.js"']) {
+      expect(acting).not.toContain(gone);
+    }
+  });
 });
 
 /** The five verbs that only look — `board`, `doctor`, `delivered`, `explore`, `design` —
- *  live in `verbs/read.ts`, one exported name each, and run.ts's dispatch calls them
+ *  live in `verbs/see.ts`, one exported name each, and run.ts's dispatch calls them
  *  there. Proved the same three ways: the module exports exactly those five, run.ts holds
  *  the dispatch lines and not the bodies, and each command still answers as it did. */
 describe("the reading verbs", () => {
   const source = (f: string): string => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
 
   it("exports one name per reading verb, and nothing else", () => {
-    expect(Object.keys(read).sort()).toEqual(["board", "delivered", "design", "doctor", "explore"]);
+    expect(Object.keys(see).sort()).toEqual(["board", "delivered", "design", "doctor", "explore"]);
   });
 
   it("is what run.ts dispatches the reading verbs through", () => {
     const run_ts = source("run.ts");
     for (const dispatched of [
-      "read.board(", "read.doctor(", "read.delivered(", "read.explore(", "read.design(",
+      "see.board(", "see.doctor(", "see.delivered(", "see.explore(", "see.design(",
     ]) {
       expect(run_ts).toContain(dispatched);
     }
@@ -869,7 +878,11 @@ describe("the reading verbs", () => {
   });
 
   it("holds the board's body rather than reaching for another module's", () => {
-    expect(source("verbs/read.ts")).toContain("boardOf(at.conn(), chosen)");
+    expect(source("verbs/see.ts")).toContain("boardOf(at.conn(), chosen)");
+  });
+
+  it("is a file a person can read in one sitting: under the 400-line ceiling", () => {
+    expect(source("verbs/see.ts").split("\n").length).toBeLessThan(400);
   });
 
   it("shows the board through the module, groups and all", () => {
@@ -898,14 +911,14 @@ describe("the reading verbs", () => {
   });
 
   it("names the four verbs that keep a module of their own, and nothing in between", async () => {
-    // `doctor`, `explore` and `design` each already had a file; what read.ts adds is the
+    // `doctor`, `explore` and `design` each already had a file; what see.ts adds is the
     // one name run.ts reaches them by, so the name must be that module's own function and
     // not a wrapper that could drift from it.
     const [doctor, explore, ui] = await Promise.all([
       import("../src/doctor.js"), import("../src/explore.js"), import("../src/ui.js"),
     ]);
-    expect(read.doctor).toBe(doctor.doctor);
-    expect(read.explore).toBe(explore.explore);
-    expect(read.design).toBe(ui.design);
+    expect(see.doctor).toBe(doctor.doctor);
+    expect(see.explore).toBe(explore.explore);
+    expect(see.design).toBe(ui.design);
   });
 });

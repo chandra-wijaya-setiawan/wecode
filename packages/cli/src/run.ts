@@ -29,12 +29,12 @@ import { queries } from "@wecode/core/dist/db.js";
 // this file uses for something else.
 import * as ent from "./verbs/entity.js";
 import { paint } from "./paint.js";
-// The verbs that run something or show you something. Namespaced because several of them —
-// `board`, `worker`, `answer` — are also words this file uses for a table or a column.
-import * as see from "./verbs/run-and-see.js";
+// The verbs that act. Namespaced because several of them — `worker`, `answer` — are also
+// words this file uses for a table or a column.
+import * as act from "./verbs/run-and-see.js";
 // The verbs that only look: board, doctor, delivered, explore, design. Namespaced for the
 // same reason — `board` and `design` are also words this file uses.
-import * as read from "./verbs/read.js";
+import * as see from "./verbs/see.js";
 // Namespaced because `tree` is already the core query that reads the whole shape back.
 import * as rungs from "./verbs/tree.js";
 // Namespaced for the same reason: `requirement` and `task` are already tables in this file.
@@ -70,16 +70,16 @@ function dispatch(argv: readonly string[]): number {
     const what = rest[0] ?? "";
     return isStateful(what) ? use.entityHelp(look, what) : usage();
   }
-  if (head === "board") return read.board(seen(rest));
-  if (head === "doctor") return read.doctor(rest);
+  if (head === "board") return see.board(seen(rest));
+  if (head === "doctor") return see.doctor(rest);
   if (head === "init") return init(rest);
-  if (head === "answer") return see.answer(seen(rest));
-  if (head === "ask") return see.ask(seen(rest));
+  if (head === "answer") return act.answer(seen(rest));
+  if (head === "ask") return act.ask(seen(rest));
   if (head === "show") return show(rest);
-  if (head === "land") return see.land(seen(rest));
-  if (head === "onboard") return see.onboard(seen(rest));
-  if (head === "plan") return see.plan(rest);
-  if (head === "explore") return later(read.explore(rest));
+  if (head === "land") return act.land(seen(rest));
+  if (head === "onboard") return act.onboard(seen(rest));
+  if (head === "plan") return act.plan(rest);
+  if (head === "explore") return later(see.explore(rest));
   if (head === "paint") return later(paint(rest));
   if (head === "workspaces") return use.workspaces(look);
   if (head === "tree") return use.showTree(look, rest);
@@ -87,7 +87,7 @@ function dispatch(argv: readonly string[]): number {
   if (head === "wait") return until.wait(at, rest);
   // Before verb(): `delivered` is a story state as well as a command, so falling through
   // would read it as an entity and answer "delivered has no states".
-  if (head === "delivered") return read.delivered(rest);
+  if (head === "delivered") return see.delivered(rest);
   if (head === "lessons") return use.showLessons(look, rest);
   if (head === "lesson") return use.lesson(look, rest);
   return verb(head, rest);
@@ -182,11 +182,11 @@ function hereProject(): { id: number; name: string } | null {
 /** What run.ts lends the verbs in `verbs/run-and-see.ts`: the argv tail they were given,
  *  and the four things only this file knows — the workspace database, how a refusal is
  *  said, where you are standing, and the tables. */
-const TABLES: see.Tables = {
+const TABLES: act.Tables = {
   workspace, project, story, requirement, criteria, acceptanceTest, task, worker, assignment, landedBranch,
 };
 
-const seen = (args: readonly string[]): see.See => ({
+const seen = (args: readonly string[]): act.See => ({
   args, conn: db, fail, hereProject, actor: whoIsAsking, tables: TABLES,
 });
 
@@ -281,7 +281,7 @@ function verb(entity: string, rest: readonly string[]): number {
   // every other verb, `create` first, is the row, so it goes on down this function.
   // The split is here rather than in dispatch() so the row stays the default and the
   // drawing the exception, both read in one place.
-  if (entity === "design" && name === "show") return later(read.design([name, ...args]));
+  if (entity === "design" && name === "show") return later(see.design([name, ...args]));
 
   // parseArgs would call --help an unknown option. It is the one place a newcomer looks
   // for create's flags, so answer it here, before the flags are parsed at all.
@@ -401,7 +401,7 @@ function create(entity: string, args: readonly string[]): number {
       case "task_test": id = work.taskTest(job()); break;
       case "task": id = work.task(job()); break;
       case "worker":
-        id = see.worker({
+        id = act.worker({
           make, text, role: values["role"] ?? "", kind: (values["kind"] ?? "agent") as WorkerKind,
         });
         break;
