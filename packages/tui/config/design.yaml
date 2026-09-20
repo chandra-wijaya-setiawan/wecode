@@ -116,9 +116,62 @@ detail:
     title: "children ({count}) · {tally}"
     columns: ["#", what, state, detail]
     empty: "nothing under it"
+  # The four rungs the outline stops short of. They are proof, not work: they say what a
+  # story owes and what a task was accepted on, and the only moment that answer is wanted is
+  # the moment someone is looking at that story or that task. So they are a second section
+  # on the node page, under the children and read the same way — the page the row already
+  # opens to, not a page of their own, because proof with its subject off-screen is a
+  # statement about nothing.
+  proof:
+    of: node
+    under: children
+    # A story owes a requirement, which owes its criteria, which owe their tests; a task is
+    # proven by its own tests. Both are one section, and the nesting is the same indent the
+    # outline spends on depth rather than three titled sub-sections.
+    entities:
+      story: [requirement, acceptance_criteria, acceptance_test]
+      task: [task_test]
+    nesting: indent
+    indent: 2
+    title: "proof ({count}) · {tally}"
+    columns: [mark, statement, state]
+    empty: "nothing proves it yet"
+
   # A page drawing past its own border overwrites the two lines that must stay readable,
   # so what will not fit is dropped and counted rather than drawn.
   overrun: "… and {count} more"
+
+  # The foot of a detail page is two lines, not one. The cockpit's bar is a flat list
+  # because every key on it does the same thing wherever the cursor is; a record's page
+  # answers two different questions at once — what can be done to this record, and how to
+  # get back out — and a single line runs them together, so the key that acts on the record
+  # sits between the key that leaves the page and the key that quits the program. The two
+  # levels split them, and nothing else about the bar changes: same gap, same entry.
+  footer:
+    lines: 2
+    sits: last
+    gap: "  "
+    entry: "{key} {does}"
+    # The global level is drawn last, on the terminal's final line, because that is where
+    # it is on every other screen: a key whose position moves with the page is a key the
+    # reader has to look for. The record level is the one that changes, so it is the one
+    # that moves, and it sits above.
+    order: [record, global]
+    global_level: last_line
+    levels:
+      # What this page can do to the record it is showing, including moving the cursor
+      # through the children it lists.
+      - level: record
+        keys: ["j/k", "g/G", enter, a]
+      # What means the same thing on every screen, in the order the cockpit's bar already
+      # names them.
+      - level: global
+        keys: [esc, v, "v t", r, q]
+    # Neither level invents a key. Every key here is one `key_bar` already declares, and a
+    # key `key_bar` withholds from this screen is withheld here too — the detail page does
+    # not fold, so `+/-` appears on neither level.
+    keys_from: key_bar
+    omits: ["+/-"]
 
   # An approval is an assignment whose objective is a design, and the operator is being
   # asked to sign a picture. The page names the design and stops there, so the signature is
@@ -181,6 +234,22 @@ outline:
     elide: "…"
     # A part with nothing to say is dropped with its separator, never written empty.
     omit_empty: true
+
+  # How far down the tree goes. The ledger is nine levels deep, and four of them are not
+  # work at all — a requirement, its criteria, the tests that accept it and the tests a task
+  # is proven by are the proof that a story was done, not things being done. Drawn as rows
+  # they outnumber the work: one story with three requirements carries a dozen rows under it
+  # before a single task appears, and the operator scrolling for what is moving scrolls past
+  # all of them. So the tree stops at the five levels that are work, and the proof is read on
+  # the page of the row it proves, where it is being asked for.
+  levels:
+    count: 5
+    shows: [project, release, epic, story, task]
+    # Not hidden behind a fold. A folded row still costs its line and still says there is
+    # something under it; these are on another page entirely.
+    omits: [requirement, acceptance_criteria, acceptance_test, task_test]
+    omitted_to: detail
+    fold_reaches: task
 
   # Depth is the indent and nothing else. The rail said what the indent was already
   # saying, at two columns a level on every level above the row — at depth nine that is
