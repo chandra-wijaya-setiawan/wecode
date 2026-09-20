@@ -26,10 +26,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
 import { loadMachines, open, SCHEMA_VERSION } from "@wecode/core";
-// Through the package entry, the one door: `@wecode/ui` names the design half beside
+// Through the package entry, the one door: `@wecode/lens` names the design half beside
 // `check`, so the gate reaches the loader the projector reaches and a reader of this file
 // does not have to know that `expected` lives in expected.js.
-import { against, check, expected, type CapturedNode } from "@wecode/ui";
+import { against, check, expected, type CapturedNode } from "@wecode/lens";
 import { App } from "../src/app.js";
 import { Cockpit } from "../src/screens.js";
 import {
