@@ -8,14 +8,16 @@ import { type PrimaryDrift, updatePrimary } from "../../core/src/land.js";
 
 /** A landing adds files, and the operator's checkout is the one place that shows up as the
  *  opposite: HEAD moves under an index that never saw the new paths, so `git status` there
- *  reads them as staged deletions of files the operator never had. The instruction land
- *  gives has to end that in one command — the added files on disk, and nothing staged.
+ *  reads them as staged deletions of files the operator never had. A checkout holding
+ *  nothing else is nobody's work, so land ends that itself — the added files on disk, and
+ *  nothing staged — and says nothing about a folder it has made correct. Only a checkout
+ *  with something of theirs in it is left alone and told the command.
  *
- *  Both halves, because either alone is a trap. Restoring only the worktree writes the files
- *  and leaves their removal staged, so the operator's next commit deletes what just landed.
- *  Restoring only the index unstages the removal and leaves the files missing, so the tree
- *  looks clean while the landing is not in it. This file pins the command that does both, by
- *  running it on a real checkout and looking at what is left. */
+ *  Both halves, because either alone is a trap. Writing only the worktree leaves the removal
+ *  staged, so the operator's next commit deletes what just landed. Writing only the index
+ *  unstages the removal and leaves the files missing, so the tree looks clean while the
+ *  landing is not in it. This file pins both, by bringing a real checkout forward and
+ *  looking at what is left. */
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", [...args], { cwd, encoding: "utf8" }).trim();
@@ -91,6 +93,14 @@ const tell = (landed: Landed): string => {
   return update.kind === "tell" ? update.instruction : "";
 };
 
+/** `forward` carried out the way the runner carries it out: the branch is already at the
+ *  landing and only the index and the working files are behind, so `reset --hard` moves no
+ *  ref and writes both halves at once. */
+const forward = (landed: Landed): void => {
+  expect(updatePrimary(drift(landed))).toEqual({ kind: "forward" });
+  git(landed.repo, "reset", "--hard", "-q", landed.after);
+};
+
 /** The `in <path>: git …` line of the instruction, split into the directory it names and
  *  the argv it names, with the trailing parenthetical dropped. */
 function command(instruction: string): { where: string; argv: string[] } {
@@ -101,12 +111,6 @@ function command(instruction: string): { where: string; argv: string[] } {
     where: where.replace(/^in /, ""),
     argv: rest.replace(/ \(.*$/, "").trim().split(" "),
   };
-}
-
-/** Run the instruction's command, in the directory the instruction names. */
-function obey(instruction: string): void {
-  const { where, argv } = command(instruction);
-  git(where, ...argv);
 }
 
 const read = (repo: string, ...path: string[]): string =>
@@ -133,11 +137,11 @@ describe("a land brings its new files forward without staging their removal", ()
     expect(existsSync(join(landed.repo, "b.txt"))).toBe(false);
   });
 
-  it("puts the added files on disk with the landing's content once obeyed", () => {
+  it("puts the added files on disk with the landing's content once brought forward", () => {
     const landed = operatorCheckout();
     landElsewhere(landed);
 
-    obey(tell(landed));
+    forward(landed);
 
     expect(read(landed.repo, "b.txt")).toBe("landed\n");
     expect(read(landed.repo, "sub", "deep.txt")).toBe("landed deep\n");
@@ -148,7 +152,7 @@ describe("a land brings its new files forward without staging their removal", ()
     const landed = operatorCheckout();
     landElsewhere(landed);
 
-    obey(tell(landed));
+    forward(landed);
 
     expect(staged(landed.repo)).toEqual([]);
     expect(status(landed.repo)).toEqual([]);
@@ -157,17 +161,13 @@ describe("a land brings its new files forward without staging their removal", ()
     expect(git(landed.repo, "show", "--name-only", "--format=", "HEAD")).toBe("");
   });
 
-  it("names a command that restores the index and the working tree from HEAD", () => {
+  it("asks the operator for nothing: the verdict carries no instruction at all", () => {
     const landed = operatorCheckout();
     landElsewhere(landed);
-    const { where, argv } = command(tell(landed));
 
-    // Either half alone is the trap this story is about, so both are named, and from HEAD —
-    // the landing — rather than from the index the removals are staged in.
-    expect(argv).toEqual(["restore", "--source=HEAD", "--staged", "--worktree", "."]);
-    // And it is named for the checkout's own root, which is what makes the `.` reach
-    // `sub/deep.txt` as well as `b.txt`.
-    expect(where).toBe(landed.repo);
+    // Nothing in the tree is theirs, so there is nothing to warn about and no command for
+    // them to run — wecode does both halves itself, and `forward` has no words in it.
+    expect(updatePrimary(drift(landed))).toEqual({ kind: "forward" });
   });
 
   it("would leave the removal staged if only the working tree were restored", () => {
@@ -202,7 +202,7 @@ describe("a land brings its new files forward without staging their removal", ()
 
     // A path the landing deleted is the mirror image: staged as an addition here.
     expect(staged(landed.repo)).toContain("A  a.txt");
-    obey(tell(landed));
+    forward(landed);
 
     expect(existsSync(join(landed.repo, "a.txt"))).toBe(false);
     expect(status(landed.repo)).toEqual([]);
