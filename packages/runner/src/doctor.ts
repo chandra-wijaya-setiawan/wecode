@@ -64,6 +64,53 @@ export const readyTaskCanBeDispatched: Invariant = {
   },
 };
 
+/** A task the record calls done whose work is in no commit.
+ *
+ *  `task.finish` is guarded on the branch holding a commit the task wrote, but a guard only
+ *  ever ran on the finishes that came after it: a task finished before it existed, or moved
+ *  by a hand that wrote the state, leaves the record reporting work no commit carries. Read
+ *  off `assignment.commit_sha` — the same fact `taskFinishesOnItsOwnWork` reads, so the two
+ *  cannot disagree, and a refresh merge nobody attempted is never mistaken for the task's
+ *  own work. Built per record rather than listed in the pure set, because the snapshot
+ *  carries no attempt: like the ceiling check, it is the Doctor's own default. */
+export const WORK_CHECK = "done_task_has_a_commit";
+
+const assignment = table<{ objective_type: string; objective_id: number; commit_sha: string | null }>("assignment", [
+  "objective_type",
+  "objective_id",
+  "commit_sha",
+]);
+
+/** Every task some attempt committed against. A blank sha is no sha: the column is text, and
+ *  an attempt that wrote nothing has been seen to leave it empty rather than null. */
+function committedTasks(db: DatabaseSync): ReadonlySet<number> {
+  if (!hasTable(db, "assignment")) return new Set();
+  const rows = queries(db)
+    .selectFrom(assignment)
+    .select(["objective_id", "commit_sha"])
+    .where("objective_type", "=", "task")
+    .all();
+  return new Set(rows.filter((r) => (r.commit_sha ?? "").trim() !== "").map((r) => r.objective_id));
+}
+
+export const taskWorkIsCommitted = (db: DatabaseSync): Invariant => ({
+  name: WORK_CHECK,
+  check: (s: Snapshot): readonly Violation[] => {
+    const committed = committedTasks(db);
+    return s.nodes
+      .filter((n) => n.entity === "task" && n.state === "done" && !committed.has(n.id))
+      .map((n) => ({
+        invariant: WORK_CHECK,
+        entity: n.entity,
+        id: n.id,
+        slug: n.slug,
+        detail:
+          `done, and task/${n.slug} holds no commit of its own — no attempt on it recorded a ` +
+          `sha, so the work the record reports is in no commit`,
+      }));
+  },
+});
+
 /** The pure set: core's, plus the checks that are the runner's own. The file-length check is
  *  not here — it reads a tree rather than the record, so it is built per repository and added
  *  to the Doctor's own default below. `runChecks` and `checksOf` still default to core's set. */
@@ -73,30 +120,10 @@ export const RUNNER_INVARIANTS: readonly Invariant[] = [...INVARIANTS, readyTask
  *  of the schema: it is the ask, and `typed-runner-doctor.test.ts` holds each list against
  *  `PRAGMA table_info` so a column renamed out from under it fails a test. */
 const release = table<{ id: number; slug: string; state: string }>("release", ["id", "slug", "state"]);
-const epic = table<{ id: number; slug: string; state: string; release_id: number }>("epic", [
-  "id",
-  "slug",
-  "state",
-  "release_id",
-]);
-const story = table<{ id: number; slug: string; state: string; epic_id: number }>("story", [
-  "id",
-  "slug",
-  "state",
-  "epic_id",
-]);
-const requirement = table<{ id: number; slug: string; state: string; story_id: number }>("requirement", [
-  "id",
-  "slug",
-  "state",
-  "story_id",
-]);
-const criteria = table<{ id: number; slug: string; state: string; requirement_id: number }>("acceptance_criteria", [
-  "id",
-  "slug",
-  "state",
-  "requirement_id",
-]);
+const epic = table<{ id: number; slug: string; state: string; release_id: number }>("epic", ["id", "slug", "state", "release_id"]);
+const story = table<{ id: number; slug: string; state: string; epic_id: number }>("story", ["id", "slug", "state", "epic_id"]);
+const requirement = table<{ id: number; slug: string; state: string; story_id: number }>("requirement", ["id", "slug", "state", "story_id"]);
+const criteria = table<{ id: number; slug: string; state: string; requirement_id: number }>("acceptance_criteria", ["id", "slug", "state", "requirement_id"]);
 const acceptanceTest = table<{
   id: number;
   slug: string;
@@ -105,19 +132,8 @@ const acceptanceTest = table<{
   red_at_base_sha: string | null;
   script_path: string | null;
 }>("acceptance_test", ["id", "slug", "state", "parent_id", "red_at_base_sha", "script_path"]);
-const taskTable = table<{
-  id: number;
-  slug: string;
-  state: string;
-  acceptance_test_id: number;
-  role: string;
-}>("task", ["id", "slug", "state", "acceptance_test_id", "role"]);
-const taskTest = table<{ id: number; slug: string; state: string; parent_id: number }>("task_test", [
-  "id",
-  "slug",
-  "state",
-  "parent_id",
-]);
+const taskTable = table<{ id: number; slug: string; state: string; acceptance_test_id: number; role: string }>("task", ["id", "slug", "state", "acceptance_test_id", "role"]);
+const taskTest = table<{ id: number; slug: string; state: string; parent_id: number }>("task_test", ["id", "slug", "state", "parent_id"]);
 const worker = table<{ id: number; slug: string; role: string }>("worker", ["id", "slug", "role"]);
 const schemaVersion = table<{ version: number }>("schema_version", ["version"]);
 const project = table<{ id: number; repo: string }>("project", ["id", "repo"]);
@@ -154,15 +170,7 @@ interface ViolationRow {
   detail: string;
   found_at: string;
 }
-const doctorViolation = table<ViolationRow>("doctor_violation", [
-  "rowid",
-  "invariant",
-  "entity",
-  "entity_id",
-  "slug",
-  "detail",
-  "found_at",
-]);
+const doctorViolation = table<ViolationRow>("doctor_violation", ["rowid", "invariant", "entity", "entity_id", "slug", "detail", "found_at"]);
 
 /** One check a pass ran, as the pass recorded it. Rewritten whole every tick beside the
  *  violations, and in the same transaction: a report and the list of what produced it that
@@ -200,22 +208,10 @@ type Node = Omit<RecordNode, "entity">;
 
 const TABLES: readonly { entity: RecordNode["entity"]; nodes: (q: Dialect) => readonly Node[] }[] = [
   { entity: "release", nodes: (q) => q.selectFrom(release).all().map((r) => ({ ...r, parent_id: null })) },
-  {
-    entity: "epic",
-    nodes: (q) => q.selectFrom(epic).all().map(({ release_id, ...r }) => ({ ...r, parent_id: release_id })),
-  },
-  {
-    entity: "story",
-    nodes: (q) => q.selectFrom(story).all().map(({ epic_id, ...r }) => ({ ...r, parent_id: epic_id })),
-  },
-  {
-    entity: "requirement",
-    nodes: (q) => q.selectFrom(requirement).all().map(({ story_id, ...r }) => ({ ...r, parent_id: story_id })),
-  },
-  {
-    entity: "acceptance_criteria",
-    nodes: (q) => q.selectFrom(criteria).all().map(({ requirement_id, ...r }) => ({ ...r, parent_id: requirement_id })),
-  },
+  { entity: "epic", nodes: (q) => q.selectFrom(epic).all().map(({ release_id, ...r }) => ({ ...r, parent_id: release_id })) },
+  { entity: "story", nodes: (q) => q.selectFrom(story).all().map(({ epic_id, ...r }) => ({ ...r, parent_id: epic_id })) },
+  { entity: "requirement", nodes: (q) => q.selectFrom(requirement).all().map(({ story_id, ...r }) => ({ ...r, parent_id: story_id })) },
+  { entity: "acceptance_criteria", nodes: (q) => q.selectFrom(criteria).all().map(({ requirement_id, ...r }) => ({ ...r, parent_id: requirement_id })) },
   { entity: "acceptance_test", nodes: (q) => q.selectFrom(acceptanceTest).all() },
   {
     entity: "task",
@@ -346,7 +342,11 @@ export class Doctor {
     private readonly db: DatabaseSync,
     /** The tick's set: the pure ones, plus the tree read against the repository the record
      *  names. A caller passes its own only to test the boundary itself. */
-    private readonly invariants: readonly Invariant[] = [...RUNNER_INVARIANTS, fileCeilingInvariant(repoOf(db))],
+    private readonly invariants: readonly Invariant[] = [
+      ...RUNNER_INVARIANTS,
+      fileCeilingInvariant(repoOf(db)),
+      taskWorkIsCommitted(db),
+    ],
     /** How the ancestry question gets asked. The runner is the half that may read the
      *  world, so `delivered_story_has_landed` is only ever reported here after git has
      *  been asked whether the branch is in the base. */
