@@ -120,6 +120,30 @@ detail:
   # so what will not fit is dropped and counted rather than drawn.
   overrun: "… and {count} more"
 
+  # An approval is an assignment whose objective is a design, and the operator is being
+  # asked to sign a picture. The page names the design and stops there, so the signature is
+  # asked for with no way to look at what is being signed. It is the assignment page with
+  # one line added — the path the mockup was written to — and that line is a path because
+  # the operator opens the file in something that can draw an SVG.
+  approval:
+    of: assignment
+    adds: [mockup]
+    # Not a second rendering. A terminal cannot draw an SVG, and a text projection beside
+    # the file would be a second answer to what the design looks like — the one the operator
+    # signed would then be whichever they happened to read.
+    projection: none
+    projects_inline: false
+    forbidden: [wireframe, svg, ascii, thumbnail]
+    # One entry of the same block every other field is drawn in: no gutter of its own, no
+    # alignment of its own, the path as its value. A design nobody has projected yet has no
+    # path, and says so rather than offering a line that opens nothing.
+    mockup:
+      name: mockup
+      value: path
+      entry: "{name}  {path}"
+      opens: file
+      empty: "not projected yet"
+
 # The tree's own page, declared here for the same reason the detail page is: the cockpit
 # and a record both had a design and the outline had none, so what a row of the tree is
 # supposed to say was whatever outline.tsx happened to say it said — and what it says today
