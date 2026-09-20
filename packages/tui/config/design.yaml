@@ -10,6 +10,12 @@
 # test/the-cockpit-matches-its-design.test.ts gates the rendered frame against this file.
 # Changing how the cockpit looks is an edit here first, and a red test until the drawing
 # follows.
+#
+# The keys below `proposal` are the screen the operator signed off. The keys outside it
+# describe the board as it is drawn today, which is how they were written — by reading
+# screens.tsx — and so they gate nothing the code could fail. Where the two disagree the
+# proposal wins, and the drawn key is retired as the board reaches it. A design is what
+# the screen must become, never a transcript of what it already draws.
 
 # Nothing in this file repeats views.yaml. The section names, their order and their letters
 # are read from there; `lead` is the one section that is not a box and so has no row there.
@@ -92,3 +98,83 @@ key_bar:
     - { key: "a", does: act }
     - { key: "r", does: refresh }
     - { key: "q", does: quit }
+
+# The signed-off screen. Every element the proposal shows is named here, so the board can
+# be gated against a picture the code did not write.
+proposal:
+  # One frame around the whole cockpit, and the two rails of that frame are the only
+  # chrome that is allowed to hold anything: what workspace this is and whether the
+  # machine is alive above, how to move below.
+  frame:
+    outer: border
+    top_rail: [workspace, projects, beat]
+    bottom_rail: [keys]
+    top_rail_entry: "{workspace}  {projects} projects  beat {beat}"
+    bottom_rail_entry: "{key} {does}"
+
+  # One line per project, read before any section. It answers how fast the project is
+  # moving and what is blocking it without opening anything.
+  pulse:
+    per: project
+    line: "{tag} {name} {version}  {seats}  {throughput} {rate}  {flags} {crosses}"
+    parts: [tag, name, version, seats, throughput, rate, flags, crosses]
+    seats: { as: dots, held: "●", free: "○" }
+    throughput: { as: sparkline, blocks: 10, glyphs: "▁▂▃▄▅▆▇█" }
+    rate: "{done}/h"
+    flags: { of: needs_you, mark: "⚑", key: n }
+    crosses: { of: failed, mark: "✗", key: f }
+    # A count carries the key that opens it, raised, so the number and the way in are one
+    # token and neither costs a word.
+    count: "{count}{key}"
+    key_as: superscript
+
+  # Each section's mark is its state in one glyph. A head opens with that glyph in column
+  # zero — no dashes before it, none after — and pushes its count to the right edge.
+  marks:
+    needs_you: "⚑"
+    running: "●"
+    queue: "⧖"
+    cooking: "✳"
+    planned: "○"
+    delivered: "✓"
+    dropped: "✗"
+  head:
+    opens_with: mark
+    begins_at_column: 0
+    dashes: none
+    case: upper
+    line: "{mark} {title}"
+    count_at: right
+    count: "{count}{key}"
+    key_as: superscript
+
+  # A row is a sentence, so it is not cut: what will not fit continues on the next line,
+  # indented to where the text began and never under the mark. What it cost sits at the
+  # end as a gauge, because a number alone does not say how near the end it is.
+  row:
+    leads_with: mark
+    overflow: wrap
+    wrap_under: text
+    truncate: false
+    spend:
+      as: gauge
+      blocks: 8
+      glyphs: "█░"
+      shows: [tokens, scope]
+      entry: "{gauge} {tokens} {scope}"
+
+  # Queue and cooking are each one row deep. Two heads for two rows is chrome outspending
+  # content, so they share the one head line and split it.
+  shared_heads:
+    - sections: [queue, cooking]
+      head: one_line
+      rows_each: 1
+
+  # The foot of the board is the whole tree in one line: what is planned, what came out,
+  # what was dropped, and the two ways in to all of it.
+  tally:
+    line: one
+    entries: [planned, delivered, dropped, tree, all]
+    entry: "{title} {count}{key}"
+    key_as: superscript
+    keys: { planned: p, delivered: d, dropped: x, tree: t, all: a }
