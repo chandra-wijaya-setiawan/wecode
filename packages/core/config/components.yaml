@@ -166,7 +166,7 @@ components:
     layer: client
     component: true
     owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and wrapped in the shell design.yaml declares, served over http. It reads the record and offers no verb, because every verb that changes wecode is the cli's
-    modules: [pages/board, pages/decisions, pages/shell, server]
+    modules: [pages/board, pages/decisions, pages/shell, pages/tree, server]
 
   painter:
     package: painter
