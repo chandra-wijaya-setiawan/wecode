@@ -308,9 +308,10 @@ export interface PrimaryDrift {
 
 /** Either the primary checkout is already showing the landing, or it is clean at the old
  *  tip and wecode brings it forward itself, or it holds something of the operator's and
- *  they are told the command. Never silence. */
+ *  they are told the command. Never a stale tree left without either. */
 export type PrimaryUpdate =
   | { readonly kind: "current" }
+  | { readonly kind: "forward" }
   | { readonly kind: "tell"; readonly instruction: string };
 
 /** docs/design/14. A landing merge made in a tree of wecode's own moves `refs/heads/<base>`
@@ -320,15 +321,20 @@ export type PrimaryUpdate =
  *  landed paths reading as staged deletions, because HEAD moved under an index that never
  *  saw them. It reads exactly like lost work.
  *
- *  So the ref moving is never the end of it. Every drift is words: the command in full and
- *  the path it is to be run in, and nothing of the operator's folder written by wecode.
- *  A checkout clean at the old tip used to be brought forward silently on the grounds that
- *  it held nothing of anybody's — but "clean at the old tip" is read off git, and an
- *  operator watching their own folder change under them cannot tell that reading from a
- *  mistake in it. A folder a person works in is theirs on every path; wecode says what
- *  moved and what to run, and they run it. The one thing not allowed is silence.
+ *  So the ref moving is never the end of it — but what is owed depends on what is there.
+ *  A checkout clean at the old tip holds nothing of anybody's: its index and working files
+ *  are the pre-land tree exactly, so bringing it to the new tip loses nothing and stages
+ *  nothing, and there is no instruction worth writing about a folder wecode can simply make
+ *  correct. Leaving it stale instead is the expensive half: the operator is handed a staged
+ *  diff they did not make, a command to run before they may commit, and the shape lost work
+ *  has — over a tree git itself says is untouched.
  *
- *  What the words have to carry is the index. A behind checkout is not merely showing old
+ *  Everything else is words. The moment the checkout differs from the old tip at all —
+ *  tracked edits, staged ones, an untracked file on a path the landing wrote — it is theirs
+ *  and wecode writes none of it: it is told what moved, what of theirs is in the way, and
+ *  the command in full with the path to run it in.
+ *
+ *  What those words have to carry is the index. A behind checkout is not merely showing old
  *  files: its index still holds the pre-land tree while HEAD holds the landing, so every
  *  path the story touched reads as staged there — the added ones as staged deletions. That
  *  is the shape lost work has, it is the reason the silence frightened somebody, and an
@@ -338,12 +344,13 @@ export type PrimaryUpdate =
 export function updatePrimary(drift: PrimaryDrift): PrimaryUpdate {
   const { path, base, onBase, alreadyCurrent, wasTheOldTip, ownWork } = drift;
   if (!onBase || alreadyCurrent) return { kind: "current" };
+  // Clean at the old tip, with nothing of the operator's in the way: the tree is the
+  // pre-land tree, so wecode puts it on the new tip itself and leaves no staged diff behind.
+  if (wasTheOldTip && ownWork.length === 0) return { kind: "forward" };
   const what =
     ownWork.length > 0
       ? `${path} has work of yours that bringing it forward would write over:\n${indent(ownWork)}`
-      : wasTheOldTip
-        ? `${path} is exactly the commit ${base} was landed from — nothing of yours is in it`
-        : `${path} is not at the commit ${base} was landed from`;
+      : `${path} is not at the commit ${base} was landed from`;
   return {
     kind: "tell",
     instruction:
