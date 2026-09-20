@@ -60,7 +60,10 @@ export const all = (...guards: readonly Guard[]): Guard => (ctx) => {
  *
  *  `ownCommits` is the shas the branch carries that its base does not. A refresh merge
  *  brings the base's commits forward onto the branch, so "the branch has commits" is not
- *  the question — "the branch has commits of its own" is. */
+ *  the question — "the branch has commits of its own" is.
+ *
+ *  `ownCommits` is in the order the work was made, oldest first, so the last of them is
+ *  the tip: the sha the task finished on. */
 export interface TaskWork {
   readonly branch: string;
   readonly ownCommits: readonly string[];
@@ -79,7 +82,32 @@ export const taskFinishesOnItsOwnWork =
     if (entity !== "task") return refuse(`${entity} is not worked on a branch of its own`);
     const work = workOf(id);
     if (work === null) return refuse(`no branch is recorded for task #${id} — nothing was worked on`);
-    return work.ownCommits.length === 0
+    return finishedOn(work) === null
       ? refuse(`${work.branch} holds no commit of its own — the task wrote nothing to finish on`)
       : ALLOW;
   };
+
+/** The sha a task finished on: the tip of its own work.
+ *
+ *  A finish is a claim about a point in history, and the record has to be able to name
+ *  that point later — "this task is done" without a sha cannot be checked, reverted or
+ *  followed. The tip is the last of the branch's own commits, because that is the one the
+ *  rest are reachable from.
+ *
+ *  Null is the answer exactly where `taskFinishesOnItsOwnWork` refuses: no branch on
+ *  record, or a branch carrying nothing the task wrote. The two read the same record and
+ *  must never disagree — a task that may finish has a sha to finish on, and one that has
+ *  no sha may not finish. */
+export const finishedOn = (work: TaskWork | null): string | null => {
+  if (work === null) return null;
+  for (let i = work.ownCommits.length - 1; i >= 0; i--) {
+    const sha = work.ownCommits[i];
+    if (sha !== undefined && sha.trim() !== "") return sha.trim();
+  }
+  return null;
+};
+
+/** The sha a given task finished on, read through the same port the guard reads through,
+ *  so whoever wires one wires the other from one definition of what the branch holds. */
+export const shaTaskFinishedOn =
+  (workOf: (id: number) => TaskWork | null) => (id: number): string | null => finishedOn(workOf(id));
