@@ -255,9 +255,9 @@ class Walk {
     return this.ofTask(step(this.taskTestTask, test));
   }
 
-  /** An assignment's project is its objective's, whichever of the three kinds it is. A
-   *  fourth kind has no project here, which is what a `CASE` with no `ELSE` said too. */
+  /** An assignment's project is its objective's; a kind not named has none, as a `CASE` with no `ELSE` said. */
   ofAssignment(a: AssignmentRow): number | null {
+    if (a.objective_type === "story") return this.ofStory(a.objective_id);
     if (a.objective_type === "task") return this.ofTask(a.objective_id);
     if (a.objective_type === "acceptance_test") return this.ofTest(a.objective_id);
     if (a.objective_type === "task_test") return this.ofTaskTest(a.objective_id);
