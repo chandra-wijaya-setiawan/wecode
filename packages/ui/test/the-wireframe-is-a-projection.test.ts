@@ -12,7 +12,13 @@
  *  a box is an outline, that a title is text, that a child is written after the parent it
  *  sits in. Stroke colours and font stacks are not a contract. */
 import { describe, expect, it } from "vitest";
-import { wireframe, WireframeError, type Box } from "../src/wireframe.js";
+import { wireframe, WireframeError, type Box, type Cell } from "../src/wireframe.js";
+
+/** A one-to-one cell, so the picture's own `width`/`height` are the root's numbers and the
+ *  assertions below stay about the tree. The cell never reaches a coordinate — that is
+ *  the-wireframe-is-legible's claim to prove, and it is the reason this file can keep
+ *  ignoring it. */
+const UNIT: Cell = { width: 1, height: 1 };
 
 /** A root at an offset, two children at coordinates no layout would have produced: the
  *  first flush to the parent's top left, the second lower down and inset by an odd amount,
@@ -30,7 +36,7 @@ const TREE: Box = {
   ],
 };
 
-const svg = (): string => wireframe(TREE);
+const svg = (): string => wireframe(TREE, UNIT);
 
 /** Every `<rect>`, as the four numbers it states. */
 const rects = (markup: string): number[][] =>
@@ -90,7 +96,7 @@ describe("the wireframe", () => {
   });
 
   it("gives a box with no title no text at all", () => {
-    const bare = wireframe({ at: { x: 0, y: 0, width: 5, height: 5 } });
+    const bare = wireframe({ at: { x: 0, y: 0, width: 5, height: 5 } }, UNIT);
     expect(bare).not.toContain("<text");
   });
 
@@ -100,11 +106,14 @@ describe("the wireframe", () => {
   });
 
   it("draws the same tree the same way twice", () => {
-    expect(wireframe(TREE)).toBe(wireframe(TREE));
+    expect(wireframe(TREE, UNIT)).toBe(wireframe(TREE, UNIT));
   });
 
   it("does not let a title close the markup it sits in", () => {
-    const drawn = wireframe({ at: { x: 0, y: 0, width: 9, height: 9 }, title: `</text><a href="x">&` });
+    const drawn = wireframe(
+      { at: { x: 0, y: 0, width: 9, height: 9 }, title: `</text><a href="x">&` },
+      UNIT,
+    );
     expect(drawn).toContain("&lt;/text&gt;&lt;a href=&quot;x&quot;&gt;&amp;");
     expect(drawn.match(/<text/g)?.length).toBe(1);
   });
@@ -116,15 +125,19 @@ describe("a tree it cannot draw honestly", () => {
       at: { x: 0, y: 0, width: 10, height: 10 },
       children: [{ at: { x: 5, y: 0, width: 10, height: 10 } }],
     };
-    expect(() => wireframe(over)).toThrow(WireframeError);
+    expect(() => wireframe(over, UNIT)).toThrow(WireframeError);
   });
 
   it("refuses a negative size rather than clamping it", () => {
-    expect(() => wireframe({ at: { x: 0, y: 0, width: -1, height: 10 } })).toThrow(WireframeError);
+    expect(() => wireframe({ at: { x: 0, y: 0, width: -1, height: 10 } }, UNIT)).toThrow(
+      WireframeError,
+    );
   });
 
   it("refuses a coordinate that is not a number", () => {
-    expect(() => wireframe({ at: { x: NaN, y: 0, width: 1, height: 1 } })).toThrow(WireframeError);
+    expect(() => wireframe({ at: { x: NaN, y: 0, width: 1, height: 1 } }, UNIT)).toThrow(
+      WireframeError,
+    );
   });
 
   it("allows a child flush with its parent's edges", () => {
@@ -132,6 +145,6 @@ describe("a tree it cannot draw honestly", () => {
       at: { x: 0, y: 0, width: 10, height: 10 },
       children: [{ at: { x: 0, y: 0, width: 10, height: 10 } }],
     };
-    expect(() => wireframe(flush)).not.toThrow();
+    expect(() => wireframe(flush, UNIT)).not.toThrow();
   });
 });
