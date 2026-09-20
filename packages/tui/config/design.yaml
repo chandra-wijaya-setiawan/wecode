@@ -86,6 +86,46 @@ renderers:
       key_bar: last
       status: above_key_bar
 
+  # The browser. The third renderer of the same tree, and the one a person reaches without
+  # a terminal. A document is not a grid of cells: it has no last line to pin a bar to, no
+  # width to fill a rule to and no column a row begins at, so every statement the terminal
+  # half makes is answered here rather than inherited.
+  #
+  # What this block is for is the shell — the frame every page of the web surface wears,
+  # declared once here instead of written out again in each page's template string. A
+  # second page that spelled its own `<!doctype>` would be a second answer to what the web
+  # surface looks like, and the two would drift on the first rename.
+  # packages/webapp/test/the-shell-matches-its-design.test.ts gates the served document
+  # against these words, and holds every page in `src/pages` to going through the shell.
+  webapp:
+    chrome: document
+    # A browser draws boxes out of shapes, as the projector does; nothing here is spelled
+    # with a character the terminal half forbids.
+    glyphs: none
+    shell:
+      doctype: "<!doctype html>"
+      lang: en
+      charset: utf-8
+      viewport: "width=device-width, initial-scale=1"
+      # What the tab says, and what the page says at the top of itself. The same word: the
+      # product has one name, and a banner that disagreed with the title would be two.
+      title: wecode
+      banner: wecode
+      # One element holds the whole page. A page's own markup goes inside it and nowhere
+      # else, which is what makes "is this page in the shell" a thing a test can ask.
+      body: main
+      # In the document, not beside it: the surface is one workspace's own board on one
+      # workspace's own machine, and a second request for a stylesheet buys nothing.
+      stylesheet: inline
+    # A section of the page is separated by a rule, as it is in the terminal — but the rule
+    # is a border on the element, not a row of characters spent out of the height.
+    sections:
+      chrome: rule
+      drawn_with: border
+    # There is no bar. Every key the cockpit's bar names is a verb or a move, and the web
+    # surface offers neither: it is read, and what changes wecode is the cli's.
+    bars: none
+
   # The SVG projection of the same tree, which is how a design is shown to a person before
   # any of it is drawn in a terminal. It draws one rectangle per box and the box's own
   # name, and it draws nothing else — so every statement the terminal half makes is one it

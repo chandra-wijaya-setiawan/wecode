@@ -165,8 +165,8 @@ components:
     package: webapp
     layer: client
     component: true
-    owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and served over http. It reads the record and offers no verb, because every verb that changes wecode is the cli's
-    modules: [pages/board, server]
+    owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and wrapped in the shell design.yaml declares, served over http. It reads the record and offers no verb, because every verb that changes wecode is the cli's
+    modules: [pages/board, pages/shell, server]
 
   webapp surface:
     package: webapp
