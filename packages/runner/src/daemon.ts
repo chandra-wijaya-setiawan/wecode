@@ -608,7 +608,7 @@ export class Runner {
 
         const trees = this.treesFor(slugs.repo);
         const sha = await trees.commitAttempt(row.worktree, `task/${slugs.task}`, `${slugs.task}: attempt`);
-        if (sha === null) this.refundAttempt(row.task);
+        if (sha === null) this.refundAttempt(row.task, row.id);
         else {
           queries(this.db).update(tbl.assignment).set({ commit_sha: sha }).where("id", "=", row.id).run();
           committed.push(row.id);
@@ -621,15 +621,15 @@ export class Runner {
     return { committed, scripts: { passed, failed, skipped, refused } };
   }
 
-  /** Give back the retry the foreman counted, when the attempt committed nothing.
-   *
-   *  The foreman counts every attempt, because a session can exit cleanly having proved
-   *  nothing. But an attempt that left no commit left no work to judge either: the agent
-   *  never started, or the harness died before it wrote. The retry limit is there to stop a
-   *  task that keeps getting it wrong, and spending it on a tree nobody touched exhausts a
-   *  task no one has attempted. Floored at zero, so a refund never invents an attempt. */
-  private refundAttempt(task: number): void {
+  /** Give back the retry the foreman counted, when the attempt committed nothing — once per
+   *  branch tip, and the next empty attempt at that tip is counted. Refunding every one is a
+   *  task that never exhausts: an agent that keeps writing nothing loops on a tip nobody
+   *  moved. The tip moves only when an attempt commits, so the assignments after the last one
+   *  with a `commit_sha` are this tip's empty run, and one of them has had the refund. */
+  private refundAttempt(task: number, attempt: number): void {
     const q = queries(this.db);
+    const mine = q.selectFrom(tbl.assignment).select(["id", "objective_id", "commit_sha"]).where("objective_type", "=", "task").all().filter((a) => a.objective_id === task && a.id < attempt).sort(byId);
+    if (mine.length > mine.findLastIndex((a) => (a.commit_sha ?? "") !== "") + 1) return;
     const t = q.selectFrom(tbl.task).select(["attempts"]).where("id", "=", task).get();
     if (t === null || t.attempts <= 0) return;
     q.update(tbl.task).set({ attempts: t.attempts - 1 }).where("id", "=", task).run();
