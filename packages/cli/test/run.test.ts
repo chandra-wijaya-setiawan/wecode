@@ -7,6 +7,7 @@ import { run } from "../src/run.js";
 import * as rungs from "../src/verbs/tree.js";
 import * as work from "../src/verbs/work.js";
 import * as see from "../src/verbs/run-and-see.js";
+import * as read from "../src/verbs/read.js";
 import { recordRed } from "../../core/test/helpers.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
@@ -787,8 +788,7 @@ describe("the run-and-see verbs", () => {
       expect(run_ts).not.toContain(gone);
     }
     for (const dispatched of [
-      "see.board(", "see.doctor(", "see.delivered(", "see.plan(", "see.land(", "see.ask(",
-      "see.answer(", "see.design(", "see.explore(", "see.onboard(", "see.worker(",
+      "see.plan(", "see.land(", "see.ask(", "see.answer(", "see.onboard(", "see.worker(",
     ]) {
       expect(run_ts).toContain(dispatched);
     }
@@ -800,24 +800,6 @@ describe("the run-and-see verbs", () => {
     expect(see.worker({ make, text: "ada", role: "operator", kind: "human" })).toBe(1);
     expect(run(["worker", "create", "grace", "--role", "engineer"])).toBe(0);
     expect(said()).toContain("worker #2");
-  });
-
-  it("shows the board through the module, groups and all", () => {
-    run(["init"]);
-    run(["workspace", "create", "acme"]);
-    run(["project", "create", "--parent", "1", "storefront"]);
-    out.length = 0;
-    expect(run(["board", "--all"])).toBe(0);
-    expect(said()).toContain("all 1 projects in this workspace");
-    for (const group of ["RUNNING", "NEEDS YOU", "STALE", "QUEUE", "FAILED", "OPEN"]) {
-      expect(said()).toContain(`${group} (`);
-    }
-  });
-
-  it("refuses a board narrowed to a project that is not there", () => {
-    run(["init"]);
-    expect(run(["board", "--project", "9"])).toBe(1);
-    expect(err.join("")).toContain("no project #9");
   });
 
   it("asks a named person and answers them, both through the module", () => {
@@ -860,5 +842,70 @@ describe("the run-and-see verbs", () => {
   it("keeps run.ts's own words out of the new module: it parses no argv it was not given", () => {
     // The context is what run.ts lends; the module reads `at.args` and never process.argv.
     expect(source("verbs/run-and-see.ts")).not.toContain("process.argv");
+  });
+});
+
+/** The five verbs that only look — `board`, `doctor`, `delivered`, `explore`, `design` —
+ *  live in `verbs/read.ts`, one exported name each, and run.ts's dispatch calls them
+ *  there. Proved the same three ways: the module exports exactly those five, run.ts holds
+ *  the dispatch lines and not the bodies, and each command still answers as it did. */
+describe("the reading verbs", () => {
+  const source = (f: string): string => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
+
+  it("exports one name per reading verb, and nothing else", () => {
+    expect(Object.keys(read).sort()).toEqual(["board", "delivered", "design", "doctor", "explore"]);
+  });
+
+  it("is what run.ts dispatches the reading verbs through", () => {
+    const run_ts = source("run.ts");
+    for (const dispatched of [
+      "read.board(", "read.doctor(", "read.delivered(", "read.explore(", "read.design(",
+    ]) {
+      expect(run_ts).toContain(dispatched);
+    }
+    // The bodies went with them: run.ts prints no board of its own.
+    expect(run_ts).not.toContain("function showBoard(");
+    expect(run_ts).not.toContain("boardOf(");
+  });
+
+  it("holds the board's body rather than reaching for another module's", () => {
+    expect(source("verbs/read.ts")).toContain("boardOf(at.conn(), chosen)");
+  });
+
+  it("shows the board through the module, groups and all", () => {
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    run(["project", "create", "--parent", "1", "storefront"]);
+    out.length = 0;
+    expect(run(["board", "--all"])).toBe(0);
+    expect(said()).toContain("all 1 projects in this workspace");
+    for (const group of ["RUNNING", "NEEDS YOU", "STALE", "QUEUE", "FAILED", "OPEN"]) {
+      expect(said()).toContain(`${group} (`);
+    }
+  });
+
+  it("refuses a board narrowed to a project that is not there", () => {
+    run(["init"]);
+    expect(run(["board", "--project", "9"])).toBe(1);
+    expect(err.join("")).toContain("no project #9");
+  });
+
+  it("answers `delivered` through the module: nothing delivered is still an answer", () => {
+    run(["init"]);
+    out.length = 0;
+    expect(run(["delivered"])).toBe(0);
+    expect(said()).not.toBe("");
+  });
+
+  it("names the four verbs that keep a module of their own, and nothing in between", async () => {
+    // `doctor`, `explore` and `design` each already had a file; what read.ts adds is the
+    // one name run.ts reaches them by, so the name must be that module's own function and
+    // not a wrapper that could drift from it.
+    const [doctor, explore, ui] = await Promise.all([
+      import("../src/doctor.js"), import("../src/explore.js"), import("../src/ui.js"),
+    ]);
+    expect(read.doctor).toBe(doctor.doctor);
+    expect(read.explore).toBe(explore.explore);
+    expect(read.design).toBe(ui.design);
   });
 });
