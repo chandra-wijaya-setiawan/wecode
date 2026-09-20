@@ -24,10 +24,12 @@ const design = { ...file.shared, ...file.renderers.terminal } as Record<string, 
 const proposal = design.proposal as Record<string, any>;
 
 describe("the design is the proposal", () => {
-  it("declares a proposal at all, apart from the board as it is drawn", () => {
+  it("declares a proposal at all, and is the only place a head is declared", () => {
     expect(proposal).toBeTruthy();
-    expect(design.head).toBeTruthy();
-    expect(proposal).not.toEqual(design.head);
+    expect(proposal.head).toBeTruthy();
+    // The transcript of the drawn head is gone: a retired key kept beside the signed one
+    // is a second answer to what a head is, and the gate held the board to the wrong one.
+    expect(design.head).toBeUndefined();
   });
 
   it("frames the page and gives the two rails their contents", () => {
