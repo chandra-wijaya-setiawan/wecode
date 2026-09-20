@@ -55,6 +55,8 @@ import { delivered as deliveredStories } from "./delivered.js";
 import { design as projector } from "./ui.js";
 // Namespaced because `tree` is already the core query that reads the whole shape back.
 import * as rungs from "./verbs/tree.js";
+// Namespaced for the same reason: `requirement` and `task` are already tables in this file.
+import * as work from "./verbs/work.js";
 
 const DB = (): string => currentDatabase();
 
@@ -1512,6 +1514,13 @@ function create(entity: string, args: readonly string[]): number {
     return parent;
   };
   const rung: rungs.Rung = { make, text, parent: needsParent, path: values["path"] ?? process.cwd() };
+  // A thunk, so the artefact fallback only reads the project's config when a test is what
+  // is being made — it is a question about the working directory, and the other three
+  // never asked it.
+  const job = (): work.Work => ({
+    make, text, parent: needsParent,
+    kind: kindOf(values["kind"]), artefact: artefactOr(values["artefact"]), role: values["role"] ?? "",
+  });
 
   try {
     let id: number;
@@ -1521,21 +1530,11 @@ function create(entity: string, args: readonly string[]): number {
       case "release": id = rungs.release(rung); break;
       case "epic": id = rungs.epic(rung); break;
       case "story": id = rungs.story(rung); break;
-      case "requirement":
-        id = make.requirement(needsParent(), text);
-        break;
-      case "acceptance_criteria":
-        id = make.criteria(needsParent(), text);
-        break;
-      case "acceptance_test":
-        id = make.acceptanceTest(needsParent(), text, kindOf(values["kind"]), artefactOr(values["artefact"]));
-        break;
-      case "task_test":
-        id = make.taskTest(needsParent(), text, kindOf(values["kind"]), artefactOr(values["artefact"]));
-        break;
-      case "task":
-        id = make.task(needsParent(), text, { role: values["role"] ?? "" });
-        break;
+      case "requirement": id = work.requirement(job()); break;
+      case "acceptance_criteria": id = work.acceptanceCriteria(job()); break;
+      case "acceptance_test": id = work.acceptanceTest(job()); break;
+      case "task_test": id = work.taskTest(job()); break;
+      case "task": id = work.task(job()); break;
       case "worker":
         id = make.worker(text, values["role"] ?? "", (values["kind"] ?? "agent") as WorkerKind);
         break;
