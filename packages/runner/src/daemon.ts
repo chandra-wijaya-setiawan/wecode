@@ -35,7 +35,7 @@ import { attemptLanding, isLanded, LAND_CHECK } from "./land-chore.js";
 import { proveRedAtBase, type RedAtBase } from "./tick/red-at-base.js";
 import { proveStories, type Proven } from "./tick/prove-stories.js";
 import { raiseStoryChores } from "./tick/story-chores.js";
-import { beginLandChore, landedAttempts, performChores as performChorePass, type ChoreHost } from "./tick/story-chores.js";
+import { beginLandChore, landedAttempts, performChores as performChorePass, type ChoreHost } from "./tick/perform-chores.js";
 import * as refresh from "./tick/refresh.js";
 import { settleEnded, type Settled } from "./tick/settle.js";
 

@@ -95,12 +95,22 @@ describe("the refresh and behind checks are a module of their own", () => {
   /** The two callers that moved with them. `performChores` is the chore-performing half —
    *  the judging, the dispatch and the checks it proves — and only the one-line delegation
    *  the tick calls is left; `beginLandChore` and `landedAttempts` went with it because
-   *  they are the chore machinery's own reads, not the runner's. */
+   *  they are the chore machinery's own reads, not the runner's.
+   *
+   *  It is a module of its own rather than the rest of `tick/story-chores.ts`, because that
+   *  file is pinned to the one exported function that raises them: raising a chore and
+   *  performing it are two phases of the tick, and two phases are two files. */
   it("leaves one host and one delegation per chore phase", () => {
-    const moved = code("tick/story-chores.ts");
+    const moved = code("tick/perform-chores.ts");
     for (const gone of ["performChores", "dispatchChore", "proveChore", "suiteRed", "beginLandChore"]) {
       expect(moved, `${gone} is not in the module`).toMatch(new RegExp(`function ${gone}\\(`));
     }
+    // And the raising half kept none of it: one phase per file, both ways round.
+    const raising = code("tick/story-chores.ts");
+    for (const gone of ["performChores", "dispatchChore", "proveChore", "suiteRed", "beginLandChore", "landedAttempts"]) {
+      expect(raising, `${gone} stayed in tick/story-chores.ts`).not.toContain(gone);
+    }
+    expect([...raising.matchAll(/^export /gm)]).toHaveLength(2);
     const left = code("daemon.ts");
     for (const gone of ["CHORE_KIND_DEFS", "new Maker(this.db).assignment", "the landing was not made", "bash"]) {
       expect(left, `${gone} stayed in daemon.ts`).not.toContain(gone);
