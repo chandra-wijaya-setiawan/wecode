@@ -145,6 +145,20 @@ const acceptanceTest = table<{
   red_at_base_sha: string | null;
 }>("acceptance_test", ["id", "slug", "statement", "red_at_base_sha"]);
 
+/** The part of a design a guard reads: what to call it in a refusal, the picture it names,
+ *  and who signed it. */
+const design = table<{
+  id: number;
+  slug: string;
+  title: string;
+  mockup: string | null;
+  signed_by: string | null;
+}>("design", ["id", "slug", "title", "mockup", "signed_by"]);
+
+/** Who a signature names, and whether they are a person. A worker nobody has registered is
+ *  no answer either way, which is why the row is read rather than the name parsed. */
+const signatory = table<{ name: string; kind: string }>("worker", ["name", "kind"]);
+
 /** The part of a task a guard reads to name the branch its work was done on. */
 const taskNaming = table<{ id: number; slug: string }>("task", ["id", "slug"]);
 
@@ -213,6 +227,51 @@ export function guards(repo: Repo): Readonly<Record<GuardName, Guard>> {
     /** A test whose artefact is missing is unrunnable, and silently so. */
     artefact_resolves: ({ entity, id }) =>
       hasArtefact(repo, entity, id) ? ALLOW : refuse("it has no artefact — there is nothing to run or to follow"),
+
+    /** A design with no picture is a promise of one.
+     *
+     *  The same sentence as `artefact_resolves`, asked of a different column, and not the
+     *  same guard: a test's artefact is something to run and a design's mockup is something
+     *  to look at, so one guard over both would let a design be drafted on a shell command.
+     *  It reads the stored path and never stats it — a guard is evaluated wherever a verb
+     *  is applied, and whether a file is on disk changes with the branch. */
+    mockup_resolves: ({ entity, id }) => {
+      if (entity !== "design") return refuse(`${entity} names no mockup`);
+      const row = queriesOf(repo).selectFrom(design).select(["slug", "mockup"]).where("id", "=", id).get();
+      if (row === null) return refuse(`no design #${id}`);
+      return row.mockup !== null && row.mockup.trim() !== ""
+        ? ALLOW
+        : refuse(`design ${row.slug} #${id} names no mockup — there is nothing to look at or to sign`);
+    },
+
+    /** Only a person signs a design.
+     *
+     *  Authority is not relayed, the same rule `answer_is_permitted` states: an agent may
+     *  draw the mockup, propose it and argue for it, and may not be the one who approved
+     *  it. Capability parity, never authority parity — a signature an agent gave is the
+     *  record agreeing with itself, and the whole reason the row exists is that somebody
+     *  outside the work looked.
+     *
+     *  A name nobody has registered as a worker is refused rather than trusted: an unknown
+     *  signatory is indistinguishable from a typed-in one, and the safe reading of "I do
+     *  not know who that is" is no. */
+    signature_is_a_persons: ({ entity, id }) => {
+      if (entity !== "design") return refuse(`${entity} is not signed`);
+      const q = queriesOf(repo);
+      const row = q.selectFrom(design).select(["slug", "title", "signed_by"]).where("id", "=", id).get();
+      if (row === null) return refuse(`no design #${id}`);
+      const name = row.signed_by?.trim() ?? "";
+      if (name === "") {
+        return refuse(
+          `design ${row.slug} #${id} ("${row.title}") is unsigned — record who approved it before drawing it`,
+        );
+      }
+      const worker = q.selectFrom(signatory).select(["kind"]).where("name", "=", name).get();
+      if (worker === null) return refuse(`${name} is not a registered worker — nobody by that name can have signed`);
+      return worker.kind === "human"
+        ? ALLOW
+        : refuse(`${name} is an ${worker.kind} — a design is approved by a person, and authority is not relayed`);
+    },
 
     /** A failed test asks to be judged again.
      *
