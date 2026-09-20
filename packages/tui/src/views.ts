@@ -4,6 +4,7 @@ import { parse } from "yaml";
 import type { Board } from "@wecode/core";
 
 const CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
+const DESIGN = fileURLToPath(new URL("../config/design.yaml", import.meta.url));
 
 export class ViewError extends Error {}
 
@@ -113,4 +114,128 @@ export function loadOffPage(path: string = CONFIG): readonly View[] {
   return Object.entries(off as Record<string, Record<string, unknown>>).map(([name, v]) =>
     read(name, v),
   );
+}
+
+/** One box of the cockpit's design, shaped as `@wecode/ui`'s `Design` — structurally, so
+ *  that this module stays a reader of two yaml files and does not take a runtime
+ *  dependency on the gate it feeds. test/the-gate-reads-the-design-file.test.ts hands what
+ *  comes back straight to `expected` and `against`, which is what proves the two shapes
+ *  are the one shape. */
+export interface DesignBox {
+  readonly name: string;
+  readonly width: number;
+  readonly height: number;
+  readonly at?: { readonly x?: number; readonly y?: number };
+  readonly key?: string;
+  readonly rows?: readonly string[];
+  readonly parts?: readonly DesignBox[];
+}
+
+/** The terminal a design is a design of. */
+export interface Screen {
+  readonly width: number;
+  readonly height: number;
+}
+
+/** What each box is holding, by the name views.yaml gives it — `services` for the lead
+ *  section. A box nobody names holds the one line views.yaml says it holds when empty,
+ *  which is the whole of what the config can know about content. */
+export type Holds = Readonly<Record<string, readonly string[]>>;
+
+const cased = (title: string, how: unknown): string =>
+  how === "upper" ? title.toUpperCase() : title;
+
+/** The bar the design says the dashboard answers: every key that is not withheld from it,
+ *  written as the design writes an entry and joined by the gap it declares. */
+function keyBar(design: Record<string, unknown>, kind: string): string {
+  const bar = (design["key_bar"] ?? {}) as Record<string, unknown>;
+  const keys = Array.isArray(bar["keys"]) ? (bar["keys"] as Record<string, unknown>[]) : [];
+  const entry = typeof bar["entry"] === "string" ? bar["entry"] : "{key} {does}";
+  const gap = typeof bar["gap"] === "string" ? bar["gap"] : "  ";
+  const on = (list: unknown): string[] => (Array.isArray(list) ? (list as string[]) : []);
+  return keys
+    .filter((k) => k["only_on"] === undefined || on(k["only_on"]).includes(kind))
+    .filter((k) => k["except_on"] === undefined || !on(k["except_on"]).includes(kind))
+    .map((k) =>
+      entry.replace(/\{(\w+)\}/g, (_, hole: string) => String(k[hole] ?? `{${hole}}`)),
+    )
+    .join(gap);
+}
+
+/** The cockpit as design.yaml and views.yaml declare it, as a tree `@wecode/ui` can read.
+ *
+ *  Every box on this page is already written down: views.yaml says which boxes there are,
+ *  in what order, under what title, on what letter and what they say when empty; design.yaml
+ *  says the page leads with the services, that a section costs one line of chrome, that
+ *  heads are written in capitals, that the bar is the last line and which keys it names.
+ *  A hand-written expected tree is a fourth copy of all of that — one that goes stale
+ *  silently, because renaming a box in views.yaml does not touch it, and the literal then
+ *  gates the screen against a page nobody asked for any more.
+ *
+ *  So the tree is derived. The only thing a caller supplies is what each box is holding,
+ *  which is the one thing no config can know: it is the workspace's own rows. */
+export function cockpitDesign(
+  screen: Screen,
+  holds: Holds = {},
+  paths: { readonly views?: string; readonly design?: string } = {},
+): DesignBox {
+  const doc = top(paths.views ?? CONFIG);
+  const design = top(paths.design ?? DESIGN);
+  const head = (design["head"] ?? {}) as Record<string, unknown>;
+  const page = (design["page"] ?? {}) as Record<string, unknown>;
+  const board = (design["dashboard"] ?? {}) as Record<string, unknown>;
+  const chrome = typeof board["chrome_lines_per_section"] === "number"
+    ? board["chrome_lines_per_section"]
+    : 1;
+
+  const lead = page["lead"];
+  if (typeof lead !== "string") throw new ViewError("page.lead must name a section");
+  const section = (doc[lead] ?? {}) as Record<string, unknown>;
+  if (typeof section["title"] !== "string") {
+    throw new ViewError(`page.lead names ${lead}, which views.yaml gives no title`);
+  }
+
+  const sections: readonly { name: string; title: string; empty: string; key?: string }[] = [
+    { name: lead, title: section["title"], empty: "" },
+    ...loadViews(paths.views ?? CONFIG).map((v) => ({
+      name: v.name,
+      title: v.title,
+      empty: v.empty,
+      ...(v.key === undefined ? {} : { key: v.key }),
+    })),
+  ];
+
+  let y = 0;
+  const parts = sections.map((box): DesignBox => {
+    const rows = holds[box.name] ?? [box.empty];
+    const at = { y };
+    y += chrome + rows.length;
+    return {
+      name: cased(box.title, head["case"]),
+      at,
+      width: screen.width,
+      height: chrome + rows.length,
+      ...(box.key === undefined ? {} : { key: box.key }),
+      rows,
+    };
+  });
+
+  const bars = (design["bars"] ?? {}) as Record<string, unknown>;
+  if (bars["key_bar"] !== "last") throw new ViewError("bars.key_bar must be last");
+
+  return {
+    name: "Cockpit",
+    width: screen.width,
+    height: screen.height,
+    parts: [
+      ...parts,
+      {
+        name: "Key bar",
+        at: { y: screen.height - 1 },
+        width: screen.width,
+        height: 1,
+        rows: [keyBar(design, "dashboard")],
+      },
+    ],
+  };
 }
