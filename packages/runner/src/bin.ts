@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync } from "node:fs";
+import { existsSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -95,6 +95,34 @@ if (!taken.ok) {
 
 const letGo = (): void => releaseLease(db, me);
 
+// A log that simply stops tells its reader nothing. A runner killed by a signal, one that
+// threw, and one that wedged all look identical from the outside — silence, and an idle
+// fleet — so the last thing this process writes is why it is the last thing.
+//
+// `writeSync` rather than `process.stdout.write`, because to a pipe that write is buffered
+// and the exit that follows does not wait for it; a final line that is sometimes lost is
+// worse than none. Said once: a second signal arriving during the shutdown the first one
+// began must not talk over it.
+let said = false;
+const stopped = (why: string): void => {
+  if (said) return;
+  said = true;
+  writeSync(2, `${new Date().toISOString()}  stopped ${why}\n`);
+};
+
+/** What a thrown thing is called, when its name is the reason a runner is gone. */
+const named = (e: unknown): string => (e instanceof Error ? `${e.name}: ${e.message}` : `error: ${String(e)}`);
+
+// Nothing else is going to report these: an uncaught throw is exactly the death that left
+// no line. The lease goes back first, so the next runner does not have to wait it out.
+for (const fault of ["uncaughtException", "unhandledRejection"] as const) {
+  process.on(fault, (e: unknown) => {
+    stopped(named(e));
+    letGo();
+    process.exit(1);
+  });
+}
+
 // Measured by the holder, because the holder is the one reader with a repository to ask:
 // the cockpit is opened wherever the operator is standing. Re-measured every tick, so the
 // drift a person sees grows as the base does rather than dating from startup.
@@ -113,8 +141,8 @@ if (values.once === true) {
   letGo();
 } else {
   const stop = new AbortController();
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => (letGo(), stop.abort()));
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(sig, () => (stopped(sig), letGo(), stop.abort()));
   }
   process.stdout.write(
     `wecode-runner  ${dbPath}\n  budget ${budgetPath}  max_open ${budget.max_open}  every ${everyMs / 1000}s\n  lease ${me}\n${describeBuild()}`,
@@ -124,7 +152,7 @@ if (values.once === true) {
   await loop(runner, everyMs, stop.signal, (t) => {
     if (!stop.signal.aborted && !renewLease(db, me)) {
       const holder = readLease(db)?.holder ?? "nobody";
-      process.stderr.write(`lost the runner lease to ${holder} — stopping\n`);
+      stopped(`lost the runner lease to ${holder}`);
       stop.abort();
     }
     if (!stop.signal.aborted) measure();
