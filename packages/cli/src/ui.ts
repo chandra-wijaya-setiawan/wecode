@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { parse } from "yaml";
 
 /** `wecode ui check <capture.json>` — the four screen rules, as a command that fails.
  *
@@ -156,21 +157,17 @@ async function loadPorts(): Promise<Ports> {
   return { expected, wireframe };
 }
 
-/** How the design file is read. A design is written as yaml, and `packages/cli` cannot
- *  resolve `yaml` until it depends on it, so json is the fallback rather than the format:
- *  every yaml document that is also json parses the same either way. */
+/** How the design file is read. A design is written as yaml — comments, unquoted keys, block
+ *  scalars — and the gate over the cockpit's design reads it with `yaml`'s `parse`
+ *  (packages/tui/src/views.ts). This reads the same file, so it reads it the same way: one
+ *  parser, one set of documents that count as a design. A json fallback made the default
+ *  reader depend on which dependency happened to resolve, which is how a design file the
+ *  gate accepts could fail to draw. */
 export type Read = (text: string) => unknown;
 
-async function loadRead(): Promise<Read> {
-  const from = "yaml";
-  try {
-    const mod = (await import(from)) as { parse?: Read };
-    if (typeof mod.parse === "function") return mod.parse;
-  } catch {
-    // packages/cli does not depend on `yaml`; json is what is left.
-  }
-  return (text: string) => JSON.parse(text) as unknown;
-}
+/** Where the reader comes from when a caller does not say. `packages/cli` declares `yaml`,
+ *  so this is the parser itself and not a lookup that can come back empty. */
+const loadRead = (): Read => parse;
 
 /** A captured node as a box: the same coordinates, the same order, `name` read as `title`. */
 const asBox = (node: Shown): unknown => ({
