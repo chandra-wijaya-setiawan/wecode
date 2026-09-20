@@ -1,10 +1,15 @@
 /** run.ts is a dispatch, and a dispatch is short.
  *
  *  The entity helpers — the table declarations, `Kin` and the tree they describe, and the
- *  verbs that amend one row: scope, artefact, retry — are in `verbs/entity.ts` now. This
- *  holds the move from three sides: run.ts is under the line budget, the bodies are gone
- *  from it and exported from the new module, and every command they back still answers the
- *  way it did.
+ *  verbs that amend one row: scope, artefact, retry — are in `verbs/entity.ts`. The last
+ *  readers followed: `watch` and `wait`, the two commands that hold the process open, are
+ *  in `verbs/wait.ts`, and the listings — `workspaces`, `tree`, `lessons`, `lesson drop`
+ *  and an entity's own help — are in `verbs/usage.ts`. This holds each move from three
+ *  sides: run.ts is under the line budget, the bodies are gone from it and exported from
+ *  the new module, and every command they back still answers the way it did.
+ *
+ *  The budget is now the repository's own ceiling, 400, rather than a private number: a
+ *  file that is a dispatch has no claim to be longer than any other file.
  *
  *  The budget is counted in code lines rather than in lines: a file is long because of what
  *  it does, and the comments that say why are the part worth keeping. Blank lines and
@@ -14,6 +19,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DECLARED, run } from "../src/run.js";
 import * as ent from "../src/verbs/entity.js";
+import * as use from "../src/verbs/usage.js";
+import * as until from "../src/verbs/wait.js";
+import { linesIn, undocumented } from "../src/capabilities.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
 const source = (f: string): string => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
@@ -54,8 +62,8 @@ const aTask = (): void => {
 };
 
 describe("run.ts is a dispatch rather than the cli", () => {
-  it("is under seven hundred code lines", () => {
-    expect(codeLines(source("run.ts"))).toBeLessThan(700);
+  it("is under four hundred code lines, which is the ceiling every other file meets", () => {
+    expect(codeLines(source("run.ts"))).toBeLessThan(400);
   });
 
   it("counts code lines rather than lines: a comment is not a reason to split a file", () => {
@@ -173,5 +181,136 @@ describe("the commands the move carries still answer", () => {
     expect(run(["show", "story", "9"])).toBe(1);
     expect(err.join("")).toContain("no story #9. These story ids exist:");
     expect(err.join("")).toContain("#1  password reset");
+  });
+});
+
+describe("the last readers leave run.ts", () => {
+  it("holds none of their bodies", () => {
+    const run_ts = source("run.ts");
+    for (const gone of [
+      "function watch(", "function wait(", "function showTree(", "function workspaces(",
+      "function projectCount(", "function showLessons(", "function assignmentName(",
+      "function noProjectHere(", "function lesson(", "function entityHelp(",
+      "function restateHelp(", "Atomics.wait(", "setInterval(",
+    ]) {
+      expect(run_ts, gone).not.toContain(gone);
+    }
+  });
+
+  it("dispatches each of them through the module it went to", () => {
+    const run_ts = source("run.ts");
+    for (const dispatched of [
+      'if (head === "watch") return until.watch(at, rest);',
+      'if (head === "wait") return until.wait(at, rest);',
+      'if (head === "workspaces") return use.workspaces(look);',
+      'if (head === "tree") return use.showTree(look, rest);',
+      'if (head === "lessons") return use.showLessons(look, rest);',
+      'if (head === "lesson") return use.lesson(look, rest);',
+      "use.entityHelp(look, head)", "use.restateHelp()",
+    ]) {
+      expect(run_ts, dispatched).toContain(dispatched);
+    }
+  });
+
+  it("exports the two modules by the names run.ts reaches them by", () => {
+    for (const name of ["watch", "wait"]) expect(until, name).toHaveProperty(name);
+    for (const name of [
+      "workspaces", "projectCount", "showTree", "showLessons", "lesson", "entityHelp",
+      "restateHelp",
+    ]) {
+      expect(use, name).toHaveProperty(name);
+    }
+  });
+
+  it("parses no argv either module was not given, and neither decides where the workspace is", () => {
+    for (const f of ["verbs/wait.ts", "verbs/usage.ts"]) {
+      expect(source(f), f).not.toContain("process.argv");
+    }
+    // `usage.ts` names `currentDatabase` — it is what `wecode workspaces` marks the current
+    // row with — but neither module opens the workspace the commands read: that arrives
+    // as `At.conn`.
+    expect(source("verbs/wait.ts")).not.toContain("currentDatabase");
+    expect(source("verbs/usage.ts")).not.toContain("WECODE_DB");
+  });
+
+  it("keeps the manual itself behind, because capabilities.ts reads it out of run.ts's text", () => {
+    // `manual()` in capabilities.ts slices run.ts from `function usage(` to the next `\n}`.
+    // Moving those lines would empty `wecode capabilities` without failing a type check,
+    // so the one help text that does not go to verbs/usage.ts is usage() — and this is why.
+    const run_ts = source("run.ts");
+    expect(run_ts).toContain("function usage(): number {");
+    expect(undocumented(run_ts)).toEqual([]);
+    const lines = linesIn(run_ts);
+    for (const command of ["watch", "wait", "tree", "workspaces", "lessons", "lesson"]) {
+      expect(lines.get(command), command).toBeTruthy();
+    }
+  });
+});
+
+describe("the commands the last two moves carry still answer", () => {
+  it("drains the ledger once, and narrows it to a project", () => {
+    aTask();
+    expect(run(["task", "drop", "1"])).toBe(0);
+    out.length = 0;
+    // Everything on the ledger, read from the bottom: the drop is on it.
+    expect(run(["watch", "--once", "--since", "0"])).toBe(0);
+    expect(said()).toContain("task #1");
+    expect(said()).toContain("→ dropped");
+    out.length = 0;
+    // The same ledger, asked about a project that holds none of it.
+    expect(run(["watch", "--once", "--since", "0", "--project", "9"])).toBe(0);
+    expect(said()).toBe("");
+  });
+
+  it("waits on a record that has already settled, and refuses one that has no states", () => {
+    aTask();
+    expect(run(["task", "drop", "1"])).toBe(0);
+    out.length = 0;
+    expect(run(["wait", "task", "1"])).toBe(1);
+    expect(said()).toContain("task #1 dropped");
+    expect(run(["wait", "role", "1"])).toBe(1);
+    expect(err.join("")).toContain("role has no states to wait on");
+  });
+
+  it("prints the whole shape, and refuses a project that is not there", () => {
+    aTask();
+    expect(run(["tree"])).toBe(0);
+    expect(said()).toContain("storefront");
+    expect(said()).toContain("send the mail");
+    expect(run(["tree", "9"])).toBe(1);
+    expect(err.join("")).toContain("no project #9");
+  });
+
+  it("says how to make a workspace when the machine has none registered", () => {
+    // The database here is a bare path in a tmpdir, so no workspace is registered under a
+    // name. The refusal is the whole of what `workspaces` has to say, and it says the move.
+    aTask();
+    expect(run(["workspaces"])).toBe(1);
+    expect(err.join("")).toContain("no workspaces yet");
+    expect(err.join("")).toContain("wecode onboard");
+  });
+
+  it("says there are no lessons here yet, and refuses a lesson id that is not there", () => {
+    aTask();
+    expect(run(["lessons", "--project", "1"])).toBe(0);
+    expect(said()).toContain("no lessons here yet");
+    expect(run(["lesson", "drop", "9"])).toBe(1);
+    expect(err.join("")).toContain("no lesson #9");
+    expect(run(["lesson"])).toBe(1);
+    expect(err.join("")).toContain("wecode lesson drop <id>");
+  });
+
+  it("answers an entity's own help off the machine table, and refuses one with no states", () => {
+    aTask();
+    expect(run(["task", "--help"])).toBe(0);
+    expect(said()).toContain("states");
+    expect(said()).toContain("wecode task <verb> <id>");
+    expect(run(["role", "--help"])).toBe(0);
+    // `role` is not stateful, so --help is the manual rather than a refusal.
+    expect(said()).toContain("THE SHAPE OF THE WORK");
+    out.length = 0;
+    expect(run(["story", "restate", "--help"])).toBe(0);
+    expect(said()).toContain("restate <id> --to");
+    expect(said()).toContain("the slug does not move");
   });
 });
