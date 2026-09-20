@@ -256,6 +256,15 @@ importers:
         specifier: ^4.0.0
         version: 4.0.0(@types/react@19.3.0)
 
+  packages/webapp:
+    dependencies:
+      '@wecode/core':
+        specifier: workspace:*
+        version: link:../core
+      '@wecode/tui':
+        specifier: workspace:*
+        version: link:../tui
+
 packages:
 
   '@alcalzone/ansi-tokenize@0.3.0':
