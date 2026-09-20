@@ -22,6 +22,7 @@ import {
 import { answerAt } from "./answer.js";
 import { boardAt } from "./pages/board.js";
 import { decisionsAt } from "./pages/decisions.js";
+import { tasksAt } from "./pages/tasks.js";
 import { treeAt } from "./pages/tree.js";
 import { addressOf, serve } from "./server.js";
 
@@ -76,6 +77,7 @@ const db = open(dbPath);
 const routes = {
   "/": boardAt(() => board(db)),
   "/tree": treeAt(() => tree(db)),
+  "/tasks": tasksAt(() => tree(db)),
   "/decisions": decisionsAt(() => waitingApprovals(db)),
   "/answer": answerAt(() => db, operator),
 };
