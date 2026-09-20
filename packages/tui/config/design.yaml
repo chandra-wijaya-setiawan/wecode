@@ -74,6 +74,52 @@ pages:
   chrome: border
   bordered: [box, outline, node, assignment]
 
+# What a record's own screen looks like, declared beside the cockpit rather than left in
+# screens.tsx. The cockpit answers what is happening; a detail page answers what one record
+# is, and until now the only way to ask what it is supposed to show was to read the code
+# that shows it. Two screens are records — a node and an assignment — and they share one
+# block so the blocks line up with each other instead of each choosing its own gutter.
+detail:
+  screens: [node, assignment]
+  chrome: border
+  # A page is named after its work and its state, never after its key: the reader who
+  # pressed enter already knows the id, so a title of `task #3` spends its line saying
+  # what they just typed. The assignment is the one record with no work of its own to be
+  # named by, so it falls back to the id.
+  title:
+    node: "{what} · {state}"
+    assignment: "assignment #{id} · {state}"
+  # The block: `name  value`, names left-aligned into a gutter as wide as the longest of
+  # them, and a value nobody wrote reading as a dash rather than as a gap.
+  block:
+    entry: "{name}  {value}"
+    gutter: longest_name
+    align: left
+    empty: "—"
+    # A page given the whole terminal wraps; a block sized to its own fields clips, because
+    # it has no line to wrap onto. A wrapped value continues under the value, never under
+    # the name.
+    overflow:
+      node: clip
+      assignment: wrap
+    wrap_under: value
+  # What each record says about itself. Neither list restates the other's half: the board
+  # already decided what a row is worth saying, and what the four columns had no room for
+  # is the rest.
+  fields:
+    node: [entity, id, title, state, children]
+    assignment: [entity, id, objective, state, budget, beat, worktree, detail]
+  # A node is a branch, so its screen carries the list under it. An assignment is a leaf
+  # and carries none.
+  children:
+    of: node
+    title: "children ({count}) · {tally}"
+    columns: ["#", what, state, detail]
+    empty: "nothing under it"
+  # A page drawing past its own border overwrites the two lines that must stay readable,
+  # so what will not fit is dropped and counted rather than drawn.
+  overrun: "… and {count} more"
+
 # The last line is the bar, and the one line the App has to say anything on sits directly
 # above it. Both always have to be readable, which is why the body states its height rather
 # than flexing into whatever is left.
