@@ -163,37 +163,37 @@ function write(path: string, body: string): void {
   writeFileSync(path, body);
 }
 
-/** `wecode ask <task> "<question>" [--option "<answer>=<what it costs>"] [--operator <name>]`
+/** `wecode ask <task> "<question>"` / `wecode ask story <id> "<question>"` [--option "<answer>=<cost>"] [--operator <name>]
  *
  *  A decision the operator must make is a row in needs you, not a line in a report: six of
  *  them on 20 Sep reached the operator only as chat messages, because a story titled NEEDS
- *  APPROVAL sits in `planned` among fifty others. The question hangs on the task that
- *  raised it — a person answers about work rather than about a number. An option is the
- *  answer and what taking it costs, split on the first `=`; only the answers are stored as
- *  options, since an answer is checked against them, and the costs go into the question,
- *  which is what a person reads before choosing. No options at all is an open question, and
- *  any words settle it. */
+ *  APPROVAL sits in `planned` among fifty others. A bare id is a task, which is what every
+ *  existing caller means; `story <id>` hangs the question on the story, for the decisions
+ *  about the whole of it rather than about one attempt. An option is the answer and what
+ *  taking it costs, split on the first `=`; only the answers are stored as options, since an
+ *  answer is checked against them, and the costs go into the question, which is what a person
+ *  reads before choosing. No options is an open question, and any words settle it. */
 function ask(args: readonly string[]): number {
   const { values, positionals } = parseArgs({
     args: [...args],
     allowPositionals: true,
     options: { option: { type: "string", multiple: true }, operator: { type: "string" } },
   });
-  const id = Number(positionals[0]);
-  const question = positionals.slice(1).join(" ");
+  const kind = positionals[0] === "story" ? ("story" as const) : ("task" as const);
+  const rest = positionals[0] === kind ? positionals.slice(1) : positionals;
+  const id = Number(rest[0]);
+  const question = rest.slice(1).join(" ");
   if (!Number.isInteger(id) || question === "") {
-    return fail('wecode ask <task> "<question>" [--option "<answer>=<what it costs>"] [--operator <name>]');
+    return fail('wecode ask <task> "<question>" | wecode ask story <id> "<question>"  [--option "<answer>=<what it costs>"] [--operator <name>]');
   }
-  const offered = (values.option ?? []).map((o) => {
-    const at = o.indexOf("=");
-    return at === -1 ? { answer: o.trim(), costs: "" } : { answer: o.slice(0, at).trim(), costs: o.slice(at + 1).trim() };
-  });
+  const split = (o: string) => (o.includes("=") ? o.indexOf("=") : o.length); // no `=` is all answer, no cost
+  const offered = (values.option ?? []).map((o) => ({ answer: o.slice(0, split(o)).trim(), costs: o.slice(split(o) + 1).trim() }));
 
   const conn = db();
   try {
     const who = operator(conn, values.operator);
     const raised = raiseApproval(conn, {
-      objective_type: "task",
+      objective_type: kind,
       objective_id: id,
       worker_id: who.id,
       question: [question, ...offered.map((o) => `  ${o.answer}${o.costs === "" ? "" : ` — ${o.costs}`}`)].join("\n"),
