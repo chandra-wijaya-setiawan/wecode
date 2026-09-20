@@ -2,8 +2,11 @@
  *  every component is a pure function of the App's state, so a screen can be asserted on
  *  by rendering it rather than by driving a terminal. The widths are Yoga's problem now; what
  *  is left here is which regions there are, what they are called, which holds the cursor, and which is worth a border. */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { ReactNode } from "react";
 import { Box, Text } from "ink";
+import { parse } from "yaml";
 // By path, as app.ts imports it: index.ts names what board.ts offers one export at a time.
 import type { AssignmentFacts } from "@wecode/core/dist/board.js";
 import { boxKeys, type App, type Screen } from "./app.js";
@@ -17,6 +20,34 @@ const SERVICES = loadServices();
 
 /** Every column, on every screen: a box and its full-height page differ only in rows. */
 export const COLUMNS: readonly Column[] = ["#", "what", "state", "detail"];
+
+/** The detail page as config/design.yaml declares it: which facts a record's own screen says
+ *  and in what order, what that page and its children box are titled, what stands in for a
+ *  value nobody wrote, and what will not fit. Read from the file, never restated here. */
+type Named = Readonly<Record<string, string>>;
+interface Detail {
+  readonly title: Named;
+  readonly block: { readonly empty: string; readonly overflow: Named };
+  readonly fields: Readonly<Record<string, readonly string[]>>;
+  readonly children: { title: string; columns: readonly Column[]; empty: string };
+  readonly overrun: string;
+}
+const DESIGN = fileURLToPath(new URL("../config/design.yaml", import.meta.url));
+export const DETAIL = (parse(readFileSync(DESIGN, "utf8")) as { readonly detail: Detail }).detail;
+
+/** A declared line with its holes filled. A hole nobody answered closes up: an unanswered
+ *  `{tally}` is not a word the page should say. */
+const fill = (t: string, vars: Readonly<Record<string, string | number>>): string =>
+  t.replace(/\{(\w+)\}/g, (_, k: string) => String(vars[k] ?? ""));
+
+/** The fields design.yaml names for a screen, in its order, each carrying what the record
+ *  says for it — and the declared dash wherever it says nothing, or cannot. */
+const named = (screen: string, says: Named): Field[] =>
+  (DETAIL.fields[screen] ?? []).map((name) => [name, says[name] || DETAIL.block.empty]);
+
+/** Whether a screen's block wraps a value too long for the line or clips it: a page given
+ *  the whole terminal has a line to wrap onto, a block sized to its own fields has not. */
+const wraps = (screen: string): boolean => DETAIL.block.overflow[screen] === "wrap";
 
 /** The keys each screen answers, in scan order; esc and +/- are the two a screen can lack. A
  *  function because outline.tsx names its own key and this module and that draw each other. */
@@ -65,13 +96,7 @@ interface PanelProps {
 export function Panel({ title, letter, width, height, children }: PanelProps) {
   const head = clip(` ${label(title, letter)} `, Math.max(width - 4, 0));
   return (
-    <Box
-      borderStyle="single"
-      flexDirection="column"
-      flexShrink={0}
-      width={width}
-      height={height}
-    >
+    <Box borderStyle="single" flexDirection="column" flexShrink={0} width={width} height={height}>
       <Box position="absolute" marginTop={-1} marginLeft={1}>
         <Text wrap="truncate">{head}</Text>
       </Box>
@@ -179,12 +204,8 @@ export function Dashboard({ app, width }: ScreenProps) {
   const fleet = app.seats();
   return (
     <>
-      <Section
-        title={SERVICES.title}
-        mark={sectionMark("services")}
-        width={width}
-        height={serviceRows + RULE}
-      >
+      <Section title={SERVICES.title} mark={sectionMark("services")} width={width}
+        height={serviceRows + RULE}>
         <Services app={app} width={width} config={SERVICES} />
       </Section>
       {boxes(app, rows).map((box) => {
@@ -263,7 +284,7 @@ const superscript = (n: number): string =>
 export function tally(rows: readonly Row[]): string {
   const counts = new Map<string, number>();
   for (const row of rows) counts.set(row.state, (counts.get(row.state) ?? 0) + 1);
-  if (counts.size === 0) return "—";
+  if (counts.size === 0) return DETAIL.block.empty;
   return [...counts]
     .sort(([a, m], [b, n]) => n - m || a.localeCompare(b))
     .map(([state, n]) => `${state}${superscript(n)}`)
@@ -312,16 +333,12 @@ export function fieldLines(fields: readonly Field[], width: number, wrap = false
   });
 }
 
-function Fields({
-  fields,
-  width,
-}: {
-  readonly fields: readonly Field[];
-  readonly width: number;
-}) {
+/** Already-laid-out lines, drawn. Both record screens end here, so what a block looks like
+ *  is decided once in `fieldLines` and never again in a component. */
+function Lines({ lines }: { readonly lines: readonly string[] }) {
   return (
     <>
-      {fieldLines(fields, width).map((line, i) => (
+      {lines.map((line, i) => (
         <Text key={`${i}`} wrap="truncate">
           {line}
         </Text>
@@ -348,7 +365,7 @@ const share = (used: number, given: number): string =>
 /** What it has spent against what it was given, both dimensions on one line. A spend with
  *  no allowance beside it answers no question an operator has. */
 export function budgetLine(facts: AssignmentFacts | null): string {
-  if (facts === null) return "—";
+  if (facts === null) return DETAIL.block.empty;
   const { budget, spent } = facts;
   return [
     `${tokens(spent.tokens)} of ${tokens(budget.tokens)} tokens${share(spent.tokens, budget.tokens)}`,
@@ -368,7 +385,7 @@ const ago = (ms: number): string => {
  *  a bare timestamp makes the reader do the subtraction themselves. A finished assignment
  *  is not silent, it is over — calling it silent would alarm on every record ever closed. */
 export function beatLine(facts: AssignmentFacts | null): string {
-  if (facts === null) return "—";
+  if (facts === null) return DETAIL.block.empty;
   if (!facts.open) return facts.beat === null ? "over · never reported" : `over · last ${ago(facts.silent ?? 0)}`;
   if (facts.silent === null) return "no beat yet · dispatched and not started";
   return `${facts.silent <= ALIVE_FOR_MS ? "alive" : "silent"} · last beat ${ago(facts.silent)}`;
@@ -380,87 +397,70 @@ export function fit(lines: readonly string[], rows: number, width: number): stri
   if (rows <= 0) return [];
   if (lines.length <= rows) return [...lines];
   const kept = lines.slice(0, Math.max(rows - 1, 0));
-  return [...kept, clip(`… and ${lines.length - kept.length} more`, width)];
+  return [...kept, clip(fill(DETAIL.overrun, { count: lines.length - kept.length }), width)];
 }
 
-/** What is known about one assignment, on a screen of its own, filling it. Half the fields
- *  are the board's row, because the board already decided what an assignment is worth
- *  saying and a second reading could disagree with it; the other half is what four columns
- *  had no room for — what it was allowed, what it has used, when it last spoke. Neither
- *  half restates the other, so neither can contradict it. The values wrap rather than clip:
- *  half a question with an ellipsis on it is a page you have to leave to read. No children
- *  box — an assignment is a leaf. */
-export function Assignment({
-  screen,
-  facts,
-  width,
-  height,
-}: {
+/** What is known about one assignment, on a screen of its own, filling it. Which facts it
+ *  says, in what order, and under what title are design.yaml's `detail` to decide; this
+ *  function only answers them. It is a leaf, so it carries no children box. */
+export function Assignment(p: {
   readonly screen: Screen & { kind: "assignment" };
   readonly facts: AssignmentFacts | null;
   readonly width: number;
   readonly height: number;
 }) {
+  const { screen, facts, width, height } = p;
   const { row } = screen;
-  const fields: Field[] = [
-    ["entity", "assignment"],
-    ["id", `#${screen.id}`],
-    ["objective", row.what],
-    ["state", row.state],
-    ["budget", budgetLine(facts)],
-    ["beat", beatLine(facts)],
-    ["worktree", facts === null ? "—" : facts.worktree],
-    ["detail", row.detail === "" ? "—" : row.detail],
-  ];
+  const fields = named("assignment", {
+    entity: "assignment",
+    id: `#${screen.id}`,
+    objective: row.what,
+    state: row.state,
+    budget: budgetLine(facts),
+    beat: beatLine(facts),
+    worktree: facts === null ? "" : facts.worktree,
+    detail: row.detail,
+  });
   const inner = width - BORDER;
   const body = Math.max(height - BORDER, 1);
+  const title = fill(DETAIL.title.assignment ?? "", { id: screen.id, state: row.state });
   return (
-    <Panel title={`assignment #${screen.id} · ${row.state}`} width={width} height={body + BORDER}>
-      {fit(fieldLines(fields, inner, true), body, inner).map((line, i) => (
-        <Text key={`${i}`} wrap="truncate">
-          {line}
-        </Text>
-      ))}
+    <Panel title={title} width={width} height={body + BORDER}>
+      <Lines lines={fit(fieldLines(fields, inner, wraps("assignment")), body, inner)} />
     </Panel>
   );
 }
 
-/** The summary block, then the record's children as a list. The screen carries the row it was
- *  opened from, so the block leads with what the record is called and how it stands: `task #3`
- *  named a screen after its key and not its work, and the reader who pressed enter already
- *  knows the id. What the children add up to rides the children box's title. */
-export function Node({
-  app,
-  screen,
-  width,
-  height,
-}: ScreenProps & { readonly screen: Screen & { kind: "node" } }) {
+/** The summary block, then the record's children as a list — a node is a branch, so the
+ *  design gives it the one children box. Its title, its fields and what it says when it holds
+ *  nothing all come from design.yaml's `detail`. */
+export function Node(p: ScreenProps & { readonly screen: Screen & { kind: "node" } }) {
+  const { app, screen, width, height } = p;
   const rows = app.lines();
   const { row } = screen;
-  const fields: [string, string][] = [
-    ["entity", screen.entity],
-    ["id", `#${screen.id}`],
-    ["title", row.what],
-    ["state", row.state],
-    ["children", String(rows.length)],
-  ];
+  const fields = named("node", {
+    entity: screen.entity,
+    id: `#${screen.id}`,
+    title: row.what,
+    state: row.state,
+    children: String(rows.length),
+  });
   const inner = width - BORDER;
   // The summary, its border, and the children's border: what is left is the list.
   const children = Math.max(height - fields.length - 2 * BORDER, 1);
+  const title = fill(DETAIL.title.node ?? "", { what: row.what, state: row.state });
+  const under = fill(DETAIL.children.title, { count: rows.length, tally: tally(rows) });
   return (
     <>
-      <Panel title={`${row.what} · ${row.state}`} width={width} height={fields.length + BORDER}>
-        <Fields fields={fields} width={inner} />
+      <Panel title={title} width={width} height={fields.length + BORDER}>
+        <Lines lines={fieldLines(fields, inner, wraps("node"))} />
       </Panel>
-      <Panel
-        title={`children (${rows.length}) · ${tally(rows)}`}
-        width={width}
-        height={children + BORDER}
-      >
+      <Panel title={under} width={width} height={children + BORDER}>
         {rows.length === 0 ? (
-          <Empty what="nothing under it" width={inner} />
+          <Empty what={DETAIL.children.empty} width={inner} />
         ) : (
-          <List rows={rows} columns={COLUMNS} height={children} cursor={app.cursor} width={inner} />
+          <List rows={rows} columns={DETAIL.children.columns} height={children}
+            cursor={app.cursor} width={inner} />
         )}
       </Panel>
     </>
