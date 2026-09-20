@@ -11,9 +11,15 @@ import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 
-const design = parse(
+const file = parse(
   readFileSync(fileURLToPath(new URL("../config/design.yaml", import.meta.url)), "utf8"),
 ) as Record<string, any>;
+
+/** The design as one renderer reads it: the shared half — what the screen is, whoever
+ *  draws it — with the terminal's own half laid over it. Read through the split rather
+ *  than through the compatibility names at the foot of the file, so what is declared here
+ *  stays declared once those names are gone. */
+const design = { ...file.shared, ...file.renderers.terminal } as Record<string, any>;
 
 const outline = design.outline as Record<string, any>;
 
