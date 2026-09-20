@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import type { Board } from "@wecode/core";
+import { designDocument, DesignError, type Design } from "@wecode/ui";
 
 const CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
 const DESIGN = fileURLToPath(new URL("../config/design.yaml", import.meta.url));
@@ -47,10 +49,20 @@ export const FILTERS = [
   "cooking",
 ] as const satisfies readonly (keyof Board)[];
 
-const top = (path: string): Record<string, unknown> => {
-  const raw: unknown = parse(readFileSync(path, "utf8"));
-  if (raw === null || typeof raw !== "object") throw new ViewError("views.yaml is not a mapping");
-  return raw as Record<string, unknown>;
+/** One of the two yaml files this module reads, as a mapping.
+ *
+ *  The shape check is `@wecode/ui`'s rather than this module's: the gate and the projector
+ *  both answer the question "is this a design file", and two answers to it is a file one of
+ *  them accepts and the other refuses. What is left here is which file was read, which the
+ *  loader takes so that its refusal names it — a reader looking at `design.yaml is not a
+ *  mapping` should not have to guess which of two files it was. */
+const top = (path: string, called = basename(path)): Record<string, unknown> => {
+  try {
+    return designDocument(parse(readFileSync(path, "utf8")), called);
+  } catch (err) {
+    if (err instanceof DesignError) throw new ViewError(err.message);
+    throw err;
+  }
 };
 
 const read = (name: string, v: Record<string, unknown>): View => {
@@ -116,20 +128,12 @@ export function loadOffPage(path: string = CONFIG): readonly View[] {
   );
 }
 
-/** One box of the cockpit's design, shaped as `@wecode/ui`'s `Design` — structurally, so
- *  that this module stays a reader of two yaml files and does not take a runtime
- *  dependency on the gate it feeds. test/the-gate-reads-the-design-file.test.ts hands what
- *  comes back straight to `expected` and `against`, which is what proves the two shapes
- *  are the one shape. */
-export interface DesignBox {
-  readonly name: string;
-  readonly width: number;
-  readonly height: number;
-  readonly at?: { readonly x?: number; readonly y?: number };
-  readonly key?: string;
-  readonly rows?: readonly string[];
-  readonly parts?: readonly DesignBox[];
-}
+/** One box of the cockpit's design: `@wecode/ui`'s `Design` under the name this module has
+ *  always called it. It used to be a structural copy, written out here so that this module
+ *  took no dependency on the gate it feeds — which it now does, because the loader above is
+ *  the gate's. A copy that can be the real type is a second declaration of one shape, and
+ *  the day the two disagree the gate reads a design nobody wrote. */
+export type DesignBox = Design;
 
 /** The terminal a design is a design of. */
 export interface Screen {
