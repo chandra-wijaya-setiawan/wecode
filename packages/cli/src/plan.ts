@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { matchesGlob, resolve } from "node:path";
+import { matchesGlob, relative, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { parseArgs } from "node:util";
 import {
@@ -532,6 +532,18 @@ function artefacts(test: string | null, scope: readonly string[], where: string,
   }
 }
 
+/** A gate is red at base only if these hands can turn it green: one importing a module that is not on disk and that no task under this story writes is red for another story's reason. */
+function needs(test: string | null, scope: readonly string[], where: string, say: string[]): void {
+  for (const path of (test === null ? [] : files(test)).filter((p) => /\.(test|spec)\.[cm]?[jt]sx?$/.test(p) && existsSync(resolve(process.cwd(), p)))) {
+    for (const [, spec] of readFileSync(resolve(process.cwd(), path), "utf8").matchAll(/\bfrom\s+["'](\.[^"']*)["']/g)) {
+      const base = relative(process.cwd(), resolve(process.cwd(), path, "..", spec as string)).replaceAll("\\", "/").replace(/\.[cm]?jsx?$/, "");
+      const asked = [base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}/index.ts`];
+      if (asked.some((c) => existsSync(resolve(process.cwd(), c)) || scope.some((g) => matchesGlob(c, g)))) continue;
+      say.push(`${where}: test: ${path} needs ${base}.ts, which no task under this story writes`);
+    }
+  }
+}
+
 /** The workspace's packages, as `pnpm-workspace.yaml` spells them: the globs are that file's
  *  to declare, not this module's to assume, and a tree with no workspace file has no packages
  *  and so nothing to reach past. */
@@ -608,7 +620,7 @@ function criterion(v: unknown, where: string, config: ProjectConfig | null, role
 
   // Only what this file spells: a path in `project.yaml`'s fallback is that file's to answer
   // for. A criteria has no scope of its own, so the test it names may be one its tasks write.
-  if (m["test"] !== undefined) artefacts(test, all.flatMap((t) => t.scope), where, say);
+  if (m["test"] !== undefined) { artefacts(test, all.flatMap((t) => t.scope), where, say); needs(test, all.flatMap((t) => t.scope), where, say); }
   return { statement, test, tasks: all };
 }
 
@@ -631,14 +643,7 @@ function authoringTask(statement: string, config: ProjectConfig | null, roles: R
   };
 }
 
-function task(
-  v: unknown,
-  where: string,
-  config: ProjectConfig | null,
-  roles: RoleConfig | null,
-  say: string[],
-  statement: string | null,
-): Task | null {
+function task(v: unknown, where: string, config: ProjectConfig | null, roles: RoleConfig | null, say: string[], statement: string | null): Task | null {
   const m = mapping(v, where, KEYS.task, say);
   if (m === null) return null;
   const title = required(m, "title", where, say);
@@ -646,12 +651,7 @@ function task(
   const test = optional(m["test"], `${where}: test`, say) ?? config?.test ?? null;
 
   const given = m["scope"] === undefined ? null : list(m["scope"], `${where}: scope`, say);
-  const scope =
-    given !== null
-      ? given.filter((g): g is string => typeof g === "string")
-      : config === null
-        ? null
-        : [...config.source, ...config.tests];
+  const scope = given !== null ? given.filter((g): g is string => typeof g === "string") : config === null ? null : [...config.source, ...config.tests];
 
   // A task that may change anything is not a task.
   if (scope === null || scope.length === 0) {
