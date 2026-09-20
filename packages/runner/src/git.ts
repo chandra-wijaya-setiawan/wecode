@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, realpathSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { withinCeiling } from "@wecode/core";
 // By path: the landing rules belong to core but nothing exports them from the barrel.
@@ -288,16 +288,8 @@ export class Trees {
     }
     const staged = await git(path, ["diff", "--cached", "--name-only"]);
     if (staged === "") return forwarded;
-    await git(path, [
-      "-c",
-      "user.name=wecode",
-      "-c",
-      "user.email=wecode@localhost",
-      "commit",
-      "-q",
-      "-m",
-      message,
-    ]);
+    const who = ["-c", "user.name=wecode", "-c", "user.email=wecode@localhost"];
+    await git(path, [...who, "commit", "-q", "-m", message]);
     const sha = await git(path, ["rev-parse", "HEAD"]);
     await git(this.repo, ["update-ref", `refs/heads/${branch}`, sha]);
     return sha;
@@ -376,11 +368,7 @@ export class Trees {
   /** docs/design/14. Landing — "Cleanup, at the one moment it is safe". Called where
    *  `landed_sha` is set and nowhere else: before the merge the branch is the only copy of
    *  the work. Anything dirty is left standing and named, never deleted. */
-  async cleanupLanded(
-    storySlug: string,
-    storyTreePath: string,
-    taskSlugs: readonly string[],
-  ): Promise<LandingCleanup> {
+  async cleanupLanded(storySlug: string, storyTreePath: string, taskSlugs: readonly string[]): Promise<LandingCleanup> {
     const removed: string[] = [];
     const left: { what: string; why: string }[] = [];
     await git(this.repo, ["worktree", "prune"]).catch(() => "");
@@ -418,11 +406,7 @@ export class Trees {
     return false;
   }
 
-  private async deleteBranch(
-    name: string,
-    removed: string[],
-    left: { what: string; why: string }[],
-  ): Promise<void> {
+  private async deleteBranch(name: string, removed: string[], left: { what: string; why: string }[]): Promise<void> {
     if (!(await this.has(name))) return;
     try {
       await git(this.repo, ["branch", "-D", name]);
@@ -479,7 +463,33 @@ export class Trees {
     const before = await git(here, ["rev-parse", "HEAD"]);
     await this.mergeInto(here, branch, `land ${branch}`, `land ${branch}`);
     const sha = await git(here, ["rev-parse", "HEAD"]);
-    return sha === before ? { kind: "nothing", why: "already-ancestor" } : { kind: "merged", sha };
+    if (sha === before) return { kind: "nothing", why: "already-ancestor" };
+    await this.sweepEmptied(here, before, sha);
+    return { kind: "merged", sha };
+  }
+
+  /** docs/design/14. The `@wecode/ui` → `@wecode/lens` rename moved every tracked file out of
+   *  `packages/ui` and the directory stayed: `node_modules` and `dist` live in it, git neither
+   *  tracks them nor removes them. What survives is a ghost package — no package in it, a stale
+   *  `dist` that imports still resolve into, and a tree audit counting a component renamed away.
+   *  Swept only where the merge emptied it and git holds nothing under it any more: one tracked
+   *  file left anywhere below and the directory is somebody's, ignored build output and all.
+   *  Silent: there is nothing here anybody wrote, and nothing a person has to be told to run. */
+  private async sweepEmptied(tree: string, before: string, after: string): Promise<void> {
+    // `--no-renames`: a rename is the case this exists for, and git scores it `R`, not `D`.
+    const args = ["diff", "--name-only", "--no-renames", "--diff-filter=D", before, after];
+    const deleted = await git(tree, args).catch(() => "");
+    const dirs = new Set<string>();
+    for (const file of deleted.split("\n").filter((f) => f !== "")) {
+      for (let d = dirname(file); d !== "." && d !== "/"; d = dirname(d)) dirs.add(d);
+    }
+    // Deepest first: emptying `packages/ui/src` is what makes `packages/ui` removable.
+    for (const dir of [...dirs].sort((a, b) => b.length - a.length)) {
+      if (!existsSync(join(tree, dir))) continue;
+      if ((await git(tree, ["ls-files", "--", dir]).catch(() => "kept")) !== "") continue;
+      await git(tree, ["clean", "-xfdq", "--", dir]).catch(() => "");
+      rmSync(join(tree, dir), { recursive: true, force: true });
+    }
   }
 
   /** docs/design/14. The other half of a landing made in a tree of wecode's own.
@@ -583,18 +593,8 @@ export class Trees {
    *  wedged. A tree still holding `MERGE_HEAD` is, and then the sentence has to say so. */
   private async mergeInto(tree: string, branch: string, message: string, what: string): Promise<void> {
     try {
-      await git(tree, [
-        "-c",
-        "user.name=wecode",
-        "-c",
-        "user.email=wecode@localhost",
-        "merge",
-        "--no-ff",
-        "-q",
-        "-m",
-        message,
-        branch,
-      ]);
+      const who = ["-c", "user.name=wecode", "-c", "user.email=wecode@localhost"];
+      await git(tree, [...who, "merge", "--no-ff", "-q", "-m", message, branch]);
     } catch (err) {
       const conflicted = await this.conflictedPaths(tree);
       await git(tree, ["merge", "--abort"]).catch(() => "");
