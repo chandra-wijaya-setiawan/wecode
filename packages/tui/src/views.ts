@@ -149,6 +149,15 @@ export type Holds = Readonly<Record<string, readonly string[]>>;
 const cased = (title: string, how: unknown): string =>
   how === "upper" ? title.toUpperCase() : title;
 
+/** Reading a parsed yaml document without deciding anything about it. A missing block is
+ *  an empty one and a missing word is the caller's fallback, so that a design file says
+ *  what it says and this module adds nothing to it. */
+const mapOf = (v: unknown): Record<string, unknown> =>
+  v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+const listOf = (v: unknown): readonly string[] => (Array.isArray(v) ? (v as string[]) : []);
+const str = (v: unknown, or: string): string => (typeof v === "string" ? v : or);
+const num = (v: unknown, or: number): number => (typeof v === "number" ? v : or);
+
 /** The bar the design says the dashboard answers: every key that is not withheld from it,
  *  written as the design writes an entry and joined by the gap it declares. */
 function keyBar(design: Record<string, unknown>, kind: string): string {
@@ -242,4 +251,149 @@ export function cockpitDesign(
       },
     ],
   };
+}
+
+/** One stacked region of a framed page. */
+interface Section { readonly name: string; readonly rows: readonly string[]; readonly key?: string }
+
+/** A page with a frame around it: its sections stacked from the top inside the frame, its
+ *  foot pinned to the terminal's last lines. The frame's cost is read off the file rather
+ *  than spent on every page — the cockpit's chrome is a rule and pays nothing, and
+ *  `border`, which design.yaml gives a screen that has the whole terminal for one thing,
+ *  costs the line and the column on each side it is spent for. */
+function framed(name: string, key: string | undefined, screen: Screen, chrome: unknown,
+  body: readonly Section[], foot: readonly Section[]): DesignBox {
+  const pad = chrome === "border" ? 1 : 0;
+  let y = pad;
+  const inside = body.map((s): DesignBox => ({
+    name: s.name, at: { x: pad, y: (y += s.rows.length) - s.rows.length },
+    width: screen.width - 2 * pad, height: s.rows.length,
+    ...(s.key === undefined ? {} : { key: s.key }), rows: s.rows,
+  }));
+  const first = screen.height - foot.length;
+  const feet = foot.map((s, i): DesignBox => ({
+    name: s.name, at: { x: 0, y: first + i }, width: screen.width, height: 1, rows: s.rows,
+  }));
+  return {
+    name, ...(key === undefined ? {} : { key }),
+    width: screen.width, height: screen.height, parts: [...inside, ...feet],
+  };
+}
+
+/** One line of a detail page's foot: the keys one level names, written as the footer writes
+ *  an entry and joined by the gap it declares. What a key does is never restated here —
+ *  design.yaml says `keys_from: key_bar`, so the word beside a letter is the bar's word and
+ *  there is one copy of the vocabulary; a key the footer omits is dropped, which is how the
+ *  page that cannot fold declines `+/-` without a second list of what it does answer. */
+function foot(design: Record<string, unknown>, footer: Record<string, unknown>,
+  level: Record<string, unknown>): string {
+  const bar = mapOf(design["key_bar"])["keys"];
+  const keys = Array.isArray(bar) ? (bar as Record<string, unknown>[]) : [];
+  const does = new Map(keys.map((k) => [String(k["key"]), String(k["does"])]));
+  const entry = str(footer["entry"], "{key} {does}");
+  const omits = listOf(footer["omits"]);
+  return listOf(level["keys"])
+    .filter((key) => !omits.includes(key))
+    .map((key) => entry.replace("{key}", key).replace("{does}", does.get(key) ?? key))
+    .join(str(footer["gap"], "  "));
+}
+
+/** A record's own page as design.yaml declares it, for the record named. Same bargain as
+ *  the cockpit's: every name, line and key comes out of the file, and the only thing a
+ *  caller supplies is what a section is holding. Drawn for no record in particular it is
+ *  the mockup — the block's fields at the empty value design.yaml declares, the children
+ *  and the proof saying what they say when there are none — which is the picture that has
+ *  to be signed before the screen is built. */
+export function detailDesign(record: string, screen: Screen, holds: Holds = {}, paths: Paths = {}): DesignBox {
+  const design = top(paths.design ?? DESIGN);
+  const detail = mapOf(design["detail"]);
+  const records = listOf(detail["screens"]);
+  if (!records.includes(record)) {
+    throw new ViewError(`detail.screens does not name ${record} — it names ${records.join(", ") || "none"}`);
+  }
+  const block = mapOf(detail["block"]);
+  const entry = str(block["entry"], "{name}  {value}");
+  const fields = listOf(mapOf(detail["fields"])[record]);
+  /** `gutter: longest_name` — the file states the rule, never the number. */
+  const gutter = Math.max(0, ...fields.map((f) => f.length));
+  const rows = fields.map((f) =>
+    entry.replace("{name}", block["align"] === "left" ? f.padEnd(gutter) : f.padStart(gutter))
+      .replace("{value}", (holds[f] ?? [])[0] ?? str(block["empty"], "-")));
+
+  /** The sections that are only on the record they are declared `of`: a node is a branch
+   *  and carries its children and their proof, an assignment is a leaf and carries
+   *  neither. The file says which; this decides nothing. */
+  const under = (of: string): readonly Section[] => {
+    const s = mapOf(detail[of]);
+    return s["of"] !== record ? [] : [{ name: str(s["title"], of), rows: holds[of] ?? [str(s["empty"], "")] }];
+  };
+  const footer = mapOf(detail["footer"]);
+  if (footer["sits"] !== "last") throw new ViewError("detail.footer.sits must be last");
+  const levels = Array.isArray(footer["levels"]) ? (footer["levels"] as Record<string, unknown>[]) : [];
+  const feet = listOf(footer["order"]).map((name): Section => {
+    const level = levels.find((l) => l["level"] === name);
+    if (level === undefined) throw new ViewError(`detail.footer.order names ${name}, which no level declares`);
+    return { name, rows: [foot(design, footer, level)] };
+  });
+  if (feet.length !== num(footer["lines"], feet.length)) {
+    throw new ViewError(`detail.footer.lines says ${String(footer["lines"])}, and ${feet.length} are ordered`);
+  }
+
+  const body = [{ name: "block", rows }, ...under("children"), ...under("proof")];
+  return framed(str(mapOf(detail["title"])[record], record), undefined, screen, detail["chrome"], body, feet);
+}
+
+/** Where a design of either screen may be read from, when not from the config. */
+interface Paths { readonly views?: string; readonly design?: string }
+
+/** The tree's own page, as the two files declare it between them. views.yaml says what it
+ *  is called and what letter opens it; design.yaml says it is bordered, which rungs it
+ *  draws, how a row is written and what depth costs. A mockup row is one rung written
+ *  through the declared entry at the declared indent, and the holes nobody can fill
+ *  without a workspace are left as the file writes them — which is what a wireframe of a
+ *  tree is: the shape, not somebody's rows. */
+export function outlineDesign(screen: Screen, holds: Holds = {}, paths: Paths = {}): DesignBox {
+  const doc = top(paths.views ?? CONFIG);
+  const design = top(paths.design ?? DESIGN);
+  const outline = mapOf(design["outline"]);
+  const box = mapOf(doc["outline"]);
+  if (typeof box["title"] !== "string") throw new ViewError("views.yaml gives the outline no title");
+  const entry = str(mapOf(outline["row"])["entry"], "{marker} {label}");
+  const marker = mapOf(outline["marker"]);
+  const levels = listOf(mapOf(outline["levels"])["shows"]);
+  if (levels.length === 0) throw new ViewError("outline.levels.shows must name the rungs it draws");
+  const indent = num(mapOf(outline["depth"])["indent"], 2);
+  const rows = holds["outline"] ?? levels.map((level, depth) =>
+    " ".repeat(depth * indent) +
+    entry.replace(/\{(\w+)\}/g, (_, hole: string) =>
+      hole === "marker" ? str(marker[depth === levels.length - 1 ? "leaf" : "open"], " ")
+        : hole === "kind" ? level : `{${hole}}`));
+  if (mapOf(design["bars"])["key_bar"] !== "last") throw new ViewError("bars.key_bar must be last");
+  return framed(
+    box["title"], typeof box["key"] === "string" ? box["key"] : undefined,
+    screen, outline["chrome"], [{ name: "tree", rows }],
+    [{ name: "Key bar", rows: [keyBar(design, "outline")] }],
+  );
+}
+
+/** Every screen the two files declare, in the order a reader meets them: the board, the
+ *  detail page, the tree, and then each record the detail page is drawn for by name. Both
+ *  ways of naming a record page work, and neither list is written here — `detail.screens`
+ *  is the file's. */
+export function screenNames(paths: Paths = {}): readonly string[] {
+  return ["cockpit", "detail", "outline", ...listOf(mapOf(top(paths.design ?? DESIGN)["detail"])["screens"])];
+}
+
+/** The translation, by the name of the screen: what these two config files say the screen
+ *  is, as a tree `@wecode/ui` can read. This is the one door — the gate holds the drawn
+ *  screen to it and the projector draws a picture of it, and neither has a translation of
+ *  its own, because a second reading of views.yaml is a mockup that can disagree with the
+ *  gate: a picture signed off on a screen nobody is held to. */
+export function screenDesign(name: string, screen: Screen, holds: Holds = {}, paths: Paths = {}): DesignBox {
+  if (name === "cockpit") return cockpitDesign(screen, holds, paths);
+  if (name === "outline") return outlineDesign(screen, holds, paths);
+  const records = listOf(mapOf(top(paths.design ?? DESIGN)["detail"])["screens"]);
+  const record = name === "detail" ? records[0] : name;
+  if (record !== undefined && records.includes(record)) return detailDesign(record, screen, holds, paths);
+  throw new ViewError(`no such screen ${name} — the design declares ${screenNames(paths).join(", ")}`);
 }
