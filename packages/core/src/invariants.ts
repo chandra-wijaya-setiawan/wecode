@@ -8,6 +8,7 @@
  *  and gets back the entities that violate each sentence. Nothing is healed, nothing is
  *  proposed and nothing is written; that is the next slice. */
 
+import { landedElsewhere, landedElsewhereNote } from "./land.js";
 import { SCHEMA_VERSION } from "./store.js";
 
 /** The entities a check can name. The chain project → … → task_test of docs/design/04,
@@ -35,6 +36,8 @@ export interface RecordNode {
   readonly parent_id: number | null;
   /** story only — the commit the base became when it landed, null until it lands. */
   readonly landed_sha?: string | null;
+  /** story only — `<repo>` or `<repo>@<sha>` when the work landed in another repository. */
+  readonly landed_elsewhere?: string | null;
   /** acceptance_test only — the base it was last seen to fail at, null if nobody watched. */
   readonly red_at_base_sha?: string | null;
   /** task only — the role that would perform it. */
@@ -136,7 +139,7 @@ export const NEVER_REACHED_THE_BASE = "delivered with no landed_sha — it never
  *  the rest with `keepUnlanded`; a caller that cannot ask is reading a worst case. */
 export function deliveredStoryHasLanded(s: Snapshot): readonly Violation[] {
   return of(s, "story")
-    .filter((n) => n.state === "delivered" && (n.landed_sha ?? null) === null)
+    .filter((n) => n.state === "delivered" && (n.landed_sha ?? null) === null && !landedElsewhere(n.landed_elsewhere))
     .map((n) => violation("delivered_story_has_landed", n, NEVER_REACHED_THE_BASE));
 }
 
@@ -181,7 +184,7 @@ export type Landing =
  *  offering it would land half a story. */
 export function storiesToLand(s: Snapshot): readonly { readonly story: RecordNode; readonly branch: string }[] {
   return of(s, "story")
-    .filter((n) => n.state === "delivered" && (n.landed_sha ?? null) === null)
+    .filter((n) => n.state === "delivered" && (n.landed_sha ?? null) === null && !landedElsewhere(n.landed_elsewhere))
     .map((n) => ({ story: n, branch: storyBranch(n.slug) }));
 }
 
@@ -197,7 +200,7 @@ export const ALREADY_IN_THE_BASE = "already in the base";
 export function landingSkipped(n: RecordNode): string | null {
   const sha = n.landed_sha ?? null;
   if (n.state !== "delivered") return `${n.state}, and only a delivered story lands`;
-  return sha === null ? null : `${ALREADY_IN_THE_BASE} as ${sha.slice(0, 12)}`;
+  return sha !== null ? `${ALREADY_IN_THE_BASE} as ${sha.slice(0, 12)}` : landedElsewhereNote(n.landed_elsewhere);
 }
 
 /** What to record on the story once the merge has been attempted.
@@ -402,15 +405,13 @@ export const A_RESTART_IS_OWED = "a restart is owed";
 export function runnerBuildIsCurrent(r: RunnerBuild | null): readonly Violation[] {
   if (r === null || r.behind === undefined || r.behind <= 0) return [];
   const built = r.buildSha === undefined ? "an unnamed commit" : r.buildSha.slice(0, 12);
-  return [
-    {
-      invariant: "runner_build_is_current",
-      entity: "runner",
-      id: null,
-      slug: r.holder,
-      detail: `built from ${built}, ${r.behind} ${r.behind === 1 ? "commit" : "commits"} behind the base — ${A_RESTART_IS_OWED}`,
-    },
-  ];
+  return [{
+    invariant: "runner_build_is_current",
+    entity: "runner",
+    id: null,
+    slug: r.holder,
+    detail: `built from ${built}, ${r.behind} ${r.behind === 1 ? "commit" : "commits"} behind the base — ${A_RESTART_IS_OWED}`,
+  }];
 }
 
 /** One verdict and what it was taken against. `provenance_sha` is the stamp the examiner
@@ -448,8 +449,7 @@ export const IT_PROVES_A_TREE_NOBODY_HAS = "it proves a tree nobody has now";
 export function verdictProvenanceIsCurrent(vs: readonly Verdict[]): readonly Violation[] {
   return vs
     .filter(
-      (v) =>
-        v.state === "passed" &&
+      (v) => v.state === "passed" &&
         typeof v.provenance_sha === "string" &&
         typeof v.tree_sha === "string" &&
         v.provenance_sha !== v.tree_sha,
