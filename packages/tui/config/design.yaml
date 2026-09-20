@@ -122,6 +122,127 @@ renderers:
     sections:
       chrome: rule
       drawn_with: border
+    # The look. What the terminal half spends on characters and columns, a browser spends on
+    # colour, type and space, and those are decisions about the surface exactly as `chrome:
+    # rule` is. They used to be five template strings, one per page, each with its own
+    # `#888` in it: five answers to what "faint" is, which agree until one page is restyled.
+    #
+    # So the look is here, once, and `shell.ts` is the only thing that turns it into a
+    # stylesheet. The palette and the type are named, every rule spends them by name, and a
+    # colour is changed in one row rather than grepped for across the pages.
+    #
+    # `roots` is what keeps one page's rules off another's markup: the whole sheet is in
+    # every document, so each page's block is scoped to a shape only that page draws, and
+    # `the-shell-is-the-signed-design.test.ts` holds every selector to its page's roots.
+    look:
+      # A browser is told which way round the surface is so its own chrome agrees with it.
+      scheme: dark
+      # The colours, by what they are for. Nothing below spells one out.
+      palette:
+        page: "#111"
+        raised: "#1a1a1a"
+        well: "#222"
+        rule: "#333"
+        edge: "#444"
+        off: "#555"
+        dim: "#666"
+        faint: "#888"
+        ink: "#ddd"
+        mark: "#6cf"
+      # Monospace, because a column of ids only lines up in one kind of type — the same
+      # reason the cockpit it mirrors is read in a terminal.
+      type:
+        family: "ui-monospace, SFMono-Regular, Menlo, monospace"
+        size: "14px"
+        leading: "1.5"
+        tracking: ".08em"
+      # The shape each page draws that no other page does. A page's rules may name nothing
+      # outside these.
+      roots:
+        board: ["section.board"]
+        decisions: ["article"]
+        tree: ["ul.tree"]
+        tasks: ["div.inbox", "ul.inbox", "section.detail"]
+        projects: ["main > h2", "ul.strip", "ul.cards"]
+      # The document itself — its margins, its type, its banner, and the one line every page
+      # says when it has nothing to show.
+      frame:
+        body: "margin: 0; padding: 1.5rem; background: var(--page); color: var(--ink); font: var(--size)/var(--leading) var(--family)"
+        main: "display: grid; gap: 1.25rem; max-width: 60rem; margin: 0 auto"
+        h1: "font-size: 1rem; font-weight: 600; letter-spacing: var(--tracking); text-transform: uppercase; margin: 0 0 .5rem; color: var(--faint)"
+        "p.empty": "margin: 0; color: var(--dim)"
+      # One block per page, in the order the sheet writes them.
+      pages:
+        board:
+          "section.board": "border-top: 1px solid var(--rule); padding-top: .5rem"
+          "section.board h2": "font-size: 1rem; font-weight: 600; margin: 0 0 .4rem"
+          "section.board h2 .mark": "display: inline-block; width: 1.25rem; color: var(--mark)"
+          "section.board h2 kbd": "float: right; color: var(--faint); font: inherit"
+          "section.board ul": "list-style: none; margin: 0; padding: 0"
+          "section.board li": "display: flex; gap: .75rem; padding: .1rem 0"
+          "section.board li .code": "flex: 0 0 9rem; color: var(--faint)"
+          "section.board li .state": "flex: 0 0 9rem; color: var(--mark)"
+          "section.board li .what": "flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere"
+        decisions:
+          "article": "border: 1px solid var(--rule); border-radius: 4px; padding: .75rem 1rem"
+          "article h2": "font-size: 1rem; font-weight: 600; margin: 0 0 .5rem; overflow-wrap: anywhere; white-space: pre-wrap"
+          "article h2 .id": "color: var(--faint); margin-right: .6rem"
+          "article dl": "display: grid; grid-template-columns: 6rem 1fr; gap: .2rem .75rem; margin: 0"
+          "article dt": "color: var(--faint)"
+          "article dd": "margin: 0; min-width: 0; overflow-wrap: anywhere"
+          "article dd ul": "list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .4rem"
+          "article dd li": "border: 1px solid var(--edge); border-radius: 3px; padding: 0 .4rem; color: var(--mark)"
+          "article dd.open": "color: var(--dim)"
+          "article p.how": "margin: .6rem 0 0; color: var(--dim)"
+        tree:
+          "ul.tree": "list-style: none; margin: 0; padding: 0"
+          "ul.tree ul": "list-style: none; margin: 0; padding-left: 1.25rem; border-left: 1px solid var(--rule)"
+          "ul.tree li": "padding: .1rem 0; min-width: 0; overflow-wrap: anywhere"
+          "ul.tree li .label": "color: var(--ink)"
+          "ul.tree li .id, ul.tree li .kind, ul.tree li .rollup": "color: var(--faint)"
+          "ul.tree li .state": "color: var(--mark)"
+        tasks:
+          "div.inbox": "display: grid; grid-template-columns: minmax(0, 18rem) minmax(0, 1fr); gap: 1.25rem; align-items: start"
+          # One column when there is not room for two: a list and a detail side by side on a
+          # phone is two columns of nothing.
+          "@media (max-width: 48rem)":
+            "div.inbox": "grid-template-columns: minmax(0, 1fr)"
+          "ul.inbox": "list-style: none; margin: 0; padding: 0; max-height: 70vh; overflow-y: auto"
+          "ul.inbox li": "min-width: 0"
+          "ul.inbox a": "display: block; padding: .2rem .4rem; color: var(--ink); text-decoration: none; border-left: 2px solid transparent; overflow-wrap: anywhere"
+          "ul.inbox a:hover": "background: var(--raised)"
+          "ul.inbox li.picked a": "border-left-color: var(--mark); background: var(--raised)"
+          "ul.inbox .id": "color: var(--faint); margin-right: .5rem"
+          "ul.inbox .state": "color: var(--mark); margin-left: .5rem"
+          "section.detail": "border: 1px solid var(--rule); border-radius: 4px; padding: .75rem 1rem; min-width: 0"
+          "section.detail h2": "font-size: 1rem; font-weight: 600; margin: 0 0 .5rem; overflow-wrap: anywhere"
+          "section.detail h2 .id": "color: var(--faint); margin-right: .6rem"
+          "section.detail dl": "display: grid; grid-template-columns: 6rem 1fr; gap: .2rem .75rem; margin: 0"
+          "section.detail dt": "color: var(--faint)"
+          "section.detail dd": "margin: 0; min-width: 0; overflow-wrap: anywhere"
+          "section.detail dd.none": "color: var(--dim)"
+          "section.detail dd ul": "list-style: none; margin: 0; padding: 0"
+          "section.detail dd .state": "color: var(--mark)"
+        projects:
+          # The page's own heading is an h2 directly in the document's one element: the h1 is
+          # the shell's banner, and this page is the long form of one box of the board.
+          "main > h2": "font-size: .9rem; font-weight: 600; letter-spacing: var(--tracking); text-transform: uppercase; margin: 0; color: var(--faint)"
+          "ul.strip": "list-style: none; margin: 0; display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding: .6rem 0"
+          "ul.strip li": "display: flex; gap: .4rem; align-items: baseline"
+          "ul.strip .mark": "color: var(--mark)"
+          "ul.strip .title": "color: var(--faint)"
+          "ul.strip .count": "color: var(--ink)"
+          "ul.strip li.none .count, ul.strip li.none .title": "color: var(--off)"
+          "ul.cards": "list-style: none; margin: 0; padding: 0; display: grid; gap: .75rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr))"
+          "ul.cards li": "border: 1px solid var(--rule); border-radius: .25rem; padding: .6rem .75rem; display: grid; gap: .3rem; min-width: 0"
+          "ul.cards .name": "font-weight: 600; overflow-wrap: anywhere"
+          "ul.cards .code": "color: var(--dim)"
+          "ul.cards .state": "color: var(--mark)"
+          "ul.cards .stories": "color: var(--faint)"
+          "ul.cards .meter": "height: .3rem; background: var(--well); border-radius: .15rem; overflow: hidden"
+          "ul.cards .meter span": "display: block; height: 100%; background: var(--mark)"
+          "ul.cards .pulse": "color: var(--faint); display: flex; gap: .5rem; min-width: 0"
+          "ul.cards .pulse .spark": "color: var(--mark); letter-spacing: .05em"
     # There is no bar. Every key the cockpit's bar names is a verb or a move, and the web
     # surface offers neither: it is read, and what changes wecode is the cli's.
     bars: none
