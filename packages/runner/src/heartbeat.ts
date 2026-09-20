@@ -58,3 +58,46 @@ export function startHeartbeat(port: HeartbeatPort): Heartbeat {
 
   return { beat, stop, running: () => alive };
 }
+
+/** The same argument one level down, about the work rather than about the process.
+ *
+ *  An assignment's `last_seen` is the operator's only evidence that an attempt is working
+ *  rather than wedged, and it is written where the foreman observes — between phases. An
+ *  attempt that spends twenty minutes inside one phase therefore reads as twenty minutes
+ *  silent, and the board cannot tell it from an agent that died. So the work gets the same
+ *  treatment as the lease: `live` answers the assignments whose processes are still there,
+ *  and every one of them is marked seen on the clock, whatever phase it is in. */
+export interface WorkHeartbeatPort {
+  readonly everyMs: number;
+  /** The assignments still believed to be working, asked afresh each beat: one that ended
+   *  between beats must not go on being claimed alive. */
+  readonly live: () => readonly number[];
+  readonly seen: (id: number, at: string) => void;
+  /** The clock the timestamps are written from. Injected so a test can fake it. */
+  readonly now?: () => string;
+  /** One assignment that could not be written. Told, not thrown: a row that fails is a
+   *  fault for the doctor to name, and never a reason to stop claiming life for the
+   *  attempts beside it — or to take the process down from inside a timer. */
+  readonly onError?: (id: number, err: unknown) => void;
+  readonly signal?: AbortSignal;
+}
+
+/** Start marking live work seen. Every `everyMs`, regardless of which phase it is in. */
+export function startWorkHeartbeat(port: WorkHeartbeatPort): Heartbeat {
+  const at = port.now ?? ((): string => new Date().toISOString());
+  return startHeartbeat({
+    everyMs: port.everyMs,
+    ...(port.signal === undefined ? {} : { signal: port.signal }),
+    renew: () => {
+      for (const id of port.live()) {
+        try {
+          port.seen(id, at());
+        } catch (err) {
+          port.onError?.(id, err);
+        }
+      }
+      // There is no lease to lose here: the work stops being beaten by leaving `live`.
+      return true;
+    },
+  });
+}
