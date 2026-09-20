@@ -326,10 +326,10 @@ describe("the red-at-base phase is a module of its own", () => {
     expect(left).not.toMatch(/\brunAtBase\b/);
     expect(left).not.toContain("--detach");
     expect(left).not.toContain(`"reset"`);
-    // `isAncestor` asks `merge-base --is-ancestor` for a different phase and stays put: the
-    // verb is shared, the helper is not.
-    expect(left.match(/"merge-base"/g)).toHaveLength(1);
-    expect(left).toContain(`["merge-base", "--is-ancestor", base, branch]`);
+    // `contains` asks `merge-base --is-ancestor` for a different phase, and has since left
+    // for `tick/refresh.ts`: the verb is shared, so neither helper took the other along.
+    expect(left).not.toContain(`["merge-base", a, b]`);
+    expect(code("tick/refresh.ts")).toContain(`["merge-base", "--is-ancestor", base, branch]`);
   });
 
   it("is called from the daemon where the daemon called it", () => {
