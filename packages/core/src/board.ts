@@ -158,6 +158,9 @@ export const hasTable = (db: DatabaseSync, name: string): boolean =>
  *  the four copies of the same three phase names that four SQL strings held. */
 const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
 
+/** A test nobody is waiting on any more — what `every_task_test_settled` reads. */
+const SETTLED: readonly string[] = ["passed", "dropped"];
+
 /** SQLite's `julianday` reads a bare timestamp as UTC where `Date.parse` reads it as local
  *  time. The record writes ISO-8601 with a Z, but a hand-edited row may not, so the Z is
  *  supplied rather than assumed. */
@@ -483,6 +486,21 @@ function snapshot(
       .map((a) => a.objective_id),
   );
 
+  /** Ready, but only until the next tick reads it: an attempt has come back succeeded and
+   *  every task_test under it is settled, which is exactly what the automatic `finish`
+   *  takes. The `ready` is a state the record is passing through, not work to offer — the
+   *  queue was showing such a task pass after pass as though nobody had started it.
+   *
+   *  Narrower than "has a succeeded assignment", deliberately. An attempt can come back
+   *  having left a test red, and that task really is the allocator's to dispatch again; a
+   *  broader set would take it off the board while the runner went on working it. */
+  const settling = new Set(
+    assignmentRows
+      .filter((a) => a.objective_type === "task" && a.phase === "succeeded")
+      .map((a) => a.objective_id)
+      .filter((id) => taskTestRows.every((tt) => tt.parent_id !== id || SETTLED.includes(tt.state))),
+  );
+
   /** `coalesce(t.title, a.objective_type || ' #' || a.objective_id)` — the LEFT JOIN only
    *  reached a task when the objective was one. */
   const objective = (a: AssignmentRow): string =>
@@ -579,7 +597,7 @@ function snapshot(
       ...taskRows.flatMap((t) => {
         const f = refusalOf.get(t.id);
         if (t.state !== "ready" || f === undefined || f.passes < 3) return [];
-        if (!only(walk.ofTask(t.id)) || attempted.has(t.id)) return [];
+        if (!only(walk.ofTask(t.id)) || attempted.has(t.id) || settling.has(t.id)) return [];
         return [
           cook(f.since, {
             id: t.id,
@@ -628,14 +646,15 @@ function snapshot(
       }))
       .sort(byId),
     // ready, and nothing open is attempting it: the queue is what waits on a slot. The
-    // same condition `readyCandidates` dispatches on and nothing more — a second opinion
-    // here would be a task the allocator takes and the board never shows. The detail is
-    // why it is not running: the last pass's refusal, or its role.
+    // condition `readyCandidates` dispatches on, less `settling` — the one case where the
+    // allocator would take a task no person should be shown as unstarted, and the only
+    // second opinion this box is allowed. The detail is why it is not running: the last
+    // pass's refusal, or its role.
     //
     // Not `cook`ed: waiting for a slot is not being stuck — see MACHINE_SIDE. If it has
     // also stopped moving, `stale` says so and the fold has it from there.
     queued: taskRows
-      .filter((t) => t.state === "ready" && placed(walk.ofTask(t.id)) && !attempted.has(t.id))
+      .filter((t) => t.state === "ready" && placed(walk.ofTask(t.id)) && !attempted.has(t.id) && !settling.has(t.id))
       .map((t) => ({
         id: t.id,
         what: t.title,
@@ -750,16 +769,8 @@ export function recordRefusal(db: DatabaseSync, why: string, taskId: number): vo
     const q = queries(db);
     const held = q.selectFrom(refusals).select(["why", "since", "passes"]).where("task_id", "=", taskId).get();
     const same = held !== null && held.why === why ? held : null;
-    const row: RefusalRow = {
-      task_id: taskId,
-      why,
-      at,
-      since: same === null ? at : same.since,
-      passes: same === null ? 1 : same.passes + 1,
-    };
-    q.insertInto(refusals, row)
-      .onConflict(["task_id"], { why: row.why, at: row.at, since: row.since, passes: row.passes })
-      .run();
+    const row: RefusalRow = { task_id: taskId, why, at, since: same === null ? at : same.since, passes: same === null ? 1 : same.passes + 1 };
+    q.insertInto(refusals, row).onConflict(["task_id"], { why: row.why, at: row.at, since: row.since, passes: row.passes }).run();
   });
 }
 
@@ -786,10 +797,7 @@ const spend = (raw: string | null): Spend => {
     v = null;
   }
   if (v === null || typeof v !== "object") return NOTHING;
-  return {
-    tokens: typeof v.tokens === "number" ? v.tokens : 0,
-    seconds: typeof v.seconds === "number" ? v.seconds : 0,
-  };
+  return { tokens: typeof v.tokens === "number" ? v.tokens : 0, seconds: typeof v.seconds === "number" ? v.seconds : 0 };
 };
 
 /** What the record says about how one assignment is going: the half a list of four columns
@@ -811,11 +819,7 @@ export interface AssignmentFacts {
   readonly open: boolean;
 }
 
-export function assignmentFacts(
-  db: DatabaseSync,
-  id: number,
-  asOf: number = Date.now(),
-): AssignmentFacts | null {
+export function assignmentFacts(db: DatabaseSync, id: number, asOf: number = Date.now()): AssignmentFacts | null {
   const a = queries(db).selectFrom(assignments).where("id", "=", id).get();
   if (a === null) return null;
   const since = a.last_seen === null ? NaN : instant(a.last_seen);
@@ -832,9 +836,5 @@ export function assignmentFacts(
 /** How many assignments hold a slot. `waiting` counts: waiting on a person is exactly the
  *  resource the attention budget exists to bound. */
 export function openAssignments(db: DatabaseSync): number {
-  return queries(db)
-    .selectFrom(assignments)
-    .select(["phase"])
-    .all()
-    .filter((a) => OPEN_PHASES.includes(a.phase)).length;
+  return queries(db).selectFrom(assignments).select(["phase"]).all().filter((a) => OPEN_PHASES.includes(a.phase)).length;
 }
