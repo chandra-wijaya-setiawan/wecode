@@ -34,19 +34,8 @@ export interface View {
  *  page is seven boxes and views.yaml decides which seven. Cutting a box, or putting one
  *  back, is an edit to that file and to nothing here. */
 export const FILTERS = [
-  "projects",
-  "running",
-  "needs_human",
-  "stale",
-  "queued",
-  "failed",
-  "dropped",
-  "unproven",
-  "open",
-  "planned",
-  "delivered",
-  "unmergeable",
-  "cooking",
+  "projects", "running", "needs_human", "stale", "queued", "failed", "dropped",
+  "unproven", "open", "planned", "delivered", "unmergeable", "cooking",
 ] as const satisfies readonly (keyof Board)[];
 
 /** One of the two yaml files this module reads, as a mapping.
@@ -129,10 +118,9 @@ export function loadOffPage(path: string = CONFIG): readonly View[] {
 }
 
 /** One box of the cockpit's design: `@wecode/ui`'s `Design` under the name this module has
- *  always called it. It used to be a structural copy, written out here so that this module
- *  took no dependency on the gate it feeds — which it now does, because the loader above is
- *  the gate's. A copy that can be the real type is a second declaration of one shape, and
- *  the day the two disagree the gate reads a design nobody wrote. */
+ *  always called it. It was once a structural copy, kept so this module took no dependency
+ *  on the gate it feeds — which it now does, because the loader above is the gate's. A copy
+ *  that can be the real type is one shape declared twice. */
 export type DesignBox = Design;
 
 /** The terminal a design is a design of. */
@@ -158,10 +146,23 @@ const listOf = (v: unknown): readonly string[] => (Array.isArray(v) ? (v as stri
 const str = (v: unknown, or: string): string => (typeof v === "string" ? v : or);
 const num = (v: unknown, or: number): number => (typeof v === "number" ? v : or);
 
+/** Which renderer's half of design.yaml this module is translating for. The tree it builds
+ *  is read by the ink gate and by the SVG projector, and the file states separately what
+ *  each of them draws — so the one that a rule, a fill glyph and a last-line bar are true
+ *  of has to be named rather than assumed. */
+const RENDERER = "terminal";
+
+/** One block of the design, from whichever half of the file declares it: a screen's own
+ *  content is under `shared` and is the same for every renderer, and what only one
+ *  renderer draws is under that renderer. A name in neither is an empty block, which is
+ *  how every reader below keeps its own fallback. */
+const blockOf = (design: Record<string, unknown>, name: string): Record<string, unknown> =>
+  mapOf(mapOf(design["shared"])[name] ?? mapOf(mapOf(design["renderers"])[RENDERER])[name]);
+
 /** The bar the design says the dashboard answers: every key that is not withheld from it,
  *  written as the design writes an entry and joined by the gap it declares. */
 function keyBar(design: Record<string, unknown>, kind: string): string {
-  const bar = (design["key_bar"] ?? {}) as Record<string, unknown>;
+  const bar = blockOf(design, "key_bar");
   const keys = Array.isArray(bar["keys"]) ? (bar["keys"] as Record<string, unknown>[]) : [];
   const entry = typeof bar["entry"] === "string" ? bar["entry"] : "{key} {does}";
   const gap = typeof bar["gap"] === "string" ? bar["gap"] : "  ";
@@ -194,9 +195,9 @@ export function cockpitDesign(
 ): DesignBox {
   const doc = top(paths.views ?? CONFIG);
   const design = top(paths.design ?? DESIGN);
-  const head = (design["head"] ?? {}) as Record<string, unknown>;
-  const page = (design["page"] ?? {}) as Record<string, unknown>;
-  const board = (design["dashboard"] ?? {}) as Record<string, unknown>;
+  const head = blockOf(design, "head");
+  const page = blockOf(design, "page");
+  const board = blockOf(design, "dashboard");
   const chrome = typeof board["chrome_lines_per_section"] === "number"
     ? board["chrome_lines_per_section"]
     : 1;
@@ -233,7 +234,7 @@ export function cockpitDesign(
     };
   });
 
-  const bars = (design["bars"] ?? {}) as Record<string, unknown>;
+  const bars = blockOf(design, "bars");
   if (bars["key_bar"] !== "last") throw new ViewError("bars.key_bar must be last");
 
   return {
@@ -287,7 +288,7 @@ function framed(name: string, key: string | undefined, screen: Screen, chrome: u
  *  page that cannot fold declines `+/-` without a second list of what it does answer. */
 function foot(design: Record<string, unknown>, footer: Record<string, unknown>,
   level: Record<string, unknown>): string {
-  const bar = mapOf(design["key_bar"])["keys"];
+  const bar = blockOf(design, "key_bar")["keys"];
   const keys = Array.isArray(bar) ? (bar as Record<string, unknown>[]) : [];
   const does = new Map(keys.map((k) => [String(k["key"]), String(k["does"])]));
   const entry = str(footer["entry"], "{key} {does}");
@@ -306,7 +307,7 @@ function foot(design: Record<string, unknown>, footer: Record<string, unknown>,
  *  to be signed before the screen is built. */
 export function detailDesign(record: string, screen: Screen, holds: Holds = {}, paths: Paths = {}): DesignBox {
   const design = top(paths.design ?? DESIGN);
-  const detail = mapOf(design["detail"]);
+  const detail = blockOf(design, "detail");
   const records = listOf(detail["screens"]);
   if (!records.includes(record)) {
     throw new ViewError(`detail.screens does not name ${record} — it names ${records.join(", ") || "none"}`);
@@ -355,7 +356,7 @@ interface Paths { readonly views?: string; readonly design?: string }
 export function outlineDesign(screen: Screen, holds: Holds = {}, paths: Paths = {}): DesignBox {
   const doc = top(paths.views ?? CONFIG);
   const design = top(paths.design ?? DESIGN);
-  const outline = mapOf(design["outline"]);
+  const outline = blockOf(design, "outline");
   const box = mapOf(doc["outline"]);
   if (typeof box["title"] !== "string") throw new ViewError("views.yaml gives the outline no title");
   const entry = str(mapOf(outline["row"])["entry"], "{marker} {label}");
@@ -368,7 +369,7 @@ export function outlineDesign(screen: Screen, holds: Holds = {}, paths: Paths = 
     entry.replace(/\{(\w+)\}/g, (_, hole: string) =>
       hole === "marker" ? str(marker[depth === levels.length - 1 ? "leaf" : "open"], " ")
         : hole === "kind" ? level : `{${hole}}`));
-  if (mapOf(design["bars"])["key_bar"] !== "last") throw new ViewError("bars.key_bar must be last");
+  if (blockOf(design, "bars")["key_bar"] !== "last") throw new ViewError("bars.key_bar must be last");
   return framed(
     box["title"], typeof box["key"] === "string" ? box["key"] : undefined,
     screen, outline["chrome"], [{ name: "tree", rows }],
@@ -381,7 +382,7 @@ export function outlineDesign(screen: Screen, holds: Holds = {}, paths: Paths = 
  *  ways of naming a record page work, and neither list is written here — `detail.screens`
  *  is the file's. */
 export function screenNames(paths: Paths = {}): readonly string[] {
-  return ["cockpit", "detail", "outline", ...listOf(mapOf(top(paths.design ?? DESIGN)["detail"])["screens"])];
+  return ["cockpit", "detail", "outline", ...listOf(blockOf(top(paths.design ?? DESIGN), "detail")["screens"])];
 }
 
 /** The translation, by the name of the screen: what these two config files say the screen
@@ -392,7 +393,7 @@ export function screenNames(paths: Paths = {}): readonly string[] {
 export function screenDesign(name: string, screen: Screen, holds: Holds = {}, paths: Paths = {}): DesignBox {
   if (name === "cockpit") return cockpitDesign(screen, holds, paths);
   if (name === "outline") return outlineDesign(screen, holds, paths);
-  const records = listOf(mapOf(top(paths.design ?? DESIGN)["detail"])["screens"]);
+  const records = listOf(blockOf(top(paths.design ?? DESIGN), "detail")["screens"]);
   const record = name === "detail" ? records[0] : name;
   if (record !== undefined && records.includes(record)) return detailDesign(record, screen, holds, paths);
   throw new ViewError(`no such screen ${name} — the design declares ${screenNames(paths).join(", ")}`);
