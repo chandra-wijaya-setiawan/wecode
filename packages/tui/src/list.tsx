@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Box, Text } from "ink";
+import type { ReactNode } from "react";
 import { parse } from "yaml";
 import { STATEFUL } from "@wecode/core";
 
@@ -96,11 +97,9 @@ export function loadCooking(path: string = CONFIG): CookingConfig {
 
   // A state in two groups is two whys for one row, decided by the order of the file.
   const seen = new Set<string>();
-  for (const g of loaded) {
-    for (const s of g.states) {
-      if (seen.has(s)) throw new CookingError(`cooking: ${s} is in more than one group`);
-      seen.add(s);
-    }
+  for (const s of loaded.flatMap((g) => g.states)) {
+    if (seen.has(s)) throw new CookingError(`cooking: ${s} is in more than one group`);
+    seen.add(s);
   }
 
   const un = (cfg["ungrouped"] ?? {}) as Record<string, unknown>;
@@ -118,10 +117,7 @@ let cached: CookingConfig | null = null;
 export const cooking = (): CookingConfig => (cached ??= loadCooking());
 
 /** For tests, and for a config reloaded under a running board. */
-export const forgetCooking = (): void => {
-  cached = null;
-  marks = null;
-};
+export const forgetCooking = (): void => { cached = null; marks = null; };
 
 let marks: ReadonlyMap<string, string> | null = null;
 
@@ -145,14 +141,12 @@ export const groupOf = (state: string): CookingGroup | undefined =>
   cooking().groups.find((g) => g.states.includes(state));
 
 /** Every cooking row has a why. A state no group claims answers with its own word. */
-export const why = (row: Row): string =>
-  groupOf(row.state)?.why ?? row.state.replace(/_/g, " ");
+export const why = (row: Row): string => groupOf(row.state)?.why ?? row.state.replace(/_/g, " ");
 
 export const mark = (row: Row): string => groupOf(row.state)?.mark ?? cooking().ungrouped.mark;
 
-export function stateColour(state: string): string {
-  return groupOf(state)?.colour ?? cooking().ungrouped.colour;
-}
+export const stateColour = (state: string): string =>
+  groupOf(state)?.colour ?? cooking().ungrouped.colour;
 
 /** Grouped by why, in views.yaml's order and, inside a group, arrival order; ungrouped
  *  rows last. */
@@ -172,18 +166,14 @@ const cell = (row: Row, column: (typeof COLUMNS)[number]): string =>
   column === "code" ? code(row) : column === "state" ? row.state : description(row);
 
 /** Never wrap: a cell too wide for its slot loses its tail to an ellipsis. */
-export function clip(text: string, width: number): string {
-  if (width <= 0) return "";
-  if (text.length <= width) return text;
-  return text.slice(0, width - 1) + "…";
-}
+export const clip = (text: string, width: number): string =>
+  width <= 0 ? "" : text.length <= width ? text : text.slice(0, width - 1) + "…";
 
 const pad = (text: string, width: number): string => text.padEnd(width, " ");
 
 /** How wide each column must be. Passed down so a screen's boxes share one set. */
-export function columnWidths(rows: readonly Row[], _columns?: readonly Column[]): number[] {
-  return COLUMNS.map((c) => Math.max(...rows.map((r) => cell(r, c).length), 0));
-}
+export const columnWidths = (rows: readonly Row[], _columns?: readonly Column[]): number[] =>
+  COLUMNS.map((c) => Math.max(...rows.map((r) => cell(r, c).length), 0));
 
 /** Rows the height can show, scrolled so the cursor is among them. `per` is a row's cost. */
 function window(count: number, height: number, cursor: number | null, per = 1): [number, number] {
@@ -389,12 +379,20 @@ export function RunningList({ rows, height, cursor, width }: ListProps) {
   return <Lines lines={runningLines(rows, height, cursor, width)} />;
 }
 
+/** A drawn line, with the colour on the one word it is a fact about. A row painted end to
+ *  end said the whole row was the ask; the state is what is red, and the code, the title and
+ *  the why beside it are the foreground the terminal already had. A line that names no state
+ *  — a tally, a running row's lower lines — is drawn plain throughout; the settled tally
+ *  counts states rather than saying one, so its group's name takes the colour instead. */
+export function say(line: Line): ReactNode {
+  const said = [line.state, groupOf(line.state)?.name ?? PLAIN].find((w) => w !== PLAIN && line.text.includes(w));
+  if (said === undefined) return line.text;
+  const at = line.text.indexOf(said);
+  return [line.text.slice(0, at), <Text key="state" color={stateColour(line.state)}>{said}</Text>, line.text.slice(at + said.length)];
+}
+
 const Lines = ({ lines }: { readonly lines: readonly Line[] }) => (
   <Box flexDirection="column">
-    {lines.map((line, i) => (
-      <Text key={i} wrap="truncate" inverse={line.cursor} color={stateColour(line.state)}>
-        {line.text}
-      </Text>
-    ))}
+    {lines.map((line, i) => <Text key={i} wrap="truncate" inverse={line.cursor}>{say(line)}</Text>)}
   </Box>
 );
