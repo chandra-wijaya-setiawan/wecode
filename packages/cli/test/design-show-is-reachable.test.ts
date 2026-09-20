@@ -61,7 +61,7 @@ async function wecode(...argv: readonly string[]): Promise<number> {
 describe("wecode design show", () => {
   it("reaches the projector, which answers about the screen it was asked for", async () => {
     // Either outcome is the projector's, and which one it is depends on a dependency this
-    // scope cannot declare: `packages/cli` does not depend on `@wecode/ui` yet, so the
+    // scope cannot declare: `packages/cli` does not depend on `@wecode/lens` yet, so the
     // ports fail to load and the command says it could not draw. What is asserted here is
     // the only thing the routing decides — that the projector is what answered.
     const at = join(tmp("wecode-route-"), "cockpit.svg");
