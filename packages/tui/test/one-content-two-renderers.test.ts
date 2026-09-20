@@ -51,7 +51,9 @@ describe("one content, two renderers", () => {
   });
 
   it("declares more than one renderer, so the split has something to be a split between", () => {
-    expect(Object.keys(renderers)).toEqual(["terminal", "wireframe"]);
+    // Three now: the browser is a renderer of the same tree and not a surface of its own,
+    // so its frame is declared here beside the other two rather than in a page's template.
+    expect(Object.keys(renderers)).toEqual(["terminal", "webapp", "wireframe"]);
   });
 
   it("puts every block in exactly one half, so no block has two homes", () => {
@@ -84,8 +86,6 @@ describe("one content, two renderers", () => {
 
   it("keeps the terminal's characters, lines and columns in the terminal's half", () => {
     const terminal = renderers.terminal as Record<string, any>;
-    expect(terminal.head.glyph).toBe("─");
-    expect(terminal.head.case).toBe("upper");
     expect(terminal.dashboard.chrome).toBe("rule");
     expect(terminal.dashboard.rows_begin_at_column).toBe(0);
     expect(terminal.pages.chrome).toBe("border");
@@ -105,6 +105,27 @@ describe("one content, two renderers", () => {
     expect(wireframe.draws).toEqual(["box", "title"]);
     // A picture that spelled a box out of line characters would be drawing a terminal.
     for (const glyph of GLYPHS) expect(JSON.stringify(wireframe), glyph).not.toContain(glyph);
+  });
+
+  it("makes the browser answer them too, and holds the shell it declares", () => {
+    const { webapp } = renderers as Record<string, any>;
+    expect(webapp.glyphs).toBe("none");
+    expect(webapp.chrome).toBe("document");
+    // A document has no last line, so the bar the terminal pins to one is declined here
+    // rather than inherited and left undrawable.
+    expect(webapp.bars).toBe("none");
+    // A rule is a border on an element, not a row of characters spent out of the height.
+    expect(webapp.sections.chrome).toBe("rule");
+    expect(webapp.sections.drawn_with).toBe("border");
+    // The one frame every page wears, declared once: a page spelling its own doctype or
+    // its own title would be a second answer to what the web surface looks like.
+    expect(webapp.shell.doctype).toBe("<!doctype html>");
+    expect(webapp.shell.body).toBe("main");
+    expect(webapp.shell.stylesheet).toBe("inline");
+    // One name for the product: a banner that disagreed with the tab would be two.
+    expect(webapp.shell.banner).toBe(webapp.shell.title);
+    // And a browser draws shapes, so it spells no box out of line characters either.
+    for (const glyph of GLYPHS) expect(JSON.stringify(webapp), glyph).not.toContain(glyph);
   });
 
   it("gives each renderer an answer for everything the other one states", () => {
@@ -127,8 +148,9 @@ describe("the names the gate's other tests still read", () => {
     ["outline", "shared"],
     ["key_bar", "shared"],
     ["proposal", "shared"],
+    // `head` is not here: the terminal's own head block was retired, and the one head both
+    // renderers read is `shared.proposal.head`.
     ["dashboard", "terminal"],
-    ["head", "terminal"],
     ["pages", "terminal"],
     ["bars", "terminal"],
   ];
