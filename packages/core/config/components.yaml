@@ -148,7 +148,7 @@ components:
     modules: [adapters/codegraph, architecture, coverage, index, ports, propose, reflexion]
 
   view-index:
-    package: ui
+    package: lens
     layer: client
     component: true
     owns: the screens a person reads stated as ports — what the index of boxes must say, said once and without naming a renderer. The renderers behind it — ink for a terminal, CDP for a web page, wireframe for a picture — draw those lines and decide nothing

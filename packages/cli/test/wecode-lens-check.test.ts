@@ -6,7 +6,7 @@ import { tmp } from "../../core/test/tmpdir.js";
 
 /** What a tester gets from `wecode ui check`.
  *
- *  The four rules are proved where they live, against captures, in `packages/ui`. What is
+ *  The four rules are proved where they live, against captures, in `packages/lens`. What is
  *  unproven until here is the thing a gate actually consumes: that pointing the command at
  *  a capture with a fault in it makes the process fail, that a clean capture does not, and
  *  that a capture it could not read is neither of those. So the rules are a stub whose
@@ -22,7 +22,7 @@ const CLIPPED: Finding = {
 
 /** A capture on disk, and the path a tester would type. */
 function captureOf(tree: unknown, name = "capture.json"): string {
-  const at = join(tmp("wecode-ui-"), name);
+  const at = join(tmp("wecode-lens-"), name);
   writeFileSync(at, JSON.stringify(tree));
   return at;
 }
@@ -86,14 +86,14 @@ describe("wecode ui check", () => {
   });
 
   it("tells a capture it could not read apart from a screen that is wrong", async () => {
-    const missing = join(tmp("wecode-ui-"), "nothing.json");
+    const missing = join(tmp("wecode-lens-"), "nothing.json");
     const { rules } = saying();
     expect(await ui(["check", missing], rules)).toBe(2);
     expect(complained()).toContain("cannot read the capture");
   });
 
   it("refuses a capture that is not json, rather than calling it clean", async () => {
-    const at = join(tmp("wecode-ui-"), "capture.json");
+    const at = join(tmp("wecode-lens-"), "capture.json");
     writeFileSync(at, "not json at all");
     const { rules, seen } = saying();
     expect(await ui(["check", at], rules)).toBe(2);
@@ -102,7 +102,7 @@ describe("wecode ui check", () => {
 
   it("exits 2 when the rules themselves cannot answer", async () => {
     const broken = (): Rules => {
-      throw new Error("@wecode/ui exports no check — packages/cli does not depend on it yet");
+      throw new Error("@wecode/lens exports no check — packages/cli does not depend on it yet");
     };
     expect(await ui(["check", captureOf(CLEAN)], broken)).toBe(2);
     expect(complained()).toContain("does not depend on it yet");

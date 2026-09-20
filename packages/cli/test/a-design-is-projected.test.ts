@@ -2,13 +2,13 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { design, type Ports, type Read } from "../src/ui.js";
-import { expected } from "../../ui/src/expected.js";
-import { wireframe } from "../../ui/src/wireframe.js";
+import { expected } from "../../lens/src/expected.js";
+import { wireframe } from "../../lens/src/wireframe.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
 /** What an operator gets from `wecode design show`.
  *
- *  The projection is proved in `packages/ui` — that a tree draws at the coordinates it
+ *  The projection is proved in `packages/lens` — that a tree draws at the coordinates it
  *  states, that a design's offsets add up. What is unproven until here is that a person who
  *  types the command ends up with a file they can open: that the design named on the command
  *  line is the one drawn, that every section it declares is a box in the file, and that a
@@ -169,7 +169,7 @@ describe("wecode design show", () => {
 
   it("exits 2 when the projection cannot be reached at all", async () => {
     const broken = (): Ports => {
-      throw new Error("@wecode/ui exports no expected/wireframe — packages/cli does not depend on it yet");
+      throw new Error("@wecode/lens exports no expected/wireframe — packages/cli does not depend on it yet");
     };
     const code = await design(
       ["show", "cockpit", "--from", designOf(TWO_SECTIONS), "--out", svgAt()],
