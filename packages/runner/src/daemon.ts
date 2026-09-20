@@ -108,27 +108,8 @@ interface LandedRow {
 
 const tbl = {
   task: table<TaskRow>("task", ["id", "slug", "acceptance_test_id", "attempts", "max_retry", "state"]),
-  assignment: table<AssignmentRow>("assignment", [
-    "id",
-    "objective_type",
-    "objective_id",
-    "worker_id",
-    "worktree",
-    "phase",
-    "commit_sha",
-    "updated_at",
-  ]),
-  test: table<TestRow>("acceptance_test", [
-    "id",
-    "parent_id",
-    "kind",
-    "artefact",
-    "state",
-    "red_at_base_sha",
-    "red_at_base_at",
-    "red_at_base_reason",
-    "updated_at",
-  ]),
+  assignment: table<AssignmentRow>("assignment", ["id", "objective_type", "objective_id", "worker_id", "worktree", "phase", "commit_sha", "updated_at"]),
+  test: table<TestRow>("acceptance_test", ["id", "parent_id", "kind", "artefact", "state", "red_at_base_sha", "red_at_base_at", "red_at_base_reason", "updated_at"]),
   criteria: table<{ id: number; requirement_id: number }>("acceptance_criteria", ["id", "requirement_id"]),
   requirement: table<{ id: number; story_id: number }>("requirement", ["id", "story_id"]),
   story: table<StoryRow>("story", ["id", "slug", "epic_id", "state"]),
@@ -155,6 +136,9 @@ export interface Tick {
   readonly scripts: ScriptReport;
   readonly committed: readonly number[];
   readonly merged: readonly number[];
+  /** Task merges that conflicted, and still do. Every one that is true as of this tick,
+   *  whether or not the merge was re-attempted on it. */
+  readonly conflicts: readonly Conflict[];
   /** Stories this tick put in the base branch, with the commit the base became. Empty is
    *  the ordinary answer: a story lands once, and every tick after that reads it as already
    *  there rather than landing it again. */
@@ -195,6 +179,17 @@ export interface Landed {
    *  it and wecode was not allowed to bring it forward. Absent is the silent case: their
    *  folder shows the landed files already. */
   readonly notice?: string;
+}
+
+/** A task branch that will not merge into its story branch. The two tips it was attempted
+ *  between are part of it: they are what says the conflict is still the same one, and a
+ *  merge is not tried again until one of them moves. */
+export interface Conflict {
+  readonly task: number;
+  readonly branch: string;
+  readonly story: string;
+  readonly why: string;
+  readonly tips: string;
 }
 
 /** An exhausted task, and the story left waiting on it. Named, because the cost is the
@@ -305,6 +300,10 @@ export class Runner {
   private readonly doctor: Doctor;
   /** One per repository. A workspace holds many projects, and each has its own branches. */
   private readonly treesByRepo = new Map<string, Trees>();
+  /** The task merges that conflicted, by task, holding the pair of tips they conflicted
+   *  between. A daemon's own memory rather than a table: it is about attempts, not about
+   *  the record, and a restarted daemon is entitled to look at the world once more. */
+  private readonly conflicted = new Map<number, Conflict>();
   /** config/roles.yaml as read this tick, keyed by its path, good or bad. Cleared at the
    *  top of every tick: an edit to the file is in force on the next one. */
   private rolesByRepo = new Map<string, { ok: true; config: RoleConfig } | { ok: false; why: string }>();
@@ -352,7 +351,7 @@ export class Runner {
     // Level-triggered: a guard that became true for a reason other than the verb that just
     // ran settles here — including the task settleEnded proved, which lands just below.
     const settled2 = this.engine.settle();
-    const merged = await this.landDoneTasks();
+    const landings = await this.landDoneTasks();
     const acceptance = await this.proveStories();
     const exhausted = this.enforceRetryLimit();
     // Last, and after settle(): a story becomes delivered in settle(), and the condition
@@ -379,7 +378,8 @@ export class Runner {
       allocated,
       foreman,
       committed: settled.committed,
-      merged,
+      merged: landings.merged,
+      conflicts: landings.conflicts,
       landed: landing.landed,
       exhausted,
       performed,
@@ -760,21 +760,11 @@ export class Runner {
 
   /** True when the artefact passed at base. The story tree is put back on its branch either
    *  way: the merge and the ordinary prove-the-story pass both expect to find it there. */
-  private async runAtBase(at: {
-    repo: string;
-    story: string;
-    tree: string;
-    base: string;
-    artefact: string;
-  }): Promise<boolean> {
+  private async runAtBase(at: { repo: string; story: string; tree: string; base: string; artefact: string }): Promise<boolean> {
     await exec("git", ["checkout", "--detach", "-q", at.base], { cwd: at.tree });
     await exec("git", ["reset", "--hard", "-q", at.base], { cwd: at.tree });
     try {
-      await exec("bash", ["-lc", at.artefact], {
-        cwd: at.tree,
-        timeout: 10 * 60 * 1000,
-        maxBuffer: 4 * 1024 * 1024,
-      });
+      await exec("bash", ["-lc", at.artefact], { cwd: at.tree, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
       return true;
     } catch {
       return false;
@@ -885,11 +875,7 @@ export class Runner {
    *  When it will not merge, the answer is not a red verdict — it is `behind`. Judging in
    *  a tree that is missing the world tells you about the tree, and re-proving can never
    *  help because the code was never what was wrong. The caller raises the chore. */
-  private async refreshStoryTree(
-    slug: string,
-    repo: string,
-    tree: string,
-  ): Promise<{ ok: true } | { ok: false; why: string }> {
+  private async refreshStoryTree(slug: string, repo: string, tree: string): Promise<{ ok: true } | { ok: false; why: string }> {
     const branch = `story/${slug}`;
     let base: string;
     try {
@@ -903,22 +889,9 @@ export class Runner {
     if (await this.contains(repo, branch, base)) return { ok: true };
 
     try {
-      await exec(
-        "git",
-        [
-          "-c",
-          "user.name=wecode",
-          "-c",
-          "user.email=wecode@localhost",
-          "merge",
-          "--no-ff",
-          "-q",
-          "-m",
-          `refresh ${branch} from ${base}`,
-          base,
-        ],
-        { cwd: tree },
-      );
+      const identity = ["-c", "user.name=wecode", "-c", "user.email=wecode@localhost"];
+      const message = ["-m", `refresh ${branch} from ${base}`];
+      await exec("git", [...identity, "merge", "--no-ff", "-q", ...message, base], { cwd: tree });
     } catch (err) {
       // Leave no half-merge standing: the next tick, and the chore's worker, both want the
       // branch as it was. Whether that worked is read back off the tree rather than off the
@@ -1056,13 +1029,7 @@ export class Runner {
    *  closed. A story that cannot raise one also cannot have one re-raised here — when it is
    *  still behind, an existing chore is left as it stands, and not dispatched, because
    *  nothing is being proved in that tree. */
-  private async followRefresh(
-    story: { id: number; slug: string; project: number; state: string },
-    repo: string,
-    branch: string,
-    base: string,
-    behind: readonly Behind[],
-  ): Promise<number[]> {
+  private async followRefresh(story: { id: number; slug: string; project: number; state: string }, repo: string, branch: string, base: string, behind: readonly Behind[]): Promise<number[]> {
     const chore = choreFor(this.db, "refresh", "story", story.id);
     if (!(await this.isBehind(repo, branch, base))) {
       // Up to date is not the same as repaired. A branch reset onto the base contains it by
@@ -1668,11 +1635,16 @@ export class Runner {
       .catch(() => false);
   }
 
-  /** A task whose tests passed lands on its story branch. */
   /** A task whose tests passed lands on its story branch — once. The merge is recorded
    *  against the branch tip it merged, so a branch that grows a commit afterwards lands
-   *  again and one that has not is left alone. */
-  private async landDoneTasks(): Promise<number[]> {
+   *  again and one that has not is left alone.
+   *
+   *  A merge that conflicts is reported rather than swallowed, and remembered by the pair
+   *  of tips it was attempted between: two branches that have not moved conflict the same
+   *  way every tick, so the merge is not run again until one of them does. The conflict is
+   *  still named on every tick it is true for — it is a claim about the world now, not a
+   *  memo about the tick it first appeared on. */
+  private async landDoneTasks(): Promise<{ merged: number[]; conflicts: Conflict[] }> {
     const q = queries(this.db);
     const committed = new Set(
       q
@@ -1691,12 +1663,24 @@ export class Runner {
       .filter((t) => committed.has(t.id));
 
     const merged: number[] = [];
+    const conflicts: Conflict[] = [];
     for (const row of rows) {
       const slugs = this.slugsFor(row.id);
       if (slugs === null) continue;
       const branch = `task/${slugs.task}`;
+      const story = `story/${slugs.story}`;
       const tip = await this.tipOf(slugs.repo, branch);
       if (this.alreadyLanded(row.id, branch, tip)) continue;
+      // Neither branch has moved since the conflict, so git would say the same thing again
+      // and take a worktree and a merge to say it. The remembered sentence is that answer.
+      const stale = this.conflicted.get(row.id);
+      if (stale !== undefined) {
+        if (stale.tips === (await this.tipsOf(slugs.repo, tip, story))) {
+          conflicts.push(stale);
+          continue;
+        }
+        this.conflicted.delete(row.id);
+      }
       try {
         await this.treesFor(slugs.repo).mergeTaskIntoStory(
           branch,
@@ -1711,11 +1695,27 @@ export class Runner {
           })
           .run();
         merged.push(row.id);
-      } catch {
-        // a conflict a person has to see. Unrecorded, so the next tick tries again.
+      } catch (err) {
+        // The merge nobody can make deterministically. Not landed, so nothing is recorded
+        // against `landed_branch`; named here, so it is not a silence.
+        const seen: Conflict = {
+          task: row.id,
+          branch,
+          story,
+          why: reasonOf(err),
+          tips: await this.tipsOf(slugs.repo, tip, story),
+        };
+        this.conflicted.set(row.id, seen);
+        conflicts.push(seen);
       }
     }
-    return merged;
+    return { merged, conflicts };
+  }
+
+  /** The pair of tips a task merge stands between, as one comparable string. A ref that is
+   *  not there is the empty half — a world that has not moved either. */
+  private async tipsOf(repo: string, tip: string | null, story: string): Promise<string> {
+    return `${tip ?? ""}|${(await this.tipOf(repo, story)) ?? ""}`;
   }
 
   /** A tip we could not read is no proof, so the merge is attempted; git itself refuses a
