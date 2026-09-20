@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
-import { Engine, Maker, open } from "@wecode/core";
+import { Engine, ensureChore, Maker, open } from "@wecode/core";
 import { DEFAULT_BUDGET, Runner, type Observation, type WorkerAdapter, type Work } from "../src/index.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
@@ -34,6 +34,9 @@ let db: DatabaseSync;
 let make: Maker;
 let engine: Engine;
 let task: number;
+let project: number;
+let storyId: number;
+let acceptanceTest: number;
 
 beforeEach(() => {
   repo = tmp("wecode-daemon-");
@@ -57,6 +60,7 @@ beforeEach(() => {
   const c = make.criteria(req, "emailed in 60s");
   const at = make.acceptanceTest(c, "mail arrives", "script", "test -f mail.ts");
   task = make.task(at, "send the mail", { role: "engineer", scope: { write: ["mail.ts"], tools: [] } });
+  [project, storyId, acceptanceTest] = [p, s, at];
   const tt = make.taskTest(task, "mailer called", "script", "true");
   make.worker("claude-1", "engineer", "agent");
 
@@ -360,7 +364,7 @@ describe("the red-at-base phase is a module of its own", () => {
       "allocateOne",
       "settleEnded",
       "landDoneTasks",
-      "proveStories",
+      "raiseStoryChores",
       "enforceRetryLimit",
       "ranAtBase",
       "recordBaseRun",
@@ -383,5 +387,108 @@ describe("the red-at-base phase is a module of its own", () => {
     // The fixture's acceptance test fails at the seed commit, which is the whole point of
     // the phase: it is proven red there, by the module the daemon now delegates to.
     expect(tick.redAtBase).toEqual({ proven: [1], unproven: [] });
+  });
+});
+
+/** The story-proving phase is the second of the tick's phases to leave `daemon.ts`. What the
+ *  phase *does* is already pinned by `refresh-without-judging.test.ts` and the acceptance
+ *  verdicts the end-to-end ticks above read, all of which ran unchanged through this move;
+ *  what is pinned here is that the move happened, that it took the phase whole — the pass and
+ *  the two helpers only it used — and that nothing else went with it. */
+describe("the story-proving phase is a module of its own", () => {
+  const src = (module: string): string =>
+    readFileSync(fileURLToPath(new URL(`../src/${module}`, import.meta.url)), "utf8");
+
+  /** The source with its prose taken out. Both files talk about `proveStories` and about the
+   *  refresh in comments, so every assertion below is made against the code. */
+  const code = (module: string): string =>
+    src(module).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+
+  it("exports one function, and it is the phase", () => {
+    const exported = [...code("tick/prove-stories.ts").matchAll(/^export (?:async )?function (\w+)/gm)].map(
+      (m) => m[1],
+    );
+    expect(exported).toEqual(["proveStories"]);
+    // The one function, and the two types that say what it answers and what it needs.
+    expect([...code("tick/prove-stories.ts").matchAll(/^export /gm)]).toHaveLength(3);
+  });
+
+  it("took the two helpers whole, and left neither behind", () => {
+    const moved = code("tick/prove-stories.ts");
+    expect(moved).toMatch(/function refreshStoryTree\(/);
+    expect(moved).toMatch(/function midMerge\(/);
+    expect(moved).toContain(`"merge", "--no-ff", "-q"`);
+    expect(moved).toContain(`exec("git", ["merge", "--abort"]`);
+    expect(moved).toContain(`"MERGE_HEAD"`);
+    // The refresh's own constant came with it; nothing else reads it.
+    expect(moved).toContain("const REFRESH_OPEN");
+
+    const left = code("daemon.ts");
+    for (const gone of ["refreshStoryTree", "midMerge", "MERGE_HEAD", "REFRESH_OPEN", "--no-ff", "--abort"]) {
+      expect(left, `${gone} stayed in daemon.ts`).not.toContain(gone);
+    }
+  });
+
+  it("is called from the daemon where the daemon called it", () => {
+    const left = code("daemon.ts");
+    expect(left).toContain(`import { proveStories, type Proven } from "./tick/prove-stories.js"`);
+    // The one call site in `tick()` is untouched in its place, and the one wrapper is what
+    // it now reaches.
+    expect(left.match(/\breturn proveStories\(\{/g)).toHaveLength(1);
+    expect(left).toMatch(/const acceptance = await this\.storyProvingPass\(\);/);
+    expect(left.match(/this\.storyProvingPass\(\)/g)).toHaveLength(1);
+    // And the phases either side of it in `tick()` did not move with it.
+    expect(left).toMatch(/const landings = await this\.landDoneTasks\(\);/);
+    expect(left).toMatch(/await this\.raiseStoryChores\(acceptance\.behind\)/);
+  });
+
+  /** The reads the phase shares with the rest of the runner stay the runner's: they are
+   *  handed in, not copied. A second copy of `contains` in the new module would be the
+   *  defect this asserts against. */
+  it("borrows the runner's ledger, trees and graph reads rather than copying them", () => {
+    const moved = code("tick/prove-stories.ts");
+    for (const shared of ["storyOfCriteria", "projectOf", "treesFor", "worktreeRoot", "hasCommit", "contains", "runAcceptanceTests"]) {
+      expect(moved, `${shared} is declared again in the new module`).not.toMatch(
+        new RegExp(`(?:function|const)\\s+${shared}\\b`),
+      );
+      expect(moved, `${shared} is not handed in`).toContain(`host.${shared}`);
+    }
+    // One definition of the columns and of the shapes the tick reports, not two.
+    expect(moved).toMatch(/import \{ reasonOf, tbl.*\} from "\.\.\/daemon\.js"/);
+    expect(moved).not.toContain("table<");
+    expect(moved).not.toMatch(/interface (?:Behind|Waiting)\b/);
+  });
+
+  it("still reports the phase's answer on a tick", async () => {
+    // A story whose refresh is still owed is not judged, and says which repair it waits on.
+    // That is the moved pass's first rule, reached only through the daemon's delegation.
+    const chore = ensureChore(db, {
+      project_id: project,
+      kind: "refresh",
+      target_type: "story",
+      target_id: storyId,
+      check: "the tree contains the base",
+    });
+
+    const tick = await runner().tick();
+
+    const why = `waiting on its refresh: chore #${chore.id} is ${chore.state}`;
+    expect(tick.waiting).toEqual([{ story: storyId, why }]);
+    expect(tick.behind).toContainEqual({ story: storyId, why });
+    // Nothing was judged under it. Read off the row rather than off `tick.scripts`, which
+    // is the settle pass's task_test verdicts and this pass's in one list.
+    const row = db.prepare("SELECT state FROM acceptance_test WHERE id = ?").get(acceptanceTest) as { state: string };
+    expect(row.state).toBe("ready");
+  });
+
+  it("judges the story's acceptance tests in the story tree when nothing is owed", async () => {
+    // No refresh chore, so the pass reaches the examiner: the task lands `mail.ts` on the
+    // story branch and the story's `test -f mail.ts` passes in the tree the pass refreshed.
+    // The same tick lands the task and then proves the story, in that order.
+    const tick = await runner().tick();
+
+    expect(tick.waiting).toEqual([]);
+    expect(tick.behind).toEqual([]);
+    expect(tick.scripts.passed).toContain(acceptanceTest);
   });
 });
