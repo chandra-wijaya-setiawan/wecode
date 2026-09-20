@@ -67,6 +67,48 @@ export async function isLanded(repo: string, base: string, branch: string): Prom
 const has = async (repo: string, ref: string): Promise<boolean> =>
   (await quiet(repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])) !== null;
 
+/** Where a raised `land` chore stands, read off the graph rather than off the chore.
+ *
+ *  A chore is a thing wecode owes itself, and the only thing that may retire one is the
+ *  world. Three answers, because a `land` chore leaves the board three different ways:
+ *
+ *  - `owed` — the branch is there, the base does not contain it, the merge is still to make.
+ *  - `landed` — the base contains the branch. Discharged: the check is answered yes.
+ *  - `gone` — the target no longer resolves. Dropped: the check can never be answered at
+ *    all, because the branch it is a check *about* is not in the repository any more.
+ *
+ *  The last is the one that used to sit forever. A story branch deleted after the chore was
+ *  raised — rewound, renamed, cleaned up by hand — left `land` open asking for a merge of
+ *  nothing, attempt after attempt, with nobody able to satisfy it and nothing on the board
+ *  saying why. A chore whose target is gone is not work, and it is not a pass either: it is
+ *  dropped, with the reason standing as its epitaph.
+ *
+ *  The order matters, and it is the only order that is honest. `landed` cannot be asked of
+ *  a branch that is not there — `merge-base --is-ancestor` wants two commits — so a branch
+ *  that is gone reads as `gone` whatever became of its commits. That is the truthful answer
+ *  rather than a convenient one: wecode does not know whether it landed, and says so by
+ *  dropping the chore instead of claiming a landing it cannot see.
+ *
+ *  A missing *base* is not this. That is the repository being wrong rather than the target
+ *  being gone, it is owed still, and `attemptLanding` refuses it with a sentence naming the
+ *  base. Nothing here drops a chore for it. */
+export type LandStanding =
+  | { readonly kind: "owed" }
+  | { readonly kind: "landed"; readonly why: string }
+  | { readonly kind: "gone"; readonly why: string };
+
+/** The epitaph a dropped `land` chore carries. One spelling, so the board and this module
+ *  say the same thing about the same fact. */
+export const targetGone = (branch: string): string =>
+  `${branch} no longer resolves: there is no branch left to land, and "${LAND_CHECK}" can never be answered of it`;
+
+export async function landStanding(repo: string, base: string, branch: string): Promise<LandStanding> {
+  if (!(await has(repo, branch))) return { kind: "gone", why: targetGone(branch) };
+  if (!(await has(repo, base))) return { kind: "owed" };
+  if (await isLanded(repo, base, branch)) return { kind: "landed", why: `${base} already contains ${branch}` };
+  return { kind: "owed" };
+}
+
 /** Is this tree still in the middle of a merge? `MERGE_HEAD` is git's own record of it, and
  *  it lives in the tree's own git dir rather than the repository's. */
 async function midMerge(tree: string): Promise<boolean> {
