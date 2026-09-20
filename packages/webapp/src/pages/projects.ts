@@ -167,6 +167,13 @@ export function projectsPage(
   return html(document(projectsContents(board, pulse, views, off), STYLE));
 }
 
+/** This page is drawn from the board — one cell per box and one card per project row — so
+ *  it says so. Without this line discovery hands it the record it reads by default, and
+ *  `tree()`'s nodes have no box on them: the front page threw on the first cell for every
+ *  reader, while every test in this package kept passing because each one calls
+ *  `projectsPage` itself and hands it a `Board` by hand. */
+export const READS = "board";
+
 /** The page, bound to a way of getting the current rows and beat. Both are read on every
  *  request for the reason the board is: a page drawn from a snapshot taken at boot is a page
  *  that is wrong by the time somebody reads it. */
