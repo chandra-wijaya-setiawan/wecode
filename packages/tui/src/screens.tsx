@@ -1,7 +1,7 @@
 /** What an App looks like — see config/tui-contract.yaml. Nothing here decides anything:
  *  every component is a pure function of the App's state, so a screen can be asserted on
- *  by rendering it rather than by driving a terminal. The widths are Yoga's problem now; what
- *  is left here is which regions there are, what they are called, which holds the cursor, and which is worth a border. */
+ *  by rendering it rather than by driving a terminal. The widths are Yoga's problem; what is
+ *  left is which regions there are, what they are called, and which is worth a border. */
 import type { ReactNode } from "react";
 import { Box, Text } from "ink";
 // By path, as app.ts imports it: index.ts names what board.ts offers one export at a time.
@@ -41,19 +41,16 @@ const answered = (key: string, kind: Screen["kind"]): boolean => {
   return true;
 };
 
-/** A border costs a column each side. */
+/** A border costs a column each side; a section's head costs one line and no columns. */
 const BORDER = 2;
-
-/** A rule costs one line, where a border costs two and two columns with it. */
-const RULE = 1;
+const HEAD = 1;
 
 interface PanelProps {
   readonly title: string;
   /** A section's glyph, from views.yaml. A Panel has none: a page is one thing. */
   readonly mark?: string | undefined;
   readonly letter?: string | undefined;
-  /** How many rows the region holds, drawn at a Section's far end. A Panel has none. The
-   *  seated box says `2/5` there instead: see `seats`. */
+  /** How many rows the region holds, at a Section's far end; the seated box says `2/5`. */
   readonly count?: number | string | undefined;
   readonly width: number;
   readonly height: number;
@@ -85,16 +82,28 @@ export function Panel({ title, letter, width, height, children }: PanelProps) {
 const label = (title: string, letter: string | undefined): string =>
   `${title}${letter === undefined ? "" : ` [${letter}]`}`;
 
-/** A dashboard section: a rule carrying the section's own glyph, its name in capitals and,
- *  at the far end, its count; its rows under it at the full width. A border would repeat,
- *  for two lines and two columns, a separation the rule already makes. The count stands at the
- *  width: eight of them down the page are a column to compare, and the dashes hold them there. */
+/** The raised forms, against the letters that have one. Unicode has no superscript `q`, so
+ *  that key stands plain rather than borrowing a glyph that reads as another letter. */
+const PLAIN = "abcdefghijklmnoprstuvwxyz";
+const RAISED = "ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ";
+
+/** The letter a box is opened by, raised onto its count: `12ᵖ` is one token, where `12 [p]`
+ *  is a number, a bracket and a letter for the eye to put back together. */
+export const raised = (letter: string | undefined): string =>
+  letter === undefined ? "" : (RAISED[PLAIN.indexOf(letter)] ?? letter);
+
+/** A dashboard section, as config/design.yaml's `proposal.head` writes it: the section's own
+ *  glyph in column zero, its name in capitals beside it, and at the right edge what it holds
+ *  with the letter that opens it raised onto the number. No dashes — a rule was chrome spent
+ *  saying where a head began, and a glyph in column zero says it for nothing. The count
+ *  stands at the width: eight of them down the page are a column to compare. */
 function Section({ title, mark, letter, count, width, height, children }: PanelProps) {
-  const tail = count === undefined ? "" : ` ${count}`;
-  const head = clip(`── ${mark} ${label(title.toUpperCase(), letter)} `, width - tail.length);
+  const tail = count === undefined ? "" : `${count}${raised(letter)}`;
+  const body = Math.max(width - tail.length, 0);
+  const head = clip(`${mark} ${title.toUpperCase()}`, body);
   return (
     <Box flexDirection="column" flexShrink={0} width={width} height={height}>
-      <Text wrap="truncate">{head.padEnd(width - tail.length, "─") + tail}</Text>
+      <Text wrap="truncate">{head.padEnd(body, " ") + tail}</Text>
       {children}
     </Box>
   );
@@ -145,16 +154,13 @@ function boxes(
  *  abandoned — is holding nothing. */
 const SEATED = "running";
 
-/** How many of the fleet's seats the seated box's rows hold. `3` alone answers nothing an
- *  operator asks of it: three of four seats is a workspace nearly full, three of twenty is
- *  one standing idle. No workers is no seats to be short of, and the head falls back to the
- *  plain count every other box says.
+/** How many of the fleet's seats the seated box's rows hold. `3` alone answers nothing:
+ *  three of four seats is a workspace nearly full, three of twenty is one standing idle. No
+ *  workers is no seats to be short of, and the head falls back to the plain count.
  *
- *  Both numbers are the App's, as of its last refresh. This file draws and decides nothing,
- *  and the seats it once counted for itself — reaching past App's private database on the
- *  way — were counted at draw time, which is a later instant than the rows they were drawn
- *  beside. A fraction whose halves are from two instants is a fraction of nothing: a seat
- *  freed between the refresh and the frame read as a seat the running rows never held. */
+ *  Both numbers are the App's, as of its last refresh: a fraction whose halves are read at
+ *  two instants is a fraction of nothing — a seat freed between the refresh and the frame
+ *  would read as a seat the running rows never held. */
 const held = (rows: number, of: number): number | string => (of > 0 ? `${rows}/${of}` : rows);
 
 interface ScreenProps {
@@ -164,11 +170,10 @@ interface ScreenProps {
 }
 
 /** What is holding the workspace up, then every box in config order, each trimmed to the
- *  height it declares. Each is a section — a rule with its name in it — and not a box: see
- *  Section for what the borders cost and what the page bought with them back. The services
- *  section leads because a dead runner or a schema this build cannot read is the reason
- *  every box under it is wrong. It is not in `page.order`: it is no filter over the board,
- *  it holds no rows the cursor can reach, and `v` does not open it. */
+ *  height it declares. Each is a Section and not a box: see Section for what a border costs.
+ *  The services section leads because a dead runner or a schema this build cannot read is
+ *  the reason every box under it is wrong. It is not in `page.order`: it is no filter over
+ *  the board, it holds no rows the cursor can reach, and `v` does not open it. */
 export function Dashboard({ app, width }: ScreenProps) {
   const rows = app.lines();
   const widths = columnWidths(boardRows(app), COLUMNS);
@@ -183,7 +188,7 @@ export function Dashboard({ app, width }: ScreenProps) {
         title={SERVICES.title}
         mark={sectionMark("services")}
         width={width}
-        height={serviceRows + RULE}
+        height={serviceRows + HEAD}
       >
         <Services app={app} width={width} config={SERVICES} />
       </Section>
@@ -199,7 +204,7 @@ export function Dashboard({ app, width }: ScreenProps) {
             mark={sectionMark(box.name)}
             letter={key.get(box.name)}
             width={width}
-            height={box.height + RULE}
+            height={box.height + HEAD}
           >
             {box.rows.length === 0 ? (
               <Empty what={box.empty} width={width} />
@@ -299,9 +304,8 @@ function fold(value: string, width: number): string[] {
 }
 
 /** A record's facts as text: `name  value`, names left-aligned into a gutter as wide as the
- *  longest of them. Every detail screen's block is this, so the blocks line up with each
- *  other rather than each choosing its own gutter. `wrap` is what a page with the whole
- *  terminal does with a value too long for a line; a block sized to `fields.length` clips. */
+ *  longest of them, so every detail block lines up with every other. `wrap` is what a page
+ *  with the whole terminal does with an over-long value; a sized block clips. */
 export function fieldLines(fields: readonly Field[], width: number, wrap = false): string[] {
   const gutter = Math.max(...fields.map(([k]) => k.length));
   return fields.flatMap(([k, v]) => {
@@ -364,9 +368,8 @@ const ago = (ms: number): string => {
 };
 
 /** Whether anything is still working this assignment, in a word and then the evidence for
- *  it. The word comes first because it is the one thing read off this page at a glance, and
- *  a bare timestamp makes the reader do the subtraction themselves. A finished assignment
- *  is not silent, it is over — calling it silent would alarm on every record ever closed. */
+ *  it. The word comes first: a bare timestamp makes the reader subtract. A finished
+ *  assignment is not silent, it is over — silent would alarm on every closed record. */
 export function beatLine(facts: AssignmentFacts | null): string {
   if (facts === null) return "—";
   if (!facts.open) return facts.beat === null ? "over · never reported" : `over · last ${ago(facts.silent ?? 0)}`;
@@ -385,11 +388,9 @@ export function fit(lines: readonly string[], rows: number, width: number): stri
 
 /** What is known about one assignment, on a screen of its own, filling it. Half the fields
  *  are the board's row, because the board already decided what an assignment is worth
- *  saying and a second reading could disagree with it; the other half is what four columns
- *  had no room for — what it was allowed, what it has used, when it last spoke. Neither
- *  half restates the other, so neither can contradict it. The values wrap rather than clip:
- *  half a question with an ellipsis on it is a page you have to leave to read. No children
- *  box — an assignment is a leaf. */
+ *  saying; the other half is what four columns had no room for — what it was allowed, what
+ *  it has used, when it last spoke. Neither half restates the other, so neither can
+ *  contradict it. The values wrap rather than clip. No children box: a leaf has none. */
 export function Assignment({
   screen,
   facts,
@@ -425,10 +426,9 @@ export function Assignment({
   );
 }
 
-/** The summary block, then the record's children as a list. The screen carries the row it was
- *  opened from, so the block leads with what the record is called and how it stands: `task #3`
- *  named a screen after its key and not its work, and the reader who pressed enter already
- *  knows the id. What the children add up to rides the children box's title. */
+/** The summary block, then the record's children as a list. The screen carries the row it
+ *  was opened from, so the block leads with what the record is called and how it stands —
+ *  `task #3` named a screen after its key, not its work. The tally rides the box's title. */
 export function Node({
   app,
   screen,

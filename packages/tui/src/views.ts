@@ -181,7 +181,7 @@ function keyBar(design: Record<string, unknown>, kind: string): string {
  *  Every box on this page is already written down: views.yaml says which boxes there are,
  *  in what order, under what title, on what letter and what they say when empty; design.yaml
  *  says the page leads with the services, that a section costs one line of chrome, that
- *  heads are written in capitals, that the bar is the last line and which keys it names.
+ *  `proposal.head` writes heads in capitals, that the bar is last and which keys it names.
  *  A hand-written expected tree is a fourth copy of all of that — one that goes stale
  *  silently, because renaming a box in views.yaml does not touch it, and the literal then
  *  gates the screen against a page nobody asked for any more.
@@ -195,7 +195,7 @@ export function cockpitDesign(
 ): DesignBox {
   const doc = top(paths.views ?? CONFIG);
   const design = top(paths.design ?? DESIGN);
-  const head = blockOf(design, "head");
+  const head = mapOf(blockOf(design, "proposal")["head"]);
   const page = blockOf(design, "page");
   const board = blockOf(design, "dashboard");
   const chrome = typeof board["chrome_lines_per_section"] === "number"
