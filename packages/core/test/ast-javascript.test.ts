@@ -1,8 +1,26 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { spawn } from "node:child_process";
+import { describe, expect, it, vi } from "vitest";
 import { readExports, type ExportedSymbol } from "../src/ast.js";
 import { tmp } from "./tmpdir.js";
+
+/** Nothing here means a duration: every assertion is about what the parse says, so the test
+ *  waits for the parse to finish however loaded the host is. */
+vi.setConfig({ testTimeout: 0, hookTimeout: 0 });
+
+/** Runs `body` with the host deliberately busy, so a verdict reached here is the verdict the
+ *  test means rather than one that only holds on an idle machine. */
+async function underLoad<T>(body: () => Promise<T> | T): Promise<T> {
+  const spin = Array.from({ length: 4 }, () =>
+    spawn(process.execPath, ["-e", "for (;;) Math.sqrt(Math.random());"], { stdio: "ignore" }),
+  );
+  try {
+    return await body();
+  } finally {
+    for (const p of spin) p.kill("SIGKILL");
+  }
+}
 
 /** Writes `files` into a fresh directory and returns the path of the first one, which is
  *  the module under test. */
@@ -84,5 +102,15 @@ describe("readExports of a file that does not parse", () => {
 
   it("still has no exports, rather than a refusal, for a file that is not there", () => {
     expect(readExports(join(tmp("wecode-ast-js-"), "missing.ts"))).toEqual([]);
+  });
+
+  it("reaches the same verdicts with the host under load, because it waits for the parse", async () => {
+    const good = module({ "a.js": `export function fn() {}\nexport const value = 1;` });
+    const bad = module({ "a.js": `export const good = 1;\nfunction broken( {` });
+
+    await underLoad(() => {
+      expect(kinds(readExports(good))).toEqual({ fn: "function", value: "variable" });
+      expect(() => readExports(bad)).toThrow(/does not parse/);
+    });
   });
 });
