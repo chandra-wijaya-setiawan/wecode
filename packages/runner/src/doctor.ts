@@ -113,6 +113,56 @@ export const taskWorkIsCommitted = (db: DatabaseSync): Invariant => ({
   },
 });
 
+/** A task branch its story branch has already got, merged at every tick for ever.
+ *
+ *  The lander retries a done task's merge until `landed_branch` records it, and remembers a
+ *  conflict only by the pair of tips it happened between — so a branch the story has taken
+ *  by another route (cherry-picked, recut, landed by hand) is merged again every time either
+ *  tip moves, and git refuses it every time. Nothing on the branch the story does not already
+ *  hold is what superseded means, which is `ancestryOf`'s `in` read against the story branch
+ *  rather than against the base of the repository. Named, so the answer is the sentence and
+ *  not another merge. Like the ceiling and the dist check it reads the world, so it is the
+ *  Doctor's own default and not in the pure set. */
+export const SUPERSEDED_CHECK = "task_branch_is_not_superseded";
+
+/** Every task the lander has recorded a merge for. Its own table, keyed by task. */
+function landedTasks(db: DatabaseSync): ReadonlySet<number> {
+  if (!hasTable(db, "landed_branch")) return new Set();
+  return new Set(queries(db).selectFrom(landedBranch).select(["task_id"]).all().map((r) => r.task_id));
+}
+
+export const taskBranchIsNotSuperseded = (db: DatabaseSync, git: Git): Invariant => ({
+  name: SUPERSEDED_CHECK,
+  check: (s: Snapshot): readonly Violation[] => {
+    // Exactly the set the lander retries: done, something committed against it, no marker.
+    const landed = landedTasks(db);
+    const committed = committedTasks(db);
+    const owner = storyOfTask(queries(db));
+    const slugOfStory = new Map(s.nodes.filter((n) => n.entity === "story").map((n) => [n.id, n.slug]));
+    return s.nodes
+      .filter((n) => n.entity === "task" && n.state === "done" && committed.has(n.id) && !landed.has(n.id))
+      .flatMap((n) => {
+        const story = slugOfStory.get(owner.get(n.id) ?? -1);
+        if (story === undefined) return [];
+        const base = storyBranch(story);
+        const branch = `task/${n.slug}`;
+        // `no-branch` is a branch that is gone, which is a different fact and not this one.
+        if (ancestryOf(git, base)(branch) !== "in") return [];
+        return [
+          {
+            invariant: SUPERSEDED_CHECK,
+            entity: n.entity,
+            id: n.id,
+            slug: n.slug,
+            detail:
+              `done, and ${base} already holds every commit on ${branch} — the merge is ` +
+              `retried every tick and can move nothing: the branch is superseded, not unmerged`,
+          },
+        ];
+      });
+  },
+});
+
 /** docs/design/19, applied to what the record is judged by rather than to the record.
  *
  *  Every package is run from `dist`: a bin, the tick, and every specifier that resolves
@@ -449,6 +499,7 @@ export class Doctor {
       fileCeilingInvariant(repoOf(db)),
       distIsBuiltFromSource(repoOf(db)),
       taskWorkIsCommitted(db),
+      taskBranchIsNotSuperseded(db, gitIn(repoOf(db))),
     ],
     /** How the ancestry question gets asked. The runner is the half that may read the
      *  world, so `delivered_story_has_landed` is only ever reported here after git has
