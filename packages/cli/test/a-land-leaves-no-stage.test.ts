@@ -64,12 +64,12 @@ function drift(repo: string, before: string, after: string): PrimaryDrift {
   };
 }
 
-/** The command the instruction names, run in the path it names it for. */
-function obey(instruction: string): void {
-  const line = instruction.split("\n").find((l) => l.includes(": git restore"));
-  expect(line).toBeDefined();
-  const [where, rest] = (line as string).trim().split(": git ");
-  git(where.replace(/^in /, ""), ...(rest as string).replace(/ \(.*$/, "").split(" "));
+/** `forward` carried out the way the runner carries it out: the branch is already at the
+ *  landing and only the index and the working files are behind, so `reset --hard` moves no
+ *  ref and writes both halves. */
+function forward(repo: string, before: string, after: string): void {
+  expect(updatePrimary(drift(repo, before, after))).toEqual({ kind: "forward" });
+  git(repo, "reset", "--hard", "-q", after);
 }
 
 const tell = (u: ReturnType<typeof updatePrimary>): string => {
@@ -78,7 +78,7 @@ const tell = (u: ReturnType<typeof updatePrimary>): string => {
 };
 
 describe("a land leaves nothing staged in the operator's checkout", () => {
-  it("names the staged diff the moved ref left behind, and says it is not the operator's", () => {
+  it("clears the staged diff the moved ref left behind rather than describing it", () => {
     const { repo, before, after } = operatorCheckout();
     landElsewhere(repo, after);
 
@@ -86,19 +86,16 @@ describe("a land leaves nothing staged in the operator's checkout", () => {
     // path the landing added, because HEAD moved under an index that never saw it.
     expect(git(repo, "status", "--porcelain")).toBe("D  b.txt");
 
-    const said = tell(updatePrimary(drift(repo, before, after)));
-    expect(said).toContain("master moved");
-    expect(said).toContain("reads the story's paths as a staged diff");
-    expect(said).toContain("staged deletions");
-    expect(said).toContain("None of it is yours and none of it is lost");
-    expect(said).toContain("git restore --source=HEAD --staged --worktree .");
+    // Nothing of theirs is in there, so there is nothing to warn about and nothing to ask
+    // them to run: the verdict carries no words at all.
+    expect(updatePrimary(drift(repo, before, after))).toEqual({ kind: "forward" });
   });
 
-  it("leaves the checkout with nothing staged once its command has been obeyed", () => {
+  it("leaves the checkout with nothing staged once it has been brought forward", () => {
     const { repo, before, after } = operatorCheckout();
     landElsewhere(repo, after);
 
-    obey(tell(updatePrimary(drift(repo, before, after))));
+    forward(repo, before, after);
 
     expect(git(repo, "diff", "--cached", "--name-only")).toBe("");
     expect(git(repo, "status", "--porcelain")).toBe("");
