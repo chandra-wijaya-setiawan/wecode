@@ -15,6 +15,12 @@ import type { Machine, Refusal } from "./types.js";
 
 export class ChoreError extends Error {}
 
+/** The conditions — when a chore is owed, owed again, or no longer owed — live in
+ *  chore/raise.ts and come back out through here. index.ts re-exports this module and
+ *  nothing under it, so a client that asks core for `ensureChore` still gets it, and the
+ *  split is this module's business rather than every caller's. */
+export { closeChore, ensureChore, reraiseChore } from "./chore/raise.js";
+
 /** A kind is a name, a condition, a role and a check — never a switch statement. Only the
  *  two wecode needs now are declared; adding `heal` or `deploy` is a row here.
  *
@@ -307,32 +313,19 @@ function whatOf(db: DatabaseSync): (c: Chore) => string {
   };
 }
 
-/** The chore for this condition, creating it if it is not there yet.
+/** Write the row for a chore that is not there yet, and answer with it.
  *
- *  Idempotent on purpose. The runner is level-triggered: it re-reads the condition on every
- *  tick, and the condition stays true until the chore is done. Returning the chore that is
- *  already there — rather than throwing, or inserting a second — is what makes "a story
- *  that will not merge" one row instead of one row a tick. */
-export function ensureChore(db: DatabaseSync, spec: ChoreSpec, by = "runner"): Chore {
-  const found = choreFor(db, spec.kind, spec.target_type, spec.target_id);
-  if (found !== null) {
-    // The one place a settled chore stops being a dead end. Being here at all is the caller
-    // saying the condition is true — that is what `ensureChore` means — so the chore goes
-    // back to `planned` and is raised again. `done` as much as `failed`: a chore that was
-    // discharged and whose condition has come back is the same chore with a second pass,
-    // not a memo about the merge that worked in March. Never on a timer, and never quietly:
-    // the reraise is a ledger row, and the attempts behind it stay on the record.
-    if (found.state === "failed" || found.state === "done") reraiseChore(db, found.id, by);
-    return choreById(db, found.id) ?? found;
-  }
-
+ *  The write, and none of the deciding: whether a chore is owed at all is `ensureChore`'s
+ *  in chore/raise.ts, and this is what it calls once it has decided. Kept here because the
+ *  `chore` table is declared here and must be declared once.
+ *
+ *  On a clash the dialect writes over the row it found rather than ignoring it, so the
+ *  loser of the race writes the slug it was already going to write: the slug is derived
+ *  from the conflict key itself, so `slug = excluded.slug` leaves the row it found exactly
+ *  as it was. What the clause is for is unchanged — two runners reading one condition in
+ *  the same tick make one chore, and neither of them raises. */
+export function insertChore(db: DatabaseSync, spec: ChoreSpec): Chore {
   const at = now();
-  // On a clash the dialect writes over the row it found rather than ignoring it, so the
-  // loser of the race writes the
-  // slug it was already going to write: the slug is derived from the conflict key itself, so
-  // `slug = excluded.slug` leaves the row it found exactly as it was. What the clause is for
-  // is unchanged — two runners reading one condition in the same tick make one chore, and
-  // neither of them raises.
   queries(db)
     .insertInto(chore, {
       slug: slugOf(spec),
@@ -498,58 +491,10 @@ export function choreAttempts(db: DatabaseSync, id: number): ChoreAttempts | nul
   return { attempts, max_retry: CHORE_KIND_DEFS[row.kind].max_retry };
 }
 
-/** Put a settled chore back to `planned`, because the condition that made it is true again.
- *
- *  The caller's presence is the proof: `ensureChore` is only reached from a runner that has
- *  just re-read the condition. So this refuses on everything else — `planned`, `ready` and
- *  `running` have nothing to come back from, because they never left — and one that has
- *  used its attempts is drift for the doctor to name rather than a loop to keep turning.
- *
- *  The attempts stay: a reraised chore is on its second pass, and the board says so. That
- *  is the point of reraising rather than deleting the row and letting `ensureChore` insert
- *  a fresh one, which would lose every attempt and read as if this were the first time. */
-export function reraiseChore(db: DatabaseSync, id: number, by = "runner"): ChoreOutcome {
-  const row = choreById(db, id);
-  if (row === null) return { ok: false, why: `no chore #${id}` };
-  if (row.state !== "failed" && row.state !== "done") {
-    return { ok: false, why: `a ${row.state} chore is not waiting to be raised again` };
-  }
-
-  const tries = choreAttempts(db, id);
-  if (tries !== null && tries.attempts >= tries.max_retry) {
-    return { ok: false, why: outOfAttempts(tries) };
-  }
-  const out = new ChoreVerbs(db).reprove(id, by);
-  // Whatever was last said about why this chore was not being handed out is about a world
-  // that has moved on. The reason it is back is the ledger row this just wrote.
-  if (out.ok) clearChoreRefusal(db, id);
-  return out;
-}
-
-/** Close a chore whose condition no longer holds.
- *
- *  The mirror of `reraiseChore`, and one rule with it: a chore's state is a claim about the
- *  world now. When the branch that would not merge merges, nothing is owed, and leaving the
- *  row in `failed` is a stale claim that the board keeps showing and the allocator keeps
- *  refusing. So the runner says so with a verb, and with the reason it read.
- *
- *  `max_retry` does not bear on this. Attempts bound how often wecode hands a chore out
- *  again; they say nothing about whether the work is still owed, and a chore out of
- *  attempts whose condition has gone is exactly the one most worth closing.
- *
- *  The reason is kept where a chore's other free text about itself is kept — `chore_refusal`,
- *  one row per chore — so `choreRefusal(db, id)` reads why a closed chore was closed. */
-export function closeChore(db: DatabaseSync, id: number, why: string, by = "runner"): ChoreOutcome {
-  if (choreById(db, id) === null) return { ok: false, why: `no chore #${id}` };
-
-  const out = new ChoreVerbs(db).close(id, by);
-  // Unguarded on purpose: this is not "passed over", it is the epitaph, and it has to stand
-  // even when an assignment is still open on the chore. See `writeChoreRefusal`.
-  if (out.ok) writeChoreRefusal(db, why, id);
-  return out;
-}
-
-const outOfAttempts = (t: ChoreAttempts): string => `out of attempts · ${t.attempts} of ${t.max_retry}`;
+/** What the board says of a chore that has had every attempt its kind allows. One wording,
+ *  used by the allocator's refusal, by the board's detail and by the guard in `reraiseChore`
+ *  that keeps a spent chore from being raised again. */
+export const outOfAttempts = (t: ChoreAttempts): string => `out of attempts · ${t.attempts} of ${t.max_retry}`;
 
 /** What the board says of a chore that has been round once. A first attempt says only its
  *  check — the count is noise until there is something to count. */
@@ -808,8 +753,10 @@ export function recordChoreRefusal(db: DatabaseSync, why: string, choreId: numbe
  *  chore was passed over, and why a closed chore was closed — and only the first is a claim
  *  that nothing is attempting it. `closeChore` writes through here so that the reason a
  *  chore was closed survives an assignment still standing open against it, which is exactly
- *  the shape a chore left `planned` by a failed `begin` is in. */
-function writeChoreRefusal(db: DatabaseSync, why: string, choreId: number): void {
+ *  the shape a chore left `planned` by a failed `begin` is in. Exported for `closeChore`,
+ *  which is the other writer and now lives in chore/raise.ts; nothing else may use it,
+ *  because everything else writing here is saying "passed over" and owes the guard. */
+export function writeChoreRefusal(db: DatabaseSync, why: string, choreId: number): void {
   // The upsert's two `CASE WHEN … = excluded.why` arms are the rule — the same sentence
   // keeps its `since` and counts a pass, a new one starts over — and the dialect spells no
   // CASE, so the rule is read and applied here. In a transaction, because the read of the
