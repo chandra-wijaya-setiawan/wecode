@@ -103,7 +103,7 @@ components:
     layer: service
     component: true
     owns: writes what was observed back to the core, so the record and reality agree on every tick
-    modules: [daemon, land-chore, premerge, tick/prove-stories, tick/red-at-base]
+    modules: [daemon, land-chore, premerge, tick/prove-stories, tick/red-at-base, tick/story-chores]
 
   worker adapter:
     package: runner
