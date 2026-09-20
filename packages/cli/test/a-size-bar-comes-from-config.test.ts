@@ -103,6 +103,14 @@ const exists = (dir: string): boolean => {
   }
 };
 
+const readable = (file: string): boolean => {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+};
+
 function walk(dir: string, seen: (file: string) => void): void {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
@@ -199,9 +207,16 @@ describe("this repository", () => {
     expect(files.length).toBeGreaterThan(50);
   });
 
-  it("keeps every file configuration names at or under the bar it sets", () => {
-    const lengths = new Map([...bars.over.keys()].map((file) => [file, lines(readFileSync(join(REPO, file), "utf8"))]));
-    expect(overTheirBars(lengths, bars)).toEqual([]);
+  /** Whether the tree meets its bars is `a-file-has-a-ceiling`'s question, and asking it a
+   *  second time here would be the very duplication this file exists to refuse. What is
+   *  this file's question is that the bars are all here: a ceiling, and a row per file that
+   *  names a file that exists. */
+  it("sets a bar for every file, out of the one configuration", () => {
+    expect(bars.ceiling).toBeGreaterThan(0);
+    expect(bars.over.size).toBeGreaterThan(0);
+    const missing = [...bars.over.keys()].filter((file) => !readable(join(REPO, file)));
+    expect(missing).toEqual([]);
+    expect(barFor("packages/cli/src/plan.ts", bars)).toBe(bars.over.get("packages/cli/src/plan.ts"));
   });
 
   it("has no test that sets a size bar of its own", () => {
