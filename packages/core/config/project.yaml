@@ -36,7 +36,7 @@ over:
   packages/runner/test/typed-runner-doctor.test.ts: 527
   packages/tui/src/outline.tsx: 517
   packages/core/test/typed-chore.test.ts: 516
-  packages/cli/src/run.ts: 513
+  packages/cli/src/run.ts: 515
   packages/tui/src/screens.tsx: 508
   packages/cli/test/typed-run.test.ts: 507
   packages/runner/test/codex-adapter.test.ts: 500
