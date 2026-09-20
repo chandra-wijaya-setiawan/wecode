@@ -240,7 +240,15 @@ export type PrimaryUpdate =
  *  Every other drift — operator work in the tree, or a tree at some commit the landing was
  *  not made from — is words, naming the command in full and the path it is to be run in,
  *  because there wecode writing the files is the surprise. The one thing not allowed is
- *  neither. */
+ *  neither.
+ *
+ *  What the words have to carry is the index. A behind checkout is not merely showing old
+ *  files: its index still holds the pre-land tree while HEAD holds the landing, so every
+ *  path the story touched reads as staged there — the added ones as staged deletions. That
+ *  is the shape lost work has, it is the reason the silence frightened somebody, and an
+ *  instruction that says only "still shows the files from before the landing" leaves the
+ *  operator looking at a staged diff nobody has accounted for. So it is named, and said to
+ *  be the landing's rather than theirs. */
 export function updatePrimary(drift: PrimaryDrift): PrimaryUpdate {
   const { path, base, onBase, alreadyCurrent, wasTheOldTip, ownWork } = drift;
   if (!onBase || alreadyCurrent) return { kind: "current" };
@@ -254,9 +262,25 @@ export function updatePrimary(drift: PrimaryDrift): PrimaryUpdate {
     instruction:
       `${base} moved: ${path} still shows the files from before the landing.\n` +
       `  ${what}\n` +
+      `  ${phantomStage(ownWork.length > 0)}\n` +
       `  in ${path}: git restore --source=HEAD --staged --worktree . ` +
       `(commit or stash your own changes first — this discards them).`,
   };
+}
+
+/** The sentence about the index a behind checkout is holding. Two of them, because whether
+ *  the staged diff is entirely the landing's decides what the operator may safely do with
+ *  it: on an untouched tree `git restore --staged .` alone would be a mistake — it would
+ *  stage nothing back and leave the tree behind — while on a tree with the operator's own
+ *  work in it, nothing there may be discarded until they have looked. */
+function phantomStage(mixed: boolean): string {
+  const shape =
+    `git status there reads the story's paths as a staged diff — the files it added as ` +
+    `staged deletions — because HEAD moved under an index that never saw them`;
+  return mixed
+    ? `${shape}, so what is staged there is your work and the landing's mixed together: ` +
+      `look before you discard any of it.`
+    : `${shape}. None of it is yours and none of it is lost; the restore below clears it.`;
 }
 
 const indent = (lines: readonly string[]): string => lines.map((l) => `  ${l}`).join("\n");

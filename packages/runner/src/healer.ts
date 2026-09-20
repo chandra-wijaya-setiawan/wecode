@@ -1,12 +1,15 @@
 import {
+  answerApproval,
   attributedTo,
   choreFor,
   Engine,
   ensureChore,
   now,
+  raiseApproval,
   setTaskScope,
   storyBranch,
   Verbs,
+  waitingApprovals,
   withinCeiling,
   type RoleConfig,
   type Scope,
@@ -417,4 +420,148 @@ function safely<T>(f: () => T, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+/** docs/design/16, applied to a design rather than to a task.
+ *
+ *  A design is drafted before it is drawn, and a drafted design that crosses a port — a
+ *  seam where the machine stops and a person starts, the screen being the one everybody
+ *  means — is not wecode's to accept. Until now nothing raised it: the design sat in
+ *  `drafted`, `needs you` never showed it, and the board said nothing waited on the
+ *  operator while a design did. A question nobody can see is a question nobody answers.
+ *
+ *  So the same route the rest of 16 uses: an approval, which is an assignment whose worker
+ *  is a person, raised into `waiting` where the board already draws it. The row names the
+ *  screen and carries the path of the projected mockup, because a person signing a design
+ *  signs a picture and not a number, and it closes the moment the design is accepted or
+ *  dropped — the answer is the operator's own act, read back off the world. */
+
+/** What the world says a design is. Injected for the same reason `Behind` is: a design
+ *  lives in a file, reading a file is reading the world, and a diagnosis worth nothing if
+ *  the test for it can only be written against a checkout is a diagnosis worth nothing. */
+export interface Design {
+  /** The screen it designs, as the approval will name it. */
+  readonly screen: string;
+  /** `drafted` until a person says otherwise, then `accepted` or `dropped`. */
+  readonly state: string;
+  /** The ports it crosses. A design that crosses none is wecode's to judge alone. */
+  readonly crosses: readonly string[];
+  /** Where the projected mockup was written. */
+  readonly mockup: string;
+  /** The task that drafted it: what the question hangs on, so the approval is read against
+   *  the work and not against a filename. */
+  readonly task: number;
+}
+
+/** The one state that is nobody's answer yet. */
+export const DRAFTED = "drafted";
+
+/** The two answers that close the question, and the only ones the approval offers. */
+export const ACCEPTED = "accepted";
+export const DROPPED = "dropped";
+
+/** A design put in front of a person. */
+export interface Asked {
+  readonly screen: string;
+  readonly approval: number;
+  readonly mockup: string;
+}
+
+/** A design a person answered, and the assignment that answer closed. */
+export interface Signed {
+  readonly screen: string;
+  readonly approval: number;
+  readonly answer: string;
+}
+
+export interface DesignHealReport {
+  readonly asked: readonly Asked[];
+  readonly closed: readonly Signed[];
+  readonly left: readonly LeftAlone[];
+}
+
+export interface HealDesignsOptions {
+  /** The person asked. Defaults to the one human worker, when there is exactly one. */
+  readonly operator?: string;
+}
+
+const workerRow = table<{ id: number; name: string; kind: string }>("worker", ["id", "name", "kind"]);
+
+/** The question, which is also the key. It carries the screen and the mockup path because
+ *  those are what is being signed; it is matched on the screen alone, so a design whose
+ *  ports change is the same question asked once and not a second row. */
+const asks = (d: Design): string =>
+  `the design of the ${d.screen} screen is drafted and crosses ${d.crosses.join(", ")}: ` +
+  `accept it or drop it. Its projected mockup is ${d.mockup}`;
+
+const about = (screen: string): string => `the design of the ${screen} screen`;
+
+/** The approval already standing for this screen, if one is. */
+const standing = (db: DatabaseSync, screen: string) =>
+  waitingApprovals(db).find((a) => (a.question ?? "").startsWith(about(screen))) ?? null;
+
+/** Who is asked. A name given is a name honoured or nothing; with no name, the sole human
+ *  worker — because a workspace with two people has no obvious one to burden, and picking
+ *  for them would be wecode deciding whose signature a design needs. */
+function operatorOf(db: DatabaseSync, named: string | undefined): { id: number; name: string } | null {
+  const people = queries(db).selectFrom(workerRow).all().filter((w) => w.kind === "human");
+  const found = named === undefined ? (people.length === 1 ? people[0] : undefined) : people.find((w) => w.name === named);
+  return found === undefined ? null : { id: found.id, name: found.name };
+}
+
+/** One pass over the designs the world has, raising what a person owes an answer on and
+ *  closing what they have since answered.
+ *
+ *  Additive and reversible, like every other heal here: a question raised, a question
+ *  closed. Nothing accepts a design, because accepting one is the whole of what is being
+ *  asked. */
+export function healDesigns(
+  db: DatabaseSync,
+  designs: readonly Design[],
+  opts: HealDesignsOptions = {},
+): DesignHealReport {
+  const asked: Asked[] = [];
+  const closed: Signed[] = [];
+  const left: LeftAlone[] = [];
+  const who = operatorOf(db, opts.operator);
+
+  for (const d of designs) {
+    const seen = { task: d.task, slug: d.screen };
+    const open = standing(db, d.screen);
+
+    if (d.state !== DRAFTED) {
+      if (open === null) continue;
+      const answer = d.state === ACCEPTED ? ACCEPTED : DROPPED;
+      if (who === null) {
+        left.push({ ...seen, why: `${about(d.screen)} is ${d.state} and there is no operator to close it in the name of` });
+        continue;
+      }
+      answerApproval(db, open.id, answer, who.name);
+      closed.push({ screen: d.screen, approval: open.id, answer });
+      continue;
+    }
+
+    if (d.crosses.length === 0) {
+      left.push({ ...seen, why: `${about(d.screen)} crosses no port, so nobody has to sign it` });
+      continue;
+    }
+    if (open !== null) {
+      left.push({ ...seen, why: `${about(d.screen)} is already waiting on approval #${open.id}` });
+      continue;
+    }
+    if (who === null) {
+      left.push({ ...seen, why: `${about(d.screen)} needs a signature and no human worker is there to give it` });
+      continue;
+    }
+
+    const raised = raiseApproval(db, {
+      objective_type: "task",
+      objective_id: d.task,
+      worker_id: who.id,
+      question: asks(d),
+      options: [ACCEPTED, DROPPED],
+    });
+    asked.push({ screen: d.screen, approval: raised.id, mockup: d.mockup });
+  }
+  return { asked, closed, left };
 }

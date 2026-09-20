@@ -348,11 +348,11 @@ export class Runner {
     const allocated = await this.allocateOne();
     const foreman = await this.foreman.tick();
     const settled = await this.settleEnded();
+    // Level-triggered: a guard that became true for a reason other than the verb that just
+    // ran settles here — including the task settleEnded proved, which lands just below.
+    const settled2 = this.engine.settle();
     const merged = await this.landDoneTasks();
     const acceptance = await this.proveStories();
-    // Level-triggered: anything whose guard became true for a reason other than the verb
-    // that just ran settles here, rather than waiting for an event that already happened.
-    const settled2 = this.engine.settle();
     const exhausted = this.enforceRetryLimit();
     // Last, and after settle(): a story becomes delivered in settle(), and the condition
     // this reads is about a story that already is.
@@ -607,7 +607,8 @@ export class Runner {
 
         const trees = this.treesFor(slugs.repo);
         const sha = await trees.commitAttempt(row.worktree, `task/${slugs.task}`, `${slugs.task}: attempt`);
-        if (sha !== null) {
+        if (sha === null) this.refundAttempt(row.task);
+        else {
           queries(this.db).update(tbl.assignment).set({ commit_sha: sha }).where("id", "=", row.id).run();
           committed.push(row.id);
         }
@@ -617,6 +618,20 @@ export class Runner {
       }
     }
     return { committed, scripts: { passed, failed, skipped, refused } };
+  }
+
+  /** Give back the retry the foreman counted, when the attempt committed nothing.
+   *
+   *  The foreman counts every attempt, because a session can exit cleanly having proved
+   *  nothing. But an attempt that left no commit left no work to judge either: the agent
+   *  never started, or the harness died before it wrote. The retry limit is there to stop a
+   *  task that keeps getting it wrong, and spending it on a tree nobody touched exhausts a
+   *  task no one has attempted. Floored at zero, so a refund never invents an attempt. */
+  private refundAttempt(task: number): void {
+    const q = queries(this.db);
+    const t = q.selectFrom(tbl.task).select(["attempts"]).where("id", "=", task).get();
+    if (t === null || t.attempts <= 0) return;
+    q.update(tbl.task).set({ attempts: t.attempts - 1 }).where("id", "=", task).run();
   }
 
   /** Every task that has used its attempts while its story is still open.
@@ -1089,21 +1104,14 @@ export class Runner {
       target_id: story.id,
       check: "the base is an ancestor of the branch",
     });
-    // One row, two voices, and only one of them is worth an operator's attention.
-    //
-    // `chore_refusal` holds a single sentence per chore. This one is the note that raised the
-    // chore — why the work is owed — and the chore's own existence, kind and check already
-    // say that. The dispatcher's and the judge's sentences say the thing the record does not:
-    // no worker free, no slot, the tree would not open, the attempt proved nothing. Written
-    // unconditionally, this note landed on top of one of those on every tick, which cost two
-    // readings at once: the dispatch refusal's `since` and `passes` were reset each pass, so
-    // a chore held for half an hour read as first-seen-now; and a `failed` chore out of
-    // `max_retry` — the one row nothing ever comes back to rewrite — lost its verdict to
-    // "does not contain" for good.
-    //
-    // So it seeds an empty row and never overwrites. Nothing is lost by that: the row is
-    // empty on the first raise, and `reraiseChore` clears it whenever the condition comes
-    // back, which is the only other moment this note is the newest thing known.
+    // One row, two voices, and only one is worth an operator's attention. `chore_refusal`
+    // holds one sentence per chore. This one — why the work is owed — is already said by the
+    // chore's kind and check; the dispatcher's and the judge's say what the record does not:
+    // no worker free, no slot, no tree, nothing proved. Written unconditionally it landed on
+    // top of those every tick, resetting a held dispatch refusal's `since`/`passes` to
+    // first-seen-now, and costing a `failed` chore out of `max_retry` its verdict for good.
+    // So it seeds an empty row and never overwrites: the row is empty on the first raise,
+    // and `reraiseChore` clears it whenever the condition comes back.
     if (choreRefusal(this.db, raised.id) === null) recordChoreRefusal(this.db, why, raised.id);
     return raised.state === "done" ? [] : [raised.id];
   }
@@ -1457,23 +1465,15 @@ export class Runner {
 
   /** What a refresh has thrown away, or null when it has thrown nothing away.
    *
-   *  A refresh is asked for one thing — put the base into the story branch — and it is
-   *  judged by one question, "is the base an ancestor of the branch". `git reset --hard base`
-   *  answers that question perfectly and does the opposite of the work: every commit the
-   *  story was carrying stops being reachable from its branch, and the check still passes.
-   *  So does a rebase that drops a commit, and a force-push of a tree built from the base.
-   *  The attempts are still in the object store for a while, and they are nowhere a person
-   *  will look; by the time the story's tests are re-run the only evidence is that the work
-   *  is gone.
+   *  "Is the base an ancestor of the branch" is the whole check, and `git reset --hard base`
+   *  passes it while doing the opposite of the work — as does a rebase that drops a commit.
+   *  The lost attempts linger in the object store where nobody looks.
    *
-   *  The commits this defends are the ones wecode itself put on the branch: `landed_branch`
-   *  records, per task, the task-branch tip that `landDoneTasks` merged into the story — the
-   *  attempt's commit, and a fact the runner wrote rather than one it was told. Each of them
-   *  was reachable from the story branch the moment it was recorded, so any of them that is
-   *  not reachable now was dropped by whatever last rewrote the branch.
-   *
-   *  An empty `sha` is skipped: it means the tip could not be read at merge time, and an
-   *  unknown commit is not evidence that a known one is missing. */
+   *  What this defends are the commits wecode itself put there: `landed_branch` records, per
+   *  task, the tip `landDoneTasks` merged in. Each was reachable when recorded, so one that
+   *  is not reachable now was dropped by whatever last rewrote the branch. An empty `sha` is
+   *  skipped: the tip could not be read at merge time, and an unknown commit is not evidence
+   *  that a known one is missing. */
   private async orphanedBy(repo: string, branch: string, storyId: number): Promise<string | null> {
     const lost: string[] = [];
     for (const row of this.landedAttempts(storyId)) {
@@ -1589,10 +1589,10 @@ export class Runner {
    *  refresh gets a scope that says what it writes, and `**` stops being the standing
    *  authority of every chore.
    *
-   *  The role's scope is still the ceiling — this only ever narrows — and the fallback is
-   *  the role's own. A merge-tree that cannot answer (no conflict to name, git too old, a
-   *  ref that is gone) must not turn into an empty scope, which would forbid the very
-   *  resolution the chore exists for. */
+   *  A refresh that conflicts on nothing claims nothing: git makes that merge by itself and
+   *  there is no file for a worker to settle. The role's scope is still the ceiling — this
+   *  only ever narrows — and it is the fallback for the one case that is not an answer: a
+   *  merge-tree that could not be asked (git too old, a ref that is gone). */
   private async claimedScope(chore: Chore, repo: string, branch: string, role: Scope): Promise<Scope> {
     if (chore.kind !== "refresh") return role;
     let base: string;
@@ -1602,26 +1602,26 @@ export class Runner {
       return role;
     }
     const conflicted = await this.conflictedPaths(repo, branch, base);
-    return conflicted.length === 0 ? role : { ...role, write: conflicted };
+    return conflicted === null ? role : { ...role, write: conflicted };
   }
 
-  /** The paths a base-into-branch merge would conflict on, read off the object store rather
-   *  than off a working tree: `merge-tree` writes no files and needs no checkout, so asking
-   *  costs nothing and cannot wedge the tree the worker is about to be handed.
+  /** The paths a base-into-branch merge would conflict on: empty when it conflicts on none,
+   *  null when merge-tree gave no answer. Read off the object store, which writes no files
+   *  and cannot wedge the tree the worker is about to be handed.
    *
-   *  Exit 1 is the answer, not the failure — it is what git returns when the merge conflicts
+   *  Exit 1 is an answer, not the failure — it is what git returns when the merge conflicts
    *  — and with `--name-only --no-messages` stdout is the written tree's oid on the first
-   *  line and one conflicting path on each line after it. Any other exit is no answer. */
-  private async conflictedPaths(repo: string, branch: string, base: string): Promise<string[]> {
+   *  line and one conflicting path on each line after it. Exit 0 is the other answer, the
+   *  clean merge, and it names no paths because there are none. Only some other exit —
+   *  git too old, a ref that is gone — settled nothing, and only it is no answer. */
+  private async conflictedPaths(repo: string, branch: string, base: string): Promise<string[] | null> {
     const args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", branch, base];
     const out = await exec("git", args, { cwd: repo })
       .then(() => "")
-      .catch((err: { code?: number; stdout?: string }) => (err.code === 1 ? (err.stdout ?? "") : ""));
-    return out
-      .split("\n")
-      .slice(1)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
+      .catch((err: { code?: number; stdout?: string }) => (err.code === 1 ? (err.stdout ?? "") : null));
+    if (out === null) return null;
+    const lines = out.split("\n").slice(1);
+    return lines.map((line) => line.trim()).filter((line) => line.length > 0);
   }
 
   /** One read per repository per tick. A tick dispatches every planned chore, and six of
