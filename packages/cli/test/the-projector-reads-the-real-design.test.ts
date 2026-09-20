@@ -18,7 +18,13 @@ import { tmp } from "../../core/test/tmpdir.js";
  *
  *  So these run the command with its own default reader, never a stub, against yaml that
  *  is not also json. a-design-is-projected.test.ts proves what the command does with a
- *  design; this proves which files reach it at all. */
+ *  design; this proves which files reach it at all.
+ *
+ *  The reader is still the command's, because `packages/cli` is the package that declares
+ *  `yaml`. What the reader hands back is now read by `@wecode/ui`'s loader, the same one the
+ *  gate reads its design file with — which is why the last case below can say "exactly as
+ *  the gate reads it" and mean the one function rather than two that agree today.
+ *  the-real-design-projects.test.ts is where that sharing is proved. */
 
 const GATE_DESIGN = fileURLToPath(new URL("../../tui/config/design.yaml", import.meta.url));
 
@@ -97,7 +103,8 @@ describe("wecode design show, on a design as it is actually written", () => {
 
   it("reads the gate's own design file exactly as the gate reads it", async () => {
     const text = readFileSync(GATE_DESIGN, "utf8");
-    const mine = await design(["show", "cockpit", "--from", GATE_DESIGN, "--out", svgAt("gate.svg")], ports);
+    // Nothing stubbed at all: the loader that answers is the gate's, reached from here.
+    const mine = await design(["show", "cockpit", "--from", GATE_DESIGN, "--out", svgAt("gate.svg")]);
     // The gate's file declares the cockpit's frame, not a screen the projection draws, so
     // the command refuses it for that reason and for no other: it parsed.
     expect(mine).toBe(2);

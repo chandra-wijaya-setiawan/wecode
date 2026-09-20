@@ -4,3 +4,12 @@ export { indexLines, type IndexedView, type ViewIndex, type ViewIndexScreen } fr
 export { inkViewIndex, inkCapture } from "./adapters/ink.js";
 export { check, type CapturedNode, type Finding, type Rule } from "./check.js";
 export { wireframe, WireframeError, type Box, type Rect } from "./wireframe.js";
+export {
+  against,
+  designDocument,
+  DesignError,
+  designScreen,
+  expected,
+  type Design,
+  type Offset,
+} from "./expected.js";
