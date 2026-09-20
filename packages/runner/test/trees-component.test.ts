@@ -152,6 +152,7 @@ describe("every branch and worktree operation goes through it", () => {
       "add",
       "branch",
       "checkout",
+      "clean",
       "commit",
       "merge",
       "reset",
@@ -159,6 +160,18 @@ describe("every branch and worktree operation goes through it", () => {
       "update-ref",
       "worktree",
     ]);
+  });
+
+  /** `clean` earns its row the way every other verb does: `sweepEmptied` runs it to take the
+   *  ignored leftovers of a renamed-away package with the merge that emptied it. It removes
+   *  files a person could have been keeping, so the list says out loud that `trees` is the
+   *  only thing in the runner allowed to run it. */
+  it("runs the sweep itself, and is the only module that does", () => {
+    expect(mutating(sourceOf("git.ts"))).toContain("clean");
+    const elsewhere = modules().filter(
+      (m) => m !== "git.ts" && verbsOf(sourceOf(m)).includes("clean"),
+    );
+    expect(elsewhere, "modules cleaning a working tree themselves").toEqual([]);
   });
 
   it("leaves no other module changing a ref or a checkout", () => {
