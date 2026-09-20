@@ -130,7 +130,10 @@ export function treePage(nodes: readonly Node[], levels?: Levels): Reply {
   return html(document(treeBranches(nodes, levels)));
 }
 
-/** The page, bound to a way of reading the record now. Read fresh on every request, for the
+/** This page declares no `READS`: the record is what a page reads unless it says otherwise,
+ *  and the record is exactly what a tree is. See `discover.ts`.
+ *
+ *  The page, bound to a way of reading the record now. Read fresh on every request, for the
  *  reason the board is: work moves without anybody reloading. */
 export const treeAt = (nodes: () => readonly Node[], levels?: Levels): Page =>
   shelled(() => treeBranches(nodes(), levels));

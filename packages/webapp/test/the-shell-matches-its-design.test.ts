@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import type { Board } from "@wecode/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { addressOf, boardAt, boardPage, serve } from "../src/index.js";
+import { discovered } from "../src/pages/discover.js";
 import { document, loadShell, shelled, ShellError } from "../src/pages/shell.js";
 
 const DESIGN = fileURLToPath(
@@ -150,7 +151,10 @@ describe("every page wears it", () => {
 
   it("leaves no page of the package making a document of its own", () => {
     const dir = fileURLToPath(new URL("../src/pages", import.meta.url));
-    const pages = readdirSync(dir).filter((f) => f.endsWith(".ts") && f !== "shell.ts");
+    // What is a page under `pages/` is `discover.ts`'s to say, and it is asked here rather
+    // than guessed at: a second list of the infrastructure files would let one of them
+    // quietly stop wearing the shell.
+    const pages = discovered(readdirSync(dir)).map((name) => `${name}.ts`);
     expect(pages.length).toBeGreaterThan(0);
     for (const page of pages) {
       const source = readFileSync(join(dir, page), "utf8");
