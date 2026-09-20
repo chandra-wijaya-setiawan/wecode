@@ -16,17 +16,14 @@
 import type { Board, Row } from "@wecode/core";
 import { code, description, loadViews, sectionMark, type View } from "@wecode/tui";
 import { html, type Page, type Reply } from "../server.js";
+import { document, shelled } from "./shell.js";
 
-/** The page's own presentation, and the only thing here that is not read off config: a
- *  stylesheet is how the page looks, not what it says. Dark because the cockpit it mirrors
- *  is read in a terminal, and monospace for the one thing a column of ids needs. */
+/** This box's own presentation, and the only thing here that is not read off config: a
+ *  stylesheet is how the page looks, not what it says. What a document looks like — its
+ *  margins, its type and its banner — is the shell's, so none of it is here. A section is
+ *  separated by a rule as design.yaml says it is, drawn as a border rather than as a row of
+ *  characters, because a browser has no height to spend. */
 const STYLE = `
-  :root { color-scheme: dark }
-  body { margin: 0; padding: 1.5rem; background: #111; color: #ddd;
-         font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace }
-  main { display: grid; gap: 1.25rem; max-width: 60rem; margin: 0 auto }
-  h1 { font-size: 1rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
-       margin: 0 0 .5rem; color: #888 }
   section { border-top: 1px solid #333; padding-top: .5rem }
   h2 { font-size: 1rem; font-weight: 600; margin: 0 0 .4rem }
   h2 .mark { display: inline-block; width: 1.25rem; color: #6cf }
@@ -82,21 +79,22 @@ function section(view: View, rows: readonly Row[]): string {
   return `<section id="${escape(view.name)}">${head}${body}</section>`;
 }
 
-/** The whole document. The title is the product's name and the only word this file owns. */
-export function boardPage(board: Board, views: readonly View[] = loadViews()): Reply {
-  const sections = views.map((v) => section(v, board[v.filter])).join("");
-  return html(
-    `<!doctype html>\n<html lang="en"><head><meta charset="utf-8">` +
-      `<meta name="viewport" content="width=device-width, initial-scale=1">` +
-      `<title>wecode</title><style>${STYLE}</style></head>` +
-      `<body><main><h1>wecode</h1>${sections}</main></body></html>\n`,
-  );
+/** What the board says: its boxes, and nothing around them. The frame is the shell's, so
+ *  this file writes no document — it writes what goes inside one. */
+export function boardBoxes(board: Board, views: readonly View[] = loadViews()): string {
+  return views.map((v) => section(v, board[v.filter])).join("");
 }
 
-/** The page, bound to a way of getting the current rows.
+/** The whole document: the board's boxes, in the shell design.yaml declares. */
+export function boardPage(board: Board, views: readonly View[] = loadViews()): Reply {
+  return html(document(boardBoxes(board, views), STYLE));
+}
+
+/** The page, bound to a way of getting the current rows, and wearing the shell — a page of
+ *  this package reaches the server through `shelled` and by no other road.
  *
  *  A board is read fresh on every request rather than once at startup: work moves without
  *  anybody reloading, and a page served from a snapshot taken when the process booted is a
  *  board that is wrong by the time it is read. */
 export const boardAt = (rows: () => Board, views?: readonly View[]): Page =>
-  () => (views === undefined ? boardPage(rows()) : boardPage(rows(), views));
+  shelled(() => (views === undefined ? boardBoxes(rows()) : boardBoxes(rows(), views)), STYLE);
