@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /** The board in a browser, wired to a workspace. This file owns the process — which
  *  database, which port, and a socket closed however the process ends. Everything drawn is
- *  `pages/board.ts`'s and everything routed is `server.ts`'s.
+ *  a page's under `pages/`, everything routed is `server.ts`'s, and which page answers which
+ *  path is here — the one place a reader can see the whole surface at once.
  *
  *  Which workspace, and the refusal to make one, are read the same way `wecode-tui` reads
  *  them: a board is for looking at work that exists, and `open()` would cheerfully write an
@@ -15,8 +16,10 @@ import {
   databaseOf,
   listWorkspaces,
   open,
+  tree,
 } from "@wecode/core";
 import { boardAt } from "./pages/board.js";
+import { treeAt } from "./pages/tree.js";
 import { addressOf, serve } from "./server.js";
 
 process.removeAllListeners("warning");
@@ -58,7 +61,14 @@ if (!Number.isInteger(port) || port < 0 || port > 65535) {
 
 const db = open(dbPath);
 
-const server = await serve({ "/": boardAt(() => board(db)) }, port, values.host ?? "127.0.0.1");
+/** The surface, whole. Each page is read fresh per request, so the routes are bound to a
+ *  way of reading the workspace rather than to a reading of it. */
+const routes = {
+  "/": boardAt(() => board(db)),
+  "/tree": treeAt(() => tree(db)),
+};
+
+const server = await serve(routes, port, values.host ?? "127.0.0.1");
 process.stdout.write(`workspace ${values.workspace ?? currentWorkspace()} at ${addressOf(server)}\n`);
 
 let closed = false;
