@@ -138,8 +138,7 @@ components:
     layer: client
     component: true
     owns: every verb, as a command. The only way an agent reaches wecode
-    modules: [bin, capabilities, delivered, doctor, explore, index, paint, plan, run, scope-proposal, ui, unimported, verbs/entity, verbs/read, verbs/run-and-see, verbs/see, verbs/tree, verbs/usage, verbs/wait, verbs/work]
-    modules: [bin, capabilities, delivered, doctor, explore, index, paint, plan, plan/refusals, run, scope-proposal, ui, unimported]
+    modules: [bin, capabilities, delivered, doctor, explore, index, paint, plan, plan/refusals, run, scope-proposal, ui, unimported, verbs/entity, verbs/make, verbs/read, verbs/run-and-see, verbs/see, verbs/tree, verbs/usage, verbs/wait, verbs/work]
 
   repo-explorer:
     package: explorer
@@ -160,7 +159,7 @@ components:
     layer: client
     component: true
     owns: the board, and the few verbs worth typing while looking at a row
-    modules: [app, bin, index, list, outline, screens, services, views]
+    modules: [app, bin, index, keys, list, outline, screens, services, views]
 
   webapp:
     package: webapp
