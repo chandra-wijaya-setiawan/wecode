@@ -22,7 +22,7 @@ const CLIPPED: Finding = {
 
 /** A capture on disk, and the path a tester would type. */
 function captureOf(tree: unknown, name = "capture.json"): string {
-  const at = join(tmp("wecode-ui-"), name);
+  const at = join(tmp("wecode-lens-"), name);
   writeFileSync(at, JSON.stringify(tree));
   return at;
 }
@@ -86,14 +86,14 @@ describe("wecode ui check", () => {
   });
 
   it("tells a capture it could not read apart from a screen that is wrong", async () => {
-    const missing = join(tmp("wecode-ui-"), "nothing.json");
+    const missing = join(tmp("wecode-lens-"), "nothing.json");
     const { rules } = saying();
     expect(await ui(["check", missing], rules)).toBe(2);
     expect(complained()).toContain("cannot read the capture");
   });
 
   it("refuses a capture that is not json, rather than calling it clean", async () => {
-    const at = join(tmp("wecode-ui-"), "capture.json");
+    const at = join(tmp("wecode-lens-"), "capture.json");
     writeFileSync(at, "not json at all");
     const { rules, seen } = saying();
     expect(await ui(["check", at], rules)).toBe(2);

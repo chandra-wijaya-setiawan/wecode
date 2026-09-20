@@ -104,6 +104,16 @@ describe("@wecode/lens", () => {
     expect(stale, "files still reaching the old directory by path").toEqual([]);
   });
 
+  // A filename is the one place the old name survives a search that only reads contents,
+  // and it is the name a person types to run the file — a suite called `wecode-ui-check`
+  // is a page of the repository still titled after a package that is gone.
+  it("is the name every file is titled after", () => {
+    const titled = sources(ROOT)
+      .filter((f) => /wecode-ui\b/.test(f.slice(f.lastIndexOf("/") + 1)))
+      .map((f) => f.slice(ROOT.length));
+    expect(titled, "files still named after the old package").toEqual([]);
+  });
+
   it("is the package the component map claims the view-index in", () => {
     const map = readFileSync(join(PACKAGES, "core", "config", "components.yaml"), "utf8");
     const row = map.slice(map.indexOf("\n  view-index:"));
