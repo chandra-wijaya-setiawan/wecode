@@ -45,20 +45,28 @@ export type Rules = (capture: unknown) => readonly Finding[];
  *  implementation: both specifiers name the same module, and if neither resolves the
  *  command says so in the one sentence that tells a reader what to do about it, and exits
  *  2 rather than deciding anything itself. */
-async function fromUi(): Promise<Record<string, unknown>> {
+async function reach(pkg: string, sibling: string): Promise<Record<string, unknown>> {
   // Not literal specifiers: a literal `@wecode/ui` would stop this package compiling
   // before the dependency is declared.
-  const here = fileURLToPath(new URL("../../ui/dist/index.js", import.meta.url));
+  const here = fileURLToPath(new URL(sibling, import.meta.url));
   let last = "";
-  for (const from of ["@wecode/ui", here]) {
+  for (const from of [pkg, here]) {
     try {
       return (await import(from)) as Record<string, unknown>;
     } catch (err) {
       last = (err as Error).message;
     }
   }
-  throw new Error(`@wecode/ui cannot be reached — packages/cli does not depend on it yet: ${last}`);
+  throw new Error(`${pkg} cannot be reached — packages/cli does not depend on it yet: ${last}`);
 }
+
+const fromUi = (): Promise<Record<string, unknown>> => reach("@wecode/ui", "../../ui/dist/index.js");
+
+/** The gate over the product's own screens, reached the same way and for the same reason:
+ *  `@wecode/tui` is where views.yaml and design.yaml are read, and reading them a second
+ *  time here would be a mockup that can disagree with the gate the screen is held to. */
+const fromTui = (): Promise<Record<string, unknown>> =>
+  reach("@wecode/tui", "../../tui/dist/views.js");
 
 /** Where the rules come from when a caller does not say. */
 async function loadRules(): Promise<Rules> {
@@ -204,16 +212,45 @@ async function loadSelect(): Promise<Select> {
   return designScreen;
 }
 
+/** The gate's translation, as this command needs it: a screen's name and the terminal it
+ *  is a screen of, and the design tree the product's own config says it is. The tree is
+ *  `unknown` for the reason the capture is — its shape is `@wecode/ui`'s, and a second
+ *  declaration of it here would be a second place to keep right. */
+export type Translate = (name: string, screen: { width: number; height: number }) => unknown;
+
+/** Where the translation comes from when a caller does not say. */
+async function loadTranslate(): Promise<Translate> {
+  const { screenDesign } = (await fromTui()) as { screenDesign?: Translate };
+  if (typeof screenDesign !== "function") {
+    throw new Error("@wecode/tui exports no screenDesign — packages/cli does not depend on it yet");
+  }
+  return screenDesign;
+}
+
+/** The terminal a real screen is drawn for. A design file states its own size, so this is
+ *  only asked for by `--real`, where the size is the one thing the config cannot know. */
+function terminal(size: string | undefined): { width: number; height: number } {
+  const said = /^(\d+)x(\d+)$/.exec(size ?? "80x30");
+  if (said === null) throw new Error(`--size is <width>x<height>, not ${String(size)}`);
+  return { width: Number(said[1]), height: Number(said[2]) };
+}
+
 export async function design(
   args: readonly string[],
   ports: () => Ports | Promise<Ports> = loadPorts,
   read: () => Read | Promise<Read> = loadRead,
   select: () => Select | Promise<Select> = loadSelect,
+  translate: () => Translate | Promise<Translate> = loadTranslate,
 ): Promise<number> {
   const { values, positionals } = parseArgs({
     args: [...args],
     allowPositionals: true,
-    options: { from: { type: "string" }, out: { type: "string" } },
+    options: {
+      from: { type: "string" },
+      out: { type: "string" },
+      real: { type: "boolean" },
+      size: { type: "string" },
+    },
   });
   const [question, name] = positionals;
   if (question === undefined) return designUsage();
@@ -227,11 +264,19 @@ export async function design(
   const out = resolve(values.out ?? `${name}.svg`);
 
   let declared: unknown;
-  try {
-    const parsed = (await read())(readFileSync(resolve(file), "utf8"));
-    declared = (await select())(parsed, name, file);
-  } catch (err) {
-    return fail(`cannot read the design at ${file}: ${(err as Error).message}`, 2);
+  if (values.real === true) {
+    try {
+      declared = (await translate())(name, terminal(values.size));
+    } catch (err) {
+      return fail(`cannot read the real design: ${(err as Error).message}`, 2);
+    }
+  } else {
+    try {
+      const parsed = (await read())(readFileSync(resolve(file), "utf8"));
+      declared = (await select())(parsed, name, file);
+    } catch (err) {
+      return fail(`cannot read the design at ${file}: ${(err as Error).message}`, 2);
+    }
   }
 
   try {
@@ -253,6 +298,8 @@ function designUsage(code = 0): number {
       "  wecode design show <screen>   write a wireframe of the declared screen, and say where",
       "",
       "  --from <file>   the design file to read (default design.yaml)",
+      "  --real          draw the product's own screen, as its config declares it",
+      "  --size <w>x<h>  the terminal a --real screen is drawn for (default 80x30)",
       "  --out <file>    where to write the wireframe (default <screen>.svg)",
       "",
       "Exit: 0 written, 2 the screen could not be drawn.",
