@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { design } from "../src/ui.js";
-import { check, expected } from "../../ui/src/index.js";
+import { check, expected } from "../../lens/src/index.js";
 import { loadViews, screenDesign, screenNames } from "../../tui/src/views.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
@@ -39,7 +39,7 @@ const complained = (): string => err.join("");
 const svgAt = (name: string): string => join(tmp("wecode-real-mockup-"), name);
 
 /** The command with nothing stubbed at all — no ports, no reader, no translation. That is
- *  the whole claim: run as an operator runs it, it reaches `@wecode/ui` and `@wecode/tui`
+ *  the whole claim: run as an operator runs it, it reaches `@wecode/lens` and `@wecode/tui`
  *  and writes a file. */
 async function drawn(screen: string, ...rest: string[]): Promise<string> {
   const at = svgAt(`${screen}.svg`);

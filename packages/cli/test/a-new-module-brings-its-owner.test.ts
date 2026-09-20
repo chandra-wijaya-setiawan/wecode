@@ -62,8 +62,8 @@ function project(): void {
 function owned(): void {
   mkdirSync(join(repo, "packages", "core", "config"), { recursive: true });
   writeFileSync(join(repo, OWNERS), "components:\n  view-index:\n    modules: [ports]\n");
-  mkdirSync(join(repo, "packages", "ui", "src"), { recursive: true });
-  writeFileSync(join(repo, "packages", "ui", "src", "ports.ts"), "export {};\n");
+  mkdirSync(join(repo, "packages", "lens", "src"), { recursive: true });
+  writeFileSync(join(repo, "packages", "lens", "src", "ports.ts"), "export {};\n");
 }
 
 function file(body: string): string {
@@ -107,8 +107,8 @@ describe("a new module brings its owner", () => {
   it("refuses a story that adds a module no task here may claim", () => {
     project();
     owned();
-    expect(run(["plan", plan({ title: "write the wireframe", scope: '"packages/ui/src/wireframe.ts"' })])).toBe(1);
-    expect(complained()).toContain("adds packages/ui/src/wireframe.ts");
+    expect(run(["plan", plan({ title: "write the wireframe", scope: '"packages/lens/src/wireframe.ts"' })])).toBe(1);
+    expect(complained()).toContain("adds packages/lens/src/wireframe.ts");
     expect(complained()).toContain(`no task here may write ${OWNERS}`);
 
     // Refused whole: a story that cannot claim its own module creates nothing.
@@ -120,7 +120,7 @@ describe("a new module brings its owner", () => {
     project();
     owned();
     const path = plan(
-      { title: "write the wireframe", scope: '"packages/ui/src/wireframe.ts"' },
+      { title: "write the wireframe", scope: '"packages/lens/src/wireframe.ts"' },
       { title: "claim it", scope: `"${OWNERS}"` },
     );
     expect(run(["plan", path])).toBe(0);
@@ -131,7 +131,7 @@ describe("a new module brings its owner", () => {
   it("takes the claim from the same task when that is where it sits", () => {
     project();
     owned();
-    const scope = `"packages/ui/src/wireframe.ts", "${OWNERS}"`;
+    const scope = `"packages/lens/src/wireframe.ts", "${OWNERS}"`;
     expect(run(["plan", plan({ title: "write the wireframe and claim it", scope })])).toBe(0);
     expect(count("story")).toBe(1);
   });
@@ -139,7 +139,7 @@ describe("a new module brings its owner", () => {
   it("accepts a glob over the map, which is a scope that can still write it", () => {
     project();
     owned();
-    const scope = '"packages/ui/src/wireframe.ts", "packages/core/config/*.yaml"';
+    const scope = '"packages/lens/src/wireframe.ts", "packages/core/config/*.yaml"';
     expect(run(["plan", plan({ title: "write the wireframe", scope })])).toBe(0);
     expect(count("story")).toBe(1);
   });
@@ -147,7 +147,7 @@ describe("a new module brings its owner", () => {
   it("says nothing about a module that is already there, which is an edit", () => {
     project();
     owned();
-    expect(run(["plan", plan({ title: "rewrite the ports", scope: '"packages/ui/src/ports.ts"' })])).toBe(0);
+    expect(run(["plan", plan({ title: "rewrite the ports", scope: '"packages/lens/src/ports.ts"' })])).toBe(0);
     expect(complained()).toBe("");
     expect(count("story")).toBe(1);
   });
@@ -155,14 +155,14 @@ describe("a new module brings its owner", () => {
   it("judges only a path spelled out, because a glob states a shape and not a module", () => {
     project();
     owned();
-    expect(run(["plan", plan({ title: "work on the ui", scope: '"packages/ui/src/**"' })])).toBe(0);
+    expect(run(["plan", plan({ title: "work on the lens", scope: '"packages/lens/src/**"' })])).toBe(0);
     expect(complained()).toBe("");
   });
 
   it("leaves a scope outside packages/*/src alone", () => {
     project();
     owned();
-    const scope = '"packages/ui/test/wireframe.test.ts", "packages/ui/README.md"';
+    const scope = '"packages/lens/test/wireframe.test.ts", "packages/lens/README.md"';
     expect(run(["plan", plan({ title: "write the test", scope })])).toBe(0);
     expect(complained()).toBe("");
   });
@@ -171,7 +171,7 @@ describe("a new module brings its owner", () => {
     project();
     owned();
     rmSync(join(repo, OWNERS));
-    expect(run(["plan", plan({ title: "write the wireframe", scope: '"packages/ui/src/wireframe.ts"' })])).toBe(0);
+    expect(run(["plan", plan({ title: "write the wireframe", scope: '"packages/lens/src/wireframe.ts"' })])).toBe(0);
     expect(complained()).toBe("");
     expect(count("story")).toBe(1);
   });
