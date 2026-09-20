@@ -17,7 +17,11 @@
  *  every parent would say only "this row has children", which the list already says.
  *
  *  The nodes arrive as nodes, not as a database, for the reason the board's do: where a
- *  workspace is, is `bin.ts`'s. */
+ *  workspace is, is `bin.ts`'s.
+ *
+ *  How deep a row sits is drawn as the nested list's own indent, and that rule — like every
+ *  other rule of this surface — is the shell's: one stylesheet, selected on the markup this
+ *  file writes. */
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -69,20 +73,6 @@ export function loadLevels(path: string = DESIGN): Levels {
 /** What the page says when the record is empty. A page that came back blank reads as a page
  *  that failed. */
 const NOTHING_YET = "nothing in the record yet";
-
-/** This page's own presentation. Indent is the nesting, drawn as the list's own padding
- *  rather than as spaces in the text, and a root is flush as the design says. The
- *  document's margins, type and banner are the shell's and none of them is here. */
-const STYLE = `
-  ul.tree { list-style: none; margin: 0; padding: 0 }
-  ul.tree ul { list-style: none; margin: 0; padding-left: 1.25rem;
-               border-left: 1px solid #333 }
-  li { padding: .1rem 0; min-width: 0; overflow-wrap: anywhere }
-  li .label { color: #ddd }
-  li .id, li .kind, li .rollup { color: #888 }
-  li .state { color: #6cf }
-  p.empty { margin: 0; color: #666 }
-`;
 
 /** The parts of a row, in the order the design writes them, joined by the separator the
  *  rest of the surface's prose already uses. The label leads because the label is what the
@@ -137,7 +127,7 @@ export function treeBranches(nodes: readonly Node[], levels?: Levels): string {
 
 /** The whole document: the tree, in the shell design.yaml declares. */
 export function treePage(nodes: readonly Node[], levels?: Levels): Reply {
-  return html(document(treeBranches(nodes, levels), STYLE));
+  return html(document(treeBranches(nodes, levels)));
 }
 
 /** This page declares no `READS`: the record is what a page reads unless it says otherwise,
@@ -146,4 +136,4 @@ export function treePage(nodes: readonly Node[], levels?: Levels): Reply {
  *  The page, bound to a way of reading the record now. Read fresh on every request, for the
  *  reason the board is: work moves without anybody reloading. */
 export const treeAt = (nodes: () => readonly Node[], levels?: Levels): Page =>
-  shelled(() => treeBranches(nodes(), levels), STYLE);
+  shelled(() => treeBranches(nodes(), levels));

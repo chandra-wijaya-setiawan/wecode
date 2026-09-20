@@ -15,30 +15,14 @@
  *  that can post, and the card goes on naming the command a reader has to hand.
  *
  *  The approvals arrive as a function, not as a database: what is proved here is the page,
- *  and where a workspace is, is `bin.ts`'s. */
+ *  and where a workspace is, is `bin.ts`'s.
+ *
+ *  What a card looks like is not here either. The surface has one stylesheet and it is the
+ *  shell's; this file writes the markup its rules are selected on. */
 import type { Approval, Evidence } from "@wecode/core";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
 import { document, shelled } from "./shell.js";
-
-/** This page's own presentation. A card is a bordered block because a browser draws boxes
- *  out of shapes; the document's margins, type and banner are the shell's and none of them
- *  is here. */
-const STYLE = `
-  article { border: 1px solid #333; border-radius: 4px; padding: .75rem 1rem }
-  article h2 { font-size: 1rem; font-weight: 600; margin: 0 0 .5rem;
-               overflow-wrap: anywhere; white-space: pre-wrap }
-  article h2 .id { color: #888; margin-right: .6rem }
-  dl { display: grid; grid-template-columns: 6rem 1fr; gap: .2rem .75rem; margin: 0 }
-  dt { color: #888 }
-  dd { margin: 0; min-width: 0; overflow-wrap: anywhere }
-  dd ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap;
-          gap: .4rem }
-  dd li { border: 1px solid #444; border-radius: 3px; padding: 0 .4rem; color: #6cf }
-  dd.open { color: #666 }
-  p.empty { margin: 0; color: #666 }
-  p.how { margin: .6rem 0 0; color: #666 }
-`;
 
 /** What the page says when nobody owes wecode an answer. A page that came back blank reads
  *  as a page that failed. */
@@ -93,7 +77,7 @@ export function decisionCards(approvals: readonly Approval[]): string {
 
 /** The whole document: the cards, in the shell design.yaml declares. */
 export function decisionsPage(approvals: readonly Approval[]): Reply {
-  return html(document(decisionCards(approvals), STYLE));
+  return html(document(decisionCards(approvals)));
 }
 
 /** Which reading of the workspace this page is served from. What is waiting on a person is
@@ -106,4 +90,4 @@ export const READS = "approvals";
  *  command line is gone from the record the moment it is answered, and a page served from
  *  a snapshot would still be asking it. */
 export const decisionsAt = (approvals: () => readonly Approval[]): Page =>
-  shelled(() => decisionCards(approvals()), STYLE);
+  shelled(() => decisionCards(approvals()));

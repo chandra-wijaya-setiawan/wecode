@@ -12,7 +12,10 @@
  *  second declaration of the board — one that goes stale the moment a box is renamed.
  *
  *  The rows arrive as a `Board`, not as a database. A page that opened its own connection
- *  could not be read without one, and where a workspace is, is `bin.ts`'s business. */
+ *  could not be read without one, and where a workspace is, is `bin.ts`'s business.
+ *
+ *  Nor does this file say how a box looks. The surface has one stylesheet and it is the
+ *  shell's; what is here is the markup, and the class names the shell's rules select on. */
 import type { Board, Row } from "@wecode/core";
 import { code, description, loadViews, sectionMark, type View } from "@wecode/tui";
 import { html, type Page, type Reply } from "../server.js";
