@@ -44,6 +44,7 @@ import { attemptLanding, isLanded, LAND_CHECK } from "./land-chore.js";
 import { proveRedAtBase, type RedAtBase } from "./tick/red-at-base.js";
 import { proveStories, type Proven } from "./tick/prove-stories.js";
 import { raiseStoryChores } from "./tick/story-chores.js";
+import * as refresh from "./tick/refresh.js";
 import { settleEnded, type Settled } from "./tick/settle.js";
 
 const exec = promisify(execFile);
@@ -241,9 +242,6 @@ export interface Waiting {
   readonly story: number;
   readonly why: string;
 }
-
-/** The half of a refresh's verdict that says what was owed, said once for every commit. */
-const KEPT = "a refresh adds the base, it does not replace the branch";
 
 /** The `script_run` entity a run at base is recorded under — its own, so it never collides
  *  with the examiner's verdict rows for the same test. Named once: the insert and the read
@@ -735,10 +733,8 @@ export class Runner {
     });
   }
 
-  private async hasCommit(repo: string, ref: string): Promise<boolean> {
-    return await exec("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo })
-      .then(() => true)
-      .catch(() => false);
+  private hasCommit(repo: string, ref: string): Promise<boolean> {
+    return refresh.hasCommit(repo, ref);
   }
 
   /** The phase itself lives in `tick/story-chores.ts` — the pass, the `refresh` rule it
@@ -1087,40 +1083,10 @@ export class Runner {
     }
   }
 
-  /** What a refresh has thrown away, or null when it has thrown nothing away.
-   *
-   *  "Is the base an ancestor of the branch" is the whole check, and `git reset --hard base`
-   *  passes it while doing the opposite of the work — as does a rebase that drops a commit.
-   *
-   *  Two records say what the branch held. `landed_branch` names the tip `landDoneTasks`
-   *  merged per task, and goes first because it names the task; an empty `sha` is skipped,
-   *  since a tip that could not be read then is not evidence a known commit is gone now. The
-   *  branch's own reflog covers the rest. */
-  private async orphanedBy(repo: string, branch: string, storyId: number): Promise<string | null> {
-    const lost: string[] = [];
-    for (const row of this.landedAttempts(storyId)) {
-      if (!(await this.contains(repo, branch, row.sha))) lost.push(`task ${row.task} at ${row.sha.slice(0, 12)}`);
-    }
-    if (lost.length > 0) return `it no longer reaches work wecode merged into it: ${lost.join(", ")} — ${KEPT}`;
-    const tips = await this.droppedTips(repo, branch);
-    return tips.length === 0 ? null : `it no longer reaches a commit it already held: ${tips.join(", ")} — ${KEPT}`;
-  }
-
-  /** The commits this branch has stood at and can no longer reach, newest first.
-   *
-   *  `landed_branch` only knows the tips wecode merged in, so everything a worker committed
-   *  on the branch itself — a settled conflict, a refresh's own merge commit, a story with
-   *  no landed task at all — had nothing defending it, and a reset onto the base dropped it
-   *  unseen. A story branch only ever moves forward: wecode merges into it and `update-ref`s
-   *  it to a commit that already contained it, and every reset it makes is in a detached
-   *  tree. So a former tip that is unreachable now was thrown away by hand. */
-  private async droppedTips(repo: string, branch: string): Promise<string[]> {
-    const seen = await exec("git", ["reflog", "show", "--format=%H", `refs/heads/${branch}`], { cwd: repo })
-      .then((r) => r.stdout.split("\n").filter((l) => /^[0-9a-f]{40}$/.test(l)))
-      .catch(() => [] as string[]);
-    const lost: string[] = [];
-    for (const tip of new Set(seen)) if (!(await this.contains(repo, branch, tip))) lost.push(tip.slice(0, 12));
-    return lost;
+  /** What a refresh has thrown away. The read itself is `tick/refresh.ts`'s; what is the
+   *  runner's is the walk to the attempt commits the ledger recorded under this story. */
+  private orphanedBy(repo: string, branch: string, storyId: number): Promise<string | null> {
+    return refresh.orphanedBy(repo, branch, this.landedAttempts(storyId));
   }
 
   /** The attempt commits this story's tasks landed on its branch. The walk is
@@ -1152,11 +1118,8 @@ export class Runner {
       .map((r) => ({ task: r.task_id, sha: r.sha }));
   }
 
-  /** `git merge-base --is-ancestor`: the merge, read off the graph rather than off a report. */
-  private async contains(repo: string, branch: string, base: string): Promise<boolean> {
-    return await exec("git", ["merge-base", "--is-ancestor", base, branch], { cwd: repo })
-      .then(() => true)
-      .catch(() => false);
+  private contains(repo: string, branch: string, base: string): Promise<boolean> {
+    return refresh.contains(repo, branch, base);
   }
 
   /** The first of the story's scripts that fails in the merged tree, or null when they all
@@ -1234,27 +1197,8 @@ export class Runner {
     } catch {
       return role;
     }
-    const conflicted = await this.conflictedPaths(repo, branch, base);
+    const conflicted = await refresh.conflictedPaths(repo, branch, base);
     return conflicted === null ? role : { ...role, write: conflicted };
-  }
-
-  /** The paths a base-into-branch merge would conflict on: empty when it conflicts on none,
-   *  null when merge-tree gave no answer. Read off the object store, which writes no files
-   *  and cannot wedge the tree the worker is about to be handed.
-   *
-   *  Exit 1 is an answer, not the failure — it is what git returns when the merge conflicts
-   *  — and with `--name-only --no-messages` stdout is the written tree's oid on the first
-   *  line and one conflicting path on each line after it. Exit 0 is the other answer, the
-   *  clean merge, and it names no paths because there are none. Only some other exit —
-   *  git too old, a ref that is gone — settled nothing, and only it is no answer. */
-  private async conflictedPaths(repo: string, branch: string, base: string): Promise<string[] | null> {
-    const args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", branch, base];
-    const out = await exec("git", args, { cwd: repo })
-      .then(() => "")
-      .catch((err: { code?: number; stdout?: string }) => (err.code === 1 ? (err.stdout ?? "") : null));
-    if (out === null) return null;
-    const lines = out.split("\n").slice(1);
-    return lines.map((line) => line.trim()).filter((line) => line.length > 0);
   }
 
   /** One read per repository per tick. A tick dispatches every planned chore, and six of
@@ -1279,24 +1223,8 @@ export class Runner {
       .filter((a) => OPEN_PHASES.includes(a.phase)).length;
   }
 
-  /** Would this branch merge into the base, without touching either?
-   *
-   *  `merge-tree --write-tree` answers it in the object store: no checkout, no index, and
-   *  nothing to clean up if the answer is no.
-   *
-   *  Both refs are checked first, because merge-tree exits 1 for a ref that is not there
-   *  as well as for a conflict. Read off the exit code alone, a story that never had a
-   *  branch gets a merge chore that no merge could ever discharge. */
-  private async mergesCleanly(repo: string, base: string, branch: string): Promise<boolean> {
-    for (const ref of [base, branch]) {
-      const there = await exec("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo })
-        .then(() => true)
-        .catch(() => false);
-      if (!there) return true;
-    }
-    return await exec("git", ["merge-tree", "--write-tree", base, branch], { cwd: repo })
-      .then(() => true)
-      .catch(() => false);
+  private mergesCleanly(repo: string, base: string, branch: string): Promise<boolean> {
+    return refresh.mergesCleanly(repo, base, branch);
   }
 
   /** A task whose tests passed lands on its story branch — once. The merge is recorded
@@ -1390,13 +1318,8 @@ export class Runner {
     return row?.branch === branch && row.sha === tip;
   }
 
-  private async tipOf(repo: string, ref: string): Promise<string | null> {
-    try {
-      const { stdout } = await exec("git", ["rev-parse", "--verify", "--quiet", ref], { cwd: repo });
-      return stdout.trim() || null;
-    } catch {
-      return null;
-    }
+  private tipOf(repo: string, ref: string): Promise<string | null> {
+    return refresh.tipOf(repo, ref);
   }
 }
 
