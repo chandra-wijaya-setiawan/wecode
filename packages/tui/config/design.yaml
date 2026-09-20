@@ -348,6 +348,25 @@ proposal:
     count_at: right
     count: "{count}{key}"
     key_as: superscript
+    # The hint is on every head, not on the heads whose count happened to be worth raising.
+    # A head with no letter on it is a section the operator can see and cannot open, and
+    # which sections those are would then be decided by which ones had rows that day.
+    hint_on: every_head
+    hint: "{key}"
+    # Which letter is not decided here. views.yaml already gave each box one, and a second
+    # copy of the seven letters is two lists that must agree with nothing checking them. The
+    # proposal names two sections in shorter words than the board does, so what is written
+    # here is which box each head is — the letter is read from there.
+    keys:
+      from: views.yaml#views.*.key
+      sections:
+        needs_you: needs_human
+        running: running
+        queue: queued
+        cooking: cooking
+        planned: planned
+        delivered: delivered
+        dropped: dropped
 
   # A row is a sentence, so it is not cut: what will not fit continues on the next line,
   # indented to where the text began and never under the mark. What it cost sits at the
@@ -364,12 +383,14 @@ proposal:
       shows: [tokens, scope]
       entry: "{gauge} {tokens} {scope}"
 
-  # Queue and cooking are each one row deep. Two heads for two rows is chrome outspending
-  # content, so they share the one head line and split it.
-  shared_heads:
-    - sections: [queue, cooking]
-      head: one_line
-      rows_each: 1
+  # Every section gets its own head. Queue and cooking used to share one line to save the
+  # line, and what that line cost was the pair's two counts and two hints collapsed into
+  # one: `q` and `c` open different boxes, and a head that names both sections can only
+  # carry one of the letters, so half the pair was unopenable from the head that named it.
+  # Waiting for a slot and being stuck are also two different questions, and a shared head
+  # reads as one. A hint on every head is what a head is for, so no two sections share one.
+  heads: per_section
+  shared_heads: []
 
   # The foot of the board is the whole tree in one line: what is planned, what came out,
   # what was dropped, and the two ways in to all of it.
