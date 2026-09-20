@@ -184,6 +184,9 @@ importers:
       '@wecode/explorer':
         specifier: workspace:*
         version: link:../explorer
+      yaml:
+        specifier: ^2.9.1
+        version: 2.9.1
 
   packages/core:
     dependencies:
