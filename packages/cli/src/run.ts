@@ -1,35 +1,22 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
-// The landing rules are a module of their own in core, deliberately outside the barrel: no
-// git, no clock, no filesystem, so the command half and the runner half can be held to the
-// same words. Addressed through the package's build output, the way its barrel is.
-import { type BaseState, refuseDirtyBase, reportAbort, reportLeftover } from "@wecode/core/dist/land.js";
 import {
   actorOf,
-  answerApproval, raiseApproval, APPROVAL_KIND,
   attributedTo,
-  board,
   Completions,
   Engine,
   Maker,
   OPERATOR,
-  detect,
   currentDatabase,
   databaseOf,
   listWorkspaces,
-  loadRoles,
   lessons,
   dropLesson,
   tree,
   type Node,
   loadMachines,
   open,
-  readPointer,
-  workspaceDir,
-  writePointer,
-  readProjectConfig,
   restate,
   isRestatable,
   RESTATABLE,
@@ -39,20 +26,19 @@ import {
   STATEFUL,
   TRANSITIONS,
   Verbs,
+  readProjectConfig,
   type Actor,
   type Outcome,
   type StatefulEntity,
   type TestKind,
   type WorkerKind,
-  writeProjectConfig,
 } from "@wecode/core";
 // The typed query layer is not on `@wecode/core`'s index, so it is reached by its own path.
-import { excluded, queries, table, type Dialect, type TableDef, type Value } from "@wecode/core/dist/db.js";
-import { plan } from "./plan.js";
-import { doctor } from "./doctor.js";
-import { explore } from "./explore.js"; import { paint } from "./paint.js";
-import { delivered as deliveredStories } from "./delivered.js";
-import { design as projector } from "./ui.js";
+import { queries, table, type Dialect, type TableDef, type Value } from "@wecode/core/dist/db.js";
+import { paint } from "./paint.js";
+// The verbs that run something or show you something. Namespaced because several of them —
+// `board`, `worker`, `answer` — are also words this file uses for a table or a column.
+import * as see from "./verbs/run-and-see.js";
 // Namespaced because `tree` is already the core query that reads the whole shape back.
 import * as rungs from "./verbs/tree.js";
 // Namespaced for the same reason: `requirement` and `task` are already tables in this file.
@@ -81,16 +67,16 @@ function dispatch(argv: readonly string[]): number {
     const what = rest[0] ?? "";
     return isStateful(what) ? entityHelp(what) : usage();
   }
-  if (head === "board") return showBoard(rest);
-  if (head === "doctor") return doctor(rest);
+  if (head === "board") return see.board(seen(rest));
+  if (head === "doctor") return see.doctor(rest);
   if (head === "init") return init(rest);
-  if (head === "answer") return answer(rest);
-  if (head === "ask") return ask(rest);
+  if (head === "answer") return see.answer(seen(rest));
+  if (head === "ask") return see.ask(seen(rest));
   if (head === "show") return show(rest);
-  if (head === "land") return land(rest);
-  if (head === "onboard") return onboard(rest);
-  if (head === "plan") return plan(rest);
-  if (head === "explore") return later(explore(rest));
+  if (head === "land") return see.land(seen(rest));
+  if (head === "onboard") return see.onboard(seen(rest));
+  if (head === "plan") return see.plan(rest);
+  if (head === "explore") return later(see.explore(rest));
   if (head === "paint") return later(paint(rest));
   if (head === "workspaces") return workspaces();
   if (head === "tree") return showTree(rest);
@@ -98,7 +84,7 @@ function dispatch(argv: readonly string[]): number {
   if (head === "wait") return wait(rest);
   // Before verb(): `delivered` is a story state as well as a command, so falling through
   // would read it as an entity and answer "delivered has no states".
-  if (head === "delivered") return deliveredStories(rest);
+  if (head === "delivered") return see.delivered(rest);
   if (head === "lessons") return showLessons(rest);
   if (head === "lesson") return lesson(rest);
   return verb(head, rest);
@@ -153,121 +139,6 @@ function init(args: readonly string[]): number {
   mkdirSync(dirname(path), { recursive: true });
   open(path).close();
   process.stdout.write(`workspace at ${path}\n  wecode onboard   in a repository, to put a project in it\n`);
-  return 0;
-}
-
-/** The database, the worktrees and the session logs are wecode's, not the project's. */
-function ignore(path: string, line: string): void {
-  const body = existsSync(path) ? readFileSync(path, "utf8") : "";
-  if (body.split("\n").some((l) => l.trim() === line)) return;
-  writeFileSync(path, body === "" || body.endsWith("\n") ? `${body}${line}\n` : `${body}\n${line}\n`);
-}
-
-/** Never over an existing file: a config somebody edited is not ours to replace. */
-function write(path: string, body: string): void {
-  if (existsSync(path)) return;
-  writeFileSync(path, body);
-}
-
-/** `wecode ask <task> "<question>"` / `wecode ask story <id> "<question>"` [--option "<answer>=<cost>"] [--operator <name>]
- *
- *  A decision the operator must make is a row in needs you, not a line in a report: six of
- *  them on 20 Sep reached the operator only as chat messages, because a story titled NEEDS
- *  APPROVAL sits in `planned` among fifty others. A bare id is a task, which is what every
- *  existing caller means; `story <id>` hangs the question on the story, for the decisions
- *  about the whole of it rather than about one attempt. An option is the answer and what
- *  taking it costs, split on the first `=`; only the answers are stored as options, since an
- *  answer is checked against them, and the costs go into the question, which is what a person
- *  reads before choosing. No options is an open question, and any words settle it. */
-function ask(args: readonly string[]): number {
-  const { values, positionals } = parseArgs({
-    args: [...args],
-    allowPositionals: true,
-    options: { option: { type: "string", multiple: true }, operator: { type: "string" } },
-  });
-  const kind = positionals[0] === "story" ? ("story" as const) : ("task" as const);
-  const rest = positionals[0] === kind ? positionals.slice(1) : positionals;
-  const id = Number(rest[0]);
-  const question = rest.slice(1).join(" ");
-  if (!Number.isInteger(id) || question === "") {
-    return fail('wecode ask <task> "<question>" | wecode ask story <id> "<question>"  [--option "<answer>=<what it costs>"] [--operator <name>]');
-  }
-  const split = (o: string) => (o.includes("=") ? o.indexOf("=") : o.length); // no `=` is all answer, no cost
-  const offered = (values.option ?? []).map((o) => ({ answer: o.slice(0, split(o)).trim(), costs: o.slice(split(o) + 1).trim() }));
-
-  const conn = db();
-  try {
-    const who = operator(conn, values.operator);
-    const raised = raiseApproval(conn, {
-      objective_type: kind,
-      objective_id: id,
-      worker_id: who.id,
-      question: [question, ...offered.map((o) => `  ${o.answer}${o.costs === "" ? "" : ` — ${o.costs}`}`)].join("\n"),
-      options: offered.length === 0 ? null : offered.map((o) => o.answer),
-    });
-    process.stdout.write(`approval #${raised.id} waits on ${who.name}\n  wecode answer ${raised.id} "<text>"\n`);
-    return 0;
-  } catch (err) {
-    return fail((err as Error).message);
-  }
-}
-
-/** Who is asked, or why nobody can be. A name given is honoured or nothing; with no name,
- *  the sole human worker — a workspace with two people has no obvious one to burden, and
- *  choosing would be wecode deciding whose signature a decision needs. */
-function operator(conn: ReturnType<typeof open>, named: string | undefined): { id: number; name: string } {
-  const people = queries(conn).selectFrom(worker).all().filter((w) => w.kind === "human");
-  const found = named === undefined ? (people.length === 1 ? people[0] : undefined) : people.find((w) => w.name === named);
-  if (found !== undefined) return { id: found.id, name: found.name };
-  if (named !== undefined) return fails(`no human worker named ${named}. Human workers: ${names(people)}`);
-  return fails(
-    people.length === 0
-      ? "nobody to ask: wecode worker create <you> --role operator --kind human"
-      : `${people.length} people could be asked (${names(people)}), so name one with --operator <name>`,
-  );
-}
-
-const names = (people: readonly { name: string }[]): string => (people.length === 0 ? "none" : people.map((p) => p.name).join(", "));
-/** Nobody to carry the authority. Its own class because `answer` treats it as a fact about
- *  the workspace rather than as a refusal — see there. */
-class NoOperator extends Error {}
-const fails = (why: string): never => {
-  throw new NoOperator(why);
-};
-
-/** `wecode answer <assignment> "<text>"` — the one verb that clears a needs_human.
- *  An approval is recorded as the operator wrote it; nothing restates it. */
-function answer(args: readonly string[]): number {
-  const id = Number(args[0]);
-  const text = args.slice(1).join(" ");
-  if (!Number.isInteger(id) || text === "") return fail('wecode answer <assignment> "<text>"');
-
-  const conn = db();
-  const q = queries(conn);
-  const row = q.selectFrom(assignment).select(["phase", "kind"]).where("id", "=", id).get();
-  if (row === null) return fail(`no assignment #${id}`);
-  if (row.phase !== "waiting") return fail(`assignment #${id} is ${row.phase}, and is not waiting on anybody`);
-
-  // An approval closes as well as records: it has no work to go back to, so core checks the
-  // answer against the options offered and finishes it, in the answerer's own name. Where
-  // the workspace has no person on record there is no such name, and the answer is written
-  // the way every other needs_human is — a row left waiting would be worse than a record.
-  if (row.kind === APPROVAL_KIND) {
-    try {
-      const by = operator(conn, process.env["WECODE_ACTOR"]).name;
-      process.stdout.write(`approval #${id} answered ${answerApproval(conn, id, text, by).answer} by ${by}\n`);
-      return 0;
-    } catch (err) {
-      if (!(err instanceof NoOperator)) return fail((err as Error).message);
-    }
-  }
-
-  const who = whoIsAsking();
-  q.update(assignment)
-    .set({ answer: text, answered_by: who, updated_at: new Date().toISOString() })
-    .where("id", "=", id)
-    .run();
-  process.stdout.write(`assignment #${id} answered by ${who}\n`);
   return 0;
 }
 
@@ -448,396 +319,6 @@ function projectCount(path: string): number {
   return n;
 }
 
-/** `wecode onboard [name]` — what happens when wecode meets a repository.
- *
- *  It learns the stack, records what it learned, and registers the project. Before this,
- *  every test carried a hand-typed command and every scope a hand-typed path. */
-function onboard(args: readonly string[]): number {
-  const { values, positionals } = parseArgs({
-    args: [...args],
-    allowPositionals: true,
-    options: { workspace: { type: "string" } },
-  });
-  const root = process.cwd();
-  const name = positionals[0] ?? basename(root);
-
-  if (!existsSync(join(root, ".git"))) {
-    return fail(
-      "this is not a git repository, and wecode works in branches and worktrees.\n" +
-        "  git init && git add -A && git commit -m \"seed\"",
-    );
-  }
-  if (gitConfig("user.email") === "") {
-    return fail(
-      "this repository has no git identity, so nothing an agent writes could be attributed.\n" +
-        '  git config user.name "Your Name" && git config user.email you@example.com',
-    );
-  }
-  if (execFileSync("git", ["rev-list", "-n", "1", "--all"], { cwd: root, encoding: "utf8" }).trim() === "") {
-    return fail(
-      "this repository has no commits, so there is nothing to cut a branch from.\n" +
-        '  git add -A && git commit -m "seed"',
-    );
-  }
-
-  const stack = detect(root);
-  if (stack === null) {
-    return fail(
-      "no stack recognised here. wecode looks for a lock file or a manifest — see config/stacks.yaml.\n" +
-        "  add one there, or write config/project.yaml by hand.",
-    );
-  }
-
-  const config = resolve(root, "config");
-  mkdirSync(config, { recursive: true });
-  const projectFile = join(config, "project.yaml");
-  const already = readProjectConfig(projectFile);
-  const learned = already ?? writeProjectConfig(projectFile, stack);
-
-  write(join(config, "roles.yaml"), rolesFor(learned));
-  ignore(resolve(root, ".gitignore"), ".wecode/");
-
-  // The workspace is named once, and the repository remembers which one it joined.
-  //
-  // Falling back to "default" while other workspaces exist put a project on a board its
-  // owner was not looking at. If there is a choice to make, it is made out loud.
-  const known = listWorkspaces();
-  const chosen = values.workspace ?? readPointer(root) ?? process.env["WECODE_WORKSPACE"];
-  if (chosen === undefined && known.length > 0 && !known.includes("default")) {
-    return fail(
-      `which workspace should this project join?\n` +
-        known.map((w) => `  wecode onboard --workspace ${w}`).join("\n") +
-        `\n  wecode onboard --workspace <new-name>   to start another`,
-    );
-  }
-  const wsName = chosen ?? "default";
-  writePointer(root, wsName);
-
-  const path = databaseOf(wsName);
-  mkdirSync(dirname(path), { recursive: true });
-  // The budget is the workspace's: attention is one person's and does not divide by how
-  // many repositories they have.
-  write(join(workspaceDir(wsName), "budget.yaml"), BUDGET);
-  const conn = open(path);
-  const q = queries(conn);
-  const make = new Maker(conn);
-
-  const wsId =
-    q.selectFrom(workspace).select(["id"]).where("name", "=", wsName).get()?.id ??
-    make.workspace(wsName, workspaceDir(wsName));
-
-  // Roles without workers is a board nothing can be dispatched from: the runner refuses
-  // every candidate with "no worker free for role engineer", and nowhere does it say a
-  // worker is a thing you make. So onboarding makes one per agent role, named after it.
-  const hired = hire(conn, make, join(config, "roles.yaml"));
-
-  const existing = q.selectFrom(project).select(["id"]).where("repo", "=", root).get();
-  if (existing !== null) {
-    process.stdout.write(
-      `project #${existing.id} is already onboarded here\n${workerLines(hired).join("\n")}${hired.length > 0 ? "\n" : ""}`,
-    );
-    return 0;
-  }
-
-  const projectId = make.project(wsId, name, root);
-  const releaseId = make.release(projectId, "0.0.1");
-  const started = new Verbs(new Engine(conn));
-  started.startProject(projectId, OPERATOR);
-  started.startRelease(releaseId, OPERATOR);
-
-  process.stdout.write(
-    [
-      `stack       ${learned.stack}`,
-      `test        ${learned.test}`,
-      learned.typecheck === null ? null : `typecheck   ${learned.typecheck}`,
-      `source      ${learned.source.join(", ")}`,
-      "",
-      `workspace   ${wsName}  (${path})`,
-      `project #${projectId}  release #${releaseId}`,
-      ...workerLines(hired),
-      "",
-      "next: wecode epic create --parent " + String(releaseId) + ' "<what this release is for>"',
-      "",
-    ]
-      .filter((l) => l !== null)
-      .join("\n"),
-  );
-  return 0;
-}
-
-interface Hired {
-  readonly id: number;
-  readonly role: string;
-  readonly fresh: boolean;
-}
-
-/** One agent worker per agent role, named after the role. A role that already has a worker
- *  keeps it: onboarding twice must not double the workforce. Human roles are people, and
- *  wecode does not get to hire those. */
-function hire(conn: ReturnType<typeof open>, make: Maker, rolesFile: string): Hired[] {
-  const hired: Hired[] = [];
-  const q = queries(conn);
-  for (const want of Object.values(loadRoles(rolesFile).roles)) {
-    if (want.worker_kind !== "agent") continue;
-    const had = q.selectFrom(worker).select(["id"]).where("role", "=", want.name).get();
-    hired.push(
-      had === null
-        ? { id: make.worker(want.name, want.name, "agent"), role: want.name, fresh: true }
-        : { id: had.id, role: want.name, fresh: false },
-    );
-  }
-  return hired;
-}
-
-const workerLines = (hired: readonly Hired[]): string[] =>
-  hired.map((h) => `worker #${h.id}  ${h.role}${h.fresh ? "" : "  (already there)"}`);
-
-/** Roles whose scopes are paths this repository has, rather than paths wecode assumed. */
-function rolesFor(c: { source: readonly string[]; tests: readonly string[] }): string {
-  const globs = (gs: readonly string[]): string => gs.map((g) => JSON.stringify(g)).join(", ");
-  return `invariants:
-  never_touch: [".github/**", "infra/**", "**/*.pem", "**/*.key", "**/.env"]
-  never_run: ["git push --force*", "npm publish*", "terraform apply*", "rm -rf /*"]
-
-defaults:
-  budget: { tokens: 250000, seconds: 3600 }
-  harness: claude-code
-
-roles:
-  engineer:
-    worker_kind: agent
-    scope:
-      write: [${globs([...c.source, ...c.tests])}]
-      tools: ["bash", "read", "edit", "write"]
-
-  acceptance-tester:
-    worker_kind: agent
-    scope:
-      write: [${globs(c.tests)}]
-      tools: ["bash", "read", "edit", "write"]
-    budget: { tokens: 120000, seconds: 1800 }
-`;
-}
-
-/** `wecode land <story>` — merge a delivered story into the branch you have checked out.
- *
- *  The operator runs this, not the runner. Landing moves the branch the operator is sitting
- *  on; a background process doing that under them would rewrite their working tree without
- *  asking. Shipping is a decision, and so is this. */
-function land(args: readonly string[]): number {
-  const id = Number(args[0]);
-  if (!Number.isInteger(id)) return fail("wecode land <story>");
-
-  const conn = db();
-  const found = queries(conn).selectFrom(story).select(["slug", "state"]).where("id", "=", id).get();
-  if (found === null) return fail(`no story #${id}`);
-  if (found.state !== "delivered") {
-    return fail(`story #${id} is ${found.state}. Only a delivered story lands.`);
-  }
-
-  const branch = `story/${found.slug}`;
-  const base = headBranch();
-
-  // The landing commit is the operator's, so it needs the operator's identity. wecode signs
-  // an agent's attempt; it does not sign a person's merge.
-  const who = gitConfig("user.name");
-  const email = gitConfig("user.email");
-  if (who === "" || email === "") {
-    return fail(
-      'this repository has no git identity, so the merge would be unattributed.\n' +
-        '  git config user.name "Your Name" && git config user.email you@example.com',
-    );
-  }
-
-  let sha: string;
-  try {
-    // A dirty base is refused by name, not by a general "your tree has changes": the merge
-    // would commit the operator's unrelated edits inside the landing commit, and the rule
-    // that says so lives in core so the runner half can be held to the same words.
-    const filthy = refuseDirtyBase(baseState(base));
-    if (filthy !== null) return fail(filthy);
-    // A delivered story whose branch is gone has nothing to merge, and calling that a
-    // landing is the reported defect. It is a failure, not a quiet success: the work is
-    // somewhere else, or nowhere.
-    if (!hasRef(branch)) return fail(nothingToLand(branch, base, "no-branch"));
-    // git answers "Already up to date" and exit 0 for a branch the base already holds, and
-    // that was indistinguishable, afterwards, from a merge that happened.
-    if (isAncestor(branch, "HEAD")) {
-      process.stdout.write(`${nothingToLand(branch, base, "already-ancestor")}\n`);
-      return 0;
-    }
-    const before = headSha();
-    try {
-      execFileSync("git", ["merge", "--no-ff", "-m", `land ${branch}`, branch], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (err) {
-      // A half-finished merge is the hazard: left in the tree, the next thing to commit —
-      // an agent, a hook, a person in a hurry — commits the conflict markers onto master.
-      // So the tree goes back exactly as it was found, and the conflict becomes a chore.
-      const conflicted = unmerged();
-      abortMerge();
-      const why = conflicted.length > 0
-        ? `${branch} conflicts with your branch in:\n${conflicted.map((f) => `  ${f}`).join("\n")}`
-        : `${branch} would not merge:\n${((err as { stderr?: string }).stderr ?? (err as Error).message).trim()}`;
-      return fail(`${why}\n${reportAbort(baseState(base), branch)}`);
-    }
-    sha = headSha();
-    if (sha === before) {
-      process.stdout.write(`${nothingToLand(branch, base, "already-ancestor")}\n`);
-      return 0;
-    }
-  } catch (err) {
-    return fail(`git: ${(err as Error).message}`);
-  }
-
-  recordLanding(conn, id, branch, sha);
-  process.stdout.write(`${branch} landed on ${base}: ${sha.slice(0, 12)}\n`);
-  // The landing is recorded either way — it happened — but a base left dirty by the merge
-  // (a hook that writes, a merge driver that stages) is the next operator's mystery, so it
-  // is said out loud and the command does not report success.
-  const left = reportLeftover(baseState(base));
-  return left === null ? 0 : fail(`${branch} landed, but the base was not left clean.\n${left}`);
-}
-
-/** The base checkout as the rule in core wants to see it. Read twice per landing: once
- *  before the merge and once after, because the whole promise is about the difference. */
-function baseState(base: string): BaseState {
-  const here = gitSay(["rev-parse", "--show-toplevel"]);
-  const gitDir = gitSay(["rev-parse", "--git-dir"]);
-  return {
-    here,
-    base,
-    // Tracked changes only. An untracked file does not affect a merge, and git refuses on
-    // its own if one would be overwritten — counting them here blocked a landing over
-    // wecode's own config directory.
-    dirty: gitSay(["status", "--porcelain", "-uno"]).split("\n").filter((l) => l !== ""),
-    merging: gitDir !== "" && existsSync(join(gitDir, "MERGE_HEAD")),
-  };
-}
-
-/** Why nothing happened. Same two reasons, and the same words, as the runner's own
- *  `landingReport`: an operator reading one and a log line from the other must not have to
- *  work out whether they mean the same thing. */
-function nothingToLand(branch: string, base: string, why: "no-branch" | "already-ancestor"): string {
-  return why === "no-branch"
-    ? `nothing to land: there is no ${branch}`
-    : `nothing to land: ${branch} is already in ${base}`;
-}
-
-/** The branch the operator is standing on, or the sha when they are detached. */
-function headBranch(): string {
-  const named = gitSay(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  return named === "" ? headSha().slice(0, 12) : named;
-}
-
-const headSha = (): string => gitSay(["rev-parse", "HEAD"]);
-
-const hasRef = (ref: string): boolean => gitSay(["rev-parse", "--verify", "--quiet", ref]) !== "";
-
-/** True when the base already holds every commit on `ref`. */
-function isAncestor(ref: string, of: string): boolean {
-  try {
-    execFileSync("git", ["merge-base", "--is-ancestor", ref, of], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function gitSay(args: readonly string[]): string {
-  try {
-    return execFileSync("git", [...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch {
-    return "";
-  }
-}
-
-/** The landing, where a query can see it. The doctor's first invariant reads `landed_branch`
- *  through the story's tasks, and it reported stories unlanded that were sitting in the base
- *  because this path merged and recorded nothing. Written here, on the path that actually
- *  merges, and nowhere else. */
-function recordLanding(
-  conn: ReturnType<typeof db>,
-  storyId: number,
-  branch: string,
-  sha: string,
-): void {
-  // The runner owns this table and creates it on its first merge; a repository landed by
-  // hand may never have run a tick. DDL is the one statement here that is not a query, and
-  // the dialect compiles queries — so this stays as schema text, and is the only SQL left.
-  conn.exec(
-    `CREATE TABLE IF NOT EXISTS landed_branch (
-       task_id   INTEGER PRIMARY KEY,
-       branch    TEXT NOT NULL,
-       sha       TEXT NOT NULL,
-       merged_at TEXT NOT NULL
-     )`,
-  );
-  // The four-table join the SQL spelled, composed instead: the dialect has neither JOIN nor
-  // IN, and it is one link of the tree per step — requirement to criteria to acceptance_test
-  // to task — which is the same walk `projectOf` makes in the other direction.
-  const q = queries(conn);
-  const reqs = new Set(
-    q.selectFrom(requirement).select(["id"]).where("story_id", "=", storyId).all().map((r) => r.id),
-  );
-  const crits = new Set(
-    q.selectFrom(criteria).select(["id", "requirement_id"]).all()
-      .filter((r) => reqs.has(r.requirement_id))
-      .map((r) => r.id),
-  );
-  const tests = new Set(
-    q.selectFrom(acceptanceTest).select(["id", "parent_id"]).all()
-      .filter((r) => crits.has(r.parent_id))
-      .map((r) => r.id),
-  );
-  const tasks = q
-    .selectFrom(task)
-    .select(["id", "acceptance_test_id"])
-    .all()
-    .filter((r) => tests.has(r.acceptance_test_id))
-    .map((r) => r.id);
-
-  const at = new Date().toISOString();
-  for (const taskId of tasks) {
-    q.insertInto(landedBranch, { task_id: taskId, branch, sha, merged_at: at })
-      .onConflict(["task_id"], {
-        branch: excluded<LandedRow>("branch"),
-        sha: excluded<LandedRow>("sha"),
-        merged_at: excluded<LandedRow>("merged_at"),
-      })
-      .run();
-  }
-}
-
-/** The paths git left with conflict markers, read before the merge is undone. */
-function unmerged(): string[] {
-  try {
-    const out = execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], { encoding: "utf8" });
-    return out.split("\n").filter((l) => l !== "");
-  } catch {
-    return [];
-  }
-}
-
-/** Best effort: if the merge never started there is nothing to abort, and saying so helps nobody. */
-function abortMerge(): void {
-  try {
-    execFileSync("git", ["merge", "--abort"], { stdio: "ignore" });
-  } catch {
-    /* no merge in progress */
-  }
-}
-
-function gitConfig(key: string): string {
-  try {
-    return execFileSync("git", ["config", "--get", key], { encoding: "utf8" }).trim();
-  } catch {
-    return "";
-  }
-}
-
 // ─── the record, in tables rather than in strings ────────────────────────────────────────
 //
 // `repo.ts` declares only the columns it speaks about; this client cannot, because `show`
@@ -846,30 +327,30 @@ function gitConfig(key: string): string {
 // and the first is the defect. `typed-run.test.ts` holds every list below against
 // `PRAGMA table_info`, name for name and in order, so a column added on either side fails.
 
-type WorkspaceRow = { id: number; slug: string; name: string; path: string; created_at: string; updated_at: string };
-type ProjectRow = { id: number; slug: string; workspace_id: number; name: string; repo: string; objective: string;
+export type WorkspaceRow = { id: number; slug: string; name: string; path: string; created_at: string; updated_at: string };
+export type ProjectRow = { id: number; slug: string; workspace_id: number; name: string; repo: string; objective: string;
   state: string; created_at: string; updated_at: string };
 type ReleaseRow = { id: number; slug: string; project_id: number; version: string; released_at: string | null;
   state: string; created_at: string; updated_at: string };
 type EpicRow = { id: number; slug: string; release_id: number; title: string; state: string; created_at: string; updated_at: string };
-type StoryRow = { id: number; slug: string; epic_id: number; title: string; state: string; created_at: string; updated_at: string };
-type RequirementRow = { id: number; slug: string; story_id: number; statement: string; state: string;
+export type StoryRow = { id: number; slug: string; epic_id: number; title: string; state: string; created_at: string; updated_at: string };
+export type RequirementRow = { id: number; slug: string; story_id: number; statement: string; state: string;
   created_at: string; updated_at: string };
-type CriteriaRow = { id: number; slug: string; requirement_id: number; statement: string; state: string;
+export type CriteriaRow = { id: number; slug: string; requirement_id: number; statement: string; state: string;
   created_at: string; updated_at: string };
 /** Both test tables carry the same columns bar the extra three an acceptance_test earns by
  *  being the thing that must have been seen to fail at the base. */
-type TestRow = { id: number; slug: string; parent_id: number; statement: string; kind: string; artefact: string | null;
+export type TestRow = { id: number; slug: string; parent_id: number; statement: string; kind: string; artefact: string | null;
   last_run_at: string | null; last_output: string | null; state: string; created_at: string; updated_at: string;
   script_path: string | null; provenance_sha: string | null };
-type AcceptanceTestRow = TestRow & { red_at_base_sha: string | null; red_at_base_at: string | null;
+export type AcceptanceTestRow = TestRow & { red_at_base_sha: string | null; red_at_base_at: string | null;
   red_at_base_reason: string | null };
-type TaskRow = { id: number; slug: string; acceptance_test_id: number; title: string; scope: string; role: string;
+export type TaskRow = { id: number; slug: string; acceptance_test_id: number; title: string; scope: string; role: string;
   budget: string; attempts: number; max_retry: number; state: string; created_at: string; updated_at: string };
 type RoleRow = { id: number; slug: string; name: string; scope: string; worker_kind: string; harness: string | null;
   created_at: string; updated_at: string };
-type WorkerRow = { id: number; slug: string; name: string; role: string; kind: string; created_at: string; updated_at: string };
-type AssignmentRow = { id: number; slug: string; objective_type: string; objective_id: number; worker_id: number;
+export type WorkerRow = { id: number; slug: string; name: string; role: string; kind: string; created_at: string; updated_at: string };
+export type AssignmentRow = { id: number; slug: string; objective_type: string; objective_id: number; worker_id: number;
   scope: string; budget: string; worktree: string; phase: string; reason: string | null; kind: string | null;
   question: string | null; options: string | null; answer: string | null; answered_by: string | null;
   session: string | null; last_seen: string | null; spent: string; commit_sha: string | null; created_at: string;
@@ -885,7 +366,7 @@ type LedgerRow = {
   at: string;
 };
 /** The runner's table, written here too because this is the path that actually merges. */
-type LandedRow = { task_id: number; branch: string; sha: string; merged_at: string };
+export type LandedRow = { task_id: number; branch: string; sha: string; merged_at: string };
 
 const workspace = table<WorkspaceRow>("workspace", ["id", "slug", "name", "path", "created_at", "updated_at"]);
 const project = table<ProjectRow>("project", [
@@ -1038,6 +519,17 @@ const ENTITIES: Readonly<Record<string, Kin>> = {
  *  old notes is asking what became of it, and a refusal answers that with silence. When the id
  *  is not there at all, the ids that are there are the answer — the epic did not vanish, it was
  *  rebuilt under another number, and only a list of the live ones says so. */
+/** What run.ts lends the verbs in `verbs/run-and-see.ts`: the argv tail they were given,
+ *  and the four things only this file knows — the workspace database, how a refusal is
+ *  said, where you are standing, and the tables. */
+const TABLES: see.Tables = {
+  workspace, project, story, requirement, criteria, acceptanceTest, task, worker, assignment, landedBranch,
+};
+
+const seen = (args: readonly string[]): see.See => ({
+  args, conn: db, fail, hereProject, actor: whoIsAsking, tables: TABLES,
+});
+
 function show(args: readonly string[]): number {
   const [entity, raw] = args;
   const id = Number(raw);
@@ -1110,53 +602,6 @@ function noProjectHere(command: string): string {
     "  wecode onboard   here, to make this repository one",
     ...(rows.length === 0 ? [] : [`  ${command} --project <id>   for a project you already have:`, ...shown, ...more]),
   ].join("\n");
-}
-
-/** `wecode board [--all] [--project N]` — by default, only the project you are standing in.
- *
- *  A board of every project in the workspace cannot answer "what is left here", which is
- *  the question somebody in a repository is asking. `--all` is the workspace-wide view. */
-function showBoard(args: readonly string[]): number {
-  const { values } = parseArgs({
-    args: [...args],
-    options: { all: { type: "boolean" }, project: { type: "string" } },
-  });
-  // Outside every project's repo there is no "here" to narrow to, so the board is the
-  // workspace's — which is what it always was.
-  const asked = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
-  const chosen = values.all === true ? null : asked;
-  if (chosen !== null && !Number.isInteger(chosen)) return fail("wecode board --project <id>");
-
-  const b = board(db(), chosen);
-  const mine = b.projects.find((p) => p.id === chosen);
-  if (chosen !== null && mine === undefined) return fail(`no project #${chosen}`);
-  process.stdout.write(
-    mine === undefined
-      ? `\nall ${b.projects.length} projects in this workspace\n`
-      : `\n#${mine.id} ${mine.what} · wecode board --all for the whole workspace\n`,
-  );
-  const groups: [string, readonly { id: number; what: string; state: string; detail: string }[]][] = [
-    ["RUNNING", b.running],
-    ["NEEDS YOU", b.needs_human],
-    ["STALE", b.stale],
-    ["QUEUE", b.queued],
-    ["FAILED", b.failed],
-    ["OPEN", b.open],
-  ];
-  for (const [title, rows] of groups) {
-    process.stdout.write(`\n${title} (${rows.length})\n`);
-    if (rows.length === 0) {
-      process.stdout.write("  —\n");
-      continue;
-    }
-    for (const r of rows) {
-      // A title longer than the column pushed every other column off the line.
-      const what = r.what.length > 52 ? `${r.what.slice(0, 51)}…` : r.what.padEnd(52);
-      process.stdout.write(`  #${String(r.id).padStart(4)}  ${what}  ${r.state.padEnd(12)} ${r.detail}\n`);
-    }
-  }
-  process.stdout.write("\n");
-  return 0;
 }
 
 /** `wecode lessons [--project N]` — what earlier attempts on this repository learned.
@@ -1260,7 +705,7 @@ function verb(entity: string, rest: readonly string[]): number {
   // every other verb, `create` first, is the row, so it goes on down this function.
   // The split is here rather than in dispatch() so the row stays the default and the
   // drawing the exception, both read in one place.
-  if (entity === "design" && name === "show") return later(projector([name, ...args]));
+  if (entity === "design" && name === "show") return later(see.design([name, ...args]));
 
   // parseArgs would call --help an unknown option. It is the one place a newcomer looks
   // for create's flags, so answer it here, before the flags are parsed at all.
@@ -1536,7 +981,9 @@ function create(entity: string, args: readonly string[]): number {
       case "task_test": id = work.taskTest(job()); break;
       case "task": id = work.task(job()); break;
       case "worker":
-        id = make.worker(text, values["role"] ?? "", (values["kind"] ?? "agent") as WorkerKind);
+        id = see.worker({
+          make, text, role: values["role"] ?? "", kind: (values["kind"] ?? "agent") as WorkerKind,
+        });
         break;
       default:
         return fail(`no such entity: ${entity}`);
@@ -1790,36 +1237,3 @@ function entityHelp(entity: string): number {
   return 0;
 }
 
-const ROLES = `invariants:
-  never_touch: [".github/**", "infra/**", "**/*.pem", "**/*.key", "**/.env"]
-  never_run: ["git push --force*", "npm publish*", "terraform apply*", "rm -rf /*"]
-
-defaults:
-  budget: { tokens: 250000, seconds: 3600 }
-  harness: claude-code
-
-roles:
-  engineer:
-    worker_kind: agent
-    scope:
-      write: ["src/**", "tests/**"]
-      tools: ["bash", "read", "edit", "write"]
-
-  acceptance-tester:
-    worker_kind: agent
-    scope:
-      write: ["tests/acceptance/**"]
-      tools: ["bash", "read", "edit", "write"]
-    budget: { tokens: 120000, seconds: 1800 }
-`;
-
-const BUDGET = `# Raising max_open is the easiest change in this file and usually the wrong one.
-max_open: 3
-
-order:
-  fresh_first: true
-  oldest_first: true
-
-collision:
-  scope_overlap: refuse
-`;

@@ -6,6 +6,7 @@ import { Maker, open } from "@wecode/core";
 import { run } from "../src/run.js";
 import * as rungs from "../src/verbs/tree.js";
 import * as work from "../src/verbs/work.js";
+import * as see from "../src/verbs/run-and-see.js";
 import { recordRed } from "../../core/test/helpers.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
@@ -749,5 +750,115 @@ describe("the work verbs", () => {
     upToAStory();
     expect(run(["requirement", "create", "one change per link"])).toBe(1);
     expect(err.join("")).toContain('wecode requirement create --parent <id> "<text>"');
+  });
+});
+
+/** The eleven verbs that run something or show you something live in
+ *  `verbs/run-and-see.ts`, one exported function each, and run.ts is the dispatch that
+ *  calls them. Proved from three sides: the module exports exactly those eleven names,
+ *  run.ts no longer holds their bodies, and the command an operator types still answers
+ *  the way it did before the move. */
+describe("the run-and-see verbs", () => {
+  const source = (f: string): string => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
+
+  /** The shallowest tree with something to hang a question or a landing on. */
+  const aStory = (): void => {
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    run(["project", "create", "--parent", "1", "storefront"]);
+    run(["release", "create", "--parent", "1", "1.0.0"]);
+    run(["epic", "create", "--parent", "1", "recovery"]);
+    run(["story", "create", "--parent", "1", "password reset"]);
+  };
+
+  it("exports one function per verb, and nothing else", () => {
+    expect(Object.keys(see).sort()).toEqual([
+      "answer", "ask", "board", "delivered", "design", "doctor", "explore", "land",
+      "onboard", "plan", "worker",
+    ]);
+  });
+
+  it("leaves run.ts with the dispatch and not the bodies", () => {
+    const run_ts = source("run.ts");
+    for (const gone of [
+      "function showBoard(", "function ask(", "function answer(", "function land(",
+      "function onboard(", "function recordLanding(", "function hire(", "function rolesFor(",
+    ]) {
+      expect(run_ts).not.toContain(gone);
+    }
+    for (const dispatched of [
+      "see.board(", "see.doctor(", "see.delivered(", "see.plan(", "see.land(", "see.ask(",
+      "see.answer(", "see.design(", "see.explore(", "see.onboard(", "see.worker(",
+    ]) {
+      expect(run_ts).toContain(dispatched);
+    }
+  });
+
+  it("makes a worker when called directly, the way `wecode worker create` does", () => {
+    run(["init"]);
+    const make = new Maker(open(process.env["WECODE_DB"] as string));
+    expect(see.worker({ make, text: "ada", role: "operator", kind: "human" })).toBe(1);
+    expect(run(["worker", "create", "grace", "--role", "engineer"])).toBe(0);
+    expect(said()).toContain("worker #2");
+  });
+
+  it("shows the board through the module, groups and all", () => {
+    run(["init"]);
+    run(["workspace", "create", "acme"]);
+    run(["project", "create", "--parent", "1", "storefront"]);
+    out.length = 0;
+    expect(run(["board", "--all"])).toBe(0);
+    expect(said()).toContain("all 1 projects in this workspace");
+    for (const group of ["RUNNING", "NEEDS YOU", "STALE", "QUEUE", "FAILED", "OPEN"]) {
+      expect(said()).toContain(`${group} (`);
+    }
+  });
+
+  it("refuses a board narrowed to a project that is not there", () => {
+    run(["init"]);
+    expect(run(["board", "--project", "9"])).toBe(1);
+    expect(err.join("")).toContain("no project #9");
+  });
+
+  it("asks a named person and answers them, both through the module", () => {
+    aStory();
+    run(["worker", "create", "ada", "--role", "operator", "--kind", "human"]);
+    out.length = 0;
+    expect(run(["ask", "story", "1", "ship it?", "--option", "yes=a week", "--option", "no"])).toBe(0);
+    expect(said()).toContain("approval #1 waits on ada");
+    out.length = 0;
+    expect(run(["answer", "1", "yes"])).toBe(0);
+    expect(said()).toContain("approval #1 answered yes by ada");
+  });
+
+  it("says who could be asked when no operator is named and there is no single one", () => {
+    aStory();
+    expect(run(["ask", "story", "1", "ship it?"])).toBe(1);
+    expect(err.join("")).toContain("nobody to ask: wecode worker create");
+  });
+
+  it("refuses to land a story that is not delivered, by its state", () => {
+    aStory();
+    expect(run(["land", "1"])).toBe(1);
+    expect(err.join("")).toContain("story #1 is planned. Only a delivered story lands.");
+    expect(run(["land", "9"])).toBe(1);
+    expect(err.join("")).toContain("no story #9");
+  });
+
+  it("refuses to onboard a directory that is not a git repository", () => {
+    const bare = tmp("wecode-bare-");
+    const was = process.cwd();
+    process.chdir(bare);
+    try {
+      expect(run(["onboard"])).toBe(1);
+      expect(err.join("")).toContain("this is not a git repository");
+    } finally {
+      process.chdir(was);
+    }
+  });
+
+  it("keeps run.ts's own words out of the new module: it parses no argv it was not given", () => {
+    // The context is what run.ts lends; the module reads `at.args` and never process.argv.
+    expect(source("verbs/run-and-see.ts")).not.toContain("process.argv");
   });
 });
