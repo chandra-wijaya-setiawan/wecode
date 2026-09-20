@@ -103,13 +103,20 @@ describe("the box", () => {
     expect(out.filter((l) => l.startsWith("└"))).toHaveLength(1);
   });
 
-  it("draws each row as one sentence rather than as a set of columns", () => {
-    // Nothing on the line is held to a column, so the id sits wherever the label it
-    // follows leaves it — see a-row-is-a-sentence for why that is the point.
+  it("draws each row in the columns config/design.yaml orders it in", () => {
+    // The three that are scanned lead, in the order they narrow the tree, and each is held
+    // to its own column — so a reader looking for a number, a kind or a state looks down a
+    // column rather than along fifty lines of prose. See the-outline-is-drawn-as-declared
+    // for the declaration this follows.
     const at = (what: string): number => row(what).indexOf("#");
-    expect(at("storefront")).toBeGreaterThan(0);
-    expect(new Set(["storefront", "account recovery", "password reset"].map(at)).size)
-      .toBeGreaterThan(1);
+    const named = ["storefront", "account recovery", "password reset"];
+    expect(at("storefront")).toBe(0);
+    expect(new Set(named.map(at)).size).toBe(1);
+    // The kind and the state are columns of their own, in front of the description.
+    for (const what of named) {
+      expect(row(what)).toMatch(/^ *#\d+ +[a-z_]+ +[a-z_]+ +\S/);
+      expect(row(what).indexOf(what)).toBeGreaterThan(row(what).indexOf("in_progress"));
+    }
   });
 
   it("uses colour for state and for nothing else", () => {
@@ -148,27 +155,32 @@ describe("what it opens at", () => {
     }
   });
 
-  it("indents each level under its parent", () => {
-    // The indent is the whole of the guide: a row is a sentence moved right by its depth,
-    // with no rail drawn down the space it moved across.
-    const indent = (what: string): number => {
-      const line = row(what);
-      return line.length - line.trimStart().length;
-    };
-    expect(indent("storefront")).toBe(0);
-    expect(indent("1.0.0")).toBe(indent("storefront") + INDENT);
-    expect(indent("account recovery")).toBe(indent("1.0.0") + INDENT);
-    expect(indent("password reset")).toBe(indent("account recovery") + INDENT);
+  it("hangs each level off its parent, a connector per level, inside the description", () => {
+    // Depth is drawn rather than counted: the row is moved right by its depth inside the
+    // description, and the connector at the end of that move says which level it is on
+    // without anyone counting spaces. See outline-connectors for what each glyph means.
+    /** What sits immediately in front of the label: the connector and the fold marker. */
+    const guideOf = (what: string): string => row(what).slice(0, row(what).indexOf(what));
+    const label = (what: string): number => row(what).indexOf(what);
+    expect(row("storefront")).toContain("- storefront");
+    expect(label("1.0.0")).toBe(label("storefront") + INDENT);
+    expect(label("account recovery")).toBe(label("1.0.0") + INDENT);
+    expect(label("password reset")).toBe(label("account recovery") + INDENT);
+    for (const under of ["1.0.0", "account recovery", "password reset"]) {
+      expect(guideOf(under), under).toMatch(/[├└]─[-+ ] $/);
+    }
   });
 
-  it("shows every row's id, kind and state beside it, in full", () => {
+  it("shows every row's id, kind and state in front of it, in full", () => {
     // A code, not a bare number — the outline draws rows through the same contract as
     // every other list, and list.tsx is the one place that decides what a code looks like.
-    // The label leads the sentence and the particulars follow it.
+    // The three lead the row, in the order they narrow the tree.
     expect(row("storefront")).toMatch(
-      new RegExp(`^- storefront · #${tree.project} · project · in_progress\\b`),
+      new RegExp(`^#${tree.project} +project +in_progress +- storefront\\b`),
     );
-    expect(row("password reset")).toContain(" · story · ");
+    expect(row("password reset")).toMatch(/^#\d+ +story +in_progress +/);
+    // And no four-letter word: a reader should not have to learn this screen's vocabulary.
+    for (const line of inside()) expect(line, line).not.toMatch(/\bproj\b|\bstor\b|\brequ\b/);
   });
 });
 
