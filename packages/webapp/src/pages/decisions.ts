@@ -7,11 +7,12 @@
  *  than rows — a card is the unit that fits a whole question — and it is the same rows,
  *  read through `waitingApprovals`, not a second opinion about what is waiting.
  *
- *  Read-only, and not as an omission: `renderers.webapp` in design.yaml says the web
- *  surface has no bars because every verb that changes wecode is the cli's. A page that
- *  offered a button to answer with would be the first verb on this surface, so there is no
- *  form, no control and nothing to post to — the answer is `wecode` on a command line, and
- *  the card says so rather than leaving a reader hunting for the button.
+ *  The page itself draws no control. `POST /answer` — `answer.ts` — is the surface's one
+ *  verb and will answer a card's question, but what this document offers is still the
+ *  question and the command that settles it: a card that grew a button would be a design
+ *  change to `renderers.webapp`, which says the web surface has no bars, and design.yaml
+ *  is where that is decided rather than here. So the verb exists, reachable by anything
+ *  that can post, and the card goes on naming the command a reader has to hand.
  *
  *  The approvals arrive as a function, not as a database: what is proved here is the page,
  *  and where a workspace is, is `bin.ts`'s. */
