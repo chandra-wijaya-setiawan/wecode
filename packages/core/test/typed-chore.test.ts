@@ -27,9 +27,11 @@ import {
   type ChoreSpec,
   type RoleConfig,
 } from "../src/index.js";
+import * as core from "../src/index.js";
 import { freshDb, seed } from "./helpers.js";
 
 const source = readFileSync(fileURLToPath(new URL("../src/chore.ts", import.meta.url)), "utf8");
+const raise = readFileSync(fileURLToPath(new URL("../src/chore/raise.ts", import.meta.url)), "utf8");
 
 const roles: RoleConfig = loadRoles(fileURLToPath(new URL("../../../config/roles.yaml", import.meta.url)));
 
@@ -158,6 +160,102 @@ describe("the chore module, ported onto the typed layer", () => {
     const actual = (db.prepare("PRAGMA table_info(chore)").all() as { name: string }[]).map((c) => c.name);
 
     expect(columns.sort()).toEqual([...actual].sort());
+  });
+});
+
+/** docs/design/18: the three conditions — a chore is owed, owed again, or no longer owed —
+ *  are one rule read three ways, and they are now one module. Held against the source of
+ *  both files, because the defect this prevents is a fourth condition growing back in
+ *  chore.ts beside the record it is a claim about. */
+describe("the chore-raising conditions, in their own module", () => {
+  const RAISING = ["ensureChore", "reraiseChore", "closeChore"] as const;
+
+  const declares = (text: string, name: string): boolean =>
+    new RegExp(`^export function ${name}\\(`, "m").test(text);
+
+  it("declares every condition in chore/raise.ts, and none of them in chore.ts", () => {
+    for (const name of RAISING) {
+      expect(declares(raise, name), `${name} in chore/raise.ts`).toBe(true);
+      expect(declares(source, name), `${name} in chore.ts`).toBe(false);
+    }
+  });
+
+  /** index.ts re-exports chore.ts and nothing under it, so the re-export is what keeps
+   *  `ensureChore` on core's surface. Drop it and every caller breaks at once. */
+  it("hands them back out through chore.ts, so core's surface is unchanged", () => {
+    expect(source).toContain('export { closeChore, ensureChore, reraiseChore } from "./chore/raise.js"');
+    for (const name of RAISING) expect(Object.keys(core)).toContain(name);
+  });
+
+  /** The conditions decide; the record writes. `raise.ts` owns no table and spells no SQL,
+   *  so the `chore` table stays declared exactly once, in chore.ts. */
+  it("leaves the tables, and the SQL, on the record's side", () => {
+    expect(raise).not.toMatch(/\btable<|\bqueries\s*\(/);
+    expect(raise.match(/\b(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/g)).toBeNull();
+    expect(source).toMatch(/table<ChoreRow>\(\s*"chore"/);
+  });
+
+  /** The two modules import each other, which is only safe while nothing here is read
+   *  while the module is evaluating. Every statement at the top level must be an import. */
+  it("touches chore.ts only from inside a function, so the cycle stays a module cycle", () => {
+    const top = raise
+      .split("\n")
+      .filter((l) => /^(const|let|var|new |[A-Za-z_$][\w$]*\s*\()/.test(l));
+    expect(top, "top-level statements in chore/raise.ts").toEqual([]);
+  });
+});
+
+describe("the conditions themselves", () => {
+  /** Owed: nothing there yet, so the row is written. */
+  it("raises a chore for a condition that has none", () => {
+    expect(countChores()).toBe(0);
+    const made = ensureChore(db, merge());
+    expect(made.state).toBe("planned");
+    expect(countChores()).toBe(1);
+  });
+
+  /** Still owed: the runner re-reads the same condition every tick, and one condition is
+   *  one chore however many ticks see it. */
+  it("raises one chore however often the same condition is read", () => {
+    const first = ensureChore(db, merge());
+    const again = ensureChore(db, merge());
+    expect(again.id).toBe(first.id);
+    expect(countChores()).toBe(1);
+  });
+
+  /** Owed again: a settled chore whose condition came back is the same chore, second pass,
+   *  with its attempts still on the record. */
+  it("raises a settled chore again, keeping the attempts behind it", () => {
+    const made = ensureChore(db, merge());
+    attempt(made.id);
+    expect(choreById(db, made.id)?.state).toBe("ready");
+    applyChore(db, made.id, "begin", "runner");
+    applyChore(db, made.id, "finish", "runner");
+
+    const back = ensureChore(db, merge());
+    expect(back.id).toBe(made.id);
+    expect(back.state).toBe("planned");
+    expect(choreAttempts(db, made.id)?.attempts).toBe(2);
+  });
+
+  /** And not past the ceiling: a spent chore is drift for the doctor, not a loop. */
+  it("refuses to raise a chore that is out of attempts", () => {
+    const made = ensureChore(db, merge());
+    const max = CHORE_KIND_DEFS.merge.max_retry;
+    for (let i = 0; i < max; i++) attempt(made.id);
+    applyChore(db, made.id, "begin", "runner");
+    applyChore(db, made.id, "fail", "runner");
+
+    const out = reraiseChore(db, made.id);
+    expect(out).toEqual({ ok: false, why: `out of attempts · ${max + 1} of ${max}` });
+  });
+
+  /** No longer owed: the condition is gone, so the chore is over and says why. */
+  it("closes a chore whose condition no longer holds, with the reason on the record", () => {
+    const made = ensureChore(db, merge());
+    expect(closeChore(db, made.id, "the branch merged", "runner").ok).toBe(true);
+    expect(choreById(db, made.id)?.state).toBe("done");
+    expect(choreRefusal(db, made.id)?.why).toBe("the branch merged");
   });
 });
 
