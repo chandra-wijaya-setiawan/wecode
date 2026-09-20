@@ -168,6 +168,20 @@ components:
     owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and wrapped in the shell design.yaml declares, served over http. It reads the record and offers no verb, because every verb that changes wecode is the cli's
     modules: [pages/board, pages/decisions, pages/shell, server]
 
+  painter:
+    package: painter
+    layer: client
+    component: true
+    owns: the surface a person reviews an artefact on — one session per artefact, the prompts the browser queues against it, the poll a waiting agent is woken by, and the chrome the artefact is framed in before it is served. It holds no opinion about what an artefact says
+    modules: [frame, server, session]
+
+  painter surface:
+    package: painter
+    layer: surface
+    component: false
+    owns: what a client of the painter package may import
+    modules: [index]
+
   webapp surface:
     package: webapp
     layer: surface

@@ -1,0 +1,273 @@
+/** The right pane: the designer's session, on a screen, in a browser.
+ *
+ *  The pane is a terminal and not a transcript. A transcript is what you get when the
+ *  browser is handed finished lines — it scrolls, it never redraws, and the program on the
+ *  far end cannot clear it, colour it or move its cursor, so anything that draws a frame
+ *  looks like torn garbage. A terminal is the other contract: the far end owns the screen,
+ *  the pane owns nothing but the bytes, and every keystroke the designer makes goes
+ *  through unread.
+ *
+ *  Three things live here, and they are separate on purpose:
+ *    - the wire, which is the only thing the two halves have to agree on;
+ *    - `keyOf` and `Screen`, which are the terminal — pure, and therefore checkable
+ *      without a browser;
+ *    - `attach`, which wires those to whatever the page actually put on the screen.
+ *
+ *  Nothing in this file touches a global. It is a browser module, but every DOM thing it
+ *  needs is a parameter, so the same code that runs in the pane runs under the test
+ *  runner, and what is proved is the code that ships rather than a copy of it. */
+
+// ─── the wire ───────────────────────────────────────────────────────────────────────
+
+/** Up: what the pane has for the session. `keys` is raw — bytes the keyboard made.
+ *  `prompt` is a whole message the designer composed and sent, which the far side
+ *  submits; they are different messages because they are different acts, and a pane that
+ *  sent a prompt as keystrokes could not tell a half-typed line from a sent one. */
+export type ToSession =
+  | { readonly kind: "keys"; readonly data: string }
+  | { readonly kind: "prompt"; readonly text: string };
+
+/** Down: what the session has for the pane. Output is a chunk of the pty's bytes, escapes
+ *  and all — the screen interprets them, because that is what a terminal is. */
+export type FromSession =
+  | { readonly kind: "output"; readonly chunk: string }
+  | { readonly kind: "exit"; readonly code: number };
+
+export const encode = (message: ToSession | FromSession): string => JSON.stringify(message);
+
+/** A frame off the wire, or null if it is not one. Null rather than a throw: a socket can
+ *  be handed anything, and a pane that dies on one bad frame is a pane that dies. */
+export function decode(frame: string): ToSession | FromSession | null {
+  let read: unknown;
+  try {
+    read = JSON.parse(frame);
+  } catch {
+    return null;
+  }
+  if (read === null || typeof read !== "object") return null;
+  const m = read as Record<string, unknown>;
+  if (m["kind"] === "keys" && typeof m["data"] === "string") return { kind: "keys", data: m["data"] };
+  if (m["kind"] === "prompt" && typeof m["text"] === "string") return { kind: "prompt", text: m["text"] };
+  if (m["kind"] === "output" && typeof m["chunk"] === "string") return { kind: "output", chunk: m["chunk"] };
+  if (m["kind"] === "exit" && typeof m["code"] === "number") return { kind: "exit", code: m["code"] };
+  return null;
+}
+
+// ─── keystrokes ─────────────────────────────────────────────────────────────────────
+
+/** As much of a `KeyboardEvent` as a terminal cares about. */
+export interface Key {
+  readonly key: string;
+  readonly ctrlKey?: boolean;
+  readonly altKey?: boolean;
+  readonly metaKey?: boolean;
+}
+
+/** The named keys, and the bytes a terminal sends for them. The arrows are the escape
+ *  sequences a program reads to move a cursor; Enter is CR because that is what the key
+ *  makes, and Backspace is DEL because that is what a terminal has sent since the vt100.
+ *  Getting these wrong is not cosmetic — it is the difference between a session the
+ *  designer can drive and one where the arrow keys print letters. */
+const NAMED: Readonly<Record<string, string>> = {
+  Enter: "\r",
+  Tab: "\t",
+  Backspace: "\x7f",
+  Delete: "\x1b[3~",
+  Escape: "\x1b",
+  ArrowUp: "\x1b[A",
+  ArrowDown: "\x1b[B",
+  ArrowRight: "\x1b[C",
+  ArrowLeft: "\x1b[D",
+  Home: "\x1b[H",
+  End: "\x1b[F",
+  PageUp: "\x1b[5~",
+  PageDown: "\x1b[6~",
+};
+
+/** The bytes a keypress sends, or "" for a press that sends nothing.
+ *
+ *  Empty rather than the key's name for the modifiers and the function keys: a lone Shift
+ *  press has no bytes, and a pane that sent the string "Shift" would type the word. Meta
+ *  is left alone too, because that is the browser's own chord — the designer expects
+ *  Cmd-C to copy out of the pane, not to reach the session. */
+export function keyOf(event: Key): string {
+  if (event.metaKey) return "";
+  const { key } = event;
+  if (event.ctrlKey) {
+    // Ctrl-A..Ctrl-Z are the control codes 1..26; this is how Ctrl-C reaches the session.
+    const upper = key.toUpperCase();
+    if (upper.length === 1 && upper >= "A" && upper <= "Z") {
+      return String.fromCharCode(upper.charCodeAt(0) - 64);
+    }
+    return "";
+  }
+  const named = NAMED[key];
+  if (named !== undefined) return event.altKey ? `\x1b${named}` : named;
+  if ([...key].length !== 1) return "";
+  return event.altKey ? `\x1b${key}` : key;
+}
+
+// ─── the screen ─────────────────────────────────────────────────────────────────────
+
+const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][A-Za-z0-9]|\x1b[=>]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+/** What the session has drawn, as the text a reader sees.
+ *
+ *  This is a screen and not a buffer: carriage return goes back to the start of the line
+ *  and overwrites it, and backspace takes a character off, which is how a spinner is one
+ *  spinner rather than four hundred frames of one. Escape sequences are dropped rather
+ *  than obeyed — a full terminal emulator is a bigger thing than this pane is, and the
+ *  bytes are kept whole on the wire so that a better screen can be dropped in here
+ *  without either half changing. */
+export class Screen {
+  private lines: string[] = [""];
+  private column = 0;
+
+  /** Everything the far end has drawn. */
+  get text(): string {
+    return this.lines.join("\n");
+  }
+
+  /** How many lines are on it. */
+  get rows(): number {
+    return this.lines.length;
+  }
+
+  /** Take a chunk of the session's output. */
+  write(chunk: string): this {
+    for (const ch of chunk.replace(ANSI, "")) {
+      if (ch === "\n") {
+        this.lines.push("");
+        this.column = 0;
+      } else if (ch === "\r") {
+        this.column = 0;
+      } else if (ch === "\b" || ch === "\x7f") {
+        this.column = Math.max(0, this.column - 1);
+      } else if (ch >= " " || ch === "\t") {
+        const line = this.lines[this.lines.length - 1] ?? "";
+        const padded = line.length < this.column ? line.padEnd(this.column, " ") : line;
+        this.lines[this.lines.length - 1] =
+          padded.slice(0, this.column) + ch + padded.slice(this.column + 1);
+        this.column += 1;
+      }
+    }
+    return this;
+  }
+
+  /** Drop everything above the last `rows` lines. A pane holds a window, not a history. */
+  clamp(rows: number): this {
+    if (rows > 0 && this.lines.length > rows) this.lines = this.lines.slice(-rows);
+    return this;
+  }
+}
+
+// ─── the pane ───────────────────────────────────────────────────────────────────────
+
+/** As much of an element as the pane writes to. */
+export interface Text {
+  textContent: string | null;
+  scrollTop?: number;
+  scrollHeight?: number;
+}
+
+/** As much of an element as the pane listens to. */
+export interface Listens {
+  addEventListener(type: string, handler: (event: never) => void): void;
+}
+
+/** The parts of the page this pane drives. Named, so the markup can move without this
+ *  file moving with it. */
+export interface Parts {
+  /** Where the session's screen goes. */
+  readonly screen: Text;
+  /** What has the keyboard focus while the designer is driving the session. */
+  readonly keyboard: Listens;
+  /** The box a prompt is composed in. */
+  readonly composer: { value: string };
+  /** What sending it looks like — the form, or the button. */
+  readonly send: Listens;
+}
+
+/** Where the pane sends what it has. */
+export type Send = (message: ToSession) => void;
+
+export interface Attached {
+  /** Take a frame from the session. */
+  readonly receive: (frame: string) => void;
+  /** The screen behind the pane, for anything that wants to read it. */
+  readonly screen: Screen;
+}
+
+/** Wire the parts to a session.
+ *
+ *  Keystrokes go up one press at a time and unread — the pane does not know what a key
+ *  means and must not, because the meaning is the far end's. A press that makes bytes is
+ *  also a press the browser must not act on itself, so it is defaulted-prevented; a press
+ *  that makes none is left to the browser, which is how Cmd-C still copies and Tab out of
+ *  an unfocused pane still moves focus.
+ *
+ *  The composer is the other door. What is typed there is not keystrokes: it is a prompt,
+ *  and it reaches the session only when it is sent, at which point the box is emptied so
+ *  that a sent prompt cannot be sent twice. */
+export function attach(parts: Parts, send: Send, rows = 0): Attached {
+  const screen = new Screen();
+
+  const draw = (): void => {
+    if (rows > 0) screen.clamp(rows);
+    parts.screen.textContent = screen.text;
+    if (parts.screen.scrollHeight !== undefined) parts.screen.scrollTop = parts.screen.scrollHeight;
+  };
+
+  parts.keyboard.addEventListener("keydown", ((event: Key & { preventDefault?: () => void }) => {
+    const data = keyOf(event);
+    if (data === "") return;
+    event.preventDefault?.();
+    send({ kind: "keys", data });
+  }) as (event: never) => void);
+
+  const sendPrompt = ((event?: { preventDefault?: () => void }) => {
+    event?.preventDefault?.();
+    const text = parts.composer.value;
+    if (text.trim() === "") return;
+    parts.composer.value = "";
+    send({ kind: "prompt", text });
+  }) as (event: never) => void;
+
+  // Both, because `send` may be the form or the button inside it, and a button inside a
+  // form raises only the form's submit.
+  parts.send.addEventListener("submit", sendPrompt);
+  parts.send.addEventListener("click", sendPrompt);
+
+  return {
+    screen,
+    receive(frame: string): void {
+      const message = decode(frame);
+      if (message === null) return;
+      if (message.kind === "output") {
+        screen.write(message.chunk);
+        draw();
+      } else if (message.kind === "exit") {
+        screen.write(`\n[session left with ${message.code}]\n`);
+        draw();
+      }
+    },
+  };
+}
+
+/** The ids the markup and this file agree on. One list, so a rename is one edit. */
+export const IDS = {
+  pane: "session",
+  screen: "session-screen",
+  composer: "session-prompt",
+  send: "session-send",
+} as const;
+
+/** The right pane's markup: a screen, and a box to send a prompt from. A `<pre>` because
+ *  the far end laid the columns out already and any other element would re-wrap them. */
+export const pane = (): string =>
+  `<section id="${IDS.pane}" class="pane pane-right">` +
+  `<pre id="${IDS.screen}" class="screen" tabindex="0" aria-label="the designer's session"></pre>` +
+  `<form id="${IDS.composer}-form" class="composer">` +
+  `<textarea id="${IDS.composer}" rows="2" aria-label="a prompt to send"></textarea>` +
+  `<button id="${IDS.send}" type="submit">send</button>` +
+  `</form></section>`;
