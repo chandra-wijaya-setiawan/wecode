@@ -11,11 +11,12 @@
 # Changing how the cockpit looks is an edit here first, and a red test until the drawing
 # follows.
 #
-# The keys below `proposal` are the screen the operator signed off. The keys outside it
-# describe the board as it is drawn today, which is how they were written — by reading
-# screens.tsx — and so they gate nothing the code could fail. Where the two disagree the
-# proposal wins, and the drawn key is retired as the board reaches it. A design is what
-# the screen must become, never a transcript of what it already draws.
+# The keys below `proposal` are the screen the operator signed off. Some keys outside it
+# were written the other way round — by reading screens.tsx — and so gated nothing the code
+# could fail. Where the two disagreed the proposal won, and the drawn key was retired as
+# the board reached it: `head:` is the first to go, because the board now writes a head the
+# way the proposal does. A design is what the screen must become, never a transcript of
+# what it already draws.
 #
 # ── The split ────────────────────────────────────────────────────────────────────────────
 #
@@ -63,31 +64,12 @@ renderers:
       # costs is these two lines and these two columns.
       forbidden: ["┌", "┐", "└", "┘", "│", "├", "┤"]
 
-    # How a head is written, and then filled with `glyph` to the full width. It opens with
-    # the section's own `mark` from views.yaml and writes the name in capitals: the mark
-    # and the case are what tell a head from a row at a glance, on a page whose chrome is
-    # one rule. A box carries the letter `v` opens it by, and the count of what it is
-    # holding pushed to the far end — the numbers down a page of eight are then a column to
-    # compare, and the fill is what holds each of them there. The lead section is neither a
-    # filter nor keyed, so it carries neither letter nor count.
-    head: &head
-      glyph: "─"
-      case: upper
-      section: "── {mark} {title} "
-      box: "── {mark} {title} [{key}] "
-      count: " {count}"
-      count_at: width
-      # One box's count is a fraction, because its rows are not just rows: a running row is
-      # holding one of the fleet's seats. `3` says how much is moving and nothing about
-      # whether the machine is full — three of four seats is a workspace with nothing
-      # spare, three of twenty is nineteen workers standing idle, and the operator's next
-      # move is different in each. So the seated box says `held/seats`, and every other box
-      # says the plain count. A workspace with no workers has no seats to be short of and
-      # falls back to the count.
-      seated:
-        box: running
-        of: workers
-        count: " {held}/{seats}"
+    # How a head is written is not here. It was, as `head:` — a rule opened with `── `,
+    # the name in capitals, the letter in brackets and the count held at the width by the
+    # fill — and every line of it was a transcript of what screens.tsx already drew. The
+    # proposal the operator signed writes a head differently, the board now draws it that
+    # way, and a retired key kept beside the live one is a second answer to what a head is.
+    # So there is one: `shared.proposal.head`, which both renderers read.
 
     # A screen given the whole terminal for one thing keeps its border: two lines once is
     # not sixteen, and the border is what tells that page from the bars under it.
@@ -401,6 +383,20 @@ shared:
       count_at: right
       count: "{count}{key}"
       key_as: superscript
+      # The lead section is no filter over the board and `v` does not open it, so it is the
+      # one head with neither a count nor a letter: it is the line and nothing else.
+      countless: [services]
+      # One box's count is a fraction, because its rows are not just rows: a running row is
+      # holding one of the fleet's seats. `3` says how much is moving and nothing about
+      # whether the machine is full — three of four seats is a workspace with nothing spare,
+      # three of twenty is nineteen workers standing idle, and the operator's next move is
+      # different in each. So the seated box's `{count}` is `held/seats`, and every other
+      # box's is the plain number. A workspace with no workers has no seats to be short of
+      # and falls back to the count.
+      seated:
+        box: running
+        of: workers
+        count: "{held}/{seats}"
       # The hint is on every head, not on the heads whose count happened to be worth
       # raising. A head with no letter on it is a section the operator can see and cannot
       # open, and which sections those are would then be decided by which ones had rows
@@ -465,6 +461,5 @@ outline: *outline
 key_bar: *key_bar
 proposal: *proposal
 dashboard: *dashboard
-head: *head
 pages: *pages
 bars: *bars
