@@ -1,4 +1,5 @@
-/** The downward half of the cascade.
+/** The cascade a drop sets off: down to what hung off the row, and up to what the row was
+ *  the last of.
  *
  *  apply.ts cascades upward: a settled child fires the completion transition of its
  *  parent. Nothing cascaded the other way, and `acceptance_criteria.drop` carries no
@@ -73,6 +74,104 @@ export function cascadeDrop(
   });
 
   return { ok: true, dropped, kept };
+}
+
+/** The ancestor the upward walk stopped at, and the sentence that stopped it. */
+export interface Held {
+  readonly entity: StatefulEntity;
+  readonly id: number;
+  readonly why: string;
+}
+
+export type AbandonCascade =
+  | { readonly ok: true; readonly dropped: readonly Drop[]; readonly held: Held | null }
+  | { readonly ok: false; readonly why: string };
+
+/** Settle every ancestor of a dropped row that has nothing left to prove it.
+ *
+ *  The mirror of `cascadeDrop`, and the other thing that follows from a drop. Dropping a
+ *  criteria's last acceptance_test must not *prove* the criteria — all-dropped is not
+ *  all-passed, and all-dropped.test.ts is the record of the five deliveries that bug cost.
+ *  But leaving it in `in_progress` is no better: `accept` refuses it for ever after, so the
+ *  criteria is unprovable work sitting on the board with nobody able to say why. It is
+ *  settled here, as `dropped`, which is what it is.
+ *
+ *  The walk stops at the first ancestor that still bears a child this cascade did not
+ *  abandon — a passed sibling test, a live criteria — and reports it as `held` rather than
+ *  swallowing it: one live child is the whole reason the parent stays. It stops the same
+ *  way at an ancestor the machine will not drop, so a `met` requirement is not undone by
+ *  the last of its criteria going away.
+ *
+ *  Like the downward walk it invokes no verb through Engine.apply, so no completion
+ *  transition fires on the way up. Abandonment proves nothing at any level.
+ */
+export function cascadeAbandon(
+  db: DatabaseSync,
+  entity: StatefulEntity,
+  id: number,
+  machines: MachineSet = loadMachines(),
+): AbandonCascade {
+  const repo = new Repo(db);
+  const state = repo.stateOf(entity, id);
+  if (state === null) return { ok: false, why: `no ${entity} #${id}` };
+  if (state !== "dropped") {
+    return { ok: false, why: `${entity} #${id} is ${state}, not dropped: nothing to cascade` };
+  }
+
+  const dropped: Drop[] = [];
+  const held = transact(db, () => climb(repo, machines, entity, id, dropped));
+
+  return { ok: true, dropped, held };
+}
+
+/** The rungs a cascade may abandon.
+ *
+ *  Everything between a criteria and an epic is work: it exists to be proved, and with
+ *  nothing left to prove it there is nothing left of it. A release and the project above it
+ *  are not — cascade.test.ts already stops the upward *success* cascade at the release,
+ *  because shipping is a decision, and abandoning a version is the same decision said the
+ *  other way. A task is not on the list either: it is dropped by whoever gave it up. */
+const ABANDONS: readonly StatefulEntity[] = [
+  "acceptance_criteria",
+  "requirement",
+  "story",
+  "epic",
+];
+
+function climb(
+  repo: Repo,
+  machines: MachineSet,
+  entity: StatefulEntity,
+  id: number,
+  dropped: Drop[],
+): Held | null {
+  let up = repo.parentOf(entity, id);
+  while (up !== null) {
+    const here = up;
+    const state = repo.stateOf(here.entity, here.id);
+    if (state === null) return null;
+
+    if (!ABANDONS.includes(here.entity)) {
+      return { ...here, why: `${here.entity} #${here.id} is not abandoned by a cascade: dropping it is a decision` };
+    }
+
+    const alive = repo.childrenOf(here.entity, here.id).find((row) => row.state !== "dropped");
+    if (alive !== undefined) {
+      const child = repo.childEntityOf(here.entity);
+      return {
+        ...here,
+        why: `${here.entity} #${here.id} still bears ${child} #${alive.id} (${alive.state})`,
+      };
+    }
+    if (transitionFor(machines[here.entity], state, "drop") === undefined) {
+      return { ...here, why: `${here.entity} #${here.id} is ${state}: the machine will not drop it` };
+    }
+
+    repo.setState(here.entity, here.id, state, "dropped", "drop", "cascade");
+    dropped.push({ ...here, verb: "drop", from: state, to: "dropped", automatic: true });
+    up = repo.parentOf(here.entity, here.id);
+  }
+  return null;
 }
 
 function walk(
