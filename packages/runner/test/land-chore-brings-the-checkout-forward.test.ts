@@ -13,9 +13,9 @@ import { DEFAULT_BUDGET, Runner } from "../src/index.js";
 /** docs/design/14. A delivered story reaches the base branch with nobody merging it.
  *
  *  The half of that page about what the operator sees afterwards. Landing moves the base
- *  ref under checkouts nobody asked, so a checkout sitting on the base at the old tip is
- *  brought forward, one holding work of its own is left alone and told, and the rest are
- *  left in peace. Its sibling `land-chore.test.ts` pins the landing itself. */
+ *  ref under checkouts nobody asked, so every checkout sitting on the base — clean at the
+ *  old tip or holding work of its own — is left exactly as it stands and told the command,
+ *  and the rest are left in peace without a word. Its sibling `land-chore.test.ts` pins the landing itself. */
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -72,20 +72,21 @@ const checkouts = (): string[] =>
     .map((l) => l.slice("worktree ".length));
 
 describe("the primary checkout, after a landing it did not make", () => {
-  it("is brought forward when it is clean, and no tree is left standing", async () => {
+  it("is told the command even when it is clean, and no tree is left standing", async () => {
     const s = story("password reset", "reset.ts");
     const before = checkouts();
 
     const tick = await runner().tick();
 
     // The merge still happens in a detached tree of wecode's own, and that tree is gone
-    // afterwards. Once the base ref has moved, a primary checkout that was clean at the old
-    // tip is brought forward too, so the operator does not see staged inverse changes.
+    // afterwards. The operator's checkout is not one of wecode's to write: clean at the old
+    // tip is still their folder, so it is left as it stands and told what moved.
     expect(git(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
     expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("the base\n");
-    expect(readFileSync(join(repo, "reset.ts"), "utf8")).toBe("password reset\n");
-    expect(git(repo, "status", "--short", "--untracked-files=no")).toBe("");
-    expect(tick.landed.find((l) => l.story === s.id)?.notice).toBeUndefined();
+    expect(existsSync(join(repo, "reset.ts"))).toBe(false);
+    const notice = tick.landed.find((l) => l.story === s.id)?.notice ?? "";
+    expect(notice).toContain(repo);
+    expect(notice).toContain("git restore --source=HEAD --staged --worktree .");
     expect(existsSync(landTree(s.slug))).toBe(false);
     expect(checkouts()).toEqual(before);
   });
@@ -104,19 +105,9 @@ describe("the primary checkout, after a landing it did not make", () => {
     expect(notice).toContain("git restore --source=HEAD --staged --worktree .");
   });
 
-  it("answers primary drift by syncing only the clean old-tip checkout", () => {
-    expect(
-      updatePrimary({
-        path: "/w/repo",
-        base: "main",
-        onBase: true,
-        alreadyCurrent: false,
-        wasTheOldTip: true,
-        ownWork: [],
-      }),
-    ).toEqual({ kind: "sync" });
-
+  it("answers every drift on the base with words, the clean old-tip checkout included", () => {
     const drifts = [
+      { wasTheOldTip: true, ownWork: [] },
       { wasTheOldTip: false, ownWork: [] },
       { wasTheOldTip: true, ownWork: ["README.md"] },
       { wasTheOldTip: false, ownWork: ["README.md"] },
@@ -130,7 +121,10 @@ describe("the primary checkout, after a landing it did not make", () => {
         ...drift,
       });
       expect(verdict.kind).toBe("tell");
-      if (verdict.kind === "tell") expect(verdict.instruction).toContain("/w/repo");
+      if (verdict.kind === "tell") {
+        expect(verdict.instruction).toContain("/w/repo");
+        expect(verdict.instruction).toContain("git restore --source=HEAD --staged --worktree .");
+      }
     }
     // And a checkout that is not on the base, or already holds the landing, is left in peace
     // without a word — there is nothing there that is stale.

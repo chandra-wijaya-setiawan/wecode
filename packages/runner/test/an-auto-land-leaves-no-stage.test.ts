@@ -14,8 +14,10 @@ import { DEFAULT_BUDGET, Runner } from "../src/index.js";
  *  same promise, and it owes it about two checkouts rather than one.
  *
  *  The operator's checkout: the base ref moves under it, so the landed paths read as staged
- *  deletions until it is brought forward. Pinned here through a whole tick, because that is
- *  the only place the promise is visible as the operator sees it.
+ *  deletions until they bring it forward themselves. That folder is theirs and wecode never
+ *  writes it, so what it owes there is the sentence — the staged diff named as the
+ *  landing's, and the command. Pinned here through a whole tick, because that is the only
+ *  place the promise is visible as the operator sees it.
  *
  *  Wecode's own: the merge is made in a detached tree of wecode's own, and that tree is not
  *  a thing an operator should ever have to find, prune or be sent to. It goes on every path
@@ -166,7 +168,7 @@ describe("an auto land, in wecode's own tree", () => {
 });
 
 describe("an auto land, in the operator's checkout", () => {
-  it("leaves nothing staged there", async () => {
+  it("leaves the tree alone and says what is staged there", async () => {
     const db: DatabaseSync = open(join(repo, "wecode.db"));
     const make = new Maker(db);
     const project = make.project(make.workspace("acme", repo), "storefront", repo);
@@ -187,17 +189,25 @@ describe("an auto land, in the operator's checkout", () => {
     commit(tree, "the story");
     git(repo, "worktree", "remove", "--force", tree);
 
-    await new Runner(db, {
+    const tick = await new Runner(db, {
       budget: DEFAULT_BUDGET,
       repoRoot: repo,
       adapters: {},
       integrationBranch: "main",
     }).tick();
 
-    // The whole promise, as the operator sees it: the ref moved under their checkout, and
-    // the landed file is *there* rather than sitting in the index as a staged deletion.
+    // The whole promise, as the operator sees it. The ref moved under their checkout, so
+    // the landed path *is* a staged deletion there — and wecode does not reach into their
+    // folder to clear it. What it owes is the sentence: the staged diff named as the
+    // landing's rather than theirs, and the command that clears it.
     expect(git(repo, "rev-parse", "main")).toBe(git(repo, "rev-parse", "HEAD"));
-    expect(existsSync(join(repo, "reset.ts"))).toBe(true);
-    expect(git(repo, "status", "--porcelain", "--untracked-files=no")).toBe("");
+    expect(existsSync(join(repo, "reset.ts"))).toBe(false);
+    expect(git(repo, "status", "--porcelain", "--untracked-files=no")).toContain("reset.ts");
+
+    const notice = tick.landed.find((l) => l.story === story)?.notice ?? "";
+    expect(notice).toContain(repo);
+    expect(notice).toContain("staged deletions");
+    expect(notice).toContain("None of it is yours");
+    expect(notice).toContain("git restore --source=HEAD --staged --worktree .");
   });
 });

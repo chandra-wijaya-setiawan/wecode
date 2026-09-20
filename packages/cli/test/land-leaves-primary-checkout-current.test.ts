@@ -74,18 +74,24 @@ function deliveredStory(file: string): { id: number; slug: string } {
 }
 
 describe("a landing leaves the primary checkout current", () => {
-  it("brings a clean primary checkout forward, so the landed file is on disk", async () => {
+  it("tells a clean primary checkout the command rather than writing it", async () => {
     const { id } = deliveredStory("landed.ts");
     expect(existsSync(join(repo, "landed.ts"))).toBe(false);
 
     const tick = await runner().tick();
 
     // (a) the base gained the commit.
-    expect(tick.landed).toEqual([{ story: id, sha: git(repo, "rev-parse", "main") }]);
     expect(git(repo, "ls-tree", "-r", "--name-only", "main").split("\n")).toContain("landed.ts");
-    // (b) and the operator's folder shows it, with no phantom deletion behind it.
-    expect(existsSync(join(repo, "landed.ts"))).toBe(true);
-    expect(git(repo, "status", "--porcelain", "-uno")).toBe("");
+    // (b) and the operator's folder was not written — not even this one, the case that used
+    // to be synced on the grounds that there was nothing there to lose.
+    expect(existsSync(join(repo, "landed.ts"))).toBe(false);
+    // (c) so the landing says it, names the tree, the command, and the staged diff the
+    // operator is about to find.
+    const notice = tick.landed.find((l) => l.story === id)?.notice ?? "";
+    expect(notice).toContain(repo);
+    expect(notice).toContain("git restore --source=HEAD --staged --worktree .");
+    expect(notice).toContain("staged deletions");
+    expect(notice).toContain("None of it is yours");
   });
 
   it("leaves a dirty primary checkout alone and names the command", async () => {
@@ -136,9 +142,9 @@ describe("a landing leaves the primary checkout current", () => {
     ).toEqual({ kind: "current" });
   });
 
-  it("a ref-only merge is never silent: every drift is a sync or an instruction", () => {
-    // The defect was a third outcome — the ref moved, the tree did not, and nothing was
-    // said. There is no input that produces it.
+  it("a ref-only merge is never silent: every drift is an instruction", () => {
+    // The defect was a second outcome — the ref moved, the tree did not, and nothing was
+    // said. There is no input that produces it, and no input that writes the tree either.
     const drifts = [true, false].flatMap((wasTheOldTip) =>
       [[], ["README.md"]].map((ownWork) => ({
         path: "/w/repo",
@@ -151,10 +157,13 @@ describe("a landing leaves the primary checkout current", () => {
     );
     for (const drift of drifts) {
       const verdict = updatePrimary(drift);
-      expect(verdict.kind).not.toBe("current");
-      if (verdict.kind === "tell") expect(verdict.instruction).toContain("/w/repo");
+      expect(verdict.kind).toBe("tell");
+      if (verdict.kind === "tell") {
+        expect(verdict.instruction).toContain("/w/repo");
+        expect(verdict.instruction).toContain("git restore --source=HEAD --staged --worktree .");
+      }
     }
-    // Clean and at the old tip is the one case wecode may act on by itself.
-    expect(drifts.filter((d) => updatePrimary(d).kind === "sync")).toHaveLength(1);
+    // There is no case left wecode acts on by itself: every drift is words.
+    expect(drifts.every((d) => updatePrimary(d).kind === "tell")).toBe(true);
   });
 });

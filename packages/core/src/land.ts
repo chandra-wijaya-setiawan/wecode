@@ -311,7 +311,6 @@ export interface PrimaryDrift {
  *  they are told the command. Never silence. */
 export type PrimaryUpdate =
   | { readonly kind: "current" }
-  | { readonly kind: "sync" }
   | { readonly kind: "tell"; readonly instruction: string };
 
 /** docs/design/14. A landing merge made in a tree of wecode's own moves `refs/heads/<base>`
@@ -321,13 +320,13 @@ export type PrimaryUpdate =
  *  landed paths reading as staged deletions, because HEAD moved under an index that never
  *  saw them. It reads exactly like lost work.
  *
- *  So the ref moving is never the end of it. A checkout that is on the base, behind, and
- *  still exactly the commit the base was landed from holds nothing of anybody's: bringing
- *  it forward can lose nothing, and leaving it stale is the surprise. That one is synced.
- *  Every other drift — operator work in the tree, or a tree at some commit the landing was
- *  not made from — is words, naming the command in full and the path it is to be run in,
- *  because there wecode writing the files is the surprise. The one thing not allowed is
- *  neither.
+ *  So the ref moving is never the end of it. Every drift is words: the command in full and
+ *  the path it is to be run in, and nothing of the operator's folder written by wecode.
+ *  A checkout clean at the old tip used to be brought forward silently on the grounds that
+ *  it held nothing of anybody's — but "clean at the old tip" is read off git, and an
+ *  operator watching their own folder change under them cannot tell that reading from a
+ *  mistake in it. A folder a person works in is theirs on every path; wecode says what
+ *  moved and what to run, and they run it. The one thing not allowed is silence.
  *
  *  What the words have to carry is the index. A behind checkout is not merely showing old
  *  files: its index still holds the pre-land tree while HEAD holds the landing, so every
@@ -339,11 +338,12 @@ export type PrimaryUpdate =
 export function updatePrimary(drift: PrimaryDrift): PrimaryUpdate {
   const { path, base, onBase, alreadyCurrent, wasTheOldTip, ownWork } = drift;
   if (!onBase || alreadyCurrent) return { kind: "current" };
-  if (ownWork.length === 0 && wasTheOldTip) return { kind: "sync" };
   const what =
     ownWork.length > 0
       ? `${path} has work of yours that bringing it forward would write over:\n${indent(ownWork)}`
-      : `${path} is not at the commit ${base} was landed from`;
+      : wasTheOldTip
+        ? `${path} is exactly the commit ${base} was landed from — nothing of yours is in it`
+        : `${path} is not at the commit ${base} was landed from`;
   return {
     kind: "tell",
     instruction:
