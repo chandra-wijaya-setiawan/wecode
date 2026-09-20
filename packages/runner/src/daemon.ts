@@ -211,9 +211,8 @@ export interface Drift {
  *
  *  An acceptance test judged in such a tree is not failing, it is uninformed: acceptance
  *  test 166 went red in loadViews because the branch predated the services box that landed
- *  with story 152, and re-proving could never help because the tree was wrong rather than
- *  the code. So a story that is behind is named and nothing under it is judged — a red
- *  verdict out of a stale tree is a lie, and it costs the next attempt its whole budget. */
+ *  with story 152, and re-proving could never help. So a story that is behind is named and
+ *  nothing under it is judged — a red verdict out of a stale tree costs a whole budget. */
 export interface Behind {
   readonly story: number;
   readonly why: string;
@@ -222,12 +221,11 @@ export interface Behind {
 /** A story whose judgement is owed to a repair wecode has already asked for, and which
  *  repair that is.
  *
- *  Live proof, 15 Sep: chore 4, kind `refresh`, target story 165, was running when
- *  acceptance_test 166 was judged at 21:14 and went red on the same stale-tree loadViews
- *  error; the chore then finished, the branch gained the base, and the test passed at 21:17
- *  untouched. The red verdict was noise from a race against a repair the tick itself had
- *  raised — so while that repair is open the story is not judged, and the operator reads
- *  "waiting on its refresh" instead of a failure that was never about the code. */
+ *  Live proof, 15 Sep: chore 4, `refresh` on story 165, was running when acceptance_test 166
+ *  was judged at 21:14 and went red on the same stale-tree loadViews error; the chore then
+ *  finished, the branch gained the base, and the test passed at 21:17 untouched. So while
+ *  that repair is open the story is not judged, and the operator reads "waiting on its
+ *  refresh" instead of a failure that was never about the code. */
 export interface Waiting {
   readonly story: number;
   readonly why: string;
@@ -237,6 +235,9 @@ export interface Waiting {
  *  queued, or with a worker in the tree right now. `done` and `failed` are both settled —
  *  the repair has had its pass, and the story is judged as it stands. */
 const REFRESH_OPEN = ["planned", "ready", "running"];
+
+/** The half of a refresh's verdict that says what was owed, said once for every commit. */
+const KEPT = "a refresh adds the base, it does not replace the branch";
 
 /** The `script_run` entity a run at base is recorded under — its own, so it never collides
  *  with the examiner's verdict rows for the same test. Named once: the insert and the read
@@ -922,9 +923,8 @@ export class Runner {
       // Leave no half-merge standing: the next tick, and the chore's worker, both want the
       // branch as it was. Whether that worked is read back off the tree rather than off the
       // abort's exit code — `merge --abort` also fails when there was no merge to abort, and
-      // that tree is not wedged. A tree still holding MERGE_HEAD is, and then the sentence
-      // has to say so: a wedged tree is what the next tick and the chore's worker will find,
-      // and a silent abort left them to discover it.
+      // that tree is not wedged. A tree still holding MERGE_HEAD is, and the sentence says
+      // so rather than leaving the next tick to discover it.
       await exec("git", ["merge", "--abort"], { cwd: tree }).catch(() => undefined);
       const wedged = await this.midMerge(tree);
       const after = wedged
@@ -960,33 +960,29 @@ export class Runner {
    *
    *  Until now that was a sentence in a report: the merge in `landDoneTasks` swallowed the
    *  conflict, and a delivered story that could not be landed looked exactly like one that
-   *  had been. Four of them sat that way for a day. A chore is the record of it — on the
-   *  board, with a target and a check, and takeable by a worker.
+   *  had been. A chore is the record of it — on the board, with a target and a check.
    *
-   *  Every story with work under it is read, not only a delivered one, because `refresh`
-   *  is owed while the work is in flight and not after it: story 165 was `in_progress`, its
-   *  tree was a story behind the base, and because this read only `delivered` nothing was
-   *  raised — so the same acceptance test was re-proved in the same wrong tree, with nothing
-   *  on the board to say why. `planned` is left out because a story nobody has started has
-   *  no branch, and `dropped` because nothing is owed on it.
+   *  Every story with work under it is read, not only a delivered one, because `refresh` is
+   *  owed while the work is in flight and not after it: story 165 was `in_progress` and a
+   *  story behind the base, and because this read only `delivered`, the same acceptance test
+   *  was re-proved in the same wrong tree with nothing on the board to say why. `planned` is
+   *  left out because a story nobody has started has no branch, `dropped` because nothing is
+   *  owed on it.
    *
    *  `merge` stays a delivered story's alone. A branch in flight is expected to diverge from
-   *  the base, and that divergence is neither owed nor anybody's to fix until the story is
-   *  finished; raising it early is a chore on every board in the workspace. `refresh` is the
-   *  opposite case and that is why it is a second kind rather than a widened first: it is
-   *  about the tree wecode is judging in right now.
+   *  the base, and that divergence is nobody's to fix until the story is finished; raising it
+   *  early is a chore on every board in the workspace. That is why `refresh` is a second kind
+   *  rather than a widened first: it is about the tree wecode is judging in right now.
    *
    *  "With work under it" is not a second clause in the query, because the branch is already
    *  the answer: `mergesCleanly` says yes to a ref that is not there, and a story with
    *  nothing under it has no branch, so it raises nothing without being asked separately.
    *
    *  This runs every tick and creates nothing on the second one: `ensureChore` is keyed on
-   *  (kind, target), which is the condition itself.
-   *
-   *  Level-triggered in both directions. The condition is re-read every tick and the chore
-   *  follows it: true again re-raises a chore that had settled, false closes one that had
-   *  not. Neither is a timer and neither is a guess — this reads the branch against the base
-   *  before it says either. */
+   *  (kind, target), which is the condition itself. Level-triggered in both directions — the
+   *  condition is re-read every tick and the chore follows it, true again re-raising one that
+   *  had settled and false closing one that had not. Neither is a timer: this reads the
+   *  branch against the base before it says either. */
   private async raiseStoryChores(behind: readonly Behind[] = []): Promise<number[]> {
     const stories: { id: number; slug: string; project: number; repo: string; state: string }[] = [];
     for (const row of queries(this.db).selectFrom(tbl.story).all().sort(byId)) {
@@ -1041,30 +1037,25 @@ export class Runner {
   /** The `refresh` chore, read off the branch.
    *
    *  The condition is `merge-base --is-ancestor base branch` and nothing else — the same
-   *  question `refreshStoryTree` asks, asked again here rather than inherited from what the
-   *  proving pass happened to report. That is the whole point of the change: `proveStories`
-   *  looks only at an in_progress story with a ready or failed *script* acceptance test, so
-   *  an in_progress story whose tests are not scripts yet, or has none written, was invisible
-   *  to it and nothing was ever raised about a tree that was plainly behind. The graph knows
-   *  about all of them.
-   *
-   *  It also means the two can no longer disagree in the other direction. A story
-   *  `proveStories` skipped because this very chore is open used to need a `waiting` list to
-   *  stop the skip reading as "the tree took the base"; now the branch answers that itself,
-   *  and it says no, so the chore stays raised without being told.
+   *  question `refreshStoryTree` asks, asked off the graph rather than inherited from what
+   *  the proving pass happened to report. `proveStories` looks only at an in_progress story
+   *  with a ready or failed *script* acceptance test, so one whose tests are not scripts yet
+   *  was invisible to it and nothing was raised about a tree that was plainly behind. It
+   *  also stops the two disagreeing the other way: a story skipped because this very chore
+   *  is open no longer needs a `waiting` list to keep the skip from reading as "the tree
+   *  took the base".
    *
    *  `behind` is still taken, for one thing only: when the proving pass did try the merge,
    *  its conflict is the better sentence to record against the chore than "does not contain".
    *  It never decides whether the chore is owed.
    *
-   *  Raising is an in_progress story's alone, but re-reading is not. A story that moves to
-   *  `on_hold` or `delivered` with a `failed` refresh chore on it used to take that chore
-   *  out of reach of the only pass that ever revisits it: the branch could take the base an
-   *  hour later and the row would still be `failed`, refusing a tree that is fine, for good.
-   *  So the check is re-read whatever state the story is in, and a chore whose condition has
-   *  cleared is closed. A story that cannot raise one also cannot have one re-raised here —
-   *  when it is still behind, an existing chore is left exactly as it stands, and not
-   *  dispatched, because nothing is being proved in that tree. */
+   *  Raising is an in_progress story's alone, but re-reading is not: a story that moves to
+   *  `on_hold` or `delivered` with a `failed` refresh chore on it would otherwise keep that
+   *  verdict for good, refusing a tree that took the base an hour later. So the check is
+   *  re-read whatever state the story is in, and a chore whose condition has cleared is
+   *  closed. A story that cannot raise one also cannot have one re-raised here — when it is
+   *  still behind, an existing chore is left as it stands, and not dispatched, because
+   *  nothing is being proved in that tree. */
   private async followRefresh(
     story: { id: number; slug: string; project: number; state: string },
     repo: string,
@@ -1076,10 +1067,8 @@ export class Runner {
     if (!(await this.isBehind(repo, branch, base))) {
       // Up to date is not the same as repaired. A branch reset onto the base contains it by
       // construction, so this test alone blesses the one refresh that must never be blessed:
-      // the one that threw the story's own work away to make the check true. Closing here
-      // would then overwrite the `failed` verdict `proveChore` gave it, and the orphaned
-      // commits would be nowhere on the board. So the chore stays exactly where it is, still
-      // owed, with the loss recorded against it.
+      // the one that threw the story's own work away to make the check true. So the chore
+      // stays where it is, still owed, with the loss recorded against it.
       const orphaned = await this.orphanedBy(repo, branch, story.id);
       if (orphaned !== null) {
         if (chore === null) return [];
@@ -1105,13 +1094,12 @@ export class Runner {
       check: "the base is an ancestor of the branch",
     });
     // One row, two voices, and only one is worth an operator's attention. `chore_refusal`
-    // holds one sentence per chore. This one — why the work is owed — is already said by the
-    // chore's kind and check; the dispatcher's and the judge's say what the record does not:
-    // no worker free, no slot, no tree, nothing proved. Written unconditionally it landed on
-    // top of those every tick, resetting a held dispatch refusal's `since`/`passes` to
-    // first-seen-now, and costing a `failed` chore out of `max_retry` its verdict for good.
-    // So it seeds an empty row and never overwrites: the row is empty on the first raise,
-    // and `reraiseChore` clears it whenever the condition comes back.
+    // holds one sentence per chore, and this one — why the work is owed — is already said by
+    // the chore's kind and check, where the dispatcher's and the judge's say what the record
+    // does not. Written unconditionally it landed on top of those every tick, resetting a
+    // held dispatch refusal's `since`/`passes` and costing a `failed` chore its verdict. So
+    // it seeds an empty row and never overwrites; `reraiseChore` clears it when the
+    // condition comes back.
     if (choreRefusal(this.db, raised.id) === null) recordChoreRefusal(this.db, why, raised.id);
     return raised.state === "done" ? [] : [raised.id];
   }
@@ -1345,14 +1333,12 @@ export class Runner {
    *
    *  Every refusal here is level-triggered — no worker free, no slot, no role on the record
    *  — because none of them is the chore's fault and all of them heal on a later tick. None
-   *  of them is silent: a chore that sits in `planned` for half an hour is only readable if
-   *  it says which of these is holding it, so each one is written to `chore_refusal` in the
-   *  same voice a task's refusal uses, and cleared the moment the chore is dispatched. What
-   *  is decided here is unchanged — only what is recorded about it.
+   *  of them is silent either: a chore that sits in `planned` for half an hour is only
+   *  readable if it says which of these is holding it, so each is written to `chore_refusal`
+   *  in the same voice a task's refusal uses, and cleared the moment it is dispatched.
    *
    *  The chore is left where it was and stays on the board: a `planned` chore is only
-   *  started once there is somewhere for it to go, so "created, shown, and taken by nobody"
-   *  still reads as planned rather than as ready forever. */
+   *  started once there is somewhere for it to go. */
   private async dispatchChore(chore: Chore): Promise<number | null> {
     const def = CHORE_KIND_DEFS[chore.kind];
     if (def === undefined) return this.refuseChore(chore, `no kind on the record for a ${chore.kind} chore`);
@@ -1467,20 +1453,36 @@ export class Runner {
    *
    *  "Is the base an ancestor of the branch" is the whole check, and `git reset --hard base`
    *  passes it while doing the opposite of the work — as does a rebase that drops a commit.
-   *  The lost attempts linger in the object store where nobody looks.
    *
-   *  What this defends are the commits wecode itself put there: `landed_branch` records, per
-   *  task, the tip `landDoneTasks` merged in. Each was reachable when recorded, so one that
-   *  is not reachable now was dropped by whatever last rewrote the branch. An empty `sha` is
-   *  skipped: the tip could not be read at merge time, and an unknown commit is not evidence
-   *  that a known one is missing. */
+   *  Two records say what the branch held. `landed_branch` names the tip `landDoneTasks`
+   *  merged per task, and goes first because it names the task; an empty `sha` is skipped,
+   *  since a tip that could not be read then is not evidence a known commit is gone now. The
+   *  branch's own reflog covers the rest. */
   private async orphanedBy(repo: string, branch: string, storyId: number): Promise<string | null> {
     const lost: string[] = [];
     for (const row of this.landedAttempts(storyId)) {
       if (!(await this.contains(repo, branch, row.sha))) lost.push(`task ${row.task} at ${row.sha.slice(0, 12)}`);
     }
-    if (lost.length === 0) return null;
-    return `it no longer reaches work wecode merged into it: ${lost.join(", ")} — a refresh adds the base, it does not replace the branch`;
+    if (lost.length > 0) return `it no longer reaches work wecode merged into it: ${lost.join(", ")} — ${KEPT}`;
+    const tips = await this.droppedTips(repo, branch);
+    return tips.length === 0 ? null : `it no longer reaches a commit it already held: ${tips.join(", ")} — ${KEPT}`;
+  }
+
+  /** The commits this branch has stood at and can no longer reach, newest first.
+   *
+   *  `landed_branch` only knows the tips wecode merged in, so everything a worker committed
+   *  on the branch itself — a settled conflict, a refresh's own merge commit, a story with
+   *  no landed task at all — had nothing defending it, and a reset onto the base dropped it
+   *  unseen. A story branch only ever moves forward: wecode merges into it and `update-ref`s
+   *  it to a commit that already contained it, and every reset it makes is in a detached
+   *  tree. So a former tip that is unreachable now was thrown away by hand. */
+  private async droppedTips(repo: string, branch: string): Promise<string[]> {
+    const seen = await exec("git", ["reflog", "show", "--format=%H", `refs/heads/${branch}`], { cwd: repo })
+      .then((r) => r.stdout.split("\n").filter((l) => /^[0-9a-f]{40}$/.test(l)))
+      .catch(() => [] as string[]);
+    const lost: string[] = [];
+    for (const tip of new Set(seen)) if (!(await this.contains(repo, branch, tip))) lost.push(tip.slice(0, 12));
+    return lost;
   }
 
   /** The attempt commits this story's tasks landed on its branch. The walk is
@@ -1585,14 +1587,12 @@ export class Runner {
    *  and for a `merge` chore — whose merge is the branch into the base, a graph this tree
    *  cannot be asked about — that stays the honest answer. A `refresh` is the other
    *  direction, and there the conflicting paths *are* knowable before a worker is hired:
-   *  `merge-tree` replays base-into-branch off the object store and names them. So the
-   *  refresh gets a scope that says what it writes, and `**` stops being the standing
-   *  authority of every chore.
+   *  `merge-tree` replays base-into-branch off the object store and names them, so `**`
+   *  stops being the standing authority of every chore.
    *
-   *  A refresh that conflicts on nothing claims nothing: git makes that merge by itself and
-   *  there is no file for a worker to settle. The role's scope is still the ceiling — this
-   *  only ever narrows — and it is the fallback for the one case that is not an answer: a
-   *  merge-tree that could not be asked (git too old, a ref that is gone). */
+   *  A refresh that conflicts on nothing claims nothing: git makes that merge by itself. The
+   *  role's scope is still the ceiling — this only ever narrows — and it is the fallback for
+   *  a merge-tree that could not be asked (git too old, a ref that is gone). */
   private async claimedScope(chore: Chore, repo: string, branch: string, role: Scope): Promise<Scope> {
     if (chore.kind !== "refresh") return role;
     let base: string;
