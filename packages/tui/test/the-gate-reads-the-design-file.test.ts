@@ -25,11 +25,11 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
-import { loadMachines, open } from "@wecode/core";
-import { check, type CapturedNode } from "@wecode/ui";
-// By path, the way the cockpit's own gate reaches it: index.ts re-exports `check` and not
-// yet the design half beside it.
-import { against, expected, type Design } from "@wecode/ui/dist/expected.js";
+import { loadMachines, open, SCHEMA_VERSION } from "@wecode/core";
+// Through the package entry, the one door: `@wecode/ui` names the design half beside
+// `check`, so the gate reaches the loader the projector reaches and a reader of this file
+// does not have to know that `expected` lives in expected.js.
+import { against, check, expected, type CapturedNode } from "@wecode/ui";
 import { App } from "../src/app.js";
 import { Cockpit } from "../src/screens.js";
 import { cockpitDesign, loadViews, ViewError } from "../src/views.js";
@@ -122,7 +122,7 @@ const HOLDS = {
   services: [
     "pulse   storefront  still      0 running · 1 queued · 0 stuck · moved 2h0m ago",
     "runner  workspace   none       no runner holds this workspace · 1 queued",
-    "schema  workspace   current    database 14 · this build understands 14",
+    `schema  workspace   current    database ${SCHEMA_VERSION} · this build understands ${SCHEMA_VERSION}`,
     "fleet   workspace   short      no engineer for 1 ready",
     "doctor  workspace   not built  0.0.2 · healing and collection",
   ],
@@ -131,7 +131,7 @@ const HOLDS = {
 
 describe("the tree is built out of the two files", () => {
   it("is a capture the four rules read clean, like any design", () => {
-    expect(check(expected(cockpitDesign(SCREEN, HOLDS) as Design))).toEqual([]);
+    expect(check(expected(cockpitDesign(SCREEN, HOLDS)))).toEqual([]);
   });
 
   it("names the boxes views.yaml names, in its order, in the case design.yaml asks for", () => {
@@ -160,7 +160,7 @@ describe("the tree is built out of the two files", () => {
   });
 
   it("stacks the boxes by what they hold, a section costing design.yaml's one line", () => {
-    const placed = expected(cockpitDesign(SCREEN, HOLDS) as Design).children ?? [];
+    const placed = expected(cockpitDesign(SCREEN, HOLDS)).children ?? [];
     expect(placed.map((box) => [box.name, box.at.y, box.at.height])).toEqual([
       ["SERVICES", 0, 6],
       ["NEEDS YOU", 6, 2],
@@ -203,7 +203,7 @@ describe("an edit to either file moves the tree", () => {
 
   it("grows every box when design.yaml spends two lines of chrome on a section", () => {
     const paths = edited({ design: ["chrome_lines_per_section: 1", "chrome_lines_per_section: 2"] });
-    const placed = expected(cockpitDesign(SCREEN, HOLDS, paths) as Design).children ?? [];
+    const placed = expected(cockpitDesign(SCREEN, HOLDS, paths)).children ?? [];
     expect(placed.slice(0, 3).map((b) => [b.name, b.at.y, b.at.height])).toEqual([
       ["SERVICES", 0, 7],
       ["NEEDS YOU", 7, 3],
@@ -229,7 +229,7 @@ describe("an edit to either file moves the tree", () => {
 
 describe("the real cockpit against the derived tree", () => {
   it("is the screen the two files ask for, box for box and row for row", () => {
-    expect(against(cockpitDesign(SCREEN, HOLDS) as Design, capture(frame()))).toEqual([]);
+    expect(against(cockpitDesign(SCREEN, HOLDS), capture(frame()))).toEqual([]);
   });
 
   it("still catches a box drawn somewhere other than where the design puts it", () => {
@@ -238,7 +238,7 @@ describe("the real cockpit against the derived tree", () => {
       box.name === "QUEUE" ? { ...box, at: { ...box.at, y: box.at.y + 1 } } : box,
     );
     expect(
-      against(cockpitDesign(SCREEN, HOLDS) as Design, { ...moved, children: boxes }),
+      against(cockpitDesign(SCREEN, HOLDS), { ...moved, children: boxes }),
     ).toEqual([
       { kind: "moved", node: "Cockpit > QUEUE", says: `was at 0,10 ${WIDTH}x2, now 0,11 ${WIDTH}x2` },
     ]);
