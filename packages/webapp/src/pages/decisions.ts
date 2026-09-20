@@ -96,6 +96,10 @@ export function decisionsPage(approvals: readonly Approval[]): Reply {
   return html(document(decisionCards(approvals), STYLE));
 }
 
+/** Which reading of the workspace this page is served from. What is waiting on a person is
+ *  not a shape of the record, so it is asked for by name. See `discover.ts`. */
+export const READS = "approvals";
+
 /** The page, bound to a way of getting the approvals that are waiting now.
  *
  *  Read fresh on every request, for the reason the board is: a question answered on the
