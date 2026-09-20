@@ -19,6 +19,7 @@ import type { Board, Row } from "@wecode/core";
 import { loadOffPage, loadViews, sectionMark, type View } from "@wecode/tui";
 import { html, type Page, type Reply, type Routes } from "../server.js";
 import { escape } from "./board.js";
+import { document, shelled } from "./shell.js";
 
 /** A project's beat, by project id: how long since anything under it moved, in
  *  milliseconds, and its passes per hour oldest bucket first. Each is a `Map` because that
@@ -30,16 +31,11 @@ export interface Pulse {
 }
 
 /** The page's own presentation, and the only thing here that is not read off config. The
- *  same dark monospace as the board: they are two questions about one workspace, not two
- *  products. */
+ *  frame's rules — the margins, the type, the banner — are the shell's, so none of them is
+ *  here: what is left is the strip and the cards, which are this page's alone. */
 const STYLE = `
-  :root { color-scheme: dark }
-  body { margin: 0; padding: 1.5rem; background: #111; color: #ddd;
-         font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace }
-  main { display: grid; gap: 1.25rem; max-width: 60rem; margin: 0 auto }
-  h1 { font-size: 1rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  h2 { font-size: .9rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
        margin: 0; color: #888 }
-  h1 a { color: inherit; text-decoration: none }
   ul.strip { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap;
              gap: .75rem 1.5rem; border-top: 1px solid #333; border-bottom: 1px solid #333;
              padding: .6rem 0 }
@@ -143,34 +139,39 @@ const heading = (views: readonly View[]): View => {
   return found;
 };
 
-/** The whole document. */
-export function projectsPage(
+/** What the page says: its heading, its strip and its cards, and nothing around them. The
+ *  frame is the shell's, so the document's own words are not spelled here — and the page's
+ *  heading is an `h2` because the one `h1` of the document is the shell's banner. */
+export function projectsContents(
   board: Board,
   pulse: Pulse = {},
   views: readonly View[] = loadViews(),
   off: readonly View[] = loadOffPage(),
-): Reply {
+): string {
   const box = heading(off);
   const strip = `<ul class="strip">${views.map((v) => cell(v, board)).join("")}</ul>`;
   const cards =
     board.projects.length === 0
       ? `<p class="empty">${escape(box.empty)}</p>`
       : `<ul class="cards">${board.projects.map((p) => card(p, pulse)).join("")}</ul>`;
-  return html(
-    `<!doctype html>\n<html lang="en"><head><meta charset="utf-8">` +
-      `<meta name="viewport" content="width=device-width, initial-scale=1">` +
-      `<title>${escape(box.title)} — wecode</title><style>${STYLE}</style></head>` +
-      `<body><main><h1>${escape(box.title)}</h1>${strip}${cards}</main></body></html>\n`,
-  );
+  return `<h2>${escape(box.title)}</h2>${strip}${cards}`;
+}
+
+/** The whole document: what the page says, in the shell design.yaml declares. */
+export function projectsPage(
+  board: Board,
+  pulse: Pulse = {},
+  views: readonly View[] = loadViews(),
+  off: readonly View[] = loadOffPage(),
+): Reply {
+  return html(document(projectsContents(board, pulse, views, off), STYLE));
 }
 
 /** The page, bound to a way of getting the current rows and beat. Both are read on every
  *  request for the reason the board is: a page drawn from a snapshot taken at boot is a page
  *  that is wrong by the time somebody reads it. */
-export const projectsAt =
-  (rows: () => Board, pulse: () => Pulse = () => ({})): Page =>
-  () =>
-    projectsPage(rows(), pulse());
+export const projectsAt = (rows: () => Board, pulse: () => Pulse = () => ({})): Page =>
+  shelled(() => projectsContents(rows(), pulse()), STYLE);
 
 /** Where the projects page answers. It is the front page — the first question anybody asks
  *  of a workspace is which projects are in it and which of them is moving — and it keeps its

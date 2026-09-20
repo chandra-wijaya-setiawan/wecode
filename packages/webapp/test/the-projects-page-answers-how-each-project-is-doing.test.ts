@@ -14,12 +14,15 @@ import { addressOf, answer, serve } from "../src/server.js";
 import {
   PROJECTS_PATHS,
   projectRoutes,
+  projectsContents,
   projectsPage,
   since,
   type Pulse,
 } from "../src/pages/projects.js";
+import { document, loadShell } from "../src/pages/shell.js";
 
 const VIEWS = loadViews();
+const SHELL = loadShell();
 const PROJECTS_BOX = loadOffPage().find((v) => v.filter === "projects");
 
 const row = (id: number, what: string, state: string, detail = ""): Row => ({
@@ -217,11 +220,32 @@ describe("a project card", () => {
 });
 
 describe("the words the page uses", () => {
-  it("heads the page with the projects box's own title", () => {
+  it("heads its own part of the page with the projects box's own title", () => {
     expect(PROJECTS_BOX).toBeDefined();
     const body = projectsPage(emptyBoard()).body;
-    expect(body).toContain(`<h1>${PROJECTS_BOX?.title}</h1>`);
-    expect(body).toContain(`<title>${PROJECTS_BOX?.title} — wecode</title>`);
+    expect(body).toContain(`<h2>${PROJECTS_BOX?.title}</h2>`);
+  });
+
+  it("wears the shell the design declares, and does not spell a document of its own", () => {
+    const body = projectsPage(emptyBoard()).body;
+    expect(body).toContain(projectsContents(emptyBoard()));
+    expect(body.startsWith(`${SHELL.doctype}\n`)).toBe(true);
+    expect(body).toContain(`<title>${SHELL.title}</title>`);
+    // The document's one h1 is the shell's banner; the page heads with an h2 under it.
+    expect([...body.matchAll(/<h1>/g)]).toHaveLength(1);
+    expect(body).toContain(`<h1>${SHELL.banner}</h1>`);
+    const inside = body.slice(
+      body.indexOf(`<${SHELL.body}>`),
+      body.indexOf(`</${SHELL.body}>`),
+    );
+    expect(inside).toContain(`<ul class="strip">`);
+  });
+
+  it("moves with the design, rather than with a document written out here", () => {
+    const moved = { ...SHELL, title: "elsewhere", banner: "a board" };
+    const body = document(projectsContents(emptyBoard()), undefined, moved);
+    expect(body).toContain("<title>elsewhere</title>");
+    expect(body).toContain("<h1>a board</h1>");
   });
 
   it("says what the projects box says when there is no project", () => {
