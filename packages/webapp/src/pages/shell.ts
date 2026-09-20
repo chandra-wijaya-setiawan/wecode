@@ -1,5 +1,5 @@
 /** The frame every page of the web surface wears, read off the design rather than written
- *  out in each page.
+ *  out in each page — the word at the top, the row of ways in under it, and the look.
  *
  *  `packages/tui/config/design.yaml` is one design with three renderers on it: a terminal,
  *  a wireframe and this. Its `renderers.webapp.shell` block says what a document of this
@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { html, type Page, type Reply } from "../server.js";
+import { pathOf } from "./discover.js";
 
 /** Where the design is, and what reads it. Both are resolved through `@wecode/tui`: the
  *  file is that package's, and `yaml` is the dependency that package already has for it.
@@ -66,6 +67,41 @@ export function loadShell(path: string = DESIGN): Shell {
   }
   return shell as unknown as Shell;
 }
+
+/** One name in the banner: the page it opens, and the word the reader is offered for it.
+ *  Where it answers is not declared — that is `discover.ts`'s one answer, asked for here
+ *  rather than said twice. */
+export interface Tab {
+  readonly page: string;
+  readonly says: string;
+  readonly at: string;
+}
+
+/** The order `renderers.webapp.banner` declares. As with the shell, nothing is defaulted:
+ *  a banner built out of whatever this file guessed is a banner nobody signed, and the
+ *  order a reader meets the surface in is a decision about the surface. */
+export function loadBanner(path: string = DESIGN): readonly Tab[] {
+  const said = mapOf(webappOf(path)["banner"])["order"];
+  if (!Array.isArray(said)) {
+    throw new ShellError(`${path}: renderers.webapp.banner declares no order`);
+  }
+  return said.map((row, at) => {
+    const held = mapOf(row);
+    for (const field of ["page", "says"]) {
+      if (typeof held[field] !== "string") {
+        throw new ShellError(`${path}: renderers.webapp.banner.order[${at}] declares no ${field}`);
+      }
+    }
+    const page = held["page"] as string;
+    return { page, says: held["says"] as string, at: pathOf(page) };
+  });
+}
+
+/** The banner as markup: the word, and under it one row of ways in, in the declared order. */
+const bannerOf = (banner: string, tabs: readonly Tab[]): string =>
+  `<h1>${banner}</h1><nav>` +
+  tabs.map((tab) => `<a href="${tab.at}">${tab.says}</a>`).join("") +
+  `</nav>`;
 
 /** The look `renderers.webapp` declares: the tokens every rule spends, the shape each page
  *  is allowed to name, and the rules themselves — the frame's, then one block per page. */
@@ -161,6 +197,7 @@ export function document(
   retired = "",
   shell: Shell = loadShell(),
   css: string = stylesheet(),
+  tabs: readonly Tab[] = loadBanner(),
 ): string {
   void retired;
   const { doctype, lang, charset, viewport, title, banner, body } = shell;
@@ -168,7 +205,7 @@ export function document(
     `${doctype}\n<html lang="${lang}"><head><meta charset="${charset}">` +
     `<meta name="viewport" content="${viewport}">` +
     `<title>${title}</title><style>${css}</style></head>` +
-    `<body><${body}><h1>${banner}</h1>${contents}</${body}></body></html>\n`
+    `<body><${body}>${bannerOf(banner, tabs)}${contents}</${body}></body></html>\n`
   );
 }
 
@@ -187,5 +224,6 @@ export const shelled = (
   retired = "",
   shell: Shell = loadShell(),
   css: string = stylesheet(),
+  tabs: readonly Tab[] = loadBanner(),
 ): Page =>
-  (url: URL): Reply => html(document(contents(url), retired, shell, css));
+  (url: URL): Reply => html(document(contents(url), retired, shell, css, tabs));
