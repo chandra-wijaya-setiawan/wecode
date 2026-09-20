@@ -120,6 +120,52 @@ detail:
   # so what will not fit is dropped and counted rather than drawn.
   overrun: "… and {count} more"
 
+# The tree's own page, declared here for the same reason the detail page is: the cockpit
+# and a record both had a design and the outline had none, so what a row of the tree is
+# supposed to say was whatever outline.tsx happened to say it said — and what it says today
+# is the description first, with the id, the entity and the state buried behind however
+# long that description ran and the description itself cut at the right edge.
+#
+# A reader scanning fifty rows is looking for one of three things — a number, a kind or a
+# state — and all three are short and all three are where the prose has pushed them. So the
+# three that are scanned lead the row, in the order they narrow it, and the one that varies
+# in width is last and keeps whatever width is left. This is the same rule the board's four
+# columns already follow.
+outline:
+  chrome: border
+  # What a row is made of, in the order it is written. The three lead columns are fixed to
+  # their own longest value; the description is what is left of the line.
+  row:
+    order: [id, entity, state, description]
+    entry: "{id}  {entity}  {state}  {description}"
+    leads_with: id
+    columns:
+      id: { width: longest, align: right }
+      entity: { width: longest, align: left }
+      state: { width: longest, align: left }
+      description: { width: rest, align: left }
+    # The line is a sentence once the three columns are past, so it is not cut: what will
+    # not fit continues under where the description began, never under the columns.
+    overflow: wrap
+    wrap_under: description
+    truncate: false
+
+  # Depth is drawn, not counted. A row hangs off its parent by a tee, or by an elbow when
+  # it is the last of its siblings, and every level above it carries a rail exactly where
+  # that branch is still going. Indentation alone says the same thing only to a reader
+  # willing to count spaces, which at depth nine nobody is.
+  depth:
+    as: connector
+    in: description
+    every_row: true
+    indent: 2
+    tee: "├─"
+    elbow: "└─"
+    rail: "│ "
+    clear: "  "
+    # Sibling roots are separate trees rather than one branch, so nothing hangs off a root.
+    root: flush
+
 # The last line is the bar, and the one line the App has to say anything on sits directly
 # above it. Both always have to be readable, which is why the body states its height rather
 # than flexing into whatever is left.
