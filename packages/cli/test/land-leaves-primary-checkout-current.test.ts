@@ -136,7 +136,7 @@ describe("a landing leaves the primary checkout current", () => {
     ).toEqual({ kind: "current" });
   });
 
-  it("a ref-only merge is never silent: every drift is an update or an instruction", () => {
+  it("a ref-only merge is never silent: every drift is a sync or an instruction", () => {
     // The defect was a third outcome — the ref moved, the tree did not, and nothing was
     // said. There is no input that produces it.
     const drifts = [true, false].flatMap((wasTheOldTip) =>
@@ -155,6 +155,6 @@ describe("a landing leaves the primary checkout current", () => {
       if (verdict.kind === "tell") expect(verdict.instruction).toContain("/w/repo");
     }
     // Clean and at the old tip is the one case wecode may act on by itself.
-    expect(drifts.filter((d) => updatePrimary(d).kind === "update")).toHaveLength(1);
+    expect(drifts.filter((d) => updatePrimary(d).kind === "sync")).toHaveLength(1);
   });
 });
