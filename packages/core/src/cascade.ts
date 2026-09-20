@@ -96,6 +96,10 @@ export type AbandonCascade =
  *  criteria is unprovable work sitting on the board with nobody able to say why. It is
  *  settled here, as `dropped`, which is what it is.
  *
+ *  It starts at whichever rung was dropped, not only at an acceptance_test: a criteria
+ *  somebody drops carries up to the requirement it was the last criteria of, by the same
+ *  walk and for the same reason.
+ *
  *  The walk stops at the first ancestor that still bears a child this cascade did not
  *  abandon — a passed sibling test, a live criteria — and reports it as `held` rather than
  *  swallowing it: one live child is the whole reason the parent stays. It stops the same
