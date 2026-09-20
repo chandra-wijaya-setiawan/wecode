@@ -7,11 +7,17 @@ import { Engine, Maker, open } from "@wecode/core";
 import { DEFAULT_BUDGET, Runner, type Observation, type WorkerAdapter, type Work } from "../src/index.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
+/** The refund is per branch tip, not per attempt.
+ *
+ *  A refund exists so a harness that died before the agent started does not spend a retry.
+ *  That is one bad start, and the tip is what tells the two apart: the tip moves when an
+ *  attempt commits, so a second empty attempt at the same tip is the same nothing happening
+ *  twice. Refund it too and the task never exhausts — it just loops, and nobody is told. */
+
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
-/** An agent that exits cleanly and writes nothing: the harness that died before it started,
- *  and the session that read the brief and gave up. Its tree has no commit in it. */
+/** An agent that exits cleanly and writes nothing, so its tree has no commit in it. */
 class Idle implements WorkerAdapter {
   readonly kind = "agent";
   async start(): Promise<Observation> {
@@ -26,22 +32,16 @@ class Idle implements WorkerAdapter {
   async kill(): Promise<void> {}
 }
 
-/** An agent that does the work: it writes the file its scope allows, so the attempt has a
- *  commit on the branch and the retry it spent stays spent. */
-class Worker implements WorkerAdapter {
-  readonly kind = "agent";
-  constructor(private readonly file: string) {}
-  async start(w: Work): Promise<Observation> {
-    writeFileSync(join(w.worktree, this.file), "work\n");
+/** An agent that writes a file its scope allows — enough to move the branch tip, not enough
+ *  to pass the task test, so the task is dispatched again. */
+class Worker extends Idle {
+  constructor(private readonly file: string) {
+    super();
+  }
+  override async start(w: Work): Promise<Observation> {
+    writeFileSync(join(w.worktree, this.file), `${this.file}\n`);
     return { phase: "succeeded", session: "s1", spent: { tokens: 1, seconds: 0 }, commit: null };
   }
-  async poll(w: Work): Promise<Observation> {
-    return { phase: "succeeded", session: w.session ?? "s1", spent: { tokens: 0, seconds: 0 }, commit: null };
-  }
-  async answer(w: Work): Promise<Observation> {
-    return this.poll(w);
-  }
-  async kill(): Promise<void> {}
 }
 
 let repo: string;
@@ -49,7 +49,7 @@ let db: DatabaseSync;
 let task: number;
 
 beforeEach(() => {
-  repo = tmp("wecode-refund-");
+  repo = tmp("wecode-refund-once-");
   git(repo, "init", "-q", "-b", "main");
   git(repo, "config", "user.name", "t");
   git(repo, "config", "user.email", "t@localhost");
@@ -69,7 +69,7 @@ beforeEach(() => {
   const req = make.requirement(story, "one change per link");
   const c = make.criteria(req, "emailed in 60s");
   const at = make.acceptanceTest(c, "mail arrives", "script", "test -f mail.ts");
-  task = make.task(at, "send the mail", { role: "engineer", scope: { write: ["mail.ts"], tools: [] } });
+  task = make.task(at, "send the mail", { role: "engineer", scope: { write: ["mail.ts", "a.ts", "b.ts"], tools: [] } });
   const tt = make.taskTest(task, "mailer called", "script", "test -f mail.ts");
   make.worker("claude-1", "engineer", "agent");
 
@@ -86,6 +86,7 @@ beforeEach(() => {
   engine.apply("task_test", tt, "deliver", "chief");
   engine.apply("acceptance_test", at, "deliver", "chief");
   engine.apply("task", task, "start", "chief");
+  db.prepare("UPDATE task SET max_retry = 9 WHERE id = ?").run(task);
 });
 
 const runner = (adapter: WorkerAdapter): Runner =>
@@ -100,45 +101,63 @@ const runner = (adapter: WorkerAdapter): Runner =>
 const attemptsOf = (id: number): number =>
   (db.prepare("SELECT attempts FROM task WHERE id = ?").get(id) as { attempts: number }).attempts;
 
-describe("an attempt that committed nothing", () => {
-  it("costs the task no retry at all", async () => {
+describe("an empty attempt at a branch tip", () => {
+  it("is refunded the first time, because the harness gets one bad start", async () => {
     await runner(new Idle()).tick();
 
     expect(attemptsOf(task)).toBe(0);
   });
 
-  it("costs the task no retry on the tick it exhausts on either", async () => {
-    db.prepare("UPDATE task SET max_retry = 1 WHERE id = ?").run(task);
-
-    const tick = await runner(new Idle()).tick();
-
-    expect(tick.exhausted).not.toContain(task);
-    expect(attemptsOf(task)).toBe(0);
-  });
-
-  it("never refunds below zero", async () => {
+  it("is counted the second time, because nothing moved between them", async () => {
     await runner(new Idle()).tick();
-
-    expect(attemptsOf(task)).toBeGreaterThanOrEqual(0);
-  });
-
-  // The second empty attempt at the same tip is counted, not refunded:
-  // see an-empty-attempt-is-refunded-once.test.ts.
-});
-
-describe("an attempt that committed", () => {
-  it("spends the retry the foreman counted", async () => {
-    await runner(new Worker("mail.ts")).tick();
+    await runner(new Idle()).tick();
 
     expect(attemptsOf(task)).toBe(1);
   });
 
-  it("leaves the count where it is on the ticks after it", async () => {
-    await runner(new Worker("mail.ts")).tick();
-    const after = attemptsOf(task);
+  it("is counted every time after that, so the task exhausts rather than loops", async () => {
+    for (let i = 0; i < 5; i += 1) await runner(new Idle()).tick();
 
-    await runner(new Worker("mail.ts")).tick();
+    expect(attemptsOf(task)).toBe(4);
+  });
 
-    expect(attemptsOf(task)).toBe(after);
+  it("reaches the retry limit, which is what puts the task in front of the operator", async () => {
+    db.prepare("UPDATE task SET max_retry = 2 WHERE id = ?").run(task);
+
+    const seen: number[] = [];
+    for (let i = 0; i < 4; i += 1) seen.push(...(await runner(new Idle()).tick()).exhausted);
+
+    expect(seen).toContain(task);
+  });
+});
+
+describe("a tip that moved", () => {
+  it("buys the next empty attempt a refund of its own", async () => {
+    await runner(new Worker("a.ts")).tick();
+    expect(attemptsOf(task)).toBe(1);
+
+    await runner(new Idle()).tick();
+
+    expect(attemptsOf(task)).toBe(1);
+  });
+
+  it("buys it only one, so the attempt after that is counted", async () => {
+    await runner(new Worker("a.ts")).tick();
+    await runner(new Idle()).tick();
+
+    await runner(new Idle()).tick();
+
+    expect(attemptsOf(task)).toBe(2);
+  });
+
+  it("moves again on the next commit, and the refund comes back with it", async () => {
+    await runner(new Worker("a.ts")).tick();
+    await runner(new Idle()).tick();
+    await runner(new Idle()).tick();
+
+    await runner(new Worker("b.ts")).tick();
+    await runner(new Idle()).tick();
+
+    expect(attemptsOf(task)).toBe(3);
   });
 });
