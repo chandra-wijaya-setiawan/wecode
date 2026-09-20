@@ -416,7 +416,7 @@ describe("the terminal", () => {
   const HIDE = "\u001b[?25l";
 
   let path: string;
-  let child: ChildProcess | null = null;
+  const kids: ChildProcess[] = [];
   let out = "";
 
   beforeAll(() => {
@@ -429,7 +429,7 @@ describe("the terminal", () => {
     seed(file);
     file.close();
     out = "";
-    child = null;
+    kids.length = 0;
   });
 
   const start = (): ChildProcess => {
@@ -438,7 +438,7 @@ describe("the terminal", () => {
     c.stdout?.on("data", (chunk: string) => {
       out += chunk;
     });
-    child = c;
+    kids.push(c);
     return c;
   };
 
@@ -527,12 +527,12 @@ describe("the terminal", () => {
     c.stderr?.on("data", (chunk: Buffer) => {
       err += chunk.toString();
     });
-    child = c;
+    kids.push(c);
     expect(await exited(c)).toBe(1);
     expect(err).toContain("no wecode workspace at");
   });
 
-  afterEach(() => {
-    child?.kill("SIGKILL");
+  afterEach(async () => {
+    await Promise.all(kids.splice(0).map((c) => (c.exitCode === null ? (c.kill("SIGKILL"), exited(c)) : null)));
   });
 });

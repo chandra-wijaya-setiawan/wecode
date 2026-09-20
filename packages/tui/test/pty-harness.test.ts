@@ -1,8 +1,9 @@
 /** The cockpit, proved the way it is used: the built binary in a terminal of its own. */
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { open } from "@wecode/core";
 import { Cockpit, text } from "./pty.js";
 import { seed } from "./seed.js";
@@ -20,30 +21,77 @@ beforeAll(() => {
 
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-const drive = async (run: (c: Cockpit) => Promise<void>, cols = 100): Promise<void> => {
+/** Every cockpit this file opens, so the one a failing assertion skipped past is still
+ *  closed. `Cockpit.open` can also throw after spawning — a pty that never draws — and
+ *  then there is no cockpit to register at all, so the kill cannot stop at the handles. */
+const opened: Cockpit[] = [];
+
+const start = async (cols = 100): Promise<Cockpit> => {
   const cockpit = await Cockpit.open({ db, cols });
-  try {
-    await run(cockpit);
-  } finally {
-    await cockpit.close();
+  opened.push(cockpit);
+  return cockpit;
+};
+
+/** A cockpit is two processes — `script` and the node it wrapped — and only the outer one
+ *  has a handle, so after the handles are closed the process table is asked whether the
+ *  workspace this file made is still open anywhere. `a-test-leaves-no-process-behind.test.ts`
+ *  is the proof that this leaves nothing. */
+const alive = (): string[] =>
+  execFileSync("ps", ["-e", "-o", "pid=,args="], { encoding: "utf8" })
+    .split("\n")
+    .filter((line) => line.includes(dir))
+    .map((line) => line.trim());
+
+afterEach(async () => {
+  for (const cockpit of opened.splice(0)) await cockpit.close();
+  const started = Date.now();
+  for (let left = alive(); left.length > 0; left = alive()) {
+    for (const line of left) {
+      try {
+        process.kill(Number(line.split(/\s+/)[0]), "SIGKILL");
+      } catch {
+        /* it left between the listing and the signal, which is the outcome wanted */
+      }
+    }
+    if (Date.now() - started > 15_000) throw new Error(`still alive:\n${left.join("\n")}`);
+    await new Promise((r) => setTimeout(r, 50));
   }
+});
+
+const drive = async (run: (c: Cockpit) => Promise<void>, cols = 100): Promise<void> => {
+  const cockpit = await start(cols);
+  await run(cockpit);
 };
 
 describe("the built cockpit, driven in a terminal", () => {
   it("draws the board it was pointed at", async () => {
     await drive(async (cockpit) => {
       const frame = cockpit.frame();
-      // The seven boxes the page draws now, in order: no Projects box — the outline is the
-      // way out to the workspace — and the seed's ready task in Queue, which is a box of its
-      // own again rather than a row folded in with what has given up.
-      expect(frame).toContain("Needs you (0) [n]");
-      expect(frame).toContain("Running (0) [r]");
-      expect(frame).toContain("Queue (1) [q]");
+      // A head is a mark and a name now, with its count at the far right of the same line,
+      // so the head is matched by its mark and name and the count is looked for on that
+      // line rather than pinned to the padding between them.
+      const heads = [
+        ["= SERVICES", ""],
+        ["? NEEDS YOU", "0ⁿ"],
+        ["> RUNNING", "0ʳ"],
+        ["- QUEUE", "1q"],
+        ["* COOKING", "0ᶜ"],
+        [". PLANNED", "0ᵖ"],
+        ["+ DELIVERED", "0ᵈ"],
+        ["x DROPPED", "0ˣ"],
+      ];
+      const lines = frame.split("\n");
+      for (const [head, count] of heads) {
+        const line = lines.find((l) => l.trimStart().startsWith(head ?? ""));
+        expect(line, `no ${head} head in:\n${frame}`).toBeDefined();
+        expect(line).toContain(count);
+      }
+      // In order, top to bottom, so a box that moved is a red and not a pass by accident.
+      const at = (head: string): number => lines.findIndex((l) => l.trimStart().startsWith(head));
+      const order = heads.map(([head]) => at(head ?? ""));
+      expect(order).toEqual([...order].sort((a, b) => a - b));
+      // The seed's one ready task, in Queue.
       expect(frame).toContain("send the reset mail");
-      expect(frame).toContain("Cooking (0) [c]");
-      expect(frame).toContain("Planned (0) [p]");
-      expect(frame).toContain("Delivered (0) [d]");
-      expect(frame).toContain("Dropped (0) [x]");
       expect(frame).toContain("j/k move");
     });
   }, 30_000);
@@ -70,7 +118,7 @@ describe("the built cockpit, driven in a terminal", () => {
   }, 30_000);
 
   it("leaves when it is told to, and gives the terminal back", async () => {
-    const cockpit = await Cockpit.open({ db });
+    const cockpit = await start();
     expect(await cockpit.quit()).toBe(0);
   }, 30_000);
 });
