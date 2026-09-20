@@ -32,7 +32,11 @@ epic:
     - { verb: start,   from: [planned],     to: in_progress }
     - { verb: hold,    from: [in_progress], to: on_hold }
     - { verb: reopen,  from: [on_hold, delivered, dropped], to: in_progress }
-    - { verb: deliver, from: [in_progress], to: delivered, guard: every_story_delivered_or_dropped, automatic: true }
+    # Also from `planned`: an epic is not what does the work, and nothing makes a planner
+    # start one before its stories are. An epic whose stories all settled while it still
+    # read `planned` was delivered in fact and stuck in the record — the guard is the same
+    # either way, and it refuses an epic with no stories, so `planned` cannot deliver empty.
+    - { verb: deliver, from: [planned, in_progress], to: delivered, guard: every_story_delivered_or_dropped, automatic: true }
     - { verb: drop,    from: [planned, in_progress, on_hold], to: dropped, guard: every_story_dropped }
 
 story:
