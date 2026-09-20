@@ -15,7 +15,6 @@
 # truth rather than against a number the tree stopped matching.
 ceiling: 400
 over:
-  packages/cli/src/run.ts: 1833
   packages/cli/src/plan.ts: 1112
   packages/runner/src/daemon.ts: 1041
   packages/runner/src/doctor.ts: 923
@@ -37,6 +36,7 @@ over:
   packages/runner/test/typed-runner-doctor.test.ts: 527
   packages/tui/src/outline.tsx: 517
   packages/core/test/typed-chore.test.ts: 516
+  packages/cli/src/run.ts: 515
   packages/tui/src/screens.tsx: 508
   packages/cli/test/typed-run.test.ts: 507
   packages/runner/test/codex-adapter.test.ts: 500
