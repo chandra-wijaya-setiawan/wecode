@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Engine, Maker, open } from "@wecode/core";
@@ -285,5 +286,102 @@ describe("a refused task says why on the board", () => {
 
     const queued = board(db).queued;
     expect(queued.some((row) => row.detail.includes("overlaps"))).toBe(true);
+  });
+});
+
+/** The red-at-base phase is the first of the tick's phases to move out of `daemon.ts` into a
+ *  module of its own. What the phase *does* is already pinned by `red-at-base.test.ts`, which
+ *  ran unchanged through this move; what is pinned here is that the move happened, that it
+ *  took the whole phase and no more of it, and that nothing else went with it. */
+describe("the red-at-base phase is a module of its own", () => {
+  const src = (module: string): string =>
+    readFileSync(fileURLToPath(new URL(`../src/${module}`, import.meta.url)), "utf8");
+
+  /** The source with its prose taken out. `daemon.ts` talks about `proveRedAtBase` and about
+   *  the merge-base in comments, so every assertion below is made against the code. */
+  const code = (module: string): string =>
+    src(module).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+
+  it("exports one function, and it is the phase", () => {
+    const exported = [...code("tick/red-at-base.ts").matchAll(/^export (?:async )?function (\w+)/gm)].map(
+      (m) => m[1],
+    );
+    expect(exported).toEqual(["proveRedAtBase"]);
+  });
+
+  it("took the two helpers whole, and left neither behind", () => {
+    const moved = code("tick/red-at-base.ts");
+    expect(moved).toMatch(/function mergeBase\(/);
+    expect(moved).toMatch(/function runAtBase\(/);
+    expect(moved).toContain(`exec("git", ["merge-base", a, b]`);
+    expect(moved).toContain(`exec("git", ["checkout", "--detach", "-q", at.base]`);
+    expect(moved).toContain(`exec("git", ["reset", "--hard", "-q", at.base]`);
+
+    const left = code("daemon.ts");
+    expect(left).not.toMatch(/\bmergeBase\b/);
+    expect(left).not.toMatch(/\brunAtBase\b/);
+    expect(left).not.toContain("--detach");
+    expect(left).not.toContain(`"reset"`);
+    // `isAncestor` asks `merge-base --is-ancestor` for a different phase and stays put: the
+    // verb is shared, the helper is not.
+    expect(left.match(/"merge-base"/g)).toHaveLength(1);
+    expect(left).toContain(`["merge-base", "--is-ancestor", base, branch]`);
+  });
+
+  it("is called from the daemon where the daemon called it", () => {
+    const left = code("daemon.ts");
+    expect(left).toContain(`import { proveRedAtBase, type RedAtBase } from "./tick/red-at-base.js"`);
+    // The one call site in `tick()` is untouched, and the one wrapper is what it now reaches.
+    expect(left.match(/this\.proveRedAtBase\(\)/g)).toHaveLength(1);
+    expect(left.match(/\breturn proveRedAtBase\(\{/g)).toHaveLength(1);
+    expect(left).toMatch(/const redAtBase = await this\.proveRedAtBase\(\);/);
+  });
+
+  /** The reads the phase shares with the rest of the runner stay the runner's: they are
+   *  handed in, not copied. A second copy of `storyOfCriteria` in the new module would be
+   *  the defect this asserts against. */
+  it("borrows the runner's ledger reads rather than copying them", () => {
+    const moved = code("tick/red-at-base.ts");
+    for (const shared of ["storyOfCriteria", "projectOf", "ranAtBase", "recordBaseRun", "treesFor", "worktreeRoot"]) {
+      expect(moved, `${shared} is declared again in the new module`).not.toMatch(
+        new RegExp(`(?:function|const)\\s+${shared}\\b`),
+      );
+      expect(moved, `${shared} is not handed in`).toContain(`host.${shared}`);
+    }
+    // One definition of the columns, not two: the table descriptors are imported back.
+    expect(moved).toMatch(/import \{ tbl.*\} from "\.\.\/daemon\.js"/);
+    expect(moved).not.toContain("table<");
+  });
+
+  it("moves no other phase", () => {
+    const left = code("daemon.ts");
+    for (const phase of [
+      "landDeliveredStories",
+      "allocateOne",
+      "settleEnded",
+      "landDoneTasks",
+      "proveStories",
+      "enforceRetryLimit",
+      "ranAtBase",
+      "recordBaseRun",
+    ]) {
+      expect(left, `${phase} left daemon.ts`).toMatch(new RegExp(`private (?:async )?${phase}\\(`));
+    }
+    // The one function, and the two types that say what it answers and what it needs.
+    expect([...code("tick/red-at-base.ts").matchAll(/^export /gm)]).toHaveLength(3);
+  });
+
+  it("still reports the phase's answer on a tick", async () => {
+    const r = new Runner(db, {
+      budget: DEFAULT_BUDGET,
+      repoRoot: repo,
+      worktreeRoot: join(repo, ".wecode/worktrees"),
+      adapters: { agent: new Writer() },
+      integrationBranch: "main",
+    });
+    const tick = await r.tick();
+    // The fixture's acceptance test fails at the seed commit, which is the whole point of
+    // the phase: it is proven red there, by the module the daemon now delegates to.
+    expect(tick.redAtBase).toEqual({ proven: [1], unproven: [] });
   });
 });

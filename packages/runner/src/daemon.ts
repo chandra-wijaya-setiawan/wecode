@@ -41,6 +41,7 @@ import { Doctor, type Invariant } from "./doctor.js";
 import { Examiner, type Refused, type ScriptReport } from "./examiner.js";
 import { Trees } from "./git.js";
 import { attemptLanding, isLanded, LAND_CHECK } from "./land-chore.js";
+import { proveRedAtBase, type RedAtBase } from "./tick/red-at-base.js";
 
 const exec = promisify(execFile);
 
@@ -86,7 +87,7 @@ interface TestRow {
   updated_at: string;
 }
 
-interface StoryRow {
+export interface StoryRow {
   id: number;
   slug: string;
   epic_id: number;
@@ -107,7 +108,7 @@ interface LandedRow {
   merged_at: string;
 }
 
-const tbl = {
+export const tbl = {
   task: table<TaskRow>("task", ["id", "slug", "acceptance_test_id", "attempts", "max_retry", "state"]),
   assignment: table<AssignmentRow>("assignment", ["id", "objective_type", "objective_id", "worker_id", "worktree", "phase", "session", "commit_sha", "updated_at"]),
   test: table<TestRow>("acceptance_test", ["id", "parent_id", "kind", "artefact", "state", "red_at_base_sha", "red_at_base_at", "red_at_base_reason", "updated_at"]),
@@ -277,10 +278,7 @@ const reasonOf = (err: unknown): string => {
   return said.split("\n")[0] ?? "git said nothing";
 };
 
-export interface RedAtBase {
-  readonly proven: readonly number[];
-  readonly unproven: readonly number[];
-}
+export type { RedAtBase };
 
 export interface RunnerOptions {
   readonly budget: BudgetConfig;
@@ -715,55 +713,20 @@ export class Runner {
     return stopped;
   }
 
-  /** A test nobody has seen fail proves nothing by passing. So each ready acceptance test is
-   *  run once at the commit its story was cut from — the merge-base of the story branch and
-   *  the integration branch — before any of its tasks has written a line. Red there is the
-   *  proof, and is recorded. Green there is a test that cannot fail, and the reason it
-   *  proves nothing is recorded against it instead. */
-  private async proveRedAtBase(): Promise<RedAtBase> {
-    // `artefact IS NOT NULL` and `red_at_base_sha IS NULL` are spelled as comparisons with
-    // null, which the dialect compiles to IS / IS NOT rather than to an `= NULL` that never
-    // matches. The story's own state is the one condition that needs the walk up the ERD.
-    const tests = queries(this.db)
-      .selectFrom(tbl.test).select(["id", "artefact", "parent_id"])
-      .where("state", "=", "ready").where("kind", "=", "script").where("artefact", "!=", null).where("red_at_base_sha", "=", null).all();
-
-    const rows: { id: number; artefact: string; story: string; repo: string }[] = [];
-    for (const test of tests) {
-      if (test.artefact === null) continue;
-      const story = this.storyOfCriteria(test.parent_id);
-      if (story === null || story.state !== "in_progress") continue;
-      const owner = this.projectOf(story);
-      if (owner === null) continue;
-      rows.push({ id: test.id, artefact: test.artefact, story: story.slug, repo: owner.repo });
-    }
-
-    const proven: number[] = [];
-    const unproven: number[] = [];
-    for (const row of rows) {
-      const repo = this.opts.repoRoot ?? row.repo;
-      try {
-        const trees = this.treesFor(repo);
-        const tree = await trees.storyTree(row.story, join(this.worktreeRoot(repo), `story-${row.story}`));
-        const base = await this.mergeBase(repo, `story/${row.story}`, await trees.integrationBranch());
-        if (base === null || this.ranAtBase(row.id, base, row.artefact)) continue;
-        const green = await this.runAtBase({ repo, story: row.story, tree, base, artefact: row.artefact });
-        this.recordBaseRun(row.id, base, row.artefact, green);
-        (green ? unproven : proven).push(row.id);
-      } catch {
-        // no branch, or no tree to be had: there is no base to prove anything against yet
-      }
-    }
-    return { proven, unproven };
-  }
-
-  private async mergeBase(repo: string, a: string, b: string): Promise<string | null> {
-    try {
-      const { stdout } = await exec("git", ["merge-base", a, b], { cwd: repo });
-      return stdout.trim() || null;
-    } catch {
-      return null;
-    }
+  /** The phase itself lives in `tick/red-at-base.ts`. What is left here is what the rest of
+   *  the runner already owned: the walk up the ERD, the trees, and the two rows the run is
+   *  written into. */
+  private proveRedAtBase(): Promise<RedAtBase> {
+    return proveRedAtBase({
+      db: this.db,
+      repoRoot: this.opts.repoRoot,
+      storyOfCriteria: (criteriaId) => this.storyOfCriteria(criteriaId),
+      projectOf: (story) => this.projectOf(story),
+      treesFor: (repo) => this.treesFor(repo),
+      worktreeRoot: (repo) => this.worktreeRoot(repo),
+      ranAtBase: (testId, base, artefact) => this.ranAtBase(testId, base, artefact),
+      recordBaseRun: (testId, base, artefact, green) => this.recordBaseRun(testId, base, artefact, green),
+    });
   }
 
   /** The same ledger of finished work the verdicts use, under an entity of its own: one run
@@ -772,21 +735,6 @@ export class Runner {
     const row = queries(this.db)
       .selectFrom(tbl.scriptRun).select(["fingerprint"]).where("entity", "=", BASE_RUN).where("test_id", "=", testId).get();
     return row?.fingerprint === `${base}|${artefact}`;
-  }
-
-  /** True when the artefact passed at base. The story tree is put back on its branch either
-   *  way: the merge and the ordinary prove-the-story pass both expect to find it there. */
-  private async runAtBase(at: { repo: string; story: string; tree: string; base: string; artefact: string }): Promise<boolean> {
-    await exec("git", ["checkout", "--detach", "-q", at.base], { cwd: at.tree });
-    await exec("git", ["reset", "--hard", "-q", at.base], { cwd: at.tree });
-    try {
-      await exec("bash", ["-lc", at.artefact], { cwd: at.tree, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
-      return true;
-    } catch {
-      return false;
-    } finally {
-      await this.treesFor(at.repo).storyTree(at.story, at.tree);
-    }
   }
 
   /** The observation goes on the test itself, in the columns `test_has_been_red` reads.
