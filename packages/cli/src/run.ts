@@ -39,6 +39,9 @@ import { paint } from "./paint.js";
 // The verbs that run something or show you something. Namespaced because several of them —
 // `board`, `worker`, `answer` — are also words this file uses for a table or a column.
 import * as see from "./verbs/run-and-see.js";
+// The verbs that only look: board, doctor, delivered, explore, design. Namespaced for the
+// same reason — `board` and `design` are also words this file uses.
+import * as read from "./verbs/read.js";
 // Namespaced because `tree` is already the core query that reads the whole shape back.
 import * as rungs from "./verbs/tree.js";
 // Namespaced for the same reason: `requirement` and `task` are already tables in this file.
@@ -67,8 +70,8 @@ function dispatch(argv: readonly string[]): number {
     const what = rest[0] ?? "";
     return isStateful(what) ? entityHelp(what) : usage();
   }
-  if (head === "board") return see.board(seen(rest));
-  if (head === "doctor") return see.doctor(rest);
+  if (head === "board") return read.board(seen(rest));
+  if (head === "doctor") return read.doctor(rest);
   if (head === "init") return init(rest);
   if (head === "answer") return see.answer(seen(rest));
   if (head === "ask") return see.ask(seen(rest));
@@ -76,7 +79,7 @@ function dispatch(argv: readonly string[]): number {
   if (head === "land") return see.land(seen(rest));
   if (head === "onboard") return see.onboard(seen(rest));
   if (head === "plan") return see.plan(rest);
-  if (head === "explore") return later(see.explore(rest));
+  if (head === "explore") return later(read.explore(rest));
   if (head === "paint") return later(paint(rest));
   if (head === "workspaces") return workspaces();
   if (head === "tree") return showTree(rest);
@@ -84,7 +87,7 @@ function dispatch(argv: readonly string[]): number {
   if (head === "wait") return wait(rest);
   // Before verb(): `delivered` is a story state as well as a command, so falling through
   // would read it as an entity and answer "delivered has no states".
-  if (head === "delivered") return see.delivered(rest);
+  if (head === "delivered") return read.delivered(rest);
   if (head === "lessons") return showLessons(rest);
   if (head === "lesson") return lesson(rest);
   return verb(head, rest);
@@ -705,7 +708,7 @@ function verb(entity: string, rest: readonly string[]): number {
   // every other verb, `create` first, is the row, so it goes on down this function.
   // The split is here rather than in dispatch() so the row stays the default and the
   // drawing the exception, both read in one place.
-  if (entity === "design" && name === "show") return later(see.design([name, ...args]));
+  if (entity === "design" && name === "show") return later(read.design([name, ...args]));
 
   // parseArgs would call --help an unknown option. It is the one place a newcomer looks
   // for create's flags, so answer it here, before the flags are parsed at all.
