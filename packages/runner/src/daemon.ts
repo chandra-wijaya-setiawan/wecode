@@ -69,6 +69,7 @@ interface AssignmentRow {
   worker_id: number;
   worktree: string;
   phase: string;
+  session: string | null;
   commit_sha: string | null;
   updated_at: string;
 }
@@ -108,7 +109,7 @@ interface LandedRow {
 
 const tbl = {
   task: table<TaskRow>("task", ["id", "slug", "acceptance_test_id", "attempts", "max_retry", "state"]),
-  assignment: table<AssignmentRow>("assignment", ["id", "objective_type", "objective_id", "worker_id", "worktree", "phase", "commit_sha", "updated_at"]),
+  assignment: table<AssignmentRow>("assignment", ["id", "objective_type", "objective_id", "worker_id", "worktree", "phase", "session", "commit_sha", "updated_at"]),
   test: table<TestRow>("acceptance_test", ["id", "parent_id", "kind", "artefact", "state", "red_at_base_sha", "red_at_base_at", "red_at_base_reason", "updated_at"]),
   criteria: table<{ id: number; requirement_id: number }>("acceptance_criteria", ["id", "requirement_id"]),
   requirement: table<{ id: number; story_id: number }>("requirement", ["id", "story_id"]),
@@ -129,6 +130,15 @@ const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
 const ENDED_PHASES: readonly string[] = ["succeeded", "failed"];
 
 const byId = (a: { id: number }, b: { id: number }): number => a.id - b.id;
+
+/** How many in a row it takes to call the model unreachable rather than the attempt
+ *  unlucky, and what one of them looks like on the record. */
+const UNREACHED = 2;
+/** How long the pause holds before one attempt is let through at the model again. A pause
+ *  nothing can lift is a wedge: an api error is usually a minute of weather. */
+const PAUSE_MS = 10 * 60 * 1000;
+const unreached = (a: { phase: string; session: string | null; commit_sha: string | null }): boolean =>
+  a.phase === "failed" && (a.session ?? "") === "" && (a.commit_sha ?? "") === "";
 
 export interface Tick {
   readonly allocated: Pass;
@@ -167,6 +177,8 @@ export interface Tick {
   /** What the invariant set found this tick. Recorded as well as returned, so a view reads
    *  the table rather than running the pass again. Empty is the healthy answer. */
   readonly doctor: readonly Violation[];
+  /** Why nothing was dispatched this tick, or null on an ordinary one. See `apiErrorPause`. */
+  readonly paused: string | null;
 }
 
 /** A story that reached the base branch on this tick, and the commit the base became.
@@ -345,7 +357,9 @@ export class Runner {
     const landing = await this.landDeliveredStories();
     // First of the work, because the point of it is that it happens before the work does.
     const redAtBase = await this.proveRedAtBase();
-    const allocated = await this.allocateOne();
+    // Before anything is handed out, and never after: a paused tick starts nothing at all.
+    const paused = this.apiErrorPause();
+    const allocated = paused === null ? await this.allocateOne() : this.holdDispatch(paused);
     const foreman = await this.foreman.tick();
     const settled = await this.settleEnded();
     // Level-triggered: a guard that became true for a reason other than the verb that just
@@ -359,7 +373,7 @@ export class Runner {
     const chores = await this.raiseStoryChores(acceptance.behind);
     // Raised first, then performed: a chore created on this tick is dispatched on it, and a
     // chore whose attempt has ended is judged before the tick says what is still owed.
-    const performed = await this.performChores();
+    const performed = await this.performChores(paused);
     // After enforcement, so a task that ran out of attempts on this very tick is already
     // named rather than named a minute later.
     const drift = this.exhaustedTasks();
@@ -374,6 +388,7 @@ export class Runner {
       // tick that did its work.
     }
     return {
+      paused,
       doctor,
       allocated,
       foreman,
@@ -396,6 +411,38 @@ export class Runner {
         refused: [...(settled.scripts.refused ?? []), ...(acceptance.scripts.refused ?? [])],
       },
     };
+  }
+
+  /** Why dispatch is held, or null. Two attempts in a row that ended having reached nothing
+   *  — failed, with no session id and no commit — is the model being unreachable, not the
+   *  work being hard: the harness exits on an api error before there is a session to name.
+   *  A third attempt into that is a crash loop billed by the minute, so nothing is handed
+   *  out until one gets through. Level-triggered like everything else here: the pause is
+   *  read off the record each tick, and the first attempt that reaches the model ends it.
+   *
+   *  It ends on its own too, `PAUSE_MS` after the attempt that caused it — otherwise the
+   *  only thing that could lift it is an attempt, and the pause stops attempts. One goes
+   *  out after the wait; failing the same way puts the pause back for another.
+   *
+   *  An attempt lost some other way before it started reads the same from the record, and
+   *  is counted the same. Two of those in a row is also worth stopping for. */
+  private apiErrorPause(): string | null {
+    const ended = queries(this.db)
+      .selectFrom(tbl.assignment).select(["id", "phase", "session", "commit_sha", "updated_at"]).all()
+      .filter((a) => ENDED_PHASES.includes(a.phase)).sort(byId).slice(-UNREACHED);
+    if (ended.length < UNREACHED || !ended.every(unreached)) return null;
+    const last = Date.parse(ended[ended.length - 1]?.updated_at ?? "");
+    if (Number.isNaN(last) || Date.now() - last > PAUSE_MS) return null;
+    const which = ended.map((a) => `#${a.id}`).join(" and ");
+    return `dispatch is paused: attempts ${which} ended without reaching the model`;
+  }
+
+  /** A paused tick's allocation: nothing started, and every task that would have been says
+   *  the pause on the board rather than sitting there reading "waiting for a slot". */
+  private holdDispatch(why: string): Pass {
+    process.stderr.write(`${why}\n`);
+    for (const c of readyCandidates(this.db)) recordRefusal(this.db, why, c.id);
+    return { created: null, refused: [] };
   }
 
   /** The allocator chooses; this only places. It is handed a `place` it calls for the one
@@ -432,11 +479,7 @@ export class Runner {
       if (!decided.has(row.task_id)) clearRefusal(this.db, row.task_id);
     }
     if (pass.created !== null) {
-      const started = queries(this.db)
-        .selectFrom(tbl.assignment)
-        .select(["objective_id"])
-        .where("id", "=", pass.created)
-        .get();
+      const started = queries(this.db).selectFrom(tbl.assignment).select(["objective_id"]).where("id", "=", pass.created).get();
       if (started !== null) clearRefusal(this.db, started.objective_id);
     }
     // A tree cut for a task the allocator then refused is released rather than left behind.
@@ -517,11 +560,7 @@ export class Runner {
     const q = queries(this.db);
     const reqs = new Set(q.selectFrom(tbl.requirement).select(["id"]).where("story_id", "=", storyId).all().map((r) => r.id));
     return new Set(
-      q
-        .selectFrom(tbl.criteria)
-        .all()
-        .filter((c) => reqs.has(c.requirement_id))
-        .map((c) => c.id),
+      q.selectFrom(tbl.criteria).all().filter((c) => reqs.has(c.requirement_id)).map((c) => c.id),
     );
   }
 
@@ -561,13 +600,8 @@ export class Runner {
       if (seen === undefined || a.updated_at > seen) finished.set(a.worker_id, a.updated_at);
     }
 
-    const free = q
-      .selectFrom(tbl.worker)
-      .select(["id"])
-      .where("role", "=", role)
-      .all()
-      .map((w) => w.id)
-      .filter((id) => !busy.has(id));
+    const free = q.selectFrom(tbl.worker).select(["id"]).where("role", "=", role).all()
+      .map((w) => w.id).filter((id) => !busy.has(id));
     if (free.length === 0) return null;
 
     const idle = (id: number): string => finished.get(id) ?? "";
@@ -579,10 +613,7 @@ export class Runner {
    *  retry nobody has promised. */
   private async settleEnded(): Promise<{ committed: number[]; scripts: ScriptReport }> {
     const rows = queries(this.db)
-      .selectFrom(tbl.assignment)
-      .select(["id", "worktree", "objective_id", "phase"])
-      .where("objective_type", "=", "task")
-      .all()
+      .selectFrom(tbl.assignment).select(["id", "worktree", "objective_id", "phase"]).where("objective_type", "=", "task").all()
       .filter((a) => ENDED_PHASES.includes(a.phase) && a.worktree !== "")
       .map((a) => ({ id: a.id, worktree: a.worktree, task: a.objective_id }));
 
@@ -647,11 +678,8 @@ export class Runner {
   private exhaustedTasks(): Drift[] {
     // `attempts >= max_retry` compares two columns, which the dialect does not spell —
     // both are read and the comparison is made here.
-    const rows = queries(this.db)
-      .selectFrom(tbl.task)
-      .all()
-      .filter((t) => !["done", "dropped"].includes(t.state) && t.attempts >= t.max_retry)
-      .sort(byId);
+    const rows = queries(this.db).selectFrom(tbl.task).all()
+      .filter((t) => !["done", "dropped"].includes(t.state) && t.attempts >= t.max_retry).sort(byId);
 
     const drift: Drift[] = [];
     for (const row of rows) {
@@ -677,10 +705,7 @@ export class Runner {
    *  failed, and the machine has not got one. */
   private enforceRetryLimit(): number[] {
     const rows = queries(this.db)
-      .selectFrom(tbl.task)
-      .select(["id", "attempts", "max_retry"])
-      .where("state", "=", "ready")
-      .all()
+      .selectFrom(tbl.task).select(["id", "attempts", "max_retry"]).where("state", "=", "ready").all()
       .filter((t) => t.attempts >= t.max_retry);
 
     const stopped: number[] = [];
@@ -700,13 +725,8 @@ export class Runner {
     // null, which the dialect compiles to IS / IS NOT rather than to an `= NULL` that never
     // matches. The story's own state is the one condition that needs the walk up the ERD.
     const tests = queries(this.db)
-      .selectFrom(tbl.test)
-      .select(["id", "artefact", "parent_id"])
-      .where("state", "=", "ready")
-      .where("kind", "=", "script")
-      .where("artefact", "!=", null)
-      .where("red_at_base_sha", "=", null)
-      .all();
+      .selectFrom(tbl.test).select(["id", "artefact", "parent_id"])
+      .where("state", "=", "ready").where("kind", "=", "script").where("artefact", "!=", null).where("red_at_base_sha", "=", null).all();
 
     const rows: { id: number; artefact: string; story: string; repo: string }[] = [];
     for (const test of tests) {
@@ -750,11 +770,7 @@ export class Runner {
    *  per test per base sha, so a tick does only the work that is owed. */
   private ranAtBase(testId: number, base: string, artefact: string): boolean {
     const row = queries(this.db)
-      .selectFrom(tbl.scriptRun)
-      .select(["fingerprint"])
-      .where("entity", "=", BASE_RUN)
-      .where("test_id", "=", testId)
-      .get();
+      .selectFrom(tbl.scriptRun).select(["fingerprint"]).where("entity", "=", BASE_RUN).where("test_id", "=", testId).get();
     return row?.fingerprint === `${base}|${artefact}`;
   }
 
@@ -1197,9 +1213,7 @@ export class Runner {
   private gateHasPermitted(storyId: number): boolean {
     const under = this.criteriaOfStory(storyId);
     const tests = queries(this.db)
-      .selectFrom(tbl.test)
-      .select(["id", "parent_id", "state"])
-      .all()
+      .selectFrom(tbl.test).select(["id", "parent_id", "state"]).all()
       .filter((t) => under.has(t.parent_id) && t.state !== "dropped");
     return tests.length > 0 && tests.every((t) => t.state === "passed");
   }
@@ -1224,7 +1238,7 @@ export class Runner {
    *  Judging first is what makes the slot free again within the tick, and what stops an
    *  agent's word being the record: a chore is done because the runner proved the check,
    *  never because the session exited zero. */
-  private async performChores(): Promise<ChorePass> {
+  private async performChores(paused: string | null = null): Promise<ChorePass> {
     const done: number[] = [];
     const failed: { id: number; why: string }[] = [];
     const dispatched: number[] = [];
@@ -1248,9 +1262,15 @@ export class Runner {
       }
     }
 
+    // Judged either way; handed out only when dispatch is running. A chore is an attempt
+    // like any other, and a paused tick must not spend one on an unreachable model.
     for (const row of this.dispatchableChores()) {
       const chore = choreById(this.db, row.id);
       if (chore === null) continue;
+      if (paused !== null) {
+        this.refuseChore(chore, paused);
+        continue;
+      }
       const id = await this.dispatchChore(chore);
       if (id !== null) dispatched.push(chore.id);
     }
@@ -1259,12 +1279,8 @@ export class Runner {
 
   private endedChoreAttempts(): { id: number; chore: number; worktree: string }[] {
     return queries(this.db)
-      .selectFrom(tbl.assignment)
-      .select(["id", "objective_id", "worktree", "phase"])
-      .where("objective_type", "=", "chore")
-      .all()
-      .filter((a) => ENDED_PHASES.includes(a.phase))
-      .sort(byId)
+      .selectFrom(tbl.assignment).select(["id", "objective_id", "worktree", "phase"]).where("objective_type", "=", "chore").all()
+      .filter((a) => ENDED_PHASES.includes(a.phase)).sort(byId)
       .map((a) => ({ id: a.id, chore: a.objective_id, worktree: a.worktree }));
   }
 
@@ -1274,25 +1290,16 @@ export class Runner {
   private dispatchableChores(): { id: number }[] {
     const q = queries(this.db);
     const attempting = new Set(
-      q
-        .selectFrom(tbl.assignment)
-        .select(["objective_type", "objective_id", "phase"])
-        .where("objective_type", "=", "chore")
-        .all()
-        .filter((a) => OPEN_PHASES.includes(a.phase))
-        .map((a) => a.objective_id),
+      q.selectFrom(tbl.assignment).select(["objective_type", "objective_id", "phase"]).where("objective_type", "=", "chore").all()
+        .filter((a) => OPEN_PHASES.includes(a.phase)).map((a) => a.objective_id),
     );
     // A kind wecode performs itself is never handed to a worker. `land` is one: its merge
     // is into the base branch, and the only tree an agent may be dispatched into is the
     // story tree, where that merge cannot be made at all. `landDeliveredStories` is where
     // its attempts happen, and the reason it is still open is already on its own row.
-    return q
-      .selectFrom(tbl.chore)
-      .all()
+    return q.selectFrom(tbl.chore).all()
       .filter((c) => ["planned", "ready"].includes(c.state) && !attempting.has(c.id))
-      .filter((c) => !performedByTheRunner(c.kind))
-      .sort(byId)
-      .map((c) => ({ id: c.id }));
+      .filter((c) => !performedByTheRunner(c.kind)).sort(byId).map((c) => ({ id: c.id }));
   }
 
   /** The attempt: a system worker, in a tree at the chore's target branch, with the role's
@@ -1494,14 +1501,9 @@ export class Runner {
   private async suiteRed(target: { slug: string; repo: string; story: number }): Promise<string | null> {
     const under = this.criteriaOfStory(target.story);
     const rows = queries(this.db)
-      .selectFrom(tbl.test)
-      .select(["id", "artefact", "parent_id", "state"])
-      .where("kind", "=", "script")
-      .where("artefact", "!=", null)
-      .where("state", "!=", "dropped")
-      .all()
-      .filter((t) => under.has(t.parent_id))
-      .sort(byId)
+      .selectFrom(tbl.test).select(["id", "artefact", "parent_id", "state"])
+      .where("kind", "=", "script").where("artefact", "!=", null).where("state", "!=", "dropped").all()
+      .filter((t) => under.has(t.parent_id)).sort(byId)
       .flatMap((t) => (t.artefact === null ? [] : [{ artefact: t.artefact }]));
     if (rows.length === 0) return null;
 
@@ -1609,9 +1611,7 @@ export class Runner {
 
   private openAssignments(): number {
     return queries(this.db)
-      .selectFrom(tbl.assignment)
-      .select(["phase"])
-      .all()
+      .selectFrom(tbl.assignment).select(["phase"]).all()
       .filter((a) => OPEN_PHASES.includes(a.phase)).length;
   }
 
