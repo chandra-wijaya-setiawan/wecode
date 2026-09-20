@@ -1,4 +1,4 @@
-/** The cockpit, run through the gate `@wecode/ui` already owns: expected, diff and check.
+/** The cockpit, run through the gate `@wecode/lens` already owns: expected, diff and check.
  *
  *  the-cockpit-matches-its-design.test.ts holds the frame to config/design.yaml, and it
  *  does it in substrings of joined lines — the only vocabulary a test of a terminal screen
@@ -6,10 +6,10 @@
  *  Queue box is still the third thing down the page, still eighty columns wide, still the
  *  one box opening on `q`, or that the row under it was not also printed under Cooking.
  *
- *  `@wecode/ui` has those words already: `check` reads a capture for the four faults true
+ *  `@wecode/lens` has those words already: `check` reads a capture for the four faults true
  *  of any screen, `expected` turns a written-down design into a capture, and `against`
  *  diffs the two under `gone` / `arrived` / `moved` / `changed`. Nothing here re-proves a
- *  rule — packages/ui's own suite does that. What is proven here is that the cockpit is a
+ *  rule — packages/lens's own suite does that. What is proven here is that the cockpit is a
  *  screen that gate can be pointed at: that a capture of the real frame is clean, that the
  *  design below is a clean capture too, that the screen is the screen the design asks for,
  *  and — four times over — that moving, renaming, resizing or refilling a box is caught.
@@ -23,11 +23,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
 import { loadMachines, open } from "@wecode/core";
-import { check, type CapturedNode } from "@wecode/ui";
+import { check, type CapturedNode } from "@wecode/lens";
 // By path, because index.ts re-exports `check` and not yet the design half beside it. The
 // package is declared in this package's devDependencies all the same: the dependency is
 // real, it is the published surface that is one export short.
-import { against, expected, type Design } from "@wecode/ui/dist/expected.js";
+import { against, expected, type Design } from "@wecode/lens/dist/expected.js";
 import { App } from "../src/app.js";
 import { Cockpit } from "../src/screens.js";
 import { loadViews } from "../src/views.js";
