@@ -149,9 +149,22 @@ describe("the surface this repository has", () => {
   it("is every page file there is, at the paths they are read on", async () => {
     const files = discovered(readdirSync(SRC));
 
-    expect(files).toEqual(["board", "decisions", "tasks", "tree"]);
+    // Naming the pages here would be the route table again, in a test. The directory is the
+    // list, so the expectation is read from it: whatever files are there are the surface.
+    expect(files).toContain(HOME);
     const routes = await pages(READINGS, new URL("../src/pages/", import.meta.url));
-    expect(Object.keys(routes).sort()).toEqual(["/", "/decisions", "/tasks", "/tree"]);
+    expect(Object.keys(routes).sort()).toEqual(files.map(pathOf).sort());
+  });
+
+  it("gains a page when a file is added, with nothing in this test to edit", async () => {
+    const before = discovered(readdirSync(SRC));
+    const dir = directory({
+      ...Object.fromEntries(before.map((n) => [`${n}.js`, pageModule(n)])),
+      "weather.js": pageModule("weather"),
+    });
+    const routes = await pages(READINGS, dir);
+
+    expect(Object.keys(routes).sort()).toEqual([...before, "weather"].map(pathOf).sort());
   });
 
   it("names no page in bin.ts — the table is gone, not copied", () => {
