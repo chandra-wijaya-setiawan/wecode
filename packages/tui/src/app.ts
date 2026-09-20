@@ -27,6 +27,7 @@ import {
 // By path, as the runner imports the dialect: index.ts names what board.ts offers one
 // export at a time, and the assignment page's half of the record is not on that list.
 import { assignmentFacts, type AssignmentFacts } from "@wecode/core/dist/board.js";
+import { boxKeys, KeyReader, type Keyed, type Mode } from "./keys.js";
 import type { Row } from "./list.js";
 import {
   atDepth,
@@ -43,6 +44,10 @@ import {
   type OutlineScope,
 } from "./outline.js";
 import { loadOffPage, type View } from "./views.js";
+
+// Where the letters live now. index.ts and screens.tsx reach the cockpit through app.ts, so
+// the box keys keep the address they have always had.
+export { boxKeys } from "./keys.js";
 
 const VIEWS_CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
 
@@ -141,13 +146,6 @@ const entityOf = (filter: keyof Board, row: Row, now: Board): StatefulEntity => 
   return "story";
 };
 
-/** What a terminal sends for the esc key, by code point rather than as a literal control
- *  character. `key("esc")` is the same key by name. */
-const ESC = String.fromCharCode(27);
-const ENTER = ["enter", "\r", "\n"];
-/** What a terminal sends for backspace, by name and by both code points terminals use. */
-const RUBOUT = ["backspace", "delete", String.fromCharCode(8), String.fromCharCode(127)];
-
 /** Whether a query names a row by its number rather than by its words. A bare number is
  *  read as an id: ids are what the other screens print and what the cli takes, so the
  *  number you copied off one of them has to find the row here. */
@@ -198,29 +196,7 @@ const METHODS: ReadonlyMap<string, keyof Verbs> = new Map(
  *  has to be a human worker's: core refuses an answer given on somebody else's behalf. */
 const whoAnswers = (): string => actorOf(process.env["WECODE_ACTOR"]) ?? OPERATOR;
 
-const keyOf = (v: View): string | undefined => {
-  const k = (v as { key?: unknown }).key;
-  return typeof k === "string" && k.length === 1 ? k : undefined;
-};
-
-/** The letter a box is opened by. A view that declares one keeps it; the rest take the
- *  first letter of their name nothing else has taken, so `v` reaches every box. */
-export function boxKeys(views: readonly View[]): ReadonlyMap<string, View> {
-  const keys = new Map<string, View>();
-  const rest: View[] = [];
-  for (const v of views) {
-    const k = keyOf(v);
-    if (k !== undefined && !keys.has(k)) keys.set(k, v);
-    else rest.push(v);
-  }
-  for (const v of rest) {
-    const free = [...v.name].find((c) => /[a-z]/.test(c) && !keys.has(c));
-    if (free !== undefined) keys.set(free, v);
-  }
-  return keys;
-}
-
-export class App {
+export class App implements Keyed {
   readonly views: readonly View[];
   status = "";
   quit = false;
@@ -249,13 +225,10 @@ export class App {
    *  reopening returns to it rather than to wherever `f` last left it: an outline that
    *  opened narrowed by a keystroke from an hour ago would be one you could not read. */
   private scope: OutlineScope = outlineOpensOn();
-  /** What the last key armed: v waits for a box's letter, a waits for a verb's, f waits for
-   *  a scope's, t waits for a direction to take the whole tree's depth in. */
-  private armed: null | "view" | "verb" | "answer" | "scope" | "search" | "depth" = null;
-  /** What is being typed after `/`, and what was typed the last time it was committed.
-   *  They are two fields because the committed one outlives the typing: `n` is only worth
-   *  a key if it goes on working after the prompt it came from has gone. */
-  private typed = "";
+  /** The keyboard. It holds what a key armed and what is half-typed; what the committed
+   *  search was looking for is this screen's, because it outlives the prompt — `n` is only
+   *  worth a key if it goes on working after the prompt it came from has gone. */
+  private readonly reader = new KeyReader(this);
   private query = "";
 
   constructor(
@@ -372,62 +345,34 @@ export class App {
   }
 
   key(k: string): void {
-    if (this.armed === "search") return this.type(k);
-    if (this.armed === "view") {
-      this.armed = null;
-      return this.openBox(k);
-    }
-    if (this.armed === "verb") {
-      this.armed = null;
-      return this.pick(k);
-    }
-    if (this.armed === "answer") {
-      this.armed = null;
-      return this.say(k);
-    }
-    if (this.armed === "scope") {
-      this.armed = null;
-      return this.narrow(k);
-    }
-    if (this.armed === "depth") {
-      this.armed = null;
-      return this.step(k);
-    }
-    if (ENTER.includes(k)) return this.descend();
-    if (k === "esc" || k === ESC) return this.pop();
-    switch (k) {
-      case "j": return this.move(1);
-      case "k": return this.move(-1);
-      case "g": this.cursor = 0; return;
-      case "G": this.cursor = this.items.length - 1; return;
-      case "q": this.quit = true; return;
-      case "r": this.refresh(); this.status = "refreshed"; return;
-      case "+": return this.fold(true);
-      case "-": return this.fold(false);
-      case "f": return this.armScope();
-      case "t": return this.armDepth();
-      case "/": return this.armSearch();
-      case "n": return this.jump(1);
-      case "N": return this.jump(-1);
-      case "v": return this.armView();
-      case "a": return this.armVerb();
-      default: this.status = `${k} does nothing here`;
-    }
+    this.reader.read(k);
+  }
+
+  /** How many rows the screen holds, for the keyboard to take the cursor to the last. */
+  get rows(): number {
+    return this.items.length;
   }
 
   private current(): Item | null {
     return this.items[this.cursor] ?? null;
   }
 
-  private move(by: number): void {
+  move(by: number): void {
     this.cursor = this.cursor + by;
     this.status = "";
   }
 
-  private armView(): void {
-    this.armed = "view";
+  /** Re-read on request, and say so. `refresh` is also the constructor's and every verb's,
+   *  and neither of those has anything to report. */
+  refreshNow(): void {
+    this.refresh();
+    this.status = "refreshed";
+  }
+
+  armView(): Mode {
     const boxes = [...this.keys].map(([k, v]) => `${k} ${v.title}`);
     this.status = `box? ${[...boxes, `${OUTLINE.key} ${OUTLINE.title}`].join("  ")}`;
+    return "view";
   }
 
   /** Which scope the outline is drawing, for the box to title itself with. */
@@ -456,19 +401,19 @@ export class App {
     this.status = `${OUTLINE.title} — ${SCOPE_LABEL[this.scope]} · f narrows`;
   }
 
-  private armScope(): void {
+  armScope(): Mode | null {
     if (this.screen.kind !== "outline") {
       this.status = `f narrows the outline — v ${OUTLINE.key}`;
-      return;
+      return null;
     }
-    this.armed = "scope";
     this.status = `show? ${[...SCOPE_KEYS].map(([k, s]) => `${k} ${SCOPE_LABEL[s]}`).join("  ")}`;
+    return "scope";
   }
 
   /** Narrow the outline to open work, or widen it back to all of it. The fold keys are
    *  re-derived rather than kept: the rows a narrowing removes take their fold state with
    *  them, so widening again stands open to the level the outline opens at. */
-  private narrow(k: string): void {
+  narrow(k: string): void {
     const scope = SCOPE_KEYS.get(k);
     if (scope === undefined) {
       this.status = `no scope on ${k}`;
@@ -489,44 +434,19 @@ export class App {
   /** Start typing a search. A box keeps rows by their state; what you have in hand is a
    *  number off another screen or two words out of a title, and what you want back is the
    *  tree with only those rows in it. */
-  private armSearch(): void {
+  armSearch(): Mode | null {
     if (this.screen.kind !== "outline") {
       this.status = `/ searches the outline — v ${OUTLINE.key}`;
-      return;
+      return null;
     }
-    this.armed = "search";
-    this.typed = "";
-    this.prompt();
-  }
-
-  private prompt(): void {
-    this.status = `/${this.typed}`;
-  }
-
-  /** A key while the search line is open. Every printable key is a character of the query
-   *  rather than a command — `n` and `j` are letters in a label, and a search box that
-   *  moved the cursor on one of them would be unusable. Enter commits, esc abandons. */
-  private type(k: string): void {
-    if (ENTER.includes(k)) {
-      this.armed = null;
-      return this.seek(this.typed.trim());
-    }
-    if (k === "esc" || k === ESC) {
-      this.armed = null;
-      this.typed = "";
-      this.status = "";
-      return;
-    }
-    if (RUBOUT.includes(k)) this.typed = this.typed.slice(0, -1);
-    else if (k.length === 1) this.typed += k;
-    this.prompt();
+    return "search";
   }
 
   /** Commit a query: filter the tree down to the rows that answer it and land on the first.
    *  Filtering is the point — a search that only moved the cursor left the other hundred rows on
    *  screen, so finding the second match meant reading past them. The ancestors are kept, and
    *  expanded: a match behind a fold says the row exists and not where it hangs. */
-  private seek(query: string): void {
+  seek(query: string): void {
     this.query = query;
     if (query === "") {
       this.status = "nothing to search for";
@@ -573,7 +493,7 @@ export class App {
 
   /** The next match after the cursor, or the previous one before it, wrapping. Wrapping
    *  rather than stopping: the count is on the line, so you can see you have come round. */
-  private jump(by: number): void {
+  jump(by: number): void {
     if (this.screen.kind !== "outline") {
       this.status = `n walks the outline's matches — v ${OUTLINE.key}`;
       return;
@@ -600,7 +520,7 @@ export class App {
 
   /** Open or close the node under the cursor by one level. The rows are rebuilt rather
    *  than a screen pushed, so the cursor stays where it was and esc still means back. */
-  private fold(open: boolean): void {
+  fold(open: boolean): void {
     if (this.screen.kind !== "outline") {
       this.status = `${open ? "+" : "-"} folds the outline — v ${OUTLINE.key}`;
       return;
@@ -622,18 +542,18 @@ export class App {
 
   /** Arm the depth keys. `t` is the tree's own letter — the same one `v` opens the outline
    *  with — so `t e` and `t f` read as "the tree, one level further in / out". */
-  private armDepth(): void {
+  armDepth(): Mode | null {
     if (this.screen.kind !== "outline") {
       this.status = `t e steps the outline in — v ${OUTLINE.key}`;
-      return;
+      return null;
     }
-    this.armed = "depth";
     this.status = `depth? e in  f out — ${this.depthNow()}`;
+    return "depth";
   }
 
   /** Take the whole tree one level in or out. `+`/`-` open the node under the cursor; these
    *  move every branch at once, because reading a tree a node at a time never ends. */
-  private step(k: string): void {
+  stepDepth(k: string): void {
     const by = k === "e" ? +1 : k === "f" ? -1 : 0;
     if (by === 0) {
       this.status = `no depth on ${k}`;
@@ -656,7 +576,7 @@ export class App {
     return `depth ${openDepth(forest, this.expanded)}/${treeDepth(forest)}`;
   }
 
-  private openBox(k: string): void {
+  openBox(k: string): void {
     if (k === OUTLINE.key) return this.openOutline();
     const view = this.keys.get(k);
     if (view === undefined) {
@@ -680,20 +600,20 @@ export class App {
   /** `a` on a waiting approval offers its answers rather than the machine's verbs. Both
    *  routes end in `waiting → running`, but only this one writes down what was said and
    *  who said it, and the bare verb would leave the question standing. */
-  private armAnswer(approval: Approval): void {
+  private armAnswer(approval: Approval): Mode | null {
     const options = approval.options;
     if (options === null) {
       this.status = `assignment #${approval.id} asks an open question, and a key is not an answer to one`;
-      return;
+      return null;
     }
-    this.armed = "answer";
     this.status = `answer? ${options.map((o) => `${o[0]} ${o}`).join("  ")}`;
+    return "answer";
   }
 
   /** Answer the approval under the cursor with the option that letter names, in the
    *  answerer's own name. A letter two options share is refused: an answer is a decision
    *  the record keeps, and guessing which one was meant is not available. */
-  private say(k: string): void {
+  sayAnswer(k: string): void {
     const approval = this.approvalHere();
     const match = (approval?.options ?? []).filter((o) => o.startsWith(k));
     if (approval === null || match.length === 0) {
@@ -715,7 +635,7 @@ export class App {
     this.refresh();
   }
 
-  private armVerb(): void {
+  armVerb(): Mode | null {
     const approval = this.approvalHere();
     if (approval !== null) return this.armAnswer(approval);
     const verbs = this.offered();
@@ -727,15 +647,15 @@ export class App {
         .flatMap((v) => (item?.entity == null ? [] : [this.refusal(item.entity, item.row.id, v)]))
         .filter((why): why is string => why !== null);
       this.status = held[0] ?? "nothing may be done to this row";
-      return;
+      return null;
     }
-    this.armed = "verb";
     this.status = `verb? ${verbs.map((v) => `${v[0]} ${v}`).join("  ")}`;
+    return "verb";
   }
 
   /** A letter that fits two verbs is refused. Guessing would apply the wrong one, and a
    *  state change is not a keystroke you can take back. */
-  private pick(k: string): void {
+  pickVerb(k: string): void {
     const item = this.current();
     const match = this.offered().filter((v) => v.startsWith(k));
     if (item === null || item.entity === null) {
@@ -771,7 +691,7 @@ export class App {
     return this.facade[method](id, "operator");
   }
 
-  private descend(): void {
+  descend(): void {
     const item = this.current();
     if (item === null || item.entity === null) {
       this.status = "nothing to open";
@@ -806,7 +726,7 @@ export class App {
     this.cursor = 0;
   }
 
-  private pop(): void {
+  pop(): void {
     if (this.frames.length === 1) {
       this.status = "this is the dashboard";
       return;
