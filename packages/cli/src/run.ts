@@ -50,7 +50,7 @@ import {
 import { excluded, queries, table, type Dialect, type TableDef, type Value } from "@wecode/core/dist/db.js";
 import { plan } from "./plan.js";
 import { doctor } from "./doctor.js";
-import { explore } from "./explore.js";
+import { explore } from "./explore.js"; import { paint } from "./paint.js";
 import { delivered as deliveredStories } from "./delivered.js";
 import { design as projector } from "./ui.js";
 
@@ -87,6 +87,7 @@ function dispatch(argv: readonly string[]): number {
   if (head === "onboard") return onboard(rest);
   if (head === "plan") return plan(rest);
   if (head === "explore") return later(explore(rest));
+  if (head === "paint") return later(paint(rest));
   if (head === "workspaces") return workspaces();
   if (head === "tree") return showTree(rest);
   if (head === "watch") return watch(rest);
@@ -1116,7 +1117,6 @@ function showBoard(args: readonly string[]): number {
     args: [...args],
     options: { all: { type: "boolean" }, project: { type: "string" } },
   });
-
   // Outside every project's repo there is no "here" to narrow to, so the board is the
   // workspace's — which is what it always was.
   const asked = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
@@ -1494,7 +1494,6 @@ function create(entity: string, args: readonly string[]): number {
       role: { type: "string" }, path: { type: "string" }, project: { type: "string" },
     },
   });
-
   const text = positionals.join(" ");
   const parent = Number(values["parent"]);
 
@@ -1692,6 +1691,7 @@ function usage(): number {
       "  wecode <entity> --help                     that entity's states and verbs",
       "  wecode delivered [--all] [--project N]     what wecode can already do (--json)",
       "  wecode explore read|uses|purpose <file>    what is in this repository, asked of an index",
+      "  wecode paint open|poll|end|export <file>   a drawing in front of a person, and what they said",
       "  wecode lessons [--project N]               what earlier attempts here learned",
       "  wecode lesson drop <id>                    a wrong lesson is worse than none",
       "  wecode doctor                              one pass of the invariants; non-zero if any is broken",
