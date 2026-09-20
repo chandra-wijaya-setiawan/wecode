@@ -29,7 +29,17 @@ describe("the refresh and behind checks are a module of their own", () => {
   it("exports the five reads, and the runner holds no second copy of any of them", () => {
     const moved = code("tick/refresh.ts");
     const exported = [...moved.matchAll(/^export (?:async )?function (\w+)/gm)].map((m) => m[1]);
-    expect(exported).toEqual(["hasCommit", "contains", "tipOf", "mergesCleanly", "conflictedPaths", "orphanedBy"]);
+    expect(exported).toEqual([
+      "hasCommit",
+      "contains",
+      "tipOf",
+      "mergesCleanly",
+      "conflictedPaths",
+      // The refresh chore's scope is the one thing `conflictedPaths` is asked for, and it
+      // is a read of the graph like the rest: the narrowing came here with it.
+      "refreshScope",
+      "orphanedBy",
+    ]);
     // `droppedTips` is `orphanedBy`'s alone, so it came with it and stayed private.
     expect(moved).toMatch(/^async function droppedTips\(/m);
 
@@ -51,6 +61,54 @@ describe("the refresh and behind checks are a module of their own", () => {
     expect(moved).not.toContain("queries(");
     expect(moved).not.toContain("tbl.");
     expect(moved).toMatch(/landed: readonly \{ task: number; sha: string \}\[\]/);
+  });
+
+  /** The point of moving any of it. `daemon.ts` is the file every phase was written into,
+   *  and a 900-line class is the one defect no test ever catches: it grows a method at a
+   *  time and nobody is ever the person who made it long.
+   *
+   *  Counted in code lines rather than `wc -l`, because prose is not the problem — a phase
+   *  that left behind the paragraph explaining where it went is shorter, not longer, and a
+   *  move that kept the code and deleted the comments would pass a `wc -l` budget while
+   *  making the file worse. 700 is what is left when the refresh reads, the story-chores
+   *  pass and the chore-performing half are all somewhere else. */
+  it("leaves the daemon under 700 lines of code", () => {
+    const counted = code("daemon.ts")
+      .split("\n")
+      .filter((line) => line.trim() !== "");
+    expect(counted.length, `daemon.ts is ${counted.length} code lines`).toBeLessThan(700);
+  });
+
+  /** What the count is of, proved on a source of its own: blank lines and prose do not
+   *  count, and a line of code with a comment after it does. */
+  it("counts code, not prose", () => {
+    const sample = ["// a comment", "const a = 1;", "", "/* block", "   still block */", "const b = 2; // trailing"];
+    const counted = sample
+      .join("\n")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "")
+      .split("\n")
+      .filter((line) => line.trim() !== "");
+    expect(counted).toEqual(["const a = 1;", "const b = 2; "]);
+  });
+
+  /** The two callers that moved with them. `performChores` is the chore-performing half —
+   *  the judging, the dispatch and the checks it proves — and only the one-line delegation
+   *  the tick calls is left; `beginLandChore` and `landedAttempts` went with it because
+   *  they are the chore machinery's own reads, not the runner's. */
+  it("leaves one host and one delegation per chore phase", () => {
+    const moved = code("tick/story-chores.ts");
+    for (const gone of ["performChores", "dispatchChore", "proveChore", "suiteRed", "beginLandChore"]) {
+      expect(moved, `${gone} is not in the module`).toMatch(new RegExp(`function ${gone}\\(`));
+    }
+    const left = code("daemon.ts");
+    for (const gone of ["CHORE_KIND_DEFS", "new Maker(this.db).assignment", "the landing was not made", "bash"]) {
+      expect(left, `${gone} stayed in daemon.ts`).not.toContain(gone);
+    }
+    // One wrapper each, and one host handed to both.
+    expect(left.match(/return performChorePass\(/g)).toHaveLength(1);
+    expect(left.match(/\breturn raiseStoryChores\(/g)).toHaveLength(1);
+    expect(left.match(/this\.choreHost\(\)/g)).toHaveLength(2);
   });
 
   /** A real repository: two commits on `master`, a `feature` branch cut from the first. */

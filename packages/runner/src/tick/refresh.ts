@@ -76,6 +76,27 @@ export async function conflictedPaths(repo: string, branch: string, base: string
     .filter((line) => line.length > 0);
 }
 
+/** The scope a `refresh` chore is dispatched under: the role's, narrowed to the paths the
+ *  merge will actually conflict on.
+ *
+ *  `system` is declared `write: ["**"]` because a conflict is wherever the conflict is, and
+ *  for a `merge` chore — whose merge is the branch into the base, a graph this tree cannot
+ *  be asked about — that stays the honest answer. A refresh is the other direction, and
+ *  there the paths are knowable before a worker is hired.
+ *
+ *  A refresh that conflicts on nothing claims nothing: git makes that merge by itself. The
+ *  role's scope is the ceiling — this only ever narrows — and it is the fallback for a
+ *  merge-tree that could not be asked (git too old, a ref that is gone). */
+export async function refreshScope<S extends { write: readonly string[] }>(
+  repo: string,
+  branch: string,
+  base: string,
+  role: S,
+): Promise<S> {
+  const conflicted = await conflictedPaths(repo, branch, base);
+  return conflicted === null ? role : { ...role, write: conflicted };
+}
+
 const KEPT = "a refresh adds the base, it does not replace the branch";
 
 /** What a refresh has thrown away, or null when it has thrown nothing away.
