@@ -75,16 +75,10 @@ interface AcceptanceTestRow {
   statement: string;
   state: string;
   red_at_base_sha: string | null;
+  last_run_at: string | null;
   last_output: string | null;
 }
-const acceptanceTests = table<AcceptanceTestRow>("acceptance_test", [
-  "id",
-  "parent_id",
-  "statement",
-  "state",
-  "red_at_base_sha",
-  "last_output",
-]);
+const acceptanceTests = table<AcceptanceTestRow>("acceptance_test", ["id", "parent_id", "statement", "state", "red_at_base_sha", "last_run_at", "last_output"]);
 
 interface TaskTestRow {
   id: number;
@@ -105,16 +99,7 @@ interface TaskRow {
   state: string;
   updated_at: string;
 }
-const tasks = table<TaskRow>("task", [
-  "id",
-  "acceptance_test_id",
-  "title",
-  "role",
-  "attempts",
-  "max_retry",
-  "state",
-  "updated_at",
-]);
+const tasks = table<TaskRow>("task", ["id", "acceptance_test_id", "title", "role", "attempts", "max_retry", "state", "updated_at"]);
 
 interface AssignmentRow {
   id: number;
@@ -131,21 +116,7 @@ interface AssignmentRow {
   created_at: string;
   updated_at: string;
 }
-const assignments = table<AssignmentRow>("assignment", [
-  "id",
-  "objective_type",
-  "objective_id",
-  "worker_id",
-  "worktree",
-  "budget",
-  "phase",
-  "kind",
-  "question",
-  "last_seen",
-  "spent",
-  "created_at",
-  "updated_at",
-]);
+const assignments = table<AssignmentRow>("assignment", ["id", "objective_type", "objective_id", "worker_id", "worktree", "budget", "phase", "kind", "question", "last_seen", "spent", "created_at", "updated_at"]);
 
 const workers = table<{ id: number; name: string }>("worker", ["id", "name"]);
 
@@ -168,18 +139,9 @@ interface ChoreRow {
 }
 const chores = table<ChoreRow>("chore", ["id", "kind", "project_id", "target_type", "target_id", "state"]);
 
-const choreRefusals = table<{ chore_id: number; why: string; since: string; passes: number }>("chore_refusal", [
-  "chore_id",
-  "why",
-  "since",
-  "passes",
-]);
+const choreRefusals = table<{ chore_id: number; why: string; since: string; passes: number }>("chore_refusal", ["chore_id", "why", "since", "passes"]);
 
-const landConflicts = table<{ story_id: number; branch: string; reason: string }>("land_conflict", [
-  "story_id",
-  "branch",
-  "reason",
-]);
+const landConflicts = table<{ story_id: number; branch: string; reason: string }>("land_conflict", ["story_id", "branch", "reason"]);
 
 /** The catalogue is a table like any other, so asking whether one exists is a query. */
 const catalogue = table<{ type: string; name: string }>("sqlite_master", ["type", "name"]);
@@ -424,6 +386,44 @@ export function silence(db: DatabaseSync, asOf: number = Date.now()): ReadonlyMa
     return Number.isNaN(then) ? [] : [[project, Math.max(0, asOf - then)]];
   };
   return new Map([...beat].flatMap(since));
+}
+
+/** How many blocks the pulse's sparkline draws, and how wide one of them is — design.yaml. */
+export const BUCKETS = 10;
+const HOUR = 3_600_000;
+
+/** Each project's throughput as ten hourly counts of passes, oldest bucket first.
+ *
+ *  A pass is the only unit of progress the ledger timestamps: `last_run_at` on a test row
+ *  that reached `passed`. Both kinds count — an acceptance test and a task test are each a
+ *  thing that was red and is now green — and each is placed under its project by the same
+ *  walk up that places every row of the board.
+ *
+ *  Every project has a series, all zeroes when nothing passed. That is the opposite of
+ *  `silence`, which leaves out a project it cannot date, and for the opposite reason: no
+ *  pass in ten hours is a fact about the project, where an unreadable beat is no evidence
+ *  either way. A run older than the window, one stamped in the future, and one nothing can
+ *  parse are all equally no evidence of a pass, and none of them reaches a bucket.
+ *
+ *  Ten hours rather than ten of anything else because the rate beside the sparkline is per
+ *  hour: one block is one hour, so the last block and the rate are the same number. */
+export function throughput(db: DatabaseSync, asOf: number = Date.now()): ReadonlyMap<number, readonly number[]> {
+  const q = queries(db);
+  const testRows = q.selectFrom(acceptanceTests).all();
+  const walk = new Walk(db, q.selectFrom(epics).all(), q.selectFrom(stories).all(), q.selectFrom(tasks).all(), testRows);
+  const series = new Map<number, number[]>();
+  for (const p of q.selectFrom(projects).all()) series.set(p.id, Array<number>(BUCKETS).fill(0));
+  const count = (project: number | null, state: string, ranAt: string | null): void => {
+    if (project === null || state !== "passed" || ranAt === null) return;
+    const ago = asOf - instant(ranAt);
+    if (Number.isNaN(ago)) return;
+    const bucket = BUCKETS - 1 - Math.floor(ago / HOUR);
+    const row = bucket < 0 || bucket >= BUCKETS ? undefined : series.get(project);
+    if (row !== undefined) row[bucket] = (row[bucket] ?? 0) + 1;
+  };
+  for (const t of testRows) count(walk.ofTest(t.id), t.state, t.last_run_at);
+  for (const t of q.selectFrom(taskTests).all()) count(walk.ofTaskTest(t.id), t.state, t.last_run_at);
+  return series;
 }
 
 /** The board and the fold are one query: the machine-side panels record each row's
