@@ -8,6 +8,7 @@ import { parseArgs } from "node:util";
 import { type BaseState, refuseDirtyBase, reportAbort, reportLeftover } from "@wecode/core/dist/land.js";
 import {
   actorOf,
+  answerApproval, raiseApproval, APPROVAL_KIND,
   attributedTo,
   board,
   Completions,
@@ -79,6 +80,7 @@ function dispatch(argv: readonly string[]): number {
   if (head === "doctor") return doctor(rest);
   if (head === "init") return init(rest);
   if (head === "answer") return answer(rest);
+  if (head === "ask") return ask(rest);
   if (head === "show") return show(rest);
   if (head === "land") return land(rest);
   if (head === "onboard") return onboard(rest);
@@ -161,6 +163,72 @@ function write(path: string, body: string): void {
   writeFileSync(path, body);
 }
 
+/** `wecode ask <task> "<question>" [--option "<answer>=<what it costs>"] [--operator <name>]`
+ *
+ *  A decision the operator must make is a row in needs you, not a line in a report: six of
+ *  them on 20 Sep reached the operator only as chat messages, because a story titled NEEDS
+ *  APPROVAL sits in `planned` among fifty others. The question hangs on the task that
+ *  raised it — a person answers about work rather than about a number. An option is the
+ *  answer and what taking it costs, split on the first `=`; only the answers are stored as
+ *  options, since an answer is checked against them, and the costs go into the question,
+ *  which is what a person reads before choosing. No options at all is an open question, and
+ *  any words settle it. */
+function ask(args: readonly string[]): number {
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { option: { type: "string", multiple: true }, operator: { type: "string" } },
+  });
+  const id = Number(positionals[0]);
+  const question = positionals.slice(1).join(" ");
+  if (!Number.isInteger(id) || question === "") {
+    return fail('wecode ask <task> "<question>" [--option "<answer>=<what it costs>"] [--operator <name>]');
+  }
+  const offered = (values.option ?? []).map((o) => {
+    const at = o.indexOf("=");
+    return at === -1 ? { answer: o.trim(), costs: "" } : { answer: o.slice(0, at).trim(), costs: o.slice(at + 1).trim() };
+  });
+
+  const conn = db();
+  try {
+    const who = operator(conn, values.operator);
+    const raised = raiseApproval(conn, {
+      objective_type: "task",
+      objective_id: id,
+      worker_id: who.id,
+      question: [question, ...offered.map((o) => `  ${o.answer}${o.costs === "" ? "" : ` — ${o.costs}`}`)].join("\n"),
+      options: offered.length === 0 ? null : offered.map((o) => o.answer),
+    });
+    process.stdout.write(`approval #${raised.id} waits on ${who.name}\n  wecode answer ${raised.id} "<text>"\n`);
+    return 0;
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+}
+
+/** Who is asked, or why nobody can be. A name given is honoured or nothing; with no name,
+ *  the sole human worker — a workspace with two people has no obvious one to burden, and
+ *  choosing would be wecode deciding whose signature a decision needs. */
+function operator(conn: ReturnType<typeof open>, named: string | undefined): { id: number; name: string } {
+  const people = queries(conn).selectFrom(worker).all().filter((w) => w.kind === "human");
+  const found = named === undefined ? (people.length === 1 ? people[0] : undefined) : people.find((w) => w.name === named);
+  if (found !== undefined) return { id: found.id, name: found.name };
+  if (named !== undefined) return fails(`no human worker named ${named}. Human workers: ${names(people)}`);
+  return fails(
+    people.length === 0
+      ? "nobody to ask: wecode worker create <you> --role operator --kind human"
+      : `${people.length} people could be asked (${names(people)}), so name one with --operator <name>`,
+  );
+}
+
+const names = (people: readonly { name: string }[]): string => (people.length === 0 ? "none" : people.map((p) => p.name).join(", "));
+/** Nobody to carry the authority. Its own class because `answer` treats it as a fact about
+ *  the workspace rather than as a refusal — see there. */
+class NoOperator extends Error {}
+const fails = (why: string): never => {
+  throw new NoOperator(why);
+};
+
 /** `wecode answer <assignment> "<text>"` — the one verb that clears a needs_human.
  *  An approval is recorded as the operator wrote it; nothing restates it. */
 function answer(args: readonly string[]): number {
@@ -168,10 +236,25 @@ function answer(args: readonly string[]): number {
   const text = args.slice(1).join(" ");
   if (!Number.isInteger(id) || text === "") return fail('wecode answer <assignment> "<text>"');
 
-  const q = queries(db());
-  const row = q.selectFrom(assignment).select(["phase"]).where("id", "=", id).get();
+  const conn = db();
+  const q = queries(conn);
+  const row = q.selectFrom(assignment).select(["phase", "kind"]).where("id", "=", id).get();
   if (row === null) return fail(`no assignment #${id}`);
   if (row.phase !== "waiting") return fail(`assignment #${id} is ${row.phase}, and is not waiting on anybody`);
+
+  // An approval closes as well as records: it has no work to go back to, so core checks the
+  // answer against the options offered and finishes it, in the answerer's own name. Where
+  // the workspace has no person on record there is no such name, and the answer is written
+  // the way every other needs_human is — a row left waiting would be worse than a record.
+  if (row.kind === APPROVAL_KIND) {
+    try {
+      const by = operator(conn, process.env["WECODE_ACTOR"]).name;
+      process.stdout.write(`approval #${id} answered ${answerApproval(conn, id, text, by).answer} by ${by}\n`);
+      return 0;
+    } catch (err) {
+      if (!(err instanceof NoOperator)) return fail((err as Error).message);
+    }
+  }
 
   const who = whoIsAsking();
   q.update(assignment)
@@ -758,117 +841,33 @@ function gitConfig(key: string): string {
 // `PRAGMA table_info`, name for name and in order, so a column added on either side fails.
 
 type WorkspaceRow = { id: number; slug: string; name: string; path: string; created_at: string; updated_at: string };
-type ProjectRow = {
-  id: number;
-  slug: string;
-  workspace_id: number;
-  name: string;
-  repo: string;
-  objective: string;
-  state: string;
-  created_at: string;
-  updated_at: string;
-};
-type ReleaseRow = {
-  id: number;
-  slug: string;
-  project_id: number;
-  version: string;
-  released_at: string | null;
-  state: string;
-  created_at: string;
-  updated_at: string;
-};
+type ProjectRow = { id: number; slug: string; workspace_id: number; name: string; repo: string; objective: string;
+  state: string; created_at: string; updated_at: string };
+type ReleaseRow = { id: number; slug: string; project_id: number; version: string; released_at: string | null;
+  state: string; created_at: string; updated_at: string };
 type EpicRow = { id: number; slug: string; release_id: number; title: string; state: string; created_at: string; updated_at: string };
 type StoryRow = { id: number; slug: string; epic_id: number; title: string; state: string; created_at: string; updated_at: string };
-type RequirementRow = {
-  id: number;
-  slug: string;
-  story_id: number;
-  statement: string;
-  state: string;
-  created_at: string;
-  updated_at: string;
-};
-type CriteriaRow = {
-  id: number;
-  slug: string;
-  requirement_id: number;
-  statement: string;
-  state: string;
-  created_at: string;
-  updated_at: string;
-};
+type RequirementRow = { id: number; slug: string; story_id: number; statement: string; state: string;
+  created_at: string; updated_at: string };
+type CriteriaRow = { id: number; slug: string; requirement_id: number; statement: string; state: string;
+  created_at: string; updated_at: string };
 /** Both test tables carry the same columns bar the extra three an acceptance_test earns by
  *  being the thing that must have been seen to fail at the base. */
-type TestRow = {
-  id: number;
-  slug: string;
-  parent_id: number;
-  statement: string;
-  kind: string;
-  artefact: string | null;
-  last_run_at: string | null;
-  last_output: string | null;
-  state: string;
-  created_at: string;
-  updated_at: string;
-  script_path: string | null;
-  provenance_sha: string | null;
-};
-type AcceptanceTestRow = TestRow & {
-  red_at_base_sha: string | null;
-  red_at_base_at: string | null;
-  red_at_base_reason: string | null;
-};
-type TaskRow = {
-  id: number;
-  slug: string;
-  acceptance_test_id: number;
-  title: string;
-  scope: string;
-  role: string;
-  budget: string;
-  attempts: number;
-  max_retry: number;
-  state: string;
-  created_at: string;
-  updated_at: string;
-};
-type RoleRow = {
-  id: number;
-  slug: string;
-  name: string;
-  scope: string;
-  worker_kind: string;
-  harness: string | null;
-  created_at: string;
-  updated_at: string;
-};
+type TestRow = { id: number; slug: string; parent_id: number; statement: string; kind: string; artefact: string | null;
+  last_run_at: string | null; last_output: string | null; state: string; created_at: string; updated_at: string;
+  script_path: string | null; provenance_sha: string | null };
+type AcceptanceTestRow = TestRow & { red_at_base_sha: string | null; red_at_base_at: string | null;
+  red_at_base_reason: string | null };
+type TaskRow = { id: number; slug: string; acceptance_test_id: number; title: string; scope: string; role: string;
+  budget: string; attempts: number; max_retry: number; state: string; created_at: string; updated_at: string };
+type RoleRow = { id: number; slug: string; name: string; scope: string; worker_kind: string; harness: string | null;
+  created_at: string; updated_at: string };
 type WorkerRow = { id: number; slug: string; name: string; role: string; kind: string; created_at: string; updated_at: string };
-type AssignmentRow = {
-  id: number;
-  slug: string;
-  objective_type: string;
-  objective_id: number;
-  worker_id: number;
-  scope: string;
-  budget: string;
-  worktree: string;
-  phase: string;
-  reason: string | null;
-  kind: string | null;
-  question: string | null;
-  options: string | null;
-  answer: string | null;
-  answered_by: string | null;
-  session: string | null;
-  last_seen: string | null;
-  spent: string;
-  commit_sha: string | null;
-  created_at: string;
-  updated_at: string;
-};
+type AssignmentRow = { id: number; slug: string; objective_type: string; objective_id: number; worker_id: number;
+  scope: string; budget: string; worktree: string; phase: string; reason: string | null; kind: string | null;
+  question: string | null; options: string | null; answer: string | null; answered_by: string | null;
+  session: string | null; last_seen: string | null; spent: string; commit_sha: string | null; created_at: string;
+  updated_at: string };
 type LedgerRow = {
   id: number;
   entity: string;
@@ -1677,6 +1676,7 @@ function usage(): number {
       "",
       "MOVING WORK",
       "  wecode <entity> <verb> <id>                start, deliver, pass, fail, drop, retry …",
+      '  wecode ask <task> "<question>"             put a decision in needs you (--option "yes=<cost>")',
       '  wecode answer <assignment> "<text>"        clears a needs_human',
       "  wecode land <story>                        merge a delivered story into your branch",
       "",
