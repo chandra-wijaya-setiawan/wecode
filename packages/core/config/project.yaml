@@ -13,7 +13,7 @@ ceiling: 400
 over:
   packages/cli/src/run.ts: 1833
   packages/runner/src/daemon.ts: 1760
-  packages/cli/src/plan.ts: 1281
+  packages/cli/src/plan.ts: 1112
   packages/tui/src/app.ts: 862
   packages/core/src/chore.ts: 861
   packages/core/src/board.ts: 840
