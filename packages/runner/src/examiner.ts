@@ -96,9 +96,8 @@ function projectConfig(cwd: string): Record<string, unknown> {
 export const ENTRY_HIDDEN = "unproved: it still passes with its entry point hidden";
 
 /** Where a proof enters the code it proves. A screen proof that renders a component
- *  directly passes just as well when the file the app actually draws is gone, and such a
- *  proof says nothing about the screen. Which file each proof must enter by is a fact about
- *  the packaging, so it is declared in `config/project.yaml` and read from there. */
+ *  directly passes just as well when the file the app draws is gone, and says nothing about
+ *  the screen. Which file each proof enters by is declared in `config/project.yaml`. */
 export interface Entry {
   /** What identifies the proof: any artefact whose command names this is checked. */
   readonly proof: string;
@@ -130,7 +129,6 @@ export function entryFor(artefact: string, entries: readonly Entry[]): Entry | n
  *  `vitest --passWithNoTests`, `jest --passWithNoTests`, `go test ./...` over a package with
  *  no `_test.go`, and `pytest` on an empty selection all exit 0, so a task_test whose path
  *  filter has gone stale reads as green forever. Only the banner distinguishes the two.
- *
  *  Anchored on the runner's own words, never on a count: "0 passing" is also what a suite
  *  prints while every test in it errors, and that is already a failure by its exit code. */
 const NO_TESTS: readonly RegExp[] = [
@@ -165,8 +163,8 @@ export function failingFilesOf(output: string): readonly string[] {
   for (const re of FAILING_FILE) {
     for (const [, file] of output.matchAll(re)) {
       // Only a plain path is ever put back on a command line. Anything carrying shell
-      // punctuation is a word off a progress line, not a file, and re-running it would run
-      // something nobody wrote.
+      // punctuation is a word off a progress line, and re-running it would run something
+      // nobody wrote.
       if (file !== undefined && !/[;&|><$`(){}*?"'\\]/.test(file)) found.add(file);
     }
   }
@@ -201,6 +199,8 @@ export interface RunAgainst {
 interface Row {
   readonly id: number;
   readonly artefact: string;
+  /** The file the test declared itself to live in, when it declared one. */
+  readonly script: string | null;
   readonly state: string;
 }
 
@@ -217,6 +217,7 @@ interface TestRow {
   parent_id: number;
   kind: string;
   artefact: string | null;
+  script_path: string | null;
   state: string;
   last_run_at: string | null;
   last_output: string | null;
@@ -229,6 +230,7 @@ const TEST_COLUMNS = [
   "parent_id",
   "kind",
   "artefact",
+  "script_path",
   "state",
   "last_run_at",
   "last_output",
@@ -291,9 +293,9 @@ const SETTLED: readonly string[] = ["done", "dropped"];
  *
  *  A verdict is also a fact about *what it was run against*. Without that, a failed
  *  acceptance test is re-run every tick — on 14 Sep two of them held a tick open for
- *  minutes each while eleven ready tasks waited, and the runner read as idle rather than
- *  hung. So each run records a fingerprint of the tree tip, the attempt and the artefact,
- *  and a standing verdict is left alone until one of the three moves. */
+ *  minutes each while eleven ready tasks waited. So each run records a fingerprint of the
+ *  tree tip, the attempt and the artefact, and a standing verdict is left alone until one
+ *  of the three moves. */
 export class Examiner {
   /** The record's verbs, one method per transition. Not the engine: a verb spelled as a
    *  string is a transition the compiler cannot see, and this module's two are chosen at
@@ -357,12 +359,12 @@ export class Examiner {
   private runnable(entity: TestEntity, mine: (r: { id: number; parent_id: number }) => boolean): readonly Row[] {
     return queries(this.db)
       .selectFrom(TESTS[entity])
-      .select(["id", "parent_id", "artefact", "state"])
+      .select(["id", "parent_id", "artefact", "script_path", "state"])
       .where("kind", "=", "script")
       .all()
       .flatMap((r) =>
         r.artefact !== null && RUNNABLE.includes(r.state) && mine(r)
-          ? [{ id: r.id, artefact: r.artefact, state: r.state }]
+          ? [{ id: r.id, artefact: r.artefact, script: r.script_path, state: r.state }]
           : [],
       )
       .sort((a, b) => a.id - b.id);
@@ -411,7 +413,10 @@ export class Examiner {
     const provenance = await this.treeSha(cwd);
 
     for (const row of rows) {
-      const script = scriptPathOf(row.artefact);
+      // What the test says it lives in beats what its command looks like: `vitest run t`
+      // names no path to infer, so a declared file is the only way to tell a tree that
+      // lacks the proof from a tree the proof is red in.
+      const script = row.script ?? scriptPathOf(row.artefact);
       if (script !== null && !existsSync(isAbsolute(script) ? script : resolve(cwd, script))) {
         // No script, no evidence. A verdict here would say the code is broken when all that
         // is missing is the test itself, so the test is left exactly as it stands.
@@ -490,7 +495,6 @@ export class Examiner {
    *  files must be in the tree, or there is no second command to write and the failure is
    *  the work's. The narrowed run is a different command from the one that went red — it
    *  selects those files alone — so a suite red is never simply asked twice.
-   *
    *  A second red, or a green that selected nothing, is no disagreement at all. */
   private async passesAlone(artefact: string, cwd: string, output: string): Promise<string | null> {
     const files = failingFilesOf(output);
@@ -503,7 +507,6 @@ export class Examiner {
 
   /** Makes a tree runnable, and answers with why it could not be — null when it is ready,
    *  whether that took a build or no command at all.
-   *
    *  Not named for what it does, because `typed-runner-doctor` reads every runner module
    *  for a bare `prepare(` and means `db.prepare` by it. One name here is the cheaper of
    *  the two costs. */
@@ -557,17 +560,14 @@ export class Examiner {
     return seen !== null && seen.fingerprint === print;
   }
 
-  /** The git tree sha of the sources this run saw — `git rev-parse HEAD:.`. A commit sha
-   *  names a history; a tree sha names the files, which is what a test proves something
-   *  about, and two commits with the same sources deserve the same stamp. It asks git and
-   *  nothing else, so it answers the same in any language and never consults a toolchain.
+  /** The git tree sha of the sources this run saw. A commit sha names a history; a tree sha
+   *  names the files, which is what a test proves something about, so two commits with the
+   *  same sources deserve the same stamp. It asks git and nothing else.
    *
    *  Asked as `HEAD:<prefix>` rather than as `HEAD:.`, because git refuses the `.` at the
    *  top of a checkout — "path '.' exists on disk, but not in 'HEAD'" — and a worktree is
    *  exactly that. `--show-prefix` is empty there and `sub/` below it, so one form answers
-   *  in both places and still names the sources of the directory the test ran in.
-   *
-   *  Null where there is no git to ask, and a null stamp accuses nothing later. */
+   *  in both places. Null where there is no git to ask, and a null stamp accuses nobody. */
   private async treeSha(cwd: string): Promise<string | null> {
     try {
       const { stdout: prefix } = await exec("git", ["rev-parse", "--show-prefix"], { cwd });

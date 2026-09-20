@@ -10,8 +10,7 @@ import { parse } from "yaml";
 import { Box, Text } from "ink";
 import { STATEFUL, type Node, type StatefulEntity } from "@wecode/core";
 import type { App } from "./app.js";
-import { clip, stateColour, type Line, type Row } from "./list.js";
-import { Panel } from "./screens.js";
+import { clip, stateColour, type Line, type Row } from "./list.js";import { Panel } from "./screens.js";
 
 const CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
 
@@ -337,51 +336,118 @@ export function splitTree(what: string): [string, string] {
  *  the screen's prose already use, so the whole line reads as one list of things. */
 const JOIN = " · ";
 
-/** How deep a row sits, read back off the guide `outlineRows` drew it with: two columns per
- *  level above it, and the fold marker after them. The guide is the depth written down, so
- *  the indent does not have to be counted a second way. */
-export function depthOf(guide: string): number {
-  return Math.max(Math.floor((guide.length - 1) / INDENT), 0);
+/** Two columns between one column and the next, as config/design.yaml writes the row.
+ *  A terminal has no rules to lean on, so the gap is the whole of the separation. */
+const GAP = "  ";
+
+/** The row's columns, in `outline.row.order`. The three that are scanned lead, in the
+ *  order they narrow the tree; the one that varies in width is last. */
+export const OUTLINE_ROW = ["id", "entity", "state", "description"] as const;
+
+/** A row's short identity, said the way every other list says it: a code, not a number. */
+export const outlineId = (row: Row): string => `#${row.id}`;
+
+/** The row's kind, lifted out of the detail `outlineRows` wrote it at the head of. A row
+ *  whose detail opens with something else has no kind to draw and takes a blank cell. */
+export function outlineEntity(row: Row): string {
+  const first = row.detail === "" ? "" : (row.detail.split(JOIN)[0] ?? "");
+  return KINDS.has(first) ? first : "";
 }
 
-/** One row as one sentence, indented by its depth.
- *
- *  It was four columns — a tree cell, an id, a four-letter type and a four-letter state —
- *  and every one of them was as wide as the widest row anywhere in the tree. That is what a
- *  column is: a shallow row pays the deepest row's width, and the line it buys with it is
- *  mostly blank. The cut to four characters was the same cost again, paid by the reader:
- *  `stor`, `rels` and `requ` are words nobody knows until they have learned this screen.
- *
- *  A sentence spends nothing it does not use. The indent says the depth — which is all the
- *  rail said, in two columns a level rather than none — the marker says what pressing does,
- *  and the label leads, because the label is what the row is. The row's particulars follow
- *  it in full words. Nothing here is padded, so a line is as long as it has something to
- *  say and no longer, and the width the columns used to hold goes to the labels. */
-export function sentence(row: Row): string {
+/** What the description is made of, once the three columns have taken theirs: the label,
+ *  and whatever the detail still had to say — the orphan mark, the next task, the rollup.
+ *  The guide is not in here; it is a fixed prefix the wrap must not break. */
+export function outlineText(row: Row): string {
   const parts = row.detail === "" ? [] : row.detail.split(JOIN);
-  const kind = parts.length > 0 && KINDS.has(parts[0] ?? "") ? parts[0] ?? "" : "";
-  const [guide, label] = splitTree(row.what);
-  const head = guide === "" ? label : `${guide.slice(-1)} ${label}`;
-  const rest = [`#${row.id}`, kind, row.state, ...parts.slice(kind === "" ? 0 : 1)];
-  return `${" ".repeat(depthOf(guide) * INDENT)}${[head, ...rest].filter((s) => s !== "").join(JOIN)}`;
+  const rest = outlineEntity(row) === "" ? parts : parts.slice(1);
+  const [, label] = splitTree(row.what);
+  return [label, ...rest].filter((s) => s !== "").join(JOIN);
 }
 
-/** Rows the height can show, scrolled so the cursor is among them. The shared list does
- *  this arithmetic too, and fixes its own line shape with it; the outline draws its own
- *  line and pays for the window again. */
-function window(count: number, height: number, cursor: number | null): [number, number] {
-  if (count <= height) return [0, count];
+/** How wide each of the three fixed columns is: its own longest value, and not a column
+ *  more. A width taken from the widest row anywhere is what the description is spared. */
+export function outlineWidths(rows: readonly Row[]): readonly number[] {
+  const cells = [outlineId, outlineEntity, (r: Row): string => r.state];
+  return cells.map((of) => Math.max(...rows.map((r) => of(r).length), 0));
+}
+
+/** The column the description begins at, and so the column a wrapped line resumes at. */
+export const describedAt = (widths: readonly number[]): number =>
+  widths.reduce((n, w) => n + w + GAP.length, 0);
+
+/** Break `text` at its spaces into a first line of `first` columns and the rest of `rest`,
+ *  as many lines as it takes. Nothing is dropped: a word too wide for a line of its own is
+ *  broken across lines rather than cut, because `outline.row.truncate` is false. */
+function fold(text: string, first: number, rest: number): string[] {
+  const out: string[] = [];
+  let line = "";
+  const room = (): number => (out.length === 0 ? first : rest);
+  for (const word of text.split(" ").filter((w) => w !== "")) {
+    if (line !== "" && line.length + 1 + word.length <= room()) {
+      line = `${line} ${word}`;
+      continue;
+    }
+    if (line !== "") out.push(line);
+    line = word;
+    while (line.length > room()) {
+      out.push(line.slice(0, room()));
+      line = line.slice(room());
+    }
+  }
+  out.push(line);
+  return out;
+}
+
+/** One row, drawn as design.yaml declares it: the id right-aligned in its column, the kind
+ *  and the state left-aligned in theirs, and the description taking whatever is left.
+ *
+ *  Depth is in the description, as a connector rather than as an indent — a rail exactly
+ *  where the branch above is still going, and a tee or an elbow where this row hangs off
+ *  it. An indent says the same thing only to a reader willing to count spaces.
+ *
+ *  A line is a sentence once the three columns are past, so it is not cut: what will not
+ *  fit continues on the next line, under where the description began. */
+export function outlineRow(row: Row, widths: readonly number[], width: number): string[] {
+  const lead =
+    [
+      outlineId(row).padStart(widths[0] ?? 0),
+      outlineEntity(row).padEnd(widths[1] ?? 0),
+      row.state.padEnd(widths[2] ?? 0),
+    ].join(GAP) + GAP;
+  const at = describedAt(widths);
+  const [guide] = splitTree(row.what);
+  const opens = guide === "" ? "" : `${guide} `;
+  const text = outlineText(row);
+  // Too narrow to wrap into is too narrow to draw the row's own shape in at all.
+  if (width - at - opens.length <= 0) return [clip(`${lead}${opens}${text}`, width)];
+  return fold(text, width - at - opens.length, width - at).map((line, i) =>
+    i === 0 ? `${lead}${opens}${line}` : `${" ".repeat(at)}${line}`,
+  );
+}
+
+/** Rows the height can show, scrolled so the cursor is among them. `costs` is how many
+ *  lines each row takes, because a wrapped row is worth more than one and a window counted
+ *  in rows would draw past the box's own border. */
+function window(costs: readonly number[], height: number, cursor: number | null): [number, number] {
+  if (costs.reduce((a, b) => a + b, 0) <= height) return [0, costs.length];
   // One line goes to the "… and N more" tally.
-  const shown = Math.max(height - 1, 0);
-  if (cursor === null || cursor < shown) return [0, shown];
-  const first = Math.min(cursor - shown + 1, count - shown);
-  return [first, first + shown];
+  const room = Math.max(height - 1, 0);
+  const end = (from: number): number => {
+    let used = 0;
+    let i = from;
+    while (i < costs.length && used + (costs[i] ?? 0) <= room) used += costs[i++] ?? 0;
+    // A row taller than the whole box still gets the box: it is drawn as far as it goes
+    // and cut there, which is a row the reader can see the start of rather than none.
+    return i === from && from < costs.length ? from + 1 : i;
+  };
+  let first = 0;
+  if (cursor !== null) while (first < costs.length && cursor >= end(first)) first += 1;
+  return [first, end(first)];
 }
 
-/** The outline's own lines, one sentence each. It does not go through the shared list
- *  because that list's contract is the code and the state first and the description last —
- *  right for a box of unrelated rows, and for a tree it puts two columns of repeated words
- *  where the indent that says where the row sits has to be. */
+/** The outline's own lines. It does not go through the shared list because that list's
+ *  contract is one line per row, clipped — and a tree's row is a sentence that wraps, with
+ *  its depth drawn in the description the wrap has to keep clear of. */
 export function outlineLines(
   rows: readonly Row[],
   height: number,
@@ -389,19 +455,28 @@ export function outlineLines(
   width: number,
 ): Line[] {
   if (height <= 0) return [];
-  const [first, last] = window(rows.length, height, cursor);
-  const lines = rows.slice(first, last).map((row, i) => ({
-    text: clip(sentence(row), width),
-    state: row.state,
-    cursor: cursor !== null && first + i === cursor,
-  }));
-  const hidden = rows.length - lines.length;
+  const widths = outlineWidths(rows);
+  const drawn = rows.map((row) => outlineRow(row, widths, width));
+  const [first, last] = window(drawn.map((d) => d.length), height, cursor);
+  const lines: Line[] = [];
+  for (let i = first; i < last; i += 1) {
+    // A wrapped row is one row: every line of it carries the state it is coloured by, and
+    // the cursor covers all of it rather than only the line the label started on.
+    for (const text of drawn[i] ?? []) {
+      lines.push({ text, state: (rows[i] as Row).state, cursor: cursor === i });
+    }
+  }
+  const hidden = rows.length - (last - first);
+  // The tally's own line comes off the box before the rows are cut to what is left.
+  const budget = hidden > 0 ? Math.max(height - 1, 0) : height;
+  if (lines.length > budget) lines.length = budget;
   if (hidden > 0) lines.push({ text: clip(`… and ${hidden} more`, width), state: "", cursor: false });
   return lines;
 }
 
 /** One box, titled with its scope, its count and the letter that opens it, holding every
- *  visible row as one sentence indented by its depth.
+ *  visible row as config/design.yaml declares one: id, kind and state in their own columns,
+ *  and then the description with the tree drawn into it.
  *
  *  The scope is in the title rather than only in the status line, because the status line is
  *  the last thing that happened and this is what you are looking at: a narrowed outline is

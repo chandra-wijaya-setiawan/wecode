@@ -1,10 +1,15 @@
 /** The cockpit is drawn the way config/design.yaml says it is.
  *
- *  The look of the frame — rules and not boxes, the name in the rule, the count and the
- *  letter beside it, the bars at the foot, the keys they name — was decided in docstrings
- *  inside screens.tsx. A decision that lives only in the code that acts on it cannot be
- *  broken, because there is nothing for the drawing to disagree with. design.yaml is that
- *  something, and this file is the disagreement.
+ *  The look of the frame — heads and not boxes, the mark in column zero, the count and the
+ *  letter at the right edge, the bars at the foot, the keys they name — was decided in
+ *  docstrings inside screens.tsx. A decision that lives only in the code that acts on it
+ *  cannot be broken, because there is nothing for the drawing to disagree with.
+ *  design.yaml is that something, and this file is the disagreement.
+ *
+ *  It used to be the wrong one. A head was gated against design.yaml's `head:`, which was
+ *  itself written by reading screens.tsx, so the gate compared the drawing to itself and
+ *  went red the moment the board moved to the screen the operator actually signed. `head:`
+ *  is gone and every claim below reads `proposal.head`.
  *
  *  Every claim is asserted against the rendered frame. Asking the components, or
  *  App.lines(), or the config alone, answers about a screen nobody is looking at.
@@ -19,7 +24,7 @@ import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
 import { loadMachines, Maker, open } from "@wecode/core";
 import { App } from "../src/app.js";
-import { Cockpit } from "../src/screens.js";
+import { Cockpit, raised } from "../src/screens.js";
 import { loadViews } from "../src/views.js";
 import { mark as rowMark, sectionMark } from "../src/list.js";
 import { loadServices } from "../src/services.js";
@@ -41,13 +46,19 @@ interface Design {
     readonly row_leads_with: string;
     readonly forbidden: readonly string[];
   };
-  readonly head: {
-    readonly glyph: string;
-    readonly case: string;
-    readonly section: string;
-    readonly box: string;
-    readonly count: string;
-    readonly count_at: string;
+  readonly proposal: {
+    readonly head: {
+      readonly opens_with: string;
+      readonly begins_at_column: number;
+      readonly dashes: string;
+      readonly case: string;
+      readonly line: string;
+      readonly count: string;
+      readonly count_at: string;
+      readonly key_as: string;
+      readonly countless: readonly string[];
+      readonly seated: { readonly box: string; readonly of: string; readonly count: string };
+    };
   };
   readonly pages: { readonly chrome: string; readonly bordered: readonly string[] };
   readonly bars: { readonly key_bar: string; readonly status: string };
@@ -83,28 +94,55 @@ const lines = (width = 100, height = 90): string[] =>
 const fill = (template: string, holes: Record<string, string>): string =>
   template.replace(/\{(\w+)\}/g, (_, name: string) => holes[name] ?? `{${name}}`);
 
+/** The one head declaration the file has left. `head:` used to sit beside it, written by
+ *  reading screens.tsx, and this gate held the drawing to that transcript — so the board
+ *  could not move to the screen the operator signed without turning its own gate red. */
+const HEAD = design.proposal.head;
+
 /** A name in the case the design writes heads in. */
 const cased = (title: string): string =>
-  design.head.case === "upper" ? title.toUpperCase() : title;
+  HEAD.case === "upper" ? title.toUpperCase() : title;
 
-/** A head as the design writes it: the template in the design's case, the rule out to the
- *  full width, and — where there is a count — that count standing at the far end of it. */
+/** How the design opens a head: the section's mark in column zero, then its name. */
+const opening = (name: string, title: string): string =>
+  fill(HEAD.line, { mark: sectionMark(name), title: cased(title) });
+
+/** A head as the design writes it: the opening, blank out to the width — no dashes — and,
+ *  where there is one, the count at the right edge with the box's letter raised onto it. */
 const head = (
-  template: string,
-  holes: Record<string, string>,
+  name: string,
+  title: string,
   width: number,
-  count?: number,
+  count?: string,
+  key?: string,
 ): string => {
-  expect(design.head.count_at).toBe("width");
-  const tail = count === undefined ? "" : fill(design.head.count, { count: String(count) });
-  const written = fill(template, { ...holes, title: cased(holes["title"] ?? "") });
-  const fillTo = Math.max(width - tail.length - written.length, 0);
-  return written + design.head.glyph.repeat(fillTo) + tail;
+  expect(HEAD.count_at).toBe("right");
+  expect(HEAD.dashes).toBe("none");
+  expect(HEAD.key_as).toBe("superscript");
+  const tail =
+    count === undefined ? "" : fill(HEAD.count, { count, key: raised(key) });
+  return opening(name, title).padEnd(Math.max(width - tail.length, 0), " ") + tail;
 };
 
-/** Every line the dashboard gives to chrome, in the order it draws them. */
-const chrome = (out: readonly string[]): string[] =>
-  out.filter((l) => l.startsWith(design.head.glyph.repeat(2)));
+/** What a box's `{count}` says: the plain number of rows it holds, except the seated box,
+ *  whose rows each hold one of the fleet's seats and so reads `held/seats` — a workspace
+ *  with no workers has no seats to be short of and falls back to the plain number. */
+const counted = (view: (typeof views)[number]): string => {
+  const rows = app.boardNow()[view.filter].length;
+  const seats = app.seats();
+  if (view.name !== HEAD.seated.box || seats === 0) return String(rows);
+  return fill(HEAD.seated.count, { held: String(rows), seats: String(seats) });
+};
+
+/** Every line the dashboard gives to chrome, in the order it draws them. A head is known
+ *  by the opening the design writes, because there is no rule left to know it by. */
+const chrome = (out: readonly string[]): string[] => {
+  const openings = [
+    opening("services", services.title),
+    ...views.map((v) => opening(v.name, v.title)),
+  ];
+  return out.filter((l) => openings.some((o) => l.startsWith(o)));
+};
 
 /** An assignment an agent is working, so the running box has a row to open. */
 function assignment(): void {
@@ -161,8 +199,10 @@ describe("the page is ordered the way the design orders it", () => {
       ["services", services.title] as const,
       ...views.map((v) => [v.name, v.title] as const),
     ];
-    const drawn = chrome(lines()).map((l) => /^── (.) (.+?) [([─]/.exec(l)?.slice(1, 3) ?? [l]);
-    expect(drawn).toEqual(named.map(([name, title]) => [sectionMark(name), cased(title)]));
+    expect(HEAD.opens_with).toBe("mark");
+    expect(HEAD.begins_at_column).toBe(0);
+    const want = named.map(([name, title]) => opening(name, title));
+    expect(chrome(lines()).map((l, i) => l.slice(0, want[i]?.length))).toEqual(want);
   });
 
   it("spends the design's one line of chrome on each section, and never a blank one", () => {
@@ -174,7 +214,7 @@ describe("the page is ordered the way the design orders it", () => {
 });
 
 describe("a section is chromed the way the design chromes it", () => {
-  it("rules the sections rather than boxing them", () => {
+  it("heads the sections rather than boxing them", () => {
     expect(design.dashboard.chrome).toBe("rule");
     const out = lines();
     for (const glyph of design.dashboard.forbidden) {
@@ -183,37 +223,36 @@ describe("a section is chromed the way the design chromes it", () => {
     }
   });
 
-  it("writes the lead section's head as design.yaml writes it", () => {
-    expect(chrome(lines())[0]).toBe(
-      head(design.head.section, { title: services.title, mark: sectionMark("services") }, 100),
+  it("writes the lead section's head as design.yaml writes it, and gives it no count", () => {
+    expect(HEAD.countless).toContain("services");
+    expect(chrome(lines())[0]?.trimEnd()).toBe(
+      head("services", services.title, 100).trimEnd(),
     );
   });
 
-  it("writes each box's head as design.yaml writes it, count and letter and all", () => {
+  it("writes each box's head as design.yaml writes it, count and raised letter and all", () => {
     const drawn = chrome(lines()).slice(1);
-    const board = app.boardNow();
     expect(drawn).toEqual(
-      views.map((v) =>
-        head(
-          design.head.box,
-          { title: v.title, mark: sectionMark(v.name), key: v.key ?? "" },
-          100,
-          board[v.filter].length,
-        ),
-      ),
+      views.map((v) => head(v.name, v.title, 100, counted(v), v.key)),
     );
   });
 
-  it("stands every count at the width, on the fill rather than beside the name", () => {
-    expect(design.head.count_at).toBe("width");
-    const board = app.boardNow();
+  it("stands every count at the right edge, with the letter raised onto it", () => {
+    expect(HEAD.count_at).toBe("right");
     const drawn = chrome(lines()).slice(1);
     drawn.forEach((line, i) => {
       const view = views[i];
-      const tail = fill(design.head.count, { count: String(board[view!.filter].length) });
+      const tail = fill(HEAD.count, { count: counted(view!), key: raised(view!.key) });
       expect(line).toHaveLength(100);
-      expect(line.endsWith(design.head.glyph + tail), `${view!.title} head: ${line}`).toBe(true);
+      expect(line.endsWith(tail), `${view!.title} head: ${line}`).toBe(true);
+      // The letter is on the count and nowhere else: no bracket to pair back up.
+      expect(line).not.toContain(`[${view!.key ?? ""}]`);
     });
+  });
+
+  it("spends no dashes on a head, so the rule that held the count is gone", () => {
+    expect(HEAD.dashes).toBe("none");
+    for (const line of chrome(lines())) expect(line).not.toContain("──");
   });
 
   it("begins a row at the column the design gives it, with none spent on chrome", () => {

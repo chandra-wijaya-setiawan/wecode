@@ -76,27 +76,7 @@ interface ChoreRow {
 }
 
 const tbl = {
-  assignment: table<AssignmentRow>("assignment", [
-    "id",
-    "objective_type",
-    "objective_id",
-    "worker_id",
-    "scope",
-    "budget",
-    "worktree",
-    "phase",
-    "session",
-    "last_seen",
-    "answer",
-    "answered_by",
-    "reason",
-    "commit_sha",
-    "spent",
-    "kind",
-    "question",
-    "options",
-    "updated_at",
-  ]),
+  assignment: table<AssignmentRow>("assignment", ["id", "objective_type", "objective_id", "worker_id", "scope", "budget", "worktree", "phase", "session", "last_seen", "answer", "answered_by", "reason", "commit_sha", "spent", "kind", "question", "options", "updated_at"]),
   worker: table<{ id: number; kind: string }>("worker", ["id", "kind"]),
   task: table<TaskRow>("task", ["id", "title", "acceptance_test_id", "attempts", "updated_at"]),
   taskTest: table<TaskTestRow>("task_test", ["id", "parent_id", "statement", "state", "last_output"]),
@@ -117,6 +97,11 @@ const tbl = {
 /** An assignment nobody has finished with. One rule, spelled once, applied in memory: the
  *  dialect has no set-membership operator and an open assignment is a handful of rows. */
 const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
+
+/** The worker kind that is a person. Nobody runs a person's assignment: there is no adapter
+ *  registered under this kind and there never will be one, so the absence is the normal
+ *  case rather than a misconfigured runner. */
+const PERSON = "human";
 
 /** Where the assignments being watched live, when the foreman has to ask git something the
  *  record does not hold — the name of the base branch a merge chore's brief has to say. */
@@ -177,6 +162,11 @@ export class Foreman {
 
     for (const row of this.open()) {
       const adapter = this.adapterFor(row);
+      // An approval is an assignment too, and it waits on a person rather than on a
+      // session. Left exactly as it was found — not started, not polled, not failed — so
+      // the question outlives the tick that walked past it and is still there when the
+      // person comes to answer it.
+      if (adapter === PERSON) continue;
       if (adapter === null) {
         this.record(row.id, { phase: "failed", session: null, spent: zero(), reason: "other" });
         failed.push(row.id);
@@ -259,7 +249,11 @@ export class Foreman {
 
   /** Every open assignment, oldest first. The phase filter and the order are applied in
    *  memory: the dialect spells neither set membership nor an ordering, and the open rows
-   *  are bounded by `max_open` rather than by the size of the record. */
+   *  are bounded by `max_open` rather than by the size of the record.
+   *
+   *  Open, not runnable: an approval waiting on a person is open by exactly this definition
+   *  and is returned here like any other row. Who the row belongs to is a question about
+   *  its worker, so it is asked once, in `adapterFor`, and not a second filter here. */
   private open(): OpenRow[] {
     const rows = this.q
       .selectFrom(tbl.assignment)
@@ -271,12 +265,18 @@ export class Foreman {
   }
 
   /** The adapter for this assignment's worker, by the two reads the join was. A worker that
-   *  is not there is null, which is what the inner join did with the row. */
-  private adapterFor(row: OpenRow): WorkerAdapter | null {
+   *  is not there is null, which is what the inner join did with the row.
+   *
+   *  A person is neither an adapter nor a missing one, so they are told apart here rather
+   *  than by the caller: the worker's kind is what says an assignment waits on a person, and
+   *  the assignment's own `kind` cannot — `approval` is also what a *running* agent calls
+   *  the question it asks through the foreman, and that one is the foreman's to carry. */
+  private adapterFor(row: OpenRow): WorkerAdapter | typeof PERSON | null {
     const a = this.q.selectFrom(tbl.assignment).select(["worker_id"]).where("id", "=", row.id).get();
     if (a === null) return null;
     const w = this.q.selectFrom(tbl.worker).select(["kind"]).where("id", "=", a.worker_id).get();
-    return w === null ? null : (this.adapters[w.kind] ?? null);
+    if (w === null) return null;
+    return w.kind === PERSON ? PERSON : (this.adapters[w.kind] ?? null);
   }
 
   private async workOf(row: OpenRow): Promise<Work> {

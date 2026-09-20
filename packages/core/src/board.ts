@@ -75,16 +75,10 @@ interface AcceptanceTestRow {
   statement: string;
   state: string;
   red_at_base_sha: string | null;
+  last_run_at: string | null;
   last_output: string | null;
 }
-const acceptanceTests = table<AcceptanceTestRow>("acceptance_test", [
-  "id",
-  "parent_id",
-  "statement",
-  "state",
-  "red_at_base_sha",
-  "last_output",
-]);
+const acceptanceTests = table<AcceptanceTestRow>("acceptance_test", ["id", "parent_id", "statement", "state", "red_at_base_sha", "last_run_at", "last_output"]);
 
 interface TaskTestRow {
   id: number;
@@ -105,16 +99,7 @@ interface TaskRow {
   state: string;
   updated_at: string;
 }
-const tasks = table<TaskRow>("task", [
-  "id",
-  "acceptance_test_id",
-  "title",
-  "role",
-  "attempts",
-  "max_retry",
-  "state",
-  "updated_at",
-]);
+const tasks = table<TaskRow>("task", ["id", "acceptance_test_id", "title", "role", "attempts", "max_retry", "state", "updated_at"]);
 
 interface AssignmentRow {
   id: number;
@@ -131,21 +116,7 @@ interface AssignmentRow {
   created_at: string;
   updated_at: string;
 }
-const assignments = table<AssignmentRow>("assignment", [
-  "id",
-  "objective_type",
-  "objective_id",
-  "worker_id",
-  "worktree",
-  "budget",
-  "phase",
-  "kind",
-  "question",
-  "last_seen",
-  "spent",
-  "created_at",
-  "updated_at",
-]);
+const assignments = table<AssignmentRow>("assignment", ["id", "objective_type", "objective_id", "worker_id", "worktree", "budget", "phase", "kind", "question", "last_seen", "spent", "created_at", "updated_at"]);
 
 const workers = table<{ id: number; name: string }>("worker", ["id", "name"]);
 
@@ -168,18 +139,9 @@ interface ChoreRow {
 }
 const chores = table<ChoreRow>("chore", ["id", "kind", "project_id", "target_type", "target_id", "state"]);
 
-const choreRefusals = table<{ chore_id: number; why: string; since: string; passes: number }>("chore_refusal", [
-  "chore_id",
-  "why",
-  "since",
-  "passes",
-]);
+const choreRefusals = table<{ chore_id: number; why: string; since: string; passes: number }>("chore_refusal", ["chore_id", "why", "since", "passes"]);
 
-const landConflicts = table<{ story_id: number; branch: string; reason: string }>("land_conflict", [
-  "story_id",
-  "branch",
-  "reason",
-]);
+const landConflicts = table<{ story_id: number; branch: string; reason: string }>("land_conflict", ["story_id", "branch", "reason"]);
 
 /** The catalogue is a table like any other, so asking whether one exists is a query. */
 const catalogue = table<{ type: string; name: string }>("sqlite_master", ["type", "name"]);
@@ -195,6 +157,9 @@ export const hasTable = (db: DatabaseSync, name: string): boolean =>
 /** An assignment nobody has finished with. One list, matched in TypeScript, rather than
  *  the four copies of the same three phase names that four SQL strings held. */
 const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
+
+/** A test nobody is waiting on any more — what `every_task_test_settled` reads. */
+const SETTLED: readonly string[] = ["passed", "dropped"];
 
 /** SQLite's `julianday` reads a bare timestamp as UTC where `Date.parse` reads it as local
  *  time. The record writes ISO-8601 with a Z, but a hand-edited row may not, so the Z is
@@ -293,9 +258,9 @@ class Walk {
     return this.ofTask(step(this.taskTestTask, test));
   }
 
-  /** An assignment's project is its objective's, whichever of the three kinds it is. A
-   *  fourth kind has no project here, which is what a `CASE` with no `ELSE` said too. */
+  /** An assignment's project is its objective's; a kind not named has none, as a `CASE` with no `ELSE` said. */
   ofAssignment(a: AssignmentRow): number | null {
+    if (a.objective_type === "story") return this.ofStory(a.objective_id);
     if (a.objective_type === "task") return this.ofTask(a.objective_id);
     if (a.objective_type === "acceptance_test") return this.ofTest(a.objective_id);
     if (a.objective_type === "task_test") return this.ofTaskTest(a.objective_id);
@@ -426,6 +391,44 @@ export function silence(db: DatabaseSync, asOf: number = Date.now()): ReadonlyMa
   return new Map([...beat].flatMap(since));
 }
 
+/** How many blocks the pulse's sparkline draws, and how wide one of them is — design.yaml. */
+export const BUCKETS = 10;
+const HOUR = 3_600_000;
+
+/** Each project's throughput as ten hourly counts of passes, oldest bucket first.
+ *
+ *  A pass is the only unit of progress the ledger timestamps: `last_run_at` on a test row
+ *  that reached `passed`. Both kinds count — an acceptance test and a task test are each a
+ *  thing that was red and is now green — and each is placed under its project by the same
+ *  walk up that places every row of the board.
+ *
+ *  Every project has a series, all zeroes when nothing passed. That is the opposite of
+ *  `silence`, which leaves out a project it cannot date, and for the opposite reason: no
+ *  pass in ten hours is a fact about the project, where an unreadable beat is no evidence
+ *  either way. A run older than the window, one stamped in the future, and one nothing can
+ *  parse are all equally no evidence of a pass, and none of them reaches a bucket.
+ *
+ *  Ten hours rather than ten of anything else because the rate beside the sparkline is per
+ *  hour: one block is one hour, so the last block and the rate are the same number. */
+export function throughput(db: DatabaseSync, asOf: number = Date.now()): ReadonlyMap<number, readonly number[]> {
+  const q = queries(db);
+  const testRows = q.selectFrom(acceptanceTests).all();
+  const walk = new Walk(db, q.selectFrom(epics).all(), q.selectFrom(stories).all(), q.selectFrom(tasks).all(), testRows);
+  const series = new Map<number, number[]>();
+  for (const p of q.selectFrom(projects).all()) series.set(p.id, Array<number>(BUCKETS).fill(0));
+  const count = (project: number | null, state: string, ranAt: string | null): void => {
+    if (project === null || state !== "passed" || ranAt === null) return;
+    const ago = asOf - instant(ranAt);
+    if (Number.isNaN(ago)) return;
+    const bucket = BUCKETS - 1 - Math.floor(ago / HOUR);
+    const row = bucket < 0 || bucket >= BUCKETS ? undefined : series.get(project);
+    if (row !== undefined) row[bucket] = (row[bucket] ?? 0) + 1;
+  };
+  for (const t of testRows) count(walk.ofTest(t.id), t.state, t.last_run_at);
+  for (const t of q.selectFrom(taskTests).all()) count(walk.ofTaskTest(t.id), t.state, t.last_run_at);
+  return series;
+}
+
 /** The board and the fold are one query: the machine-side panels record each row's
  *  age as they build it, and `cooking` is that record sorted. Computing them apart would be
  *  two reads of the same tables that could disagree about what is on the board. */
@@ -481,6 +484,21 @@ function snapshot(
     assignmentRows
       .filter((a) => a.objective_type === "task" && OPEN_PHASES.includes(a.phase))
       .map((a) => a.objective_id),
+  );
+
+  /** Ready, but only until the next tick reads it: an attempt has come back succeeded and
+   *  every task_test under it is settled, which is exactly what the automatic `finish`
+   *  takes. The `ready` is a state the record is passing through, not work to offer — the
+   *  queue was showing such a task pass after pass as though nobody had started it.
+   *
+   *  Narrower than "has a succeeded assignment", deliberately. An attempt can come back
+   *  having left a test red, and that task really is the allocator's to dispatch again; a
+   *  broader set would take it off the board while the runner went on working it. */
+  const settling = new Set(
+    assignmentRows
+      .filter((a) => a.objective_type === "task" && a.phase === "succeeded")
+      .map((a) => a.objective_id)
+      .filter((id) => taskTestRows.every((tt) => tt.parent_id !== id || SETTLED.includes(tt.state))),
   );
 
   /** `coalesce(t.title, a.objective_type || ' #' || a.objective_id)` — the LEFT JOIN only
@@ -579,7 +597,7 @@ function snapshot(
       ...taskRows.flatMap((t) => {
         const f = refusalOf.get(t.id);
         if (t.state !== "ready" || f === undefined || f.passes < 3) return [];
-        if (!only(walk.ofTask(t.id)) || attempted.has(t.id)) return [];
+        if (!only(walk.ofTask(t.id)) || attempted.has(t.id) || settling.has(t.id)) return [];
         return [
           cook(f.since, {
             id: t.id,
@@ -628,14 +646,15 @@ function snapshot(
       }))
       .sort(byId),
     // ready, and nothing open is attempting it: the queue is what waits on a slot. The
-    // same condition `readyCandidates` dispatches on and nothing more — a second opinion
-    // here would be a task the allocator takes and the board never shows. The detail is
-    // why it is not running: the last pass's refusal, or its role.
+    // condition `readyCandidates` dispatches on, less `settling` — the one case where the
+    // allocator would take a task no person should be shown as unstarted, and the only
+    // second opinion this box is allowed. The detail is why it is not running: the last
+    // pass's refusal, or its role.
     //
     // Not `cook`ed: waiting for a slot is not being stuck — see MACHINE_SIDE. If it has
     // also stopped moving, `stale` says so and the fold has it from there.
     queued: taskRows
-      .filter((t) => t.state === "ready" && placed(walk.ofTask(t.id)) && !attempted.has(t.id))
+      .filter((t) => t.state === "ready" && placed(walk.ofTask(t.id)) && !attempted.has(t.id) && !settling.has(t.id))
       .map((t) => ({
         id: t.id,
         what: t.title,
@@ -750,16 +769,8 @@ export function recordRefusal(db: DatabaseSync, why: string, taskId: number): vo
     const q = queries(db);
     const held = q.selectFrom(refusals).select(["why", "since", "passes"]).where("task_id", "=", taskId).get();
     const same = held !== null && held.why === why ? held : null;
-    const row: RefusalRow = {
-      task_id: taskId,
-      why,
-      at,
-      since: same === null ? at : same.since,
-      passes: same === null ? 1 : same.passes + 1,
-    };
-    q.insertInto(refusals, row)
-      .onConflict(["task_id"], { why: row.why, at: row.at, since: row.since, passes: row.passes })
-      .run();
+    const row: RefusalRow = { task_id: taskId, why, at, since: same === null ? at : same.since, passes: same === null ? 1 : same.passes + 1 };
+    q.insertInto(refusals, row).onConflict(["task_id"], { why: row.why, at: row.at, since: row.since, passes: row.passes }).run();
   });
 }
 
@@ -786,10 +797,7 @@ const spend = (raw: string | null): Spend => {
     v = null;
   }
   if (v === null || typeof v !== "object") return NOTHING;
-  return {
-    tokens: typeof v.tokens === "number" ? v.tokens : 0,
-    seconds: typeof v.seconds === "number" ? v.seconds : 0,
-  };
+  return { tokens: typeof v.tokens === "number" ? v.tokens : 0, seconds: typeof v.seconds === "number" ? v.seconds : 0 };
 };
 
 /** What the record says about how one assignment is going: the half a list of four columns
@@ -811,11 +819,7 @@ export interface AssignmentFacts {
   readonly open: boolean;
 }
 
-export function assignmentFacts(
-  db: DatabaseSync,
-  id: number,
-  asOf: number = Date.now(),
-): AssignmentFacts | null {
+export function assignmentFacts(db: DatabaseSync, id: number, asOf: number = Date.now()): AssignmentFacts | null {
   const a = queries(db).selectFrom(assignments).where("id", "=", id).get();
   if (a === null) return null;
   const since = a.last_seen === null ? NaN : instant(a.last_seen);
@@ -832,9 +836,5 @@ export function assignmentFacts(
 /** How many assignments hold a slot. `waiting` counts: waiting on a person is exactly the
  *  resource the attention budget exists to bound. */
 export function openAssignments(db: DatabaseSync): number {
-  return queries(db)
-    .selectFrom(assignments)
-    .select(["phase"])
-    .all()
-    .filter((a) => OPEN_PHASES.includes(a.phase)).length;
+  return queries(db).selectFrom(assignments).select(["phase"]).all().filter((a) => OPEN_PHASES.includes(a.phase)).length;
 }
