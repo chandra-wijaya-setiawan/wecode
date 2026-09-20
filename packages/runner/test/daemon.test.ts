@@ -641,3 +641,132 @@ describe("the story-chores phase is a module of its own", () => {
     expect(after.state).toBe("done");
   });
 });
+
+/** The attempt-judging phase is the fourth of the tick's phases to leave `daemon.ts`. What
+ *  the phase *does* is already pinned by the end-to-end ticks above and by
+ *  `empty-attempt-refund.test.ts`, both of which ran unchanged through this move; what is
+ *  pinned here is that the move happened, that it took the phase whole — the pass and the
+ *  refund rule only it used — and that nothing else went with it. */
+describe("the attempt-judging phase is a module of its own", () => {
+  const src = (module: string): string =>
+    readFileSync(fileURLToPath(new URL(`../src/${module}`, import.meta.url)), "utf8");
+
+  /** The source with its prose taken out. Both files talk about attempts and about the
+   *  refund in comments, so every assertion below is made against the code. */
+  const code = (module: string): string =>
+    src(module).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+
+  it("exports one function, and it is the phase", () => {
+    const exported = [...code("tick/settle.ts").matchAll(/^export (?:async )?function (\w+)/gm)].map((m) => m[1]);
+    expect(exported).toEqual(["settleEnded"]);
+    // The one function, and the two types that say what it answers and what it needs.
+    expect([...code("tick/settle.ts").matchAll(/^export /gm)]).toHaveLength(3);
+  });
+
+  it("took the refund rule whole, and left it behind nowhere", () => {
+    const moved = code("tick/settle.ts");
+    expect(moved).toMatch(/function refundAttempt\(/);
+    // The rule the helper carries came with it, not just its name: the refund is owed once
+    // per branch tip, which is the read of the assignments after the last committed one.
+    expect(moved).toContain("findLastIndex");
+    expect(moved).toContain(`set({ attempts: t.attempts - 1 })`);
+    // And the pass's own two writes: the attempt's commit, and the sha on the assignment.
+    expect(moved).toContain("commitAttempt");
+    expect(moved).toContain(`set({ commit_sha: sha })`);
+
+    const left = code("daemon.ts");
+    for (const gone of ["refundAttempt", "commitAttempt", "findLastIndex", "attempts - 1"]) {
+      expect(left, `${gone} stayed in daemon.ts`).not.toContain(gone);
+    }
+  });
+
+  it("is called from the daemon where the daemon called it", () => {
+    const left = code("daemon.ts");
+    expect(left).toContain(`import { settleEnded, type Settled } from "./tick/settle.js"`);
+    // The one call site in `tick()` is untouched in its place, and the one wrapper is what
+    // it now reaches.
+    expect(left.match(/\breturn settleEnded\(/g)).toHaveLength(1);
+    expect(left).toMatch(/const settled = await this\.settleEnded\(\);/);
+    expect(left.match(/this\.settleEnded\(/g)).toHaveLength(1);
+    // And the phases either side of it in `tick()` did not move with it.
+    expect(left).toMatch(/const settled2 = this\.engine\.settle\(\);/);
+  });
+
+  /** The reads the phase shares with the rest of the runner stay the runner's: they are
+   *  handed in, not copied. A second copy of `slugsFor` — which walks the ERD from a task
+   *  up to its project's repo — in the new module would be the defect this asserts against. */
+  it("borrows the runner's ledger, trees and examiner rather than copying them", () => {
+    const moved = code("tick/settle.ts");
+    for (const shared of ["slugsFor", "treesFor", "runTaskTests"]) {
+      expect(moved, `${shared} is declared again in the new module`).not.toMatch(
+        new RegExp(`(?:function|const)\\s+${shared}\\b`),
+      );
+      expect(moved, `${shared} is not handed in`).toContain(`host.${shared}`);
+    }
+    // One definition of the columns and of the shape a script run reports, not two.
+    expect(moved).toMatch(/import \{ tbl.*\} from "\.\.\/daemon\.js"/);
+    expect(moved).not.toContain("table<");
+    expect(moved).not.toMatch(/interface ScriptReport\b/);
+  });
+
+  it("moves no other phase", () => {
+    const left = code("daemon.ts");
+    for (const phase of [
+      "landDeliveredStories",
+      "allocateOne",
+      "landDoneTasks",
+      "performChores",
+      "enforceRetryLimit",
+      "storyChoresPass",
+      "storyProvingPass",
+      "proveRedAtBase",
+      "slugsFor",
+    ]) {
+      expect(left, `${phase} left daemon.ts`).toMatch(new RegExp(`private (?:async )?${phase}\\(`));
+    }
+  });
+
+  it("still commits the attempt and lets its tree go on a tick", async () => {
+    const tick = await runner().tick();
+
+    // The pass's own answer, reaching the report through the daemon's delegation: the
+    // assignment it committed, and the task test it judged in the tree before it went.
+    expect(tick.committed).toEqual([tick.allocated.created]);
+    const a = db.prepare("SELECT worktree, commit_sha FROM assignment WHERE id = ?").get(tick.committed[0]) as {
+      worktree: string;
+      commit_sha: string;
+    };
+    expect(a.commit_sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(existsSync(a.worktree)).toBe(false);
+    expect(tick.scripts.passed.length).toBeGreaterThan(0);
+  });
+
+  /** The refund is the half of the phase no other test here reaches: a worker that writes
+   *  nothing commits nothing, and the retry the foreman counted comes back. */
+  it("still refunds the attempt an empty run used", async () => {
+    class Idle implements WorkerAdapter {
+      readonly kind = "agent";
+      async start(): Promise<Observation> {
+        return { phase: "succeeded", session: "s1", spent: { tokens: 1, seconds: 1 }, commit: null };
+      }
+      async poll(w: Work): Promise<Observation> {
+        return { phase: "running", session: w.session ?? "", spent: { tokens: 0, seconds: 0 } };
+      }
+      async answer(w: Work): Promise<Observation> {
+        return this.poll(w);
+      }
+      async kill(): Promise<void> {}
+    }
+    const tick = await new Runner(db, {
+      budget: DEFAULT_BUDGET,
+      repoRoot: repo,
+      worktreeRoot: join(repo, ".wecode/worktrees"),
+      adapters: { agent: new Idle() },
+      integrationBranch: "main",
+    }).tick();
+
+    expect(tick.committed).toEqual([]);
+    const t = db.prepare("SELECT attempts FROM task WHERE id = ?").get(task) as { attempts: number };
+    expect(t.attempts).toBe(0);
+  });
+});

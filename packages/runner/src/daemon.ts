@@ -44,6 +44,7 @@ import { attemptLanding, isLanded, LAND_CHECK } from "./land-chore.js";
 import { proveRedAtBase, type RedAtBase } from "./tick/red-at-base.js";
 import { proveStories, type Proven } from "./tick/prove-stories.js";
 import { raiseStoryChores } from "./tick/story-chores.js";
+import { settleEnded, type Settled } from "./tick/settle.js";
 
 const exec = promisify(execFile);
 
@@ -275,7 +276,7 @@ export const reasonOf = (err: unknown): string => {
   return said.split("\n")[0] ?? "git said nothing";
 };
 
-export type { RedAtBase, Proven };
+export type { RedAtBase, Proven, Settled };
 
 export interface RunnerOptions {
   readonly budget: BudgetConfig;
@@ -603,62 +604,16 @@ export class Runner {
     return free.reduce((best, id) => (idle(id) < idle(best) || (idle(id) === idle(best) && id < best) ? id : best));
   }
 
-  /** An attempt that has ended: commit whatever it wrote onto its task branch, then let the
-   *  tree go. The branch is the surviving copy; the directory is a checkout held against a
-   *  retry nobody has promised. */
-  private async settleEnded(): Promise<{ committed: number[]; scripts: ScriptReport }> {
-    const rows = queries(this.db)
-      .selectFrom(tbl.assignment).select(["id", "worktree", "objective_id", "phase"]).where("objective_type", "=", "task").all()
-      .filter((a) => ENDED_PHASES.includes(a.phase) && a.worktree !== "")
-      .map((a) => ({ id: a.id, worktree: a.worktree, task: a.objective_id }));
-
-    const committed: number[] = [];
-    const passed: number[] = [];
-    const failed: number[] = [];
-    const skipped: number[] = [];
-    const refused: Refused[] = [];
-
-    for (const row of rows) {
-      if (!existsSync(row.worktree)) continue;
-      const slugs = this.slugsFor(row.task);
-      if (slugs === null) continue;
-      try {
-        // The attempt is judged in the tree it wrote in, before that tree goes.
-        // The assignment is what makes this attempt distinct: a retry cuts a fresh tree at
-        // the same branch tip, so the tip alone would read as "already judged".
-        const r = await this.examiner.runTaskTests(row.task, row.worktree, { attempt: row.id });
-        passed.push(...r.passed);
-        failed.push(...r.failed);
-        skipped.push(...r.skipped);
-        refused.push(...(r.refused ?? []));
-
-        const trees = this.treesFor(slugs.repo);
-        const sha = await trees.commitAttempt(row.worktree, `task/${slugs.task}`, `${slugs.task}: attempt`);
-        if (sha === null) this.refundAttempt(row.task, row.id);
-        else {
-          queries(this.db).update(tbl.assignment).set({ commit_sha: sha }).where("id", "=", row.id).run();
-          committed.push(row.id);
-        }
-        await trees.release(row.worktree);
-      } catch {
-        // leave the tree standing rather than lose work nobody has seen
-      }
-    }
-    return { committed, scripts: { passed, failed, skipped, refused } };
-  }
-
-  /** Give back the retry the foreman counted, when the attempt committed nothing — once per
-   *  branch tip, and the next empty attempt at that tip is counted. Refunding every one is a
-   *  task that never exhausts: an agent that keeps writing nothing loops on a tip nobody
-   *  moved. The tip moves only when an attempt commits, so the assignments after the last one
-   *  with a `commit_sha` are this tip's empty run, and one of them has had the refund. */
-  private refundAttempt(task: number, attempt: number): void {
-    const q = queries(this.db);
-    const mine = q.selectFrom(tbl.assignment).select(["id", "objective_id", "commit_sha"]).where("objective_type", "=", "task").all().filter((a) => a.objective_id === task && a.id < attempt).sort(byId);
-    if (mine.length > mine.findLastIndex((a) => (a.commit_sha ?? "") !== "") + 1) return;
-    const t = q.selectFrom(tbl.task).select(["attempts"]).where("id", "=", task).get();
-    if (t === null || t.attempts <= 0) return;
-    q.update(tbl.task).set({ attempts: t.attempts - 1 }).where("id", "=", task).run();
+  /** The phase itself lives in `tick/settle.ts` — the pass and the refund rule only it
+   *  used. What is left here is what the rest of the runner already owned: the walk up the
+   *  ERD to a task's slugs, the trees, and the examiner. */
+  private settleEnded(): Promise<Settled> {
+    return settleEnded({
+      db: this.db,
+      slugsFor: (taskId) => this.slugsFor(taskId),
+      treesFor: (repo) => this.treesFor(repo),
+      runTaskTests: (task, tree, at) => this.examiner.runTaskTests(task, tree, at),
+    });
   }
 
   /** Every task that has used its attempts while its story is still open.
