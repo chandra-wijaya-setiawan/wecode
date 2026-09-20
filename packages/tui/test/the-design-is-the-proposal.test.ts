@@ -115,13 +115,9 @@ describe("the design is the proposal", () => {
     expect(spend.entry).toContain("{gauge}");
   });
 
-  it("shares one head line between queue and cooking, a row each", () => {
-    const shared = proposal.shared_heads.find((s: any) =>
-      ["queue", "cooking"].every((name) => s.sections.includes(name)),
-    );
-    expect(shared).toBeTruthy();
-    expect(shared.head).toBe("one_line");
-    expect(shared.rows_each).toBe(1);
+  it("gives every section its own head, so queue and cooking share none", () => {
+    expect(proposal.heads).toBe("per_section");
+    expect(proposal.shared_heads).toEqual([]);
   });
 
   it("tallies planned, delivered, dropped, tree and all on one line", () => {
