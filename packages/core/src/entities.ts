@@ -61,6 +61,21 @@ export interface AcceptanceCriteria extends Stateful {
   readonly statement: string;
 }
 
+/** The mockup a person signed, before anybody drew it. It hangs off a story because that is
+ *  the level a person decides at: "is this what the screen should look like" is a question
+ *  about the story, not about whichever task happens to draw a box.
+ *
+ *  `signed_by` and `signed_at` are null together until somebody signs, and a design carries
+ *  its signature rather than pointing at an assignment's answer: an approval is a moment, a
+ *  signature is the standing fact that outlives it. */
+export interface Design extends Stateful {
+  readonly story_id: number;
+  readonly title: string;
+  readonly mockup: string;
+  readonly signed_by: string | null;
+  readonly signed_at: string | null;
+}
+
 /** acceptance_test hangs off an acceptance_criteria; task_test off a task. Same shape,
  *  same states, different parent — which is why they share one interface. */
 export interface Test extends Stateful {
@@ -157,6 +172,7 @@ export const ROW_FIELDS: Readonly<Record<string, readonly string[]>> = {
   story: fields<Story>()({ id: true, slug: true, created_at: true, updated_at: true, state: true, epic_id: true, title: true }),
   requirement: fields<Requirement>()({ id: true, slug: true, created_at: true, updated_at: true, state: true, story_id: true, statement: true }),
   acceptance_criteria: fields<AcceptanceCriteria>()({ id: true, slug: true, created_at: true, updated_at: true, state: true, requirement_id: true, statement: true }),
+  design: fields<Design>()({ id: true, slug: true, created_at: true, updated_at: true, state: true, story_id: true, title: true, mockup: true, signed_by: true, signed_at: true }),
   acceptance_test: fields<Test>()({ id: true, slug: true, created_at: true, updated_at: true, state: true, parent_id: true, statement: true, kind: true, artefact: true, last_run_at: true, last_output: true }),
   task_test: fields<Test>()({ id: true, slug: true, created_at: true, updated_at: true, state: true, parent_id: true, statement: true, kind: true, artefact: true, last_run_at: true, last_output: true }),
   task: fields<Task>()({ id: true, slug: true, created_at: true, updated_at: true, state: true, acceptance_test_id: true, title: true, scope: true, role: true, budget: true, attempts: true, max_retry: true }),
