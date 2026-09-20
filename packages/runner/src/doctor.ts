@@ -1,20 +1,22 @@
 import {
+  checkRunner,
   INVARIANTS,
   keepUnlanded,
   noWorkerFree,
   now,
+  readLease,
   REACHED_INSIDE_ANOTHER_MERGE,
   storyBranch,
   transact,
   type Ancestry,
   type RecordNode,
+  type RunnerBuild,
   type Snapshot,
   type Violation,
 } from "@wecode/core";
-// The dialect is core's and is deliberately not on core's barrel: `index.ts` exports the
-// things a client speaks the record in, and a query layer is not one of them. Reached by the
-// path core builds it to, which is the one specifier that resolves without widening that
-// barrel for every consumer.
+// The dialect is core's and deliberately not on core's barrel: `index.ts` exports the things
+// a client speaks the record in, and a query layer is not one of them. Reached by the path
+// core builds it to, the one specifier that resolves without widening that barrel.
 import { excluded, queries, table, type Dialect } from "@wecode/core/dist/db.js";
 import { fileCeilingInvariant } from "./ceiling.js";
 import { execFileSync } from "node:child_process";
@@ -22,14 +24,10 @@ import type { DatabaseSync } from "node:sqlite";
 
 /** docs/design/19, the check, on the runner's tick.
  *
- *  The invariant set is core's and is run here once a tick. What comes back is written to
- *  one runner-owned table so a view can say what drifted without running eight queries of
- *  its own. Nothing else is written: no entity is touched, no state moves, no chore is
- *  proposed.
- *
- *  A doctor failure never stops a tick: a check that could take the runner down with it
- *  would be a worse problem than the drift it looks for, so every invariant runs inside its
- *  own boundary and a throw becomes a line in the report rather than an exception. */
+ *  Core's set, run once a tick and written to one runner-owned table so a view can say what
+ *  drifted without eight queries of its own. Nothing else is written: no entity is touched,
+ *  no state moves, no chore is proposed. A failure never stops a tick — every invariant runs
+ *  inside its own boundary and a throw becomes a line in the report rather than an exception. */
 
 /** One invariant: the sentence and the function that finds who breaks it. */
 export interface Invariant {
@@ -39,14 +37,11 @@ export interface Invariant {
 
 /** A ready task no pass can dispatch, and the refusal that explains it.
  *
- *  The allocator refuses a task it cannot place with `no worker free for role <role>`, and
- *  clears that reason on the next tick. When the workforce holds nobody of the role at all
- *  the sentence is true every pass and for ever: the task sits `ready` for ever, and the
- *  refusal reads like a queue rather than a stop. `system` is the live case.
- *
- *  Pure over the snapshot — the record says both the task's role and every worker's — so
- *  this is an invariant like any other. It is the runner's rather than core's only because
- *  core's set is what `wecode doctor` and the tick are held to sharing verbatim. */
+ *  The allocator refuses a task it cannot place with `no worker free for role <role>` and
+ *  clears that reason next tick. With nobody of the role in the workforce that sentence is
+ *  true for ever: the task sits `ready` and the refusal reads like a queue rather than a
+ *  stop. `system` is the live case. Pure over the snapshot, and the runner's rather than
+ *  core's only because core's set is what `wecode doctor` and the tick share verbatim. */
 export const READY_TASK_CHECK = "ready_task_can_be_dispatched";
 
 export const readyTaskCanBeDispatched: Invariant = {
@@ -71,8 +66,7 @@ export const readyTaskCanBeDispatched: Invariant = {
 
 /** The pure set: core's, plus the checks that are the runner's own. The file-length check is
  *  not here — it reads a tree rather than the record, so it is built per repository and added
- *  to the Doctor's own default below. `runChecks` and `checksOf` still default to core's set,
- *  the one the command and the tick are held to agreeing on. */
+ *  to the Doctor's own default below. `runChecks` and `checksOf` still default to core's set. */
 export const RUNNER_INVARIANTS: readonly Invariant[] = [...INVARIANTS, readyTaskCanBeDispatched];
 
 /** The columns this module reads, and only those. A narrow declaration is not a second copy
@@ -149,9 +143,8 @@ interface LedgerRow {
 }
 const ledger = table<LedgerRow>("ledger", ["id", "entity", "entity_id", "verb", "from_state", "to_state", "actor", "at"]);
 
-/** `rowid` is the order this table is read back in and is a real column of it; `table_info`
- *  does not list it, which is why the test that holds these lists against the schema names
- *  it as the one exception. */
+/** `rowid` is the order this table is read back in and a real column of it; `table_info` does
+ *  not list it, so the test holding these lists against the schema names it as the exception. */
 interface ViolationRow {
   rowid?: number;
   invariant: string;
@@ -200,10 +193,9 @@ const hasTable = (db: DatabaseSync, name: string): boolean =>
     .all()
     .some((r) => SELECTABLE.includes(r.type));
 
-/** Where each entity's rows come from, flattened to the node shape. The one place in the
+/** Where each entity's rows come from, flattened to the node shape — the one place in the
  *  runner that knows the shape of the tables. Closures rather than a table name and a foreign
- *  key name, because `parent_id` is an alias and the dialect has none: each entity says which
- *  of its own columns is the parent, where it can be checked against the column declared. */
+ *  key name, because `parent_id` is an alias and the dialect has none. */
 type Node = Omit<RecordNode, "entity">;
 
 const TABLES: readonly { entity: RecordNode["entity"]; nodes: (q: Dialect) => readonly Node[] }[] = [
@@ -247,9 +239,8 @@ const step = <T>(
     }),
   );
 
-/** Every task, against the story it proves. The four joins the two queries below used to each
- *  spell, walked once here: the dialect has no JOIN, and one walk is one copy of the chain
- *  rather than two that have to agree. */
+/** Every task, against the story it proves. The dialect has no JOIN, and one walk is one copy
+ *  of the chain rather than two that have to agree. */
 function storyOfTask(q: Dialect): Map<number, number> {
   const byRequirement = new Map(
     q
@@ -333,6 +324,20 @@ export interface Pass {
   readonly looked: readonly LookedAt[];
 }
 
+/** The one check whose subject is the process rather than the record. Core owns the
+ *  sentence; the runner is the half that can name the runner of record. */
+export const BUILD_CHECK = "runner_build_is_current";
+
+/** What the process holding this workspace says it is running, read off the lease — the
+ *  only place a live process describes its own build. `null` is nobody to ask: no lease
+ *  table, or no holder, which is not the same fact as a build that is current. */
+export function runningBuild(db: DatabaseSync): RunnerBuild | null {
+  const held = hasTable(db, "runner_lease") ? readLease(db) : null;
+  if (held === null) return null;
+  const { holder, buildSha, buildBehind } = held;
+  return { holder, ...(buildSha === undefined ? {} : { buildSha }), ...(buildBehind === undefined ? {} : { behind: buildBehind }) };
+}
+
 /** The check, wired to a record. Runner-owned, like `landed_branch`: the ledger says what is
  *  true of the work, this says what this pass observed about it. Rewritten whole every tick —
  *  a violation that has been fixed is not history worth keeping. */
@@ -395,7 +400,13 @@ export class Doctor {
     }
     const world = worldOf(this.git, this.base);
     const found = runChecks(s, world, this.invariants);
-    return { found, looked: lookedAt(this.invariants, world, found) };
+    // Appended rather than folded into the set: its subject is not in the snapshot, and a
+    // workspace nobody holds has no runner for the pass to say it looked at.
+    const runner = runningBuild(this.db);
+    const build = checkRunner(runner);
+    const row = { invariant: BUILD_CHECK, world: false, reachable: true, found: build.length };
+    const looked = [...lookedAt(this.invariants, world, found), ...(runner === null ? [] : [row])];
+    return { found: [...found, ...build], looked };
   }
 
   /** Replaced, not appended: the answer to "what is wrong now" is this pass and only this
@@ -429,14 +440,11 @@ export class Doctor {
 
 /** docs/design/19, the healing, and one fix of it.
  *
- *  `delivered_story_has_landed` has been broken for five stories that did land: the marker
- *  is written only on the path that merges from now on, and theirs merged before that path
- *  existed. Their land commits are in the base, one each, subject `land story/<slug>`, so
- *  the sha is read off the world and copied onto the record rather than guessed.
- *
- *  Read-only on git, additive on the record, a ledger line for every marker written, and
- *  the ambiguous cases — no such commit, or more than one — refused rather than resolved:
- *  an unexplained fix is worse than visible drift. */
+ *  `delivered_story_has_landed` broke for five stories that did land: the marker is written
+ *  only on the path that merges from now on, and theirs merged before it existed. Their land
+ *  commits are in the base, subject `land story/<slug>`, so the sha is read off the world
+ *  rather than guessed. Read-only on git, additive on the record, a ledger line for every
+ *  marker written, and the ambiguous cases — none, or more than one — refused not resolved. */
 
 /** git, read-only, as the heal is allowed to see it: argv in, stdout out. */
 export type Git = (args: readonly string[]) => string;
@@ -498,9 +506,9 @@ export function worldOf(git: Git, base = "HEAD"): World {
 }
 
 /** One pass: core's pure set, each check inside its own boundary, then the one question that
- *  needs the world. The tick and `wecode doctor` run exactly this. A check that throws is not
- *  silently dropped — it becomes a violation naming itself, because an invariant nobody can
- *  evaluate needs seeing as much as one that failed. */
+ *  needs the world. The tick and `wecode doctor` run exactly this. A check that throws becomes
+ *  a violation naming itself: an invariant nobody can evaluate needs seeing as much as one
+ *  that failed. */
 export function runChecks(
   s: Snapshot,
   world: World,
@@ -516,15 +524,13 @@ export function runChecks(
   try {
     return keepUnlanded(found, world.ancestry);
   } catch (err) {
-    // git could not be asked. The worst case is what core already said, and a report that
-    // over-accuses is better than a pass that dies of a missing repository.
+    // git could not be asked, and over-accusing beats dying of a missing repository.
     return [...found, broken(WORLD_CHECK, err)];
   }
 }
 
-/** What a pass looked at, built from the set it ran and what that pass returned. Derived
- *  rather than collected inside `runChecks`, so the two halves that share that function —
- *  the tick and `wecode doctor` — cannot come apart over a count. */
+/** What a pass looked at, built from the set it ran and what it returned. Derived rather than
+ *  collected inside `runChecks`, so the tick and `wecode doctor` cannot differ over a count. */
 export function lookedAt(
   invariants: readonly Invariant[],
   world: World,
@@ -535,8 +541,7 @@ export function lookedAt(
   return checksOf(invariants).map((c) => ({
     invariant: c.name,
     world: c.world,
-    // A pure check needs nothing of the world, so it is reachable in the only sense that
-    // applies to it: everything it reads was there.
+    // A pure check needs nothing of the world: everything it reads was there.
     reachable: c.world ? world.reachable : true,
     found: counted.get(c.name) ?? 0,
   }));
@@ -569,9 +574,8 @@ export interface HealReport {
   readonly left: readonly LeftAlone[];
 }
 
-/** The safe heal for `delivered_story_has_landed`, applied to what a check already found.
- *  This takes its violations as an argument rather than running a pass of its own, so
- *  nothing here can change what was reported. */
+/** The safe heal for `delivered_story_has_landed`, applied to what a check already found. Its
+ *  violations are an argument, not a pass of its own, so nothing here changes what was said. */
 export function healLandedMarkers(
   db: DatabaseSync,
   found: readonly Violation[],
@@ -590,8 +594,7 @@ export function healLandedMarkers(
       written.push({ story: v.id, slug: v.slug, sha: shas[0] as string });
       continue;
     }
-    // No commit to copy, but the branch is in: the story reached the base inside somebody
-    // else's merge. No sha is the answer, so the ledger carries what is true instead.
+    // No commit to copy, but the branch is in: it reached the base inside another merge.
     if (ancestryOf(git, base)(storyBranch(v.slug)) === "in") {
       writeReached(db, v.id);
       reached.push({ story: v.id, slug: v.slug });
@@ -602,8 +605,7 @@ export function healLandedMarkers(
   return { written, reached, left };
 }
 
-/** The ledger line for a story that is in the base with nothing to name. Said once: a second
- *  heal of the same story would be the same sentence again. */
+/** The ledger line for a story in the base with nothing to name. Said once, not every heal. */
 function writeReached(db: DatabaseSync, storyId: number): void {
   const q = queries(db);
   const said = q
@@ -629,8 +631,8 @@ const healed = (storyId: number, to: string, at: string): LedgerRow => ({
   at,
 });
 
-/** Commits in the base whose subject is exactly `land story/<slug>`. `--grep` narrows, the
- *  comparison decides: `land story/a` is a substring of `land story/ab`. */
+/** Commits in the base with subject exactly `land story/<slug>`: `--grep` narrows, the
+ *  comparison decides, because `land story/a` is a substring of `land story/ab`. */
 function landCommits(git: Git, base: string, slug: string): readonly string[] {
   const subject = `land story/${slug}`;
   const out = git(["log", "--format=%H%x1f%s", "--fixed-strings", `--grep=${subject}`, base]);
@@ -646,8 +648,8 @@ function landCommits(git: Git, base: string, slug: string): readonly string[] {
 const refusal = (n: number, base: string, slug: string): string | null =>
   n === 1 ? null : `${n === 0 ? "no commit" : `${n} commits`} in ${base} with subject 'land story/${slug}'`;
 
-/** The marker hangs off the story's tasks, so a story with none has nowhere to carry it.
- *  That is drift of its own shape, and not this heal's to fix. */
+/** The marker hangs off the story's tasks: one with none has nowhere to carry it, which is
+ *  drift of its own shape and not this heal's to fix. */
 function emptyStory(db: DatabaseSync, storyId: number): string | null {
   return tasksOf(db, storyId).length === 0 ? "no task under the story to carry the marker" : null;
 }
@@ -660,11 +662,9 @@ function tasksOf(db: DatabaseSync, storyId: number): readonly number[] {
 }
 
 /** The marker the lander writes, written the same way, plus the line saying the doctor wrote
- *  it and what it read the sha off. One transaction: a marker with no ledger line behind it
- *  is exactly the unexplained fix 19 forbids. */
+ *  it and off what. One transaction: a marker with no ledger line is the fix 19 forbids. */
 function writeMarker(db: DatabaseSync, storyId: number, slug: string, sha: string): void {
-  // DDL, which the dialect does not spell and should not: a table this module owns is
-  // created by this module, and there is no column name here for a typecheck to catch.
+  // DDL, which the dialect does not spell: a table this module owns, created by it.
   db.exec(
     `CREATE TABLE IF NOT EXISTS landed_branch (
        task_id   INTEGER PRIMARY KEY,
