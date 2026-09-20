@@ -52,6 +52,7 @@ import { plan } from "./plan.js";
 import { doctor } from "./doctor.js";
 import { explore } from "./explore.js";
 import { delivered as deliveredStories } from "./delivered.js";
+import { design as projector } from "./ui.js";
 
 const DB = (): string => currentDatabase();
 
@@ -85,7 +86,7 @@ function dispatch(argv: readonly string[]): number {
   if (head === "land") return land(rest);
   if (head === "onboard") return onboard(rest);
   if (head === "plan") return plan(rest);
-  if (head === "explore") return exploring(rest);
+  if (head === "explore") return later(explore(rest));
   if (head === "workspaces") return workspaces();
   if (head === "tree") return showTree(rest);
   if (head === "watch") return watch(rest);
@@ -98,10 +99,10 @@ function dispatch(argv: readonly string[]): number {
   return verb(head, rest);
 }
 
-/** The one command whose answer is not known by the time dispatch returns.
+/** The commands whose answer is not known by the time dispatch returns.
  *
- *  A repository index builds a snapshot before it can answer anything, so `explore` is
- *  async and `run()` is not — bin.ts assigns what run() returns straight to
+ *  A repository index builds a snapshot, and the projector loads `@wecode/ui` at the moment
+ *  of use, so both are async and `run()` is not — bin.ts assigns what run() returns straight to
  *  process.exitCode, and a promise is not an exit code. So the command settles the exit
  *  code itself once the index has answered; node does not exit while that promise is
  *  outstanding, and nothing after it here overwrites a non-zero one.
@@ -109,15 +110,15 @@ function dispatch(argv: readonly string[]): number {
  *  A caller who needs the answer rather than the side effect awaits `answered()`. */
 let pending: Promise<number> = Promise.resolve(0);
 
-function exploring(args: readonly string[]): number {
-  pending = explore(args).then((code) => {
+function later(answer: Promise<number>): number {
+  pending = answer.then((code) => {
     if (code !== 0) process.exitCode = code;
     return code;
   });
   return 0;
 }
 
-/** What the last `wecode explore` answered, once it has. Zero when none has been asked. */
+/** What the last such command answered, once it has. Zero when none has been asked. */
 export const answered = (): Promise<number> => pending;
 
 /** `wecode init [name] [--workspace <name>]` — an empty workspace, and nothing else.
@@ -1250,6 +1251,13 @@ function verb(entity: string, rest: readonly string[]): number {
   const [name, ...args] = rest;
   if (name === undefined) return fail(`wecode ${entity} <verb> …`);
 
+  // `design` is the one word that names both a record and a drawing. `show` is the
+  // drawing — a screen declared in a file, projected to an svg, no ledger involved — and
+  // every other verb, `create` first, is the row, so it goes on down this function.
+  // The split is here rather than in dispatch() so the row stays the default and the
+  // drawing the exception, both read in one place.
+  if (entity === "design" && name === "show") return later(projector([name, ...args]));
+
   // parseArgs would call --help an unknown option. It is the one place a newcomer looks
   // for create's flags, so answer it here, before the flags are parsed at all.
   const asked = args.some((a) => a === "--help" || a === "-h");
@@ -1482,12 +1490,8 @@ function create(entity: string, args: readonly string[]): number {
     args: [...args],
     allowPositionals: true,
     options: {
-      parent: { type: "string" },
-      kind: { type: "string" },
-      artefact: { type: "string" },
-      role: { type: "string" },
-      path: { type: "string" },
-      project: { type: "string" },
+      parent: { type: "string" }, kind: { type: "string" }, artefact: { type: "string" },
+      role: { type: "string" }, path: { type: "string" }, project: { type: "string" },
     },
   });
 
@@ -1720,13 +1724,9 @@ function usage(): number {
 /** Which flags each entity's create reads, and what one call looks like. Kept beside the
  *  switch in create() — the two must agree, and nothing else can check that they do. */
 const CREATE_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  workspace: ["path"],
-  project: ["parent", "path"],
-  release: ["parent"],
-  epic: ["parent"],
-  story: ["parent"],
-  requirement: ["parent"],
-  acceptance_criteria: ["parent"],
+  workspace: ["path"], project: ["parent", "path"],
+  release: ["parent"], epic: ["parent"], story: ["parent"],
+  requirement: ["parent"], acceptance_criteria: ["parent"],
   acceptance_test: ["parent", "kind", "artefact"],
   task_test: ["parent", "kind", "artefact"],
   task: ["parent", "role"],
