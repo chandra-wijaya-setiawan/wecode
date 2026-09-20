@@ -20,27 +20,18 @@ import {
 
 /** `plan.ts` is one of the longest files in the tree, and the rules that refuse a plan for
  *  what its scopes and tests say are the largest thing in it that the ledger never touches.
- *  They moved to `plan/refusals.ts` whole. This proves both halves of that: the rules still
- *  refuse what they refused, and the file they left is shorter by the move. */
+ *  They moved to `plan/refusals.ts` whole. This proves the move: the rules still refuse what
+ *  they refused, and `plan.ts` no longer defines them.
+ *
+ *  How short the move made `plan.ts`, and how long `plan/refusals.ts` may be, are not
+ *  numbers here. They are rows in `packages/core/config/project.yaml`, read back by
+ *  `a-size-bar-comes-from-config` — one place for the policy, owned by the people who own
+ *  the tree rather than by this file. */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const source = (path: string): string => readFileSync(resolve(HERE, "..", path), "utf8");
-const lines = (text: string): number => text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
-
-/** What `plan.ts` may be. Below the 1281 lines it was before the refusals left it, so the
- *  move cannot be undone quietly; above what it is now, so tidying one more line here is
- *  not a test to edit. */
-const BUDGET = 1150;
 
 describe("the refusals left plan.ts", () => {
-  it("is shorter than the 1281 lines it was, and under its budget", () => {
-    expect(lines(source("src/plan.ts"))).toBeLessThanOrEqual(BUDGET);
-  });
-
-  it("puts them in plan/refusals.ts, which meets the ceiling every new file meets", () => {
-    expect(lines(source("src/plan/refusals.ts"))).toBeLessThanOrEqual(400);
-  });
-
   it("defines none of them any more, and imports them by name", () => {
     const plan = source("src/plan.ts");
     for (const rule of ["collisions", "owners", "newModules", "shared", "overlaps", "files", "artefacts", "needs", "workspace", "touches", "runs", "reach"]) {
