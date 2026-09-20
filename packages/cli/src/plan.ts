@@ -515,15 +515,15 @@ function files(artefact: string): readonly string[] {
 
 /** A test command naming a file that is not there and that nobody is scoped to write runs
  *  no tests and passes — `vitest run maler` is green forever. It is refused by path, while
- *  the whole file is still being read, because a typo found at plan time costs a keystroke
- *  and the same typo found at pass time costs a story. A path some task under it will write
- *  is not yet a file and is not a mistake. */
-function artefacts(test: string | null, scope: readonly string[], where: string, say: string[]): void {
-  if (test === null) return;
-  for (const path of files(test)) {
-    if (existsSync(resolve(process.cwd(), path))) continue;
+ *  the whole file is still being read, because a typo costs a keystroke here and a story at
+ *  pass time. A path some task under it will write is not yet a file and is not a mistake.
+ *  `gate` adds the converse, for the caller that has a scope of its own: a test file that is
+ *  there but outside that scope is a gate the task may not edit. */
+function artefacts(test: string | null, scope: readonly string[], where: string, say: string[], gate = false): void {
+  for (const path of test === null ? [] : files(test)) {
     if (scope.some((g) => matchesGlob(path, g))) continue;
-    say.push(`${where}: test: no file matches ${path}`);
+    if (!existsSync(resolve(process.cwd(), path))) say.push(`${where}: test: no file matches ${path}`);
+    else if (gate && /\.(test|spec)\.[cm]?[jt]sx?$/.test(path)) say.push(`${where}: test: ${path} is a gate this scope cannot write`);
   }
 }
 
@@ -669,7 +669,7 @@ function task(
     if (!within.ok) say.push(`${where}: ${within.why}`);
   }
 
-  if (m["test"] !== undefined) artefacts(test, scope ?? [], where, say);
+  if (m["test"] !== undefined) artefacts(test, scope ?? [], where, say, true);
 
   // Unlike the path check above, this one judges the fallback test too: a project-wide command
   // that narrows to one package is as unreachable as one the file spells out.
