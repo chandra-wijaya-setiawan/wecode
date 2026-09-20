@@ -1,5 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
-import { choreFor, choreRefusal, closeChore, ensureChore, recordChoreRefusal } from "@wecode/core";
+import {
+  choreFor,
+  choreRefusal,
+  closeChore,
+  ensureChore,
+  recordChoreRefusal,
+} from "@wecode/core";
 import { queries } from "@wecode/core/dist/db.js";
 import type { Trees } from "../git.js";
 // The table descriptors and the shape the proving pass reports stay in `daemon.ts`, where
@@ -24,6 +30,7 @@ export interface StoryChoresHost {
   readonly mergesCleanly: (repo: string, base: string, branch: string) => Promise<boolean>;
   readonly orphanedBy: (repo: string, branch: string, storyId: number) => Promise<string | null>;
 }
+
 
 /** docs/design/18. A story's branch will not merge into the base, or its tree will not
  *  take the base. Either way wecode owes itself the merge nobody can make deterministically.

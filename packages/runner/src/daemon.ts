@@ -3,26 +3,17 @@ import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import {
   applyChore,
-  choreAttempts,
-  choreById,
-  CHORE_KIND_DEFS,
-  performedByTheRunner,
-  clearChoreRefusal,
   clearRefusal,
   choreFor,
-  choreRefusal,
   closeChore,
   Engine,
   ensureChore,
   loadRoles,
-  Maker,
   now,
   recordChoreRefusal,
   recordRefusal,
-  reraiseChore,
   Verbs,
   type Budget,
-  type Chore,
   type ChoreKind,
   type RoleConfig,
   type Scope,
@@ -44,6 +35,7 @@ import { attemptLanding, isLanded, LAND_CHECK } from "./land-chore.js";
 import { proveRedAtBase, type RedAtBase } from "./tick/red-at-base.js";
 import { proveStories, type Proven } from "./tick/prove-stories.js";
 import { raiseStoryChores } from "./tick/story-chores.js";
+import { beginLandChore, landedAttempts, performChores as performChorePass, type ChoreHost } from "./tick/perform-chores.js";
 import * as refresh from "./tick/refresh.js";
 import { settleEnded, type Settled } from "./tick/settle.js";
 
@@ -131,8 +123,8 @@ export const tbl = {
 
 /** An assignment nobody has finished with, and one that has ended. Two names for one rule
  *  that used to be spelled out in five query strings. */
-const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
-const ENDED_PHASES: readonly string[] = ["succeeded", "failed"];
+export const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
+export const ENDED_PHASES: readonly string[] = ["succeeded", "failed"];
 
 const byId = (a: { id: number }, b: { id: number }): number => a.id - b.id;
 
@@ -727,34 +719,43 @@ export class Runner {
       projectOf: (story) => this.projectOf(story),
       treesFor: (repo) => this.treesFor(repo),
       worktreeRoot: (repo) => this.worktreeRoot(repo),
-      hasCommit: (repo, ref) => this.hasCommit(repo, ref),
-      contains: (repo, branch, ref) => this.contains(repo, branch, ref),
+      hasCommit: (repo, ref) => refresh.hasCommit(repo, ref),
+      contains: (repo, branch, ref) => refresh.contains(repo, branch, ref),
       runAcceptanceTests: (story, tree) => this.examiner.runAcceptanceTests(story, tree),
     });
   }
 
-  private hasCommit(repo: string, ref: string): Promise<boolean> {
-    return refresh.hasCommit(repo, ref);
+  /** Both chore phases live in `tick/story-chores.ts` — raising the `refresh` and `merge`
+   *  rules, and performing what is owed. What is left here is what the rest of the runner
+   *  already owned: the walk up the ERD, the trees, the graph reads, the fleet and the
+   *  roles file, handed in as this one host rather than copied into the module. */
+  private choreHost(): ChoreHost {
+    return {
+      db: this.db,
+      repoRoot: this.opts.repoRoot,
+      maxOpen: this.opts.budget.max_open,
+      choreBudget: this.opts.choreBudget ?? CHORE_BUDGET,
+      projectOf: (story) => this.projectOf(story),
+      treesFor: (repo) => this.treesFor(repo),
+      worktreeRoot: (repo) => this.worktreeRoot(repo),
+      criteriaOfStory: (storyId) => this.criteriaOfStory(storyId),
+      freeWorker: (role) => this.freeWorker(role),
+      scopeOfRole: (repo, role) => this.scopeOfRole(repo, role),
+      hasCommit: (repo, ref) => refresh.hasCommit(repo, ref),
+      contains: (repo, branch, ref) => refresh.contains(repo, branch, ref),
+      mergesCleanly: (repo, base, branch) => this.mergesCleanly(repo, base, branch),
+      orphanedBy: (repo, branch, storyId) => this.orphanedBy(repo, branch, storyId),
+    };
   }
 
-  /** The phase itself lives in `tick/story-chores.ts` — the pass, the `refresh` rule it
-   *  raises and closes by, and the behind-ness read that rule asks off the graph. What is
-   *  left here is what the rest of the runner already owned: the walk up the ERD, the trees,
-   *  the two ancestry questions, the trial merge and the orphan read. */
   private storyChoresPass(behind: readonly Behind[] = []): Promise<number[]> {
-    return raiseStoryChores(
-      {
-        db: this.db,
-        repoRoot: this.opts.repoRoot,
-        projectOf: (story) => this.projectOf(story),
-        treesFor: (repo) => this.treesFor(repo),
-        hasCommit: (repo, ref) => this.hasCommit(repo, ref),
-        contains: (repo, branch, ref) => this.contains(repo, branch, ref),
-        mergesCleanly: (repo, base, branch) => this.mergesCleanly(repo, base, branch),
-        orphanedBy: (repo, branch, storyId) => this.orphanedBy(repo, branch, storyId),
-      },
-      behind,
-    );
+    return raiseStoryChores(this.choreHost(), behind);
+  }
+
+  /** docs/design/18. The other half of a chore, in the same module: judge the attempt that
+   *  has ended, then hand the next one out. */
+  private performChores(paused: string | null = null): Promise<ChorePass> {
+    return performChorePass(this.choreHost(), paused);
   }
 
   /** docs/design/14. A delivered story reaches the base branch without a person merging it.
@@ -790,7 +791,7 @@ export class Runner {
         .catch(() => null);
       if (base === null) continue;
       const branch = `story/${row.slug}`;
-      if (branch === base || !(await this.hasCommit(repo, branch))) continue;
+      if (branch === base || !(await refresh.hasCommit(repo, branch))) continue;
       if (!this.gateHasPermitted(row.id)) continue;
 
       const raised = choreFor(this.db, "land", "story", row.id);
@@ -806,13 +807,13 @@ export class Runner {
 
       // An attempt is a `begin` on the record, so a chore that has used its attempts is not
       // attempted again behind the board's back: it stays there saying so.
-      if (raised !== null && !this.beginLandChore(raised.id)) {
+      if (raised !== null && !beginLandChore(this.db, raised.id)) {
         chores.push(raised.id);
         continue;
       }
       // Read before the merge: the landing moves the ref, and the tip it moved *from* is
       // what says whether the operator's checkout is merely stale or holds work of theirs.
-      const wasAt = await this.tipOf(repo, `refs/heads/${base}`);
+      const wasAt = await refresh.tipOf(repo, `refs/heads/${base}`);
       const attempt = await attemptLanding({
         repo,
         base,
@@ -851,7 +852,7 @@ export class Runner {
       // The first refusal raises the chore and is itself its first attempt, so the board
       // reads `attempt 2 of 3` on the tick after — the count is of landings tried, and one
       // has been.
-      if (raised === null) this.beginLandChore(chore.id);
+      if (raised === null) beginLandChore(this.db, chore.id);
       if (applyChore(this.db, chore.id, "fail", "runner").ok) recordChoreRefusal(this.db, attempt.why, chore.id);
       chores.push(chore.id);
     }
@@ -878,286 +879,17 @@ export class Runner {
     return tests.length > 0 && tests.every((t) => t.state === "passed");
   }
 
-  /** Bring a `land` chore to `running` for this tick's attempt, or say there is not one to
-   *  be had. `reraiseChore` is the ceiling: it refuses a chore that has used its attempts,
-   *  and that refusal is what stops the runner retrying a landing for ever. */
-  private beginLandChore(id: number): boolean {
-    const found = choreById(this.db, id);
-    if (found === null) return false;
-    if ((found.state === "failed" || found.state === "done") && !reraiseChore(this.db, id, "runner").ok) return false;
-    const planned = choreById(this.db, id);
-    if (planned?.state === "planned" && !applyChore(this.db, id, "start", "runner").ok) return false;
-    const ready = choreById(this.db, id);
-    if (ready?.state === "running") return true;
-    return applyChore(this.db, id, "begin", "runner").ok;
+  /** The trial merge, for the phase that raises a `merge` chore by it and for the landing
+   *  that only attempts one it says is clean. */
+  private mergesCleanly(repo: string, base: string, branch: string): Promise<boolean> {
+    return refresh.mergesCleanly(repo, base, branch);
   }
 
-  /** docs/design/18. The other half of a chore: judge the attempt that has ended, then hand
-   *  the next one out.
-   *
-   *  Judging first is what makes the slot free again within the tick, and what stops an
-   *  agent's word being the record: a chore is done because the runner proved the check,
-   *  never because the session exited zero. */
-  private async performChores(paused: string | null = null): Promise<ChorePass> {
-    const done: number[] = [];
-    const failed: { id: number; why: string }[] = [];
-    const dispatched: number[] = [];
-
-    for (const row of this.endedChoreAttempts()) {
-      const chore = choreById(this.db, row.chore);
-      // Only an attempt of a chore still in hand is judged. A chore already done or already
-      // failed has a verdict, and the ended assignment beside it is only history.
-      if (chore === null || chore.state !== "running") continue;
-      const proved = await this.proveChore(chore);
-      if (proved.ok) {
-        if (applyChore(this.db, chore.id, "finish", "runner").ok) done.push(chore.id);
-      } else if (applyChore(this.db, chore.id, "fail", "runner").ok) {
-        // The verdict is written to the chore, not only reported in the pass. `fail` clears
-        // whatever the last tick said about this chore, and the pass is a log line that
-        // scrolls, so without this a failed chore sits on the board saying nothing at all —
-        // and the one that has used its attempts sits there for good, never raised again and
-        // never explained. Recorded after the verb, so the reason is the one this tick read.
-        recordChoreRefusal(this.db, proved.why, chore.id);
-        failed.push({ id: chore.id, why: proved.why });
-      }
-    }
-
-    // Judged either way; handed out only when dispatch is running. A chore is an attempt
-    // like any other, and a paused tick must not spend one on an unreachable model.
-    for (const row of this.dispatchableChores()) {
-      const chore = choreById(this.db, row.id);
-      if (chore === null) continue;
-      if (paused !== null) {
-        this.refuseChore(chore, paused);
-        continue;
-      }
-      const id = await this.dispatchChore(chore);
-      if (id !== null) dispatched.push(chore.id);
-    }
-    return { dispatched, done, failed };
-  }
-
-  private endedChoreAttempts(): { id: number; chore: number; worktree: string }[] {
-    return queries(this.db)
-      .selectFrom(tbl.assignment).select(["id", "objective_id", "worktree", "phase"]).where("objective_type", "=", "chore").all()
-      .filter((a) => ENDED_PHASES.includes(a.phase)).sort(byId)
-      .map((a) => ({ id: a.id, chore: a.objective_id, worktree: a.worktree }));
-  }
-
-  /** Chores with nothing already attempting them. The guard matters: without it a chore
-   *  whose `begin` did not land is handed out again next tick while its first assignment
-   *  is still running, and then two workers are in one tree. */
-  private dispatchableChores(): { id: number }[] {
-    const q = queries(this.db);
-    const attempting = new Set(
-      q.selectFrom(tbl.assignment).select(["objective_type", "objective_id", "phase"]).where("objective_type", "=", "chore").all()
-        .filter((a) => OPEN_PHASES.includes(a.phase)).map((a) => a.objective_id),
-    );
-    // A kind wecode performs itself is never handed to a worker. `land` is one: its merge
-    // is into the base branch, and the only tree an agent may be dispatched into is the
-    // story tree, where that merge cannot be made at all. `landDeliveredStories` is where
-    // its attempts happen, and the reason it is still open is already on its own row.
-    return q.selectFrom(tbl.chore).all()
-      .filter((c) => ["planned", "ready"].includes(c.state) && !attempting.has(c.id))
-      .filter((c) => !performedByTheRunner(c.kind)).sort(byId).map((c) => ({ id: c.id }));
-  }
-
-  /** The attempt: a system worker, in a tree at the chore's target branch, with the role's
-   *  own scope off the record.
-   *
-   *  Every refusal here is level-triggered — no worker free, no slot, no role on the record
-   *  — because none of them is the chore's fault and all of them heal on a later tick. None
-   *  of them is silent either: a chore that sits in `planned` for half an hour is only
-   *  readable if it says which of these is holding it, so each is written to `chore_refusal`
-   *  in the same voice a task's refusal uses, and cleared the moment it is dispatched.
-   *
-   *  The chore is left where it was and stays on the board: a `planned` chore is only
-   *  started once there is somewhere for it to go. */
-  private async dispatchChore(chore: Chore): Promise<number | null> {
-    const def = CHORE_KIND_DEFS[chore.kind];
-    if (def === undefined) return this.refuseChore(chore, `no kind on the record for a ${chore.kind} chore`);
-    const target = this.storyTargetOf(chore);
-    if (target === null) return this.refuseChore(chore, "the story it targets is gone");
-    const scope = this.scopeOfRole(target.repo, def.role);
-    if (!scope.ok) return this.refuseChore(chore, scope.why);
-    const open = this.openAssignments();
-    const max = this.opts.budget.max_open;
-    if (open >= max) return this.refuseChore(chore, `${max - open} of ${max} slots are open`);
-    const worker = this.freeWorker(def.role);
-    if (worker === null) return this.refuseChore(chore, `no worker free for role ${def.role}`);
-
-    try {
-      const trees = this.treesFor(target.repo);
-      const branch = `story/${target.slug}`;
-      // The one thing a chore may never be given: a tree on the base branch. A merge made
-      // there is a landing, and landing is the operator's verb.
-      if (branch === (await trees.integrationBranch())) {
-        return this.refuseChore(chore, `${branch} is the base branch: landing is yours to do, not a chore's`);
-      }
-      const tree = await trees.storyTree(target.slug, join(this.worktreeRoot(target.repo), `story-${target.slug}`));
-      const claimed = await this.claimedScope(chore, target.repo, branch, scope.scope);
-      // The approval guard lives in `start`, so a kind that needs one refuses here and
-      // nothing is created for it.
-      if (chore.state === "planned") {
-        const started = applyChore(this.db, chore.id, "start", "runner");
-        if (!started.ok) return this.refuseChore(chore, started.why);
-      }
-      const id = new Maker(this.db).assignment({
-        objective_type: "chore" as "task",
-        objective_id: chore.id,
-        worker_id: worker,
-        scope: claimed,
-        budget: this.opts.choreBudget ?? CHORE_BUDGET,
-        worktree: tree,
-      });
-      // Dispatched: the assignment exists, so whatever was holding it a tick ago is no
-      // longer true of it. Cleared here rather than after `begin`, because every way out
-      // from this line on is a way out with an assignment open — and a chore being
-      // attempted must never also be showing a reason it is not.
-      clearChoreRefusal(this.db, chore.id);
-      const begun = applyChore(this.db, chore.id, "begin", `worker-${worker}`);
-      if (!begun.ok) return this.refuseChore(chore, begun.why);
-      return id;
-    } catch (err) {
-      // No branch, or no tree to be had. Which one it was is git's to say: the fixed
-      // "no branch to merge into yet" read identically whether the branch was missing, the
-      // worktree path was occupied by a file, or the index was locked, and the operator had
-      // to go to the tree themselves to find out. Report what was actually caught.
-      return this.refuseChore(chore, (err as Error).message);
-    }
-  }
-
-  /** Write the reason down and hand back the answer dispatchChore already gives. One
-   *  statement, so no branch of dispatchChore can record a reason and return the other
-   *  thing, or return without recording. */
-  private refuseChore(chore: Chore, why: string): null {
-    recordChoreRefusal(this.db, why, chore.id);
-    return null;
-  }
-
-  /** The check, proved by this machine. For `merge`: the base is an ancestor of the branch —
-   *  which is the merge having been made, not an agent's report of it — and the suite the
-   *  story carries is still green.
-   *
-   *  `refresh` proves the same two things, so it is the same code and not a copy of it.
-   *  docs/design/18 words them from either end — "the branch merges cleanly into the base"
-   *  and "the base merges into the story branch" — but one graph answers both: once the
-   *  base is an ancestor of the branch there is nothing left to conflict. */
-  private async proveChore(chore: Chore): Promise<{ ok: true } | { ok: false; why: string }> {
-    if (chore.kind === "land") {
-      // The landing's check is the mirror of the merge's: the *base* contains the branch.
-      // Nothing dispatches a `land` chore, so being asked here at all means an assignment
-      // outlived the rule — and the answer is still the graph's, not the assignment's.
-      const target = this.storyTargetOf(chore);
-      if (target === null) return { ok: false, why: "its target story is not on the record" };
-      const branch = `story/${target.slug}`;
-      const base = await this.treesFor(target.repo)
-        .integrationBranch()
-        .catch(() => null);
-      if (base === null) return { ok: false, why: "there is no base branch to land on" };
-      return (await isLanded(target.repo, base, branch))
-        ? { ok: true }
-        : { ok: false, why: `${base} does not contain ${branch}: the landing was not made` };
-    }
-    if (chore.kind !== "merge" && chore.kind !== "refresh") {
-      return { ok: false, why: `nothing here knows how to prove a ${chore.kind} chore` };
-    }
-    const target = this.storyTargetOf(chore);
-    if (target === null) return { ok: false, why: "its target story is not on the record" };
-
-    const branch = `story/${target.slug}`;
-    try {
-      const base = await this.treesFor(target.repo).integrationBranch();
-      if (!(await this.contains(target.repo, branch, base))) {
-        return { ok: false, why: `${base} is not an ancestor of ${branch}: the merge was not made` };
-      }
-      // Asked before the suite, because a branch that dropped the work it was carrying is
-      // green for the wrong reason: the tests that would have failed went with the commits.
-      const orphaned = await this.orphanedBy(target.repo, branch, target.story);
-      if (orphaned !== null) return { ok: false, why: `${branch} contains ${base}, but ${orphaned}` };
-      const red = await this.suiteRed(target);
-      if (red !== null) return { ok: false, why: `${branch} contains ${base}, but the suite is red: ${red}` };
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, why: (err as Error).message };
-    }
-  }
-
-  /** What a refresh has thrown away. The read itself is `tick/refresh.ts`'s; what is the
-   *  runner's is the walk to the attempt commits the ledger recorded under this story. */
+  /** What a refresh has thrown away. The read itself is `tick/refresh.ts`'s, and the walk
+   *  to the attempt commits the ledger recorded is `tick/story-chores.ts`'s; what is the
+   *  runner's is the story the two are asked about. */
   private orphanedBy(repo: string, branch: string, storyId: number): Promise<string | null> {
-    return refresh.orphanedBy(repo, branch, this.landedAttempts(storyId));
-  }
-
-  /** The attempt commits this story's tasks landed on its branch. The walk is
-   *  task → acceptance_test → criteria, which is `criteriaOfStory` from the other end. */
-  private landedAttempts(storyId: number): { task: number; sha: string }[] {
-    const under = this.criteriaOfStory(storyId);
-    const q = queries(this.db);
-    const tests = new Set(
-      q
-        .selectFrom(tbl.test)
-        .select(["id", "parent_id"])
-        .all()
-        .filter((t) => under.has(t.parent_id))
-        .map((t) => t.id),
-    );
-    const tasks = new Set(
-      q
-        .selectFrom(tbl.task)
-        .select(["id", "acceptance_test_id"])
-        .all()
-        .filter((t) => tests.has(t.acceptance_test_id))
-        .map((t) => t.id),
-    );
-    return q
-      .selectFrom(tbl.landed)
-      .select(["task_id", "sha"])
-      .all()
-      .filter((r) => tasks.has(r.task_id) && r.sha !== "")
-      .map((r) => ({ task: r.task_id, sha: r.sha }));
-  }
-
-  private contains(repo: string, branch: string, base: string): Promise<boolean> {
-    return refresh.contains(repo, branch, base);
-  }
-
-  /** The first of the story's scripts that fails in the merged tree, or null when they all
-   *  pass. Run, not recorded: a verdict belongs to the test's own pass, and this is only the
-   *  chore's check asking whether the merge broke anything. */
-  private async suiteRed(target: { slug: string; repo: string; story: number }): Promise<string | null> {
-    const under = this.criteriaOfStory(target.story);
-    const rows = queries(this.db)
-      .selectFrom(tbl.test).select(["id", "artefact", "parent_id", "state"])
-      .where("kind", "=", "script").where("artefact", "!=", null).where("state", "!=", "dropped").all()
-      .filter((t) => under.has(t.parent_id)).sort(byId)
-      .flatMap((t) => (t.artefact === null ? [] : [{ artefact: t.artefact }]));
-    if (rows.length === 0) return null;
-
-    const tree = await this.treesFor(target.repo).storyTree(
-      target.slug,
-      join(this.worktreeRoot(target.repo), `story-${target.slug}`),
-    );
-    for (const row of rows) {
-      const green = await exec("bash", ["-lc", row.artefact], {
-        cwd: tree,
-        timeout: 10 * 60 * 1000,
-        maxBuffer: 4 * 1024 * 1024,
-      })
-        .then(() => true)
-        .catch(() => false);
-      if (!green) return row.artefact;
-    }
-    return null;
-  }
-
-  private storyTargetOf(chore: Chore): { story: number; slug: string; repo: string } | null {
-    if (chore.target_type !== "story") return null;
-    const row = queries(this.db).selectFrom(tbl.story).where("id", "=", chore.target_id).get();
-    if (row === null) return null;
-    const owner = this.projectOf(row);
-    if (owner === null) return null;
-    return { story: row.id, slug: row.slug, repo: this.opts.repoRoot ?? owner.repo };
+    return refresh.orphanedBy(repo, branch, landedAttempts(this.db, this.criteriaOfStory(storyId)));
   }
 
   /** The role's scope, out of the file that declares it. Never a literal here: docs/design/18
@@ -1176,31 +908,6 @@ export class Runner {
     return { ok: true, scope: def.scope };
   }
 
-  /** The scope a chore is actually dispatched under: the role's, narrowed to the files the
-   *  work has to touch when this machine can name them.
-   *
-   *  `system` is declared `write: ["**"]` because a conflict is wherever the conflict is,
-   *  and for a `merge` chore — whose merge is the branch into the base, a graph this tree
-   *  cannot be asked about — that stays the honest answer. A `refresh` is the other
-   *  direction, and there the conflicting paths *are* knowable before a worker is hired:
-   *  `merge-tree` replays base-into-branch off the object store and names them, so `**`
-   *  stops being the standing authority of every chore.
-   *
-   *  A refresh that conflicts on nothing claims nothing: git makes that merge by itself. The
-   *  role's scope is still the ceiling — this only ever narrows — and it is the fallback for
-   *  a merge-tree that could not be asked (git too old, a ref that is gone). */
-  private async claimedScope(chore: Chore, repo: string, branch: string, role: Scope): Promise<Scope> {
-    if (chore.kind !== "refresh") return role;
-    let base: string;
-    try {
-      base = await this.treesFor(repo).integrationBranch();
-    } catch {
-      return role;
-    }
-    const conflicted = await refresh.conflictedPaths(repo, branch, base);
-    return conflicted === null ? role : { ...role, write: conflicted };
-  }
-
   /** One read per repository per tick. A tick dispatches every planned chore, and six of
    *  them targeting one project is one read of the file, not six. */
   private rolesOf(repo: string): { ok: true; config: RoleConfig } | { ok: false; why: string } {
@@ -1215,16 +922,6 @@ export class Runner {
     }
     this.rolesByRepo.set(path, read);
     return read;
-  }
-
-  private openAssignments(): number {
-    return queries(this.db)
-      .selectFrom(tbl.assignment).select(["phase"]).all()
-      .filter((a) => OPEN_PHASES.includes(a.phase)).length;
-  }
-
-  private mergesCleanly(repo: string, base: string, branch: string): Promise<boolean> {
-    return refresh.mergesCleanly(repo, base, branch);
   }
 
   /** A task whose tests passed lands on its story branch — once. The merge is recorded
@@ -1261,7 +958,7 @@ export class Runner {
       if (slugs === null) continue;
       const branch = `task/${slugs.task}`;
       const story = `story/${slugs.story}`;
-      const tip = await this.tipOf(slugs.repo, branch);
+      const tip = await refresh.tipOf(slugs.repo, branch);
       if (this.alreadyLanded(row.id, branch, tip)) continue;
       // Neither branch has moved since the conflict, so git would say the same thing again
       // and take a worktree and a merge to say it. The remembered sentence is that answer.
@@ -1307,7 +1004,7 @@ export class Runner {
   /** The pair of tips a task merge stands between, as one comparable string. A ref that is
    *  not there is the empty half — a world that has not moved either. */
   private async tipsOf(repo: string, tip: string | null, story: string): Promise<string> {
-    return `${tip ?? ""}|${(await this.tipOf(repo, story)) ?? ""}`;
+    return `${tip ?? ""}|${(await refresh.tipOf(repo, story)) ?? ""}`;
   }
 
   /** A tip we could not read is no proof, so the merge is attempted; git itself refuses a
@@ -1318,9 +1015,6 @@ export class Runner {
     return row?.branch === branch && row.sha === tip;
   }
 
-  private tipOf(repo: string, ref: string): Promise<string | null> {
-    return refresh.tipOf(repo, ref);
-  }
 }
 
 /** Wake on a timer, forever, until something says stop. */
