@@ -1,7 +1,8 @@
 /** run.ts is a dispatch, and a dispatch is short.
  *
  *  The entity helpers — the table declarations, `Kin` and the tree they describe, and the
- *  verbs that amend one row: scope, artefact, retry — are in `verbs/entity.ts`. The last
+ *  verbs that amend one row: scope and retry — are in `verbs/entity.ts`, and the making
+ *  verbs that went on from there — create's help and artefact — in `verbs/make.ts`. The last
  *  readers followed: `watch` and `wait`, the two commands that hold the process open, are
  *  in `verbs/wait.ts`, and the listings — `workspaces`, `tree`, `lessons`, `lesson drop`
  *  and an entity's own help — are in `verbs/usage.ts`. This holds each move from three
@@ -19,6 +20,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DECLARED, run } from "../src/run.js";
 import * as ent from "../src/verbs/entity.js";
+import * as make from "../src/verbs/make.js";
 import * as use from "../src/verbs/usage.js";
 import * as until from "../src/verbs/wait.js";
 import { linesIn, undocumented } from "../src/capabilities.js";
@@ -85,8 +87,8 @@ describe("run.ts is a dispatch rather than the cli", () => {
   it("dispatches the amending verbs and the helps through the module", () => {
     const run_ts = source("run.ts");
     for (const dispatched of [
-      "ent.scope(at, entity, args)", "ent.artefact(at, entity, args)", "ent.retry(at, args)",
-      "ent.scopeHelp()", "ent.artefactHelp()", "ent.createHelp(at, entity)",
+      "ent.scope(at, entity, args)", "make.artefact(at, entity, args)", "ent.retry(at, args)",
+      "ent.scopeHelp()", "make.artefactHelp()", "make.createHelp(at, entity)",
       "ent.elsewhere(at, entity, id)", "ent.projectOf(at, entity, id)",
       "ent.instead(q, entity, id)", "ent.under(at, entity, id)",
     ]) {
@@ -115,10 +117,25 @@ describe("the entity module", () => {
       "workspace", "project", "story", "requirement", "criteria", "acceptanceTest", "task",
       "worker", "assignment", "ledger", "landedBranch", "DECLARED", "ENTITIES", "kin",
       "instead", "projectOf", "elsewhere", "crossesProject", "under", "projectConfig",
-      "retry", "scope", "artefact", "createHelp", "scopeHelp", "artefactHelp",
+      "retry", "scope", "scopeHelp",
     ]) {
       expect(ent, name).toHaveProperty(name);
     }
+  });
+
+  /** The making verbs went on to `verbs/make.ts`: create's help, and the artefact a test is
+   *  proved by. They are named here so a second move cannot quietly leave run.ts dispatching
+   *  at nothing. */
+  it("no longer holds the making verbs, which are exported from verbs/make.ts", () => {
+    for (const name of ["createHelp", "artefact", "artefactHelp"]) {
+      expect(make, name).toHaveProperty(name);
+      expect(ent, name).not.toHaveProperty(name);
+    }
+  });
+
+  it("keeps run.ts's own words out of the making module too", () => {
+    expect(source("verbs/make.ts")).not.toContain("process.argv");
+    expect(source("verbs/make.ts")).not.toContain("currentDatabase");
   });
 
   it("describes every entity the cli can be handed by name", () => {
