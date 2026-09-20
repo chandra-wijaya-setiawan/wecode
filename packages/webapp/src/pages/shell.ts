@@ -65,14 +65,16 @@ export function loadShell(path: string = DESIGN): Shell {
 }
 
 /** The document: the declared frame, with the page's own markup inside the one element the
- *  design gives it. `style` is what the page adds to the shell's own — the design says the
- *  stylesheet is in the document, and a page's rules are still the page's. */
-export function document(contents: string, style = "", shell: Shell = loadShell()): string {
+ *  design gives it. There is no per-page argument: the surface has one stylesheet and it is
+ *  here. A page that could hand in rules of its own is a page that can disagree with the
+ *  frame about what a heading or a list looks like, and three pages each with a `STYLE`
+ *  constant are three surfaces that only look like one until somebody edits one of them. */
+export function document(contents: string, shell: Shell = loadShell()): string {
   const { doctype, lang, charset, viewport, title, banner, body } = shell;
   return (
     `${doctype}\n<html lang="${lang}"><head><meta charset="${charset}">` +
     `<meta name="viewport" content="${viewport}">` +
-    `<title>${title}</title><style>${SHELL_STYLE}${style}</style></head>` +
+    `<title>${title}</title><style>${STYLE}</style></head>` +
     `<body><${body}><h1>${banner}</h1>${contents}</${body}></body></html>\n`
   );
 }
@@ -83,17 +85,55 @@ export type Contents = (url: URL) => string;
 
 /** A page, wearing the shell. This is the only way a page of this package becomes a reply,
  *  so "every page is in the shell" is a fact about the code and not a habit. */
-export const shelled = (contents: Contents, style = "", shell: Shell = loadShell()): Page =>
-  (url: URL): Reply => html(document(contents(url), style, shell));
+export const shelled = (contents: Contents, shell: Shell = loadShell()): Page =>
+  (url: URL): Reply => html(document(contents(url), shell));
 
-/** The document's own presentation — the frame, and nothing about any one page. Dark
- *  because the cockpit it mirrors is read in a terminal, and monospace for the one thing a
- *  column of ids needs. */
-const SHELL_STYLE = `
+/** The surface's presentation, whole — the frame first, then the shapes each page draws
+ *  with. Dark because the cockpit it mirrors is read in a terminal, and monospace for the
+ *  one thing a column of ids needs.
+ *
+ *  A page's rules live here and not in the page because presentation is one decision across
+ *  the surface: a heading is the same size on the board as on the decisions page, and the
+ *  grey a secondary column is written in is one grey. Each page's block is selected from the
+ *  shape that page draws — the board's boxes are `section`s, a decision is an `article`, the
+ *  tree is `ul.tree` — so the blocks are readable apart without being separable, and a rule
+ *  common to all three, like what an empty page says, is written once. */
+const STYLE = `
   :root { color-scheme: dark }
   body { margin: 0; padding: 1.5rem; background: #111; color: #ddd;
          font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace }
   main { display: grid; gap: 1.25rem; max-width: 60rem; margin: 0 auto }
   h1 { font-size: 1rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
        margin: 0 0 .5rem; color: #888 }
+  h2 { font-size: 1rem; font-weight: 600; margin: 0 0 .4rem }
+  p.empty { margin: 0; color: #666 }
+
+  section { border-top: 1px solid #333; padding-top: .5rem }
+  section h2 .mark { display: inline-block; width: 1.25rem; color: #6cf }
+  section h2 kbd { float: right; color: #888; font: inherit }
+  section ul { list-style: none; margin: 0; padding: 0 }
+  section li { display: flex; gap: .75rem; padding: .1rem 0 }
+  section li .code { flex: 0 0 9rem; color: #888 }
+  section li .state { flex: 0 0 9rem; color: #6cf }
+  section li .what { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere }
+
+  article { border: 1px solid #333; border-radius: 4px; padding: .75rem 1rem }
+  article h2 { margin: 0 0 .5rem; overflow-wrap: anywhere; white-space: pre-wrap }
+  article h2 .id { color: #888; margin-right: .6rem }
+  article dl { display: grid; grid-template-columns: 6rem 1fr; gap: .2rem .75rem; margin: 0 }
+  article dt { color: #888 }
+  article dd { margin: 0; min-width: 0; overflow-wrap: anywhere }
+  article dd ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap;
+                  gap: .4rem }
+  article dd li { border: 1px solid #444; border-radius: 3px; padding: 0 .4rem; color: #6cf }
+  article dd.open { color: #666 }
+  article p.how { margin: .6rem 0 0; color: #666 }
+
+  ul.tree { list-style: none; margin: 0; padding: 0 }
+  ul.tree ul { list-style: none; margin: 0; padding-left: 1.25rem;
+               border-left: 1px solid #333 }
+  ul.tree li { padding: .1rem 0; min-width: 0; overflow-wrap: anywhere }
+  ul.tree li .label { color: #ddd }
+  ul.tree li .id, ul.tree li .kind, ul.tree li .rollup { color: #888 }
+  ul.tree li .state { color: #6cf }
 `;

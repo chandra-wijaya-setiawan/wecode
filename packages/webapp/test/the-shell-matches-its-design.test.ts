@@ -74,8 +74,8 @@ describe("the shell is the design's, not the page's", () => {
     const shell = loadShell(at);
     expect(shell.title).toBe("elsewhere");
     expect(shell.banner).toBe("a board");
-    expect(document("", "", shell)).toContain("<title>elsewhere</title>");
-    expect(document("", "", shell)).toContain("<h1>a board</h1>");
+    expect(document("", shell)).toContain("<title>elsewhere</title>");
+    expect(document("", shell)).toContain("<h1>a board</h1>");
   });
 
   it("refuses a design that does not declare the frame, and names what is missing", () => {
@@ -86,7 +86,7 @@ describe("the shell is the design's, not the page's", () => {
 });
 
 describe("the document is the declared frame", () => {
-  const body = document("<p>a page</p>", "p { color: red }");
+  const body = document("<p>a page</p>");
 
   it("opens with the declared doctype and language", () => {
     expect(body.startsWith(`${SHELL.doctype}\n`)).toBe(true);
@@ -110,11 +110,11 @@ describe("the document is the declared frame", () => {
     expect([...body.matchAll(/<main>/g)]).toHaveLength(1);
   });
 
-  it("keeps the stylesheet in the document, the shell's rules and the page's", () => {
+  it("keeps the one stylesheet in the document", () => {
     expect(body).toContain("<style>");
     expect(body).toContain("color-scheme: dark");
-    expect(body).toContain("p { color: red }");
     expect(body).not.toContain("<link");
+    expect([...body.matchAll(/<style>/g)]).toHaveLength(1);
   });
 });
 

@@ -12,29 +12,14 @@
  *  second declaration of the board — one that goes stale the moment a box is renamed.
  *
  *  The rows arrive as a `Board`, not as a database. A page that opened its own connection
- *  could not be read without one, and where a workspace is, is `bin.ts`'s business. */
+ *  could not be read without one, and where a workspace is, is `bin.ts`'s business.
+ *
+ *  Nor does this file say how a box looks. The surface has one stylesheet and it is the
+ *  shell's; what is here is the markup, and the class names the shell's rules select on. */
 import type { Board, Row } from "@wecode/core";
 import { code, description, loadViews, sectionMark, type View } from "@wecode/tui";
 import { html, type Page, type Reply } from "../server.js";
 import { document, shelled } from "./shell.js";
-
-/** This box's own presentation, and the only thing here that is not read off config: a
- *  stylesheet is how the page looks, not what it says. What a document looks like — its
- *  margins, its type and its banner — is the shell's, so none of it is here. A section is
- *  separated by a rule as design.yaml says it is, drawn as a border rather than as a row of
- *  characters, because a browser has no height to spend. */
-const STYLE = `
-  section { border-top: 1px solid #333; padding-top: .5rem }
-  h2 { font-size: 1rem; font-weight: 600; margin: 0 0 .4rem }
-  h2 .mark { display: inline-block; width: 1.25rem; color: #6cf }
-  h2 kbd { float: right; color: #888; font: inherit }
-  ul { list-style: none; margin: 0; padding: 0 }
-  li { display: flex; gap: .75rem; padding: .1rem 0 }
-  li .code { flex: 0 0 9rem; color: #888 }
-  li .state { flex: 0 0 9rem; color: #6cf }
-  li .what { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere }
-  p.empty { margin: 0; color: #666 }
-`;
 
 /** Every character HTML has an opinion about. A board's rows are a person's own words —
  *  a story titled `a <script> in the title` is a title, not markup — so nothing reaches
@@ -87,7 +72,7 @@ export function boardBoxes(board: Board, views: readonly View[] = loadViews()): 
 
 /** The whole document: the board's boxes, in the shell design.yaml declares. */
 export function boardPage(board: Board, views: readonly View[] = loadViews()): Reply {
-  return html(document(boardBoxes(board, views), STYLE));
+  return html(document(boardBoxes(board, views)));
 }
 
 /** The page, bound to a way of getting the current rows, and wearing the shell — a page of
@@ -97,4 +82,4 @@ export function boardPage(board: Board, views: readonly View[] = loadViews()): R
  *  anybody reloading, and a page served from a snapshot taken when the process booted is a
  *  board that is wrong by the time it is read. */
 export const boardAt = (rows: () => Board, views?: readonly View[]): Page =>
-  shelled(() => (views === undefined ? boardBoxes(rows()) : boardBoxes(rows(), views)), STYLE);
+  shelled(() => (views === undefined ? boardBoxes(rows()) : boardBoxes(rows(), views)));
