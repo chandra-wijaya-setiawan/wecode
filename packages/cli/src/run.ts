@@ -1,41 +1,18 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
-// The landing rules are a module of their own in core, deliberately outside the barrel: no
-// git, no clock, no filesystem, so the command half and the runner half can be held to the
-// same words. Addressed through the package's build output, the way its barrel is.
-import { type BaseState, refuseDirtyBase, reportAbort, reportLeftover } from "@wecode/core/dist/land.js";
 import {
   actorOf,
-  answerApproval, raiseApproval, APPROVAL_KIND,
-  attributedTo,
-  board,
   Completions,
   Engine,
   Maker,
   OPERATOR,
-  detect,
   currentDatabase,
   databaseOf,
-  listWorkspaces,
-  loadRoles,
-  lessons,
-  dropLesson,
-  tree,
-  type Node,
-  loadMachines,
   open,
-  readPointer,
-  workspaceDir,
-  writePointer,
-  readProjectConfig,
   restate,
   isRestatable,
   RESTATABLE,
-  setArtefact,
-  setScriptPath,
-  setTaskScope,
   STATEFUL,
   TRANSITIONS,
   Verbs,
@@ -44,15 +21,33 @@ import {
   type StatefulEntity,
   type TestKind,
   type WorkerKind,
-  writeProjectConfig,
 } from "@wecode/core";
 // The typed query layer is not on `@wecode/core`'s index, so it is reached by its own path.
-import { excluded, queries, table, type Dialect, type TableDef, type Value } from "@wecode/core/dist/db.js";
-import { plan } from "./plan.js";
-import { doctor } from "./doctor.js";
-import { explore } from "./explore.js"; import { paint } from "./paint.js";
-import { delivered as deliveredStories } from "./delivered.js";
-import { design as projector } from "./ui.js";
+import { queries } from "@wecode/core/dist/db.js";
+// What a record is: the tables, the shape of the tree, and the verbs that amend one row —
+// scope, artefact, retry. Namespaced because `task`, `project` and `scope` are all words
+// this file uses for something else.
+import * as ent from "./verbs/entity.js";
+// The making verbs: create's help, and the artefact a test is proved by.
+import * as make from "./verbs/make.js";
+import { paint } from "./paint.js";
+// The verbs that act. Namespaced because several of them — `worker`, `answer` — are also
+// words this file uses for a table or a column.
+import * as act from "./verbs/run-and-see.js";
+// The verbs that only look: board, doctor, delivered, explore, design. Namespaced for the
+// same reason — `board` and `design` are also words this file uses.
+import * as see from "./verbs/see.js";
+// Namespaced because `tree` is already the core query that reads the whole shape back.
+import * as rungs from "./verbs/tree.js";
+// Namespaced for the same reason: `requirement` and `task` are already tables in this file.
+import * as work from "./verbs/work.js";
+// The listings and the two help texts that are not the manual: workspaces, tree, lessons,
+// an entity's states and verbs. Namespaced because `lesson` and `workspaces` are words
+// this file's dispatch spells too.
+import * as use from "./verbs/usage.js";
+// The two commands that hold the process open. Namespaced because `wait` is the name of
+// the head dispatch compares against as well as the name of the function.
+import * as until from "./verbs/wait.js";
 
 const DB = (): string => currentDatabase();
 
@@ -72,31 +67,31 @@ function dispatch(argv: readonly string[]): number {
     return usage();
   }
   // --help after a command is the whole manual; after an entity it is that entity's verbs.
-  if (rest[0] === "--help" || rest[0] === "-h") return isStateful(head) ? entityHelp(head) : usage();
+  if (rest[0] === "--help" || rest[0] === "-h") return isStateful(head) ? use.entityHelp(look, head) : usage();
   if (head === "help") {
     const what = rest[0] ?? "";
-    return isStateful(what) ? entityHelp(what) : usage();
+    return isStateful(what) ? use.entityHelp(look, what) : usage();
   }
-  if (head === "board") return showBoard(rest);
-  if (head === "doctor") return doctor(rest);
+  if (head === "board") return see.board(seen(rest));
+  if (head === "doctor") return see.doctor(rest);
   if (head === "init") return init(rest);
-  if (head === "answer") return answer(rest);
-  if (head === "ask") return ask(rest);
+  if (head === "answer") return act.answer(seen(rest));
+  if (head === "ask") return act.ask(seen(rest));
   if (head === "show") return show(rest);
-  if (head === "land") return land(rest);
-  if (head === "onboard") return onboard(rest);
-  if (head === "plan") return plan(rest);
-  if (head === "explore") return later(explore(rest));
+  if (head === "land") return act.land(seen(rest));
+  if (head === "onboard") return act.onboard(seen(rest));
+  if (head === "plan") return act.plan(rest);
+  if (head === "explore") return later(see.explore(rest));
   if (head === "paint") return later(paint(rest));
-  if (head === "workspaces") return workspaces();
-  if (head === "tree") return showTree(rest);
-  if (head === "watch") return watch(rest);
-  if (head === "wait") return wait(rest);
+  if (head === "workspaces") return use.workspaces(look);
+  if (head === "tree") return use.showTree(look, rest);
+  if (head === "watch") return until.watch(at, rest);
+  if (head === "wait") return until.wait(at, rest);
   // Before verb(): `delivered` is a story state as well as a command, so falling through
   // would read it as an entity and answer "delivered has no states".
-  if (head === "delivered") return deliveredStories(rest);
-  if (head === "lessons") return showLessons(rest);
-  if (head === "lesson") return lesson(rest);
+  if (head === "delivered") return see.delivered(rest);
+  if (head === "lessons") return use.showLessons(look, rest);
+  if (head === "lesson") return use.lesson(look, rest);
   return verb(head, rest);
 }
 
@@ -152,881 +147,50 @@ function init(args: readonly string[]): number {
   return 0;
 }
 
-/** The database, the worktrees and the session logs are wecode's, not the project's. */
-function ignore(path: string, line: string): void {
-  const body = existsSync(path) ? readFileSync(path, "utf8") : "";
-  if (body.split("\n").some((l) => l.trim() === line)) return;
-  writeFileSync(path, body === "" || body.endsWith("\n") ? `${body}${line}\n` : `${body}\n${line}\n`);
-}
-
-/** Never over an existing file: a config somebody edited is not ours to replace. */
-function write(path: string, body: string): void {
-  if (existsSync(path)) return;
-  writeFileSync(path, body);
-}
-
-/** `wecode ask <task> "<question>"` / `wecode ask story <id> "<question>"` [--option "<answer>=<cost>"] [--operator <name>]
- *
- *  A decision the operator must make is a row in needs you, not a line in a report: six of
- *  them on 20 Sep reached the operator only as chat messages, because a story titled NEEDS
- *  APPROVAL sits in `planned` among fifty others. A bare id is a task, which is what every
- *  existing caller means; `story <id>` hangs the question on the story, for the decisions
- *  about the whole of it rather than about one attempt. An option is the answer and what
- *  taking it costs, split on the first `=`; only the answers are stored as options, since an
- *  answer is checked against them, and the costs go into the question, which is what a person
- *  reads before choosing. No options is an open question, and any words settle it. */
-function ask(args: readonly string[]): number {
-  const { values, positionals } = parseArgs({
-    args: [...args],
-    allowPositionals: true,
-    options: { option: { type: "string", multiple: true }, operator: { type: "string" } },
-  });
-  const kind = positionals[0] === "story" ? ("story" as const) : ("task" as const);
-  const rest = positionals[0] === kind ? positionals.slice(1) : positionals;
-  const id = Number(rest[0]);
-  const question = rest.slice(1).join(" ");
-  if (!Number.isInteger(id) || question === "") {
-    return fail('wecode ask <task> "<question>" | wecode ask story <id> "<question>"  [--option "<answer>=<what it costs>"] [--operator <name>]');
-  }
-  const split = (o: string) => (o.includes("=") ? o.indexOf("=") : o.length); // no `=` is all answer, no cost
-  const offered = (values.option ?? []).map((o) => ({ answer: o.slice(0, split(o)).trim(), costs: o.slice(split(o) + 1).trim() }));
-
-  const conn = db();
-  try {
-    const who = operator(conn, values.operator);
-    const raised = raiseApproval(conn, {
-      objective_type: kind,
-      objective_id: id,
-      worker_id: who.id,
-      question: [question, ...offered.map((o) => `  ${o.answer}${o.costs === "" ? "" : ` — ${o.costs}`}`)].join("\n"),
-      options: offered.length === 0 ? null : offered.map((o) => o.answer),
-    });
-    process.stdout.write(`approval #${raised.id} waits on ${who.name}\n  wecode answer ${raised.id} "<text>"\n`);
-    return 0;
-  } catch (err) {
-    return fail((err as Error).message);
-  }
-}
-
-/** Who is asked, or why nobody can be. A name given is honoured or nothing; with no name,
- *  the sole human worker — a workspace with two people has no obvious one to burden, and
- *  choosing would be wecode deciding whose signature a decision needs. */
-function operator(conn: ReturnType<typeof open>, named: string | undefined): { id: number; name: string } {
-  const people = queries(conn).selectFrom(worker).all().filter((w) => w.kind === "human");
-  const found = named === undefined ? (people.length === 1 ? people[0] : undefined) : people.find((w) => w.name === named);
-  if (found !== undefined) return { id: found.id, name: found.name };
-  if (named !== undefined) return fails(`no human worker named ${named}. Human workers: ${names(people)}`);
-  return fails(
-    people.length === 0
-      ? "nobody to ask: wecode worker create <you> --role operator --kind human"
-      : `${people.length} people could be asked (${names(people)}), so name one with --operator <name>`,
-  );
-}
-
-const names = (people: readonly { name: string }[]): string => (people.length === 0 ? "none" : people.map((p) => p.name).join(", "));
-/** Nobody to carry the authority. Its own class because `answer` treats it as a fact about
- *  the workspace rather than as a refusal — see there. */
-class NoOperator extends Error {}
-const fails = (why: string): never => {
-  throw new NoOperator(why);
-};
-
-/** `wecode answer <assignment> "<text>"` — the one verb that clears a needs_human.
- *  An approval is recorded as the operator wrote it; nothing restates it. */
-function answer(args: readonly string[]): number {
-  const id = Number(args[0]);
-  const text = args.slice(1).join(" ");
-  if (!Number.isInteger(id) || text === "") return fail('wecode answer <assignment> "<text>"');
-
-  const conn = db();
-  const q = queries(conn);
-  const row = q.selectFrom(assignment).select(["phase", "kind"]).where("id", "=", id).get();
-  if (row === null) return fail(`no assignment #${id}`);
-  if (row.phase !== "waiting") return fail(`assignment #${id} is ${row.phase}, and is not waiting on anybody`);
-
-  // An approval closes as well as records: it has no work to go back to, so core checks the
-  // answer against the options offered and finishes it, in the answerer's own name. Where
-  // the workspace has no person on record there is no such name, and the answer is written
-  // the way every other needs_human is — a row left waiting would be worse than a record.
-  if (row.kind === APPROVAL_KIND) {
-    try {
-      const by = operator(conn, process.env["WECODE_ACTOR"]).name;
-      process.stdout.write(`approval #${id} answered ${answerApproval(conn, id, text, by).answer} by ${by}\n`);
-      return 0;
-    } catch (err) {
-      if (!(err instanceof NoOperator)) return fail((err as Error).message);
-    }
-  }
-
-  const who = whoIsAsking();
-  q.update(assignment)
-    .set({ answer: text, answered_by: who, updated_at: new Date().toISOString() })
-    .where("id", "=", id)
-    .run();
-  process.stdout.write(`assignment #${id} answered by ${who}\n`);
-  return 0;
-}
-
-/** `wecode watch [--project N] [--json]` — one line per state change, forever.
- *
- *  Read off the ledger, which is append-only, so this is a query with a cursor rather than
- *  an event bus. An orchestrator that wants to be told instead of asking runs this in the
- *  background and reads lines. */
-function watch(args: readonly string[]): number {
-  const { values } = parseArgs({
-    args: [...args],
-    options: {
-      project: { type: "string" },
-      json: { type: "boolean" },
-      since: { type: "string" },
-      once: { type: "boolean" },
-    },
-  });
-  const q = queries(db());
-  const narrow = values.project === undefined ? null : Number(values.project);
-
-  // The dialect has no `max(id)` and no LIMIT, so the ledger's high-water mark is the
-  // largest of the ids it hands back. Only the id column crosses.
-  let cursor =
-    values.since === undefined
-      ? q.selectFrom(ledger).select(["id"]).all().reduce((n, r) => Math.max(n, r.id), 0)
-      : Number(values.since);
-
-  const tick = (): void => {
-    // Nor an ORDER BY: the ledger is append-only and read by id, so the ordering the lines
-    // are printed in is done here rather than in SQL.
-    const rows = q
-      .selectFrom(ledger)
-      .where("id", ">", cursor)
-      .all()
-      .sort((a, b) => a.id - b.id);
-
-    for (const r of rows) {
-      cursor = r.id;
-      if (narrow !== null && projectOf(r.entity, r.entity_id)?.id !== narrow) continue;
-      process.stdout.write(
-        values.json === true
-          ? `${JSON.stringify(r)}\n`
-          : `${r.at}  ${r.entity} #${r.entity_id}  ${r.from_state} → ${r.to_state}  ${r.verb} by ${r.actor}\n`,
-      );
-    }
-  };
-
-  tick();
-  if (values.once === true) return 0;
-
-  const timer = setInterval(tick, 1000);
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => {
-      clearInterval(timer);
-      process.exit(0);
-    });
-  }
-  return 0;
-}
-
-/** `wecode wait <entity> <id> [--timeout <seconds>]` — block until it settles, then exit.
- *
- *  The exit code is the answer: 0 if it reached a state the work wanted, 1 if it did not.
- *  A harness that can run a command in the background gets a notification for free — the
- *  command finishing *is* the notification. */
-function wait(args: readonly string[]): number {
-  const { values, positionals } = parseArgs({
-    args: [...args],
-    allowPositionals: true,
-    options: { timeout: { type: "string" }, quiet: { type: "boolean" } },
-  });
-  const [entity, raw] = positionals;
-  const id = Number(raw);
-  if (entity === undefined || !Number.isInteger(id)) return fail("wecode wait <entity> <id>");
-  if (!isStateful(entity)) return fail(`${entity} has no states to wait on`);
-
-  const good: Readonly<Record<string, readonly string[]>> = {
-    project: ["dropped"],
-    release: ["released"],
-    epic: ["delivered"],
-    story: ["delivered"],
-    requirement: ["met"],
-    acceptance_criteria: ["accepted"],
-    acceptance_test: ["passed"],
-    task_test: ["passed"],
-    task: ["done"],
-    assignment: ["succeeded"],
-  };
-  const machine = loadMachines()[entity];
-  const settled = new Set([...machine.terminal, ...(good[entity] ?? [])]);
-
-  // Which column holds the state is the entity's business, not this command's: it used to
-  // be `entity === "assignment" ? "phase" : "state"` spliced into the SQL beside the table
-  // name, and both are now the entity's own typed read.
-  const read = ENTITIES[entity]?.state;
-  if (read === undefined || read === null) return fail(`${entity} has no states to wait on`);
-
-  const q = queries(db());
-  const deadline = values.timeout === undefined ? null : Date.now() + Number(values.timeout) * 1000;
-
-  const look = (): string | null => read(q, id);
-
-  if (look() === null) return fail(`no ${entity} #${id}`);
-
-  // Blocking on purpose, and synchronously: the command exists to not return until the
-  // answer is known, and run() is not async. Atomics.wait is the one sleep that parks the
-  // thread rather than the event loop.
-  const park = new Int32Array(new SharedArrayBuffer(4));
-  for (;;) {
-    const state = look();
-    if (state !== null && settled.has(state)) {
-      if (values.quiet !== true) process.stdout.write(`${entity} #${id} ${state}\n`);
-      return (good[entity] ?? []).includes(state) ? 0 : 1;
-    }
-    if (deadline !== null && Date.now() > deadline) {
-      return fail(`${entity} #${id} is still ${state ?? "gone"} after ${values.timeout}s`) + 1;
-    }
-    Atomics.wait(park, 0, 0, 1000);
-  }
-}
-
-/** `wecode tree [project]` — the whole shape, project to task_test. */
-function showTree(args: readonly string[]): number {
-  const only = args[0] === undefined ? undefined : Number(args[0]);
-  const nodes = tree(db(), only);
-  if (nodes.length === 0) return fail(only === undefined ? "no projects yet" : `no project #${only}`);
-
-  const mark: Readonly<Record<string, string>> = {
-    delivered: "✓",
-    released: "✓",
-    met: "✓",
-    accepted: "✓",
-    passed: "✓",
-    done: "✓",
-    dropped: "·",
-    failed: "✗",
-    on_hold: "‖",
-  };
-
-  const walk = (n: Node, prefix: string, last: boolean, top: boolean): void => {
-    const elbow = top ? "" : last ? "└── " : "├── ";
-    const state = mark[n.state] ?? "○";
-    const label = n.label.length > 64 ? `${n.label.slice(0, 63)}…` : n.label;
-    process.stdout.write(`${prefix}${elbow}${state} ${dimNum(n.id)} ${label}  ${grey(n.state)}\n`);
-    const next = top ? "" : prefix + (last ? "    " : "│   ");
-    n.children.forEach((c, i) => walk(c, next, i === n.children.length - 1, false));
-  };
-
-  for (const root of nodes) walk(root, "", true, true);
-  return 0;
-}
-
-const dimNum = (id: number): string => `\u001b[2m#${id}\u001b[0m`;
-const grey = (s: string): string => `\u001b[2m${s}\u001b[0m`;
-
-/** `wecode workspaces` — which ones exist, and which one you are talking to. */
-function workspaces(): number {
-  const known = listWorkspaces();
-  if (known.length === 0) {
-    return fail("no workspaces yet.\n  wecode onboard   in a repository, to make one");
-  }
-  const here = currentDatabase();
-  for (const name of known) {
-    const path = databaseOf(name);
-    const n = existsSync(path) ? projectCount(path) : 0;
-    process.stdout.write(`${path === here ? "*" : " "} ${name.padEnd(16)} ${n} project${n === 1 ? "" : "s"}\n`);
-  }
-  return 0;
-}
-
-function projectCount(path: string): number {
-  const conn = open(path);
-  // No `count(*)` in the dialect. One column of every row is what a count over a table this
-  // size costs anyway, and it is a number nothing has to be cast to.
-  const n = queries(conn).selectFrom(project).select(["id"]).all().length;
-  conn.close();
-  return n;
-}
-
-/** `wecode onboard [name]` — what happens when wecode meets a repository.
- *
- *  It learns the stack, records what it learned, and registers the project. Before this,
- *  every test carried a hand-typed command and every scope a hand-typed path. */
-function onboard(args: readonly string[]): number {
-  const { values, positionals } = parseArgs({
-    args: [...args],
-    allowPositionals: true,
-    options: { workspace: { type: "string" } },
-  });
-  const root = process.cwd();
-  const name = positionals[0] ?? basename(root);
-
-  if (!existsSync(join(root, ".git"))) {
-    return fail(
-      "this is not a git repository, and wecode works in branches and worktrees.\n" +
-        "  git init && git add -A && git commit -m \"seed\"",
-    );
-  }
-  if (gitConfig("user.email") === "") {
-    return fail(
-      "this repository has no git identity, so nothing an agent writes could be attributed.\n" +
-        '  git config user.name "Your Name" && git config user.email you@example.com',
-    );
-  }
-  if (execFileSync("git", ["rev-list", "-n", "1", "--all"], { cwd: root, encoding: "utf8" }).trim() === "") {
-    return fail(
-      "this repository has no commits, so there is nothing to cut a branch from.\n" +
-        '  git add -A && git commit -m "seed"',
-    );
-  }
-
-  const stack = detect(root);
-  if (stack === null) {
-    return fail(
-      "no stack recognised here. wecode looks for a lock file or a manifest — see config/stacks.yaml.\n" +
-        "  add one there, or write config/project.yaml by hand.",
-    );
-  }
-
-  const config = resolve(root, "config");
-  mkdirSync(config, { recursive: true });
-  const projectFile = join(config, "project.yaml");
-  const already = readProjectConfig(projectFile);
-  const learned = already ?? writeProjectConfig(projectFile, stack);
-
-  write(join(config, "roles.yaml"), rolesFor(learned));
-  ignore(resolve(root, ".gitignore"), ".wecode/");
-
-  // The workspace is named once, and the repository remembers which one it joined.
-  //
-  // Falling back to "default" while other workspaces exist put a project on a board its
-  // owner was not looking at. If there is a choice to make, it is made out loud.
-  const known = listWorkspaces();
-  const chosen = values.workspace ?? readPointer(root) ?? process.env["WECODE_WORKSPACE"];
-  if (chosen === undefined && known.length > 0 && !known.includes("default")) {
-    return fail(
-      `which workspace should this project join?\n` +
-        known.map((w) => `  wecode onboard --workspace ${w}`).join("\n") +
-        `\n  wecode onboard --workspace <new-name>   to start another`,
-    );
-  }
-  const wsName = chosen ?? "default";
-  writePointer(root, wsName);
-
-  const path = databaseOf(wsName);
-  mkdirSync(dirname(path), { recursive: true });
-  // The budget is the workspace's: attention is one person's and does not divide by how
-  // many repositories they have.
-  write(join(workspaceDir(wsName), "budget.yaml"), BUDGET);
-  const conn = open(path);
-  const q = queries(conn);
-  const make = new Maker(conn);
-
-  const wsId =
-    q.selectFrom(workspace).select(["id"]).where("name", "=", wsName).get()?.id ??
-    make.workspace(wsName, workspaceDir(wsName));
-
-  // Roles without workers is a board nothing can be dispatched from: the runner refuses
-  // every candidate with "no worker free for role engineer", and nowhere does it say a
-  // worker is a thing you make. So onboarding makes one per agent role, named after it.
-  const hired = hire(conn, make, join(config, "roles.yaml"));
-
-  const existing = q.selectFrom(project).select(["id"]).where("repo", "=", root).get();
-  if (existing !== null) {
-    process.stdout.write(
-      `project #${existing.id} is already onboarded here\n${workerLines(hired).join("\n")}${hired.length > 0 ? "\n" : ""}`,
-    );
-    return 0;
-  }
-
-  const projectId = make.project(wsId, name, root);
-  const releaseId = make.release(projectId, "0.0.1");
-  const started = new Verbs(new Engine(conn));
-  started.startProject(projectId, OPERATOR);
-  started.startRelease(releaseId, OPERATOR);
-
-  process.stdout.write(
-    [
-      `stack       ${learned.stack}`,
-      `test        ${learned.test}`,
-      learned.typecheck === null ? null : `typecheck   ${learned.typecheck}`,
-      `source      ${learned.source.join(", ")}`,
-      "",
-      `workspace   ${wsName}  (${path})`,
-      `project #${projectId}  release #${releaseId}`,
-      ...workerLines(hired),
-      "",
-      "next: wecode epic create --parent " + String(releaseId) + ' "<what this release is for>"',
-      "",
-    ]
-      .filter((l) => l !== null)
-      .join("\n"),
-  );
-  return 0;
-}
-
-interface Hired {
-  readonly id: number;
-  readonly role: string;
-  readonly fresh: boolean;
-}
-
-/** One agent worker per agent role, named after the role. A role that already has a worker
- *  keeps it: onboarding twice must not double the workforce. Human roles are people, and
- *  wecode does not get to hire those. */
-function hire(conn: ReturnType<typeof open>, make: Maker, rolesFile: string): Hired[] {
-  const hired: Hired[] = [];
-  const q = queries(conn);
-  for (const want of Object.values(loadRoles(rolesFile).roles)) {
-    if (want.worker_kind !== "agent") continue;
-    const had = q.selectFrom(worker).select(["id"]).where("role", "=", want.name).get();
-    hired.push(
-      had === null
-        ? { id: make.worker(want.name, want.name, "agent"), role: want.name, fresh: true }
-        : { id: had.id, role: want.name, fresh: false },
-    );
-  }
-  return hired;
-}
-
-const workerLines = (hired: readonly Hired[]): string[] =>
-  hired.map((h) => `worker #${h.id}  ${h.role}${h.fresh ? "" : "  (already there)"}`);
-
-/** Roles whose scopes are paths this repository has, rather than paths wecode assumed. */
-function rolesFor(c: { source: readonly string[]; tests: readonly string[] }): string {
-  const globs = (gs: readonly string[]): string => gs.map((g) => JSON.stringify(g)).join(", ");
-  return `invariants:
-  never_touch: [".github/**", "infra/**", "**/*.pem", "**/*.key", "**/.env"]
-  never_run: ["git push --force*", "npm publish*", "terraform apply*", "rm -rf /*"]
-
-defaults:
-  budget: { tokens: 250000, seconds: 3600 }
-  harness: claude-code
-
-roles:
-  engineer:
-    worker_kind: agent
-    scope:
-      write: [${globs([...c.source, ...c.tests])}]
-      tools: ["bash", "read", "edit", "write"]
-
-  acceptance-tester:
-    worker_kind: agent
-    scope:
-      write: [${globs(c.tests)}]
-      tools: ["bash", "read", "edit", "write"]
-    budget: { tokens: 120000, seconds: 1800 }
-`;
-}
-
-/** `wecode land <story>` — merge a delivered story into the branch you have checked out.
- *
- *  The operator runs this, not the runner. Landing moves the branch the operator is sitting
- *  on; a background process doing that under them would rewrite their working tree without
- *  asking. Shipping is a decision, and so is this. */
-function land(args: readonly string[]): number {
-  const id = Number(args[0]);
-  if (!Number.isInteger(id)) return fail("wecode land <story>");
-
-  const conn = db();
-  const found = queries(conn).selectFrom(story).select(["slug", "state"]).where("id", "=", id).get();
-  if (found === null) return fail(`no story #${id}`);
-  if (found.state !== "delivered") {
-    return fail(`story #${id} is ${found.state}. Only a delivered story lands.`);
-  }
-
-  const branch = `story/${found.slug}`;
-  const base = headBranch();
-
-  // The landing commit is the operator's, so it needs the operator's identity. wecode signs
-  // an agent's attempt; it does not sign a person's merge.
-  const who = gitConfig("user.name");
-  const email = gitConfig("user.email");
-  if (who === "" || email === "") {
-    return fail(
-      'this repository has no git identity, so the merge would be unattributed.\n' +
-        '  git config user.name "Your Name" && git config user.email you@example.com',
-    );
-  }
-
-  let sha: string;
-  try {
-    // A dirty base is refused by name, not by a general "your tree has changes": the merge
-    // would commit the operator's unrelated edits inside the landing commit, and the rule
-    // that says so lives in core so the runner half can be held to the same words.
-    const filthy = refuseDirtyBase(baseState(base));
-    if (filthy !== null) return fail(filthy);
-    // A delivered story whose branch is gone has nothing to merge, and calling that a
-    // landing is the reported defect. It is a failure, not a quiet success: the work is
-    // somewhere else, or nowhere.
-    if (!hasRef(branch)) return fail(nothingToLand(branch, base, "no-branch"));
-    // git answers "Already up to date" and exit 0 for a branch the base already holds, and
-    // that was indistinguishable, afterwards, from a merge that happened.
-    if (isAncestor(branch, "HEAD")) {
-      process.stdout.write(`${nothingToLand(branch, base, "already-ancestor")}\n`);
-      return 0;
-    }
-    const before = headSha();
-    try {
-      execFileSync("git", ["merge", "--no-ff", "-m", `land ${branch}`, branch], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (err) {
-      // A half-finished merge is the hazard: left in the tree, the next thing to commit —
-      // an agent, a hook, a person in a hurry — commits the conflict markers onto master.
-      // So the tree goes back exactly as it was found, and the conflict becomes a chore.
-      const conflicted = unmerged();
-      abortMerge();
-      const why = conflicted.length > 0
-        ? `${branch} conflicts with your branch in:\n${conflicted.map((f) => `  ${f}`).join("\n")}`
-        : `${branch} would not merge:\n${((err as { stderr?: string }).stderr ?? (err as Error).message).trim()}`;
-      return fail(`${why}\n${reportAbort(baseState(base), branch)}`);
-    }
-    sha = headSha();
-    if (sha === before) {
-      process.stdout.write(`${nothingToLand(branch, base, "already-ancestor")}\n`);
-      return 0;
-    }
-  } catch (err) {
-    return fail(`git: ${(err as Error).message}`);
-  }
-
-  recordLanding(conn, id, branch, sha);
-  process.stdout.write(`${branch} landed on ${base}: ${sha.slice(0, 12)}\n`);
-  // The landing is recorded either way — it happened — but a base left dirty by the merge
-  // (a hook that writes, a merge driver that stages) is the next operator's mystery, so it
-  // is said out loud and the command does not report success.
-  const left = reportLeftover(baseState(base));
-  return left === null ? 0 : fail(`${branch} landed, but the base was not left clean.\n${left}`);
-}
-
-/** The base checkout as the rule in core wants to see it. Read twice per landing: once
- *  before the merge and once after, because the whole promise is about the difference. */
-function baseState(base: string): BaseState {
-  const here = gitSay(["rev-parse", "--show-toplevel"]);
-  const gitDir = gitSay(["rev-parse", "--git-dir"]);
-  return {
-    here,
-    base,
-    // Tracked changes only. An untracked file does not affect a merge, and git refuses on
-    // its own if one would be overwritten — counting them here blocked a landing over
-    // wecode's own config directory.
-    dirty: gitSay(["status", "--porcelain", "-uno"]).split("\n").filter((l) => l !== ""),
-    merging: gitDir !== "" && existsSync(join(gitDir, "MERGE_HEAD")),
-  };
-}
-
-/** Why nothing happened. Same two reasons, and the same words, as the runner's own
- *  `landingReport`: an operator reading one and a log line from the other must not have to
- *  work out whether they mean the same thing. */
-function nothingToLand(branch: string, base: string, why: "no-branch" | "already-ancestor"): string {
-  return why === "no-branch"
-    ? `nothing to land: there is no ${branch}`
-    : `nothing to land: ${branch} is already in ${base}`;
-}
-
-/** The branch the operator is standing on, or the sha when they are detached. */
-function headBranch(): string {
-  const named = gitSay(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  return named === "" ? headSha().slice(0, 12) : named;
-}
-
-const headSha = (): string => gitSay(["rev-parse", "HEAD"]);
-
-const hasRef = (ref: string): boolean => gitSay(["rev-parse", "--verify", "--quiet", ref]) !== "";
-
-/** True when the base already holds every commit on `ref`. */
-function isAncestor(ref: string, of: string): boolean {
-  try {
-    execFileSync("git", ["merge-base", "--is-ancestor", ref, of], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function gitSay(args: readonly string[]): string {
-  try {
-    return execFileSync("git", [...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch {
-    return "";
-  }
-}
-
-/** The landing, where a query can see it. The doctor's first invariant reads `landed_branch`
- *  through the story's tasks, and it reported stories unlanded that were sitting in the base
- *  because this path merged and recorded nothing. Written here, on the path that actually
- *  merges, and nowhere else. */
-function recordLanding(
-  conn: ReturnType<typeof db>,
-  storyId: number,
-  branch: string,
-  sha: string,
-): void {
-  // The runner owns this table and creates it on its first merge; a repository landed by
-  // hand may never have run a tick. DDL is the one statement here that is not a query, and
-  // the dialect compiles queries — so this stays as schema text, and is the only SQL left.
-  conn.exec(
-    `CREATE TABLE IF NOT EXISTS landed_branch (
-       task_id   INTEGER PRIMARY KEY,
-       branch    TEXT NOT NULL,
-       sha       TEXT NOT NULL,
-       merged_at TEXT NOT NULL
-     )`,
-  );
-  // The four-table join the SQL spelled, composed instead: the dialect has neither JOIN nor
-  // IN, and it is one link of the tree per step — requirement to criteria to acceptance_test
-  // to task — which is the same walk `projectOf` makes in the other direction.
-  const q = queries(conn);
-  const reqs = new Set(
-    q.selectFrom(requirement).select(["id"]).where("story_id", "=", storyId).all().map((r) => r.id),
-  );
-  const crits = new Set(
-    q.selectFrom(criteria).select(["id", "requirement_id"]).all()
-      .filter((r) => reqs.has(r.requirement_id))
-      .map((r) => r.id),
-  );
-  const tests = new Set(
-    q.selectFrom(acceptanceTest).select(["id", "parent_id"]).all()
-      .filter((r) => crits.has(r.parent_id))
-      .map((r) => r.id),
-  );
-  const tasks = q
-    .selectFrom(task)
-    .select(["id", "acceptance_test_id"])
-    .all()
-    .filter((r) => tests.has(r.acceptance_test_id))
-    .map((r) => r.id);
-
-  const at = new Date().toISOString();
-  for (const taskId of tasks) {
-    q.insertInto(landedBranch, { task_id: taskId, branch, sha, merged_at: at })
-      .onConflict(["task_id"], {
-        branch: excluded<LandedRow>("branch"),
-        sha: excluded<LandedRow>("sha"),
-        merged_at: excluded<LandedRow>("merged_at"),
-      })
-      .run();
-  }
-}
-
-/** The paths git left with conflict markers, read before the merge is undone. */
-function unmerged(): string[] {
-  try {
-    const out = execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], { encoding: "utf8" });
-    return out.split("\n").filter((l) => l !== "");
-  } catch {
-    return [];
-  }
-}
-
-/** Best effort: if the merge never started there is nothing to abort, and saying so helps nobody. */
-function abortMerge(): void {
-  try {
-    execFileSync("git", ["merge", "--abort"], { stdio: "ignore" });
-  } catch {
-    /* no merge in progress */
-  }
-}
-
-function gitConfig(key: string): string {
-  try {
-    return execFileSync("git", ["config", "--get", key], { encoding: "utf8" }).trim();
-  } catch {
-    return "";
-  }
-}
-
-// ─── the record, in tables rather than in strings ────────────────────────────────────────
+// ─── the record ──────────────────────────────────────────────────────────────────────────
 //
-// `repo.ts` declares only the columns it speaks about; this client cannot, because `show`
-// prints a whole record and the SQL it replaces was `SELECT *`. So these lists are the
-// schema, which makes them a second copy of it — and a second copy with no check between it
-// and the first is the defect. `typed-run.test.ts` holds every list below against
-// `PRAGMA table_info`, name for name and in order, so a column added on either side fails.
+// The tables, the row shapes and the shape of the tree live in `verbs/entity.ts` now. They
+// are still reached by this file's name, because this is the name the rest of the cli knows
+// them by: `verbs/run-and-see.ts` imports the row types from here, and `typed-run.test.ts`
+// holds DECLARED against `PRAGMA table_info`.
+export type {
+  AcceptanceTestRow, AssignmentRow, CriteriaRow, LandedRow, ProjectRow, RequirementRow,
+  StoryRow, TaskRow, TestRow, WorkerRow, WorkspaceRow,
+} from "./verbs/entity.js";
+export { DECLARED } from "./verbs/entity.js";
 
-type WorkspaceRow = { id: number; slug: string; name: string; path: string; created_at: string; updated_at: string };
-type ProjectRow = { id: number; slug: string; workspace_id: number; name: string; repo: string; objective: string;
-  state: string; created_at: string; updated_at: string };
-type ReleaseRow = { id: number; slug: string; project_id: number; version: string; released_at: string | null;
-  state: string; created_at: string; updated_at: string };
-type EpicRow = { id: number; slug: string; release_id: number; title: string; state: string; created_at: string; updated_at: string };
-type StoryRow = { id: number; slug: string; epic_id: number; title: string; state: string; created_at: string; updated_at: string };
-type RequirementRow = { id: number; slug: string; story_id: number; statement: string; state: string;
-  created_at: string; updated_at: string };
-type CriteriaRow = { id: number; slug: string; requirement_id: number; statement: string; state: string;
-  created_at: string; updated_at: string };
-/** Both test tables carry the same columns bar the extra three an acceptance_test earns by
- *  being the thing that must have been seen to fail at the base. */
-type TestRow = { id: number; slug: string; parent_id: number; statement: string; kind: string; artefact: string | null;
-  last_run_at: string | null; last_output: string | null; state: string; created_at: string; updated_at: string;
-  script_path: string | null; provenance_sha: string | null };
-type AcceptanceTestRow = TestRow & { red_at_base_sha: string | null; red_at_base_at: string | null;
-  red_at_base_reason: string | null };
-type TaskRow = { id: number; slug: string; acceptance_test_id: number; title: string; scope: string; role: string;
-  budget: string; attempts: number; max_retry: number; state: string; created_at: string; updated_at: string };
-type RoleRow = { id: number; slug: string; name: string; scope: string; worker_kind: string; harness: string | null;
-  created_at: string; updated_at: string };
-type WorkerRow = { id: number; slug: string; name: string; role: string; kind: string; created_at: string; updated_at: string };
-type AssignmentRow = { id: number; slug: string; objective_type: string; objective_id: number; worker_id: number;
-  scope: string; budget: string; worktree: string; phase: string; reason: string | null; kind: string | null;
-  question: string | null; options: string | null; answer: string | null; answered_by: string | null;
-  session: string | null; last_seen: string | null; spent: string; commit_sha: string | null; created_at: string;
-  updated_at: string };
-type LedgerRow = {
-  id: number;
-  entity: string;
-  entity_id: number;
-  verb: string;
-  from_state: string;
-  to_state: string;
-  actor: string;
-  at: string;
-};
-/** The runner's table, written here too because this is the path that actually merges. */
-type LandedRow = { task_id: number; branch: string; sha: string; merged_at: string };
+const {
+  acceptanceTest, assignment, criteria, project, requirement, story, task, worker,
+  workspace, landedBranch, ENTITIES,
+} = ent;
 
-const workspace = table<WorkspaceRow>("workspace", ["id", "slug", "name", "path", "created_at", "updated_at"]);
-const project = table<ProjectRow>("project", [
-  "id", "slug", "workspace_id", "name", "repo", "objective", "state", "created_at", "updated_at",
-]);
-const release = table<ReleaseRow>("release", [
-  "id", "slug", "project_id", "version", "released_at", "state", "created_at", "updated_at",
-]);
-const epic = table<EpicRow>("epic", ["id", "slug", "release_id", "title", "state", "created_at", "updated_at"]);
-const story = table<StoryRow>("story", ["id", "slug", "epic_id", "title", "state", "created_at", "updated_at"]);
-const requirement = table<RequirementRow>("requirement", [
-  "id", "slug", "story_id", "statement", "state", "created_at", "updated_at",
-]);
-const criteria = table<CriteriaRow>("acceptance_criteria", [
-  "id", "slug", "requirement_id", "statement", "state", "created_at", "updated_at",
-]);
-const TEST_COLUMNS = [
-  "id", "slug", "parent_id", "statement", "kind", "artefact", "last_run_at", "last_output",
-  "state", "created_at", "updated_at", "script_path",
-] as const;
-// The order is the migrations' order: 005 added script_path, 006 the three red-at-base
-// columns, 013 provenance_sha — and `show` prints columns in the order they are declared.
-const acceptanceTest = table<AcceptanceTestRow>("acceptance_test", [
-  ...TEST_COLUMNS, "red_at_base_sha", "red_at_base_at", "red_at_base_reason", "provenance_sha",
-]);
-const taskTest = table<TestRow>("task_test", [...TEST_COLUMNS, "provenance_sha"]);
-const task = table<TaskRow>("task", [
-  "id", "slug", "acceptance_test_id", "title", "scope", "role", "budget", "attempts", "max_retry",
-  "state", "created_at", "updated_at",
-]);
-const role = table<RoleRow>("role", ["id", "slug", "name", "scope", "worker_kind", "harness", "created_at", "updated_at"]);
-const worker = table<WorkerRow>("worker", ["id", "slug", "name", "role", "kind", "created_at", "updated_at"]);
-const assignment = table<AssignmentRow>("assignment", [
-  "id", "slug", "objective_type", "objective_id", "worker_id", "scope", "budget", "worktree",
-  "phase", "reason", "kind", "question", "options", "answer", "answered_by", "session",
-  "last_seen", "spent", "commit_sha", "created_at", "updated_at",
-]);
-const ledger = table<LedgerRow>("ledger", [
-  "id", "entity", "entity_id", "verb", "from_state", "to_state", "actor", "at",
-]);
-const landedBranch = table<LandedRow>("landed_branch", ["task_id", "branch", "sha", "merged_at"]);
+/** What the entity half is lent: the workspace database, how a refusal is said, and who is
+ *  asking. The three things only this file knows. */
+const at: ent.At = { conn: db, fail, actor: () => whoIsAsking() };
 
-/** Every list above, for the test that holds them against the database. Only the names and
- *  the order escape: `TableDef<Row>` is invariant in `Row`, so a list of differently-shaped
- *  tables has no useful element type — but `{ name, columns: readonly string[] }` is what
- *  the check needs and every `TableDef` already is one. */
-export const DECLARED: readonly { readonly name: string; readonly columns: readonly string[] }[] = [
-  workspace, project, release, epic, story, requirement, criteria, acceptanceTest, taskTest,
-  task, role, worker, assignment, ledger,
-];
+/** What a listing in `verbs/usage.ts` is lent on top of that: the project this repository
+ *  is, which is this file's to answer because it is the one that knows where you stand. */
+const look: use.Look = { ...at, here: () => hereProject() };
 
-/** A row this client can be handed by name: it has an id, and every column holds something
- *  SQLite stores. The index signature is what lets one whole record be printed without
- *  knowing which entity it is. */
-type Shape = { id: number } & Record<string, Value>;
-
-/** What `show`, `wait`, `where` and the missing-id answer ask of one entity.
- *
- *  The shape of the tree is still written down once, as it was — but each row carries the
- *  typed query rather than a table name and a column name spliced into SQL text. The column
- *  is checked against the table it narrows where the lookup is written, which is the whole
- *  point of the port: a `Record<string, TableDef<Shape>>` cannot work, because `TableDef`'s
- *  `columns: (keyof Row)[]` makes it invariant in `Row`. */
-interface Kin {
-  /** The entity this hangs off, or null for the ones that hang off nothing. */
-  readonly parent: string | null;
-  /** Every row's id and the words that name it. */
-  readonly names: (q: Dialect) => { id: number; label: string }[];
-  /** The words that name one row. */
-  readonly name: (q: Dialect, id: number) => string | null;
-  /** One whole record, in the order the columns are declared above. */
-  readonly row: (q: Dialect, id: number) => Record<string, Value> | null;
-  /** The parent's id, for walking up to the project. */
-  readonly up: ((q: Dialect, id: number) => number | null) | null;
-  /** The state it is in — an assignment keeps it in `phase` — or null when it has none. */
-  readonly state: ((q: Dialect, id: number) => string | null) | null;
+/** The project this repository is, or null when you are standing outside all of them. */
+function hereProject(): { id: number; name: string } | null {
+  return queries(db())
+    .selectFrom(project)
+    .select(["id", "name"])
+    .where("repo", "=", resolve(process.cwd()))
+    .get();
 }
 
-function kin<Row extends Shape>(
-  def: TableDef<Row>,
-  label: keyof Row & string,
-  opts: {
-    readonly parent?: { readonly table: string; readonly fk: keyof Row & string };
-    readonly state?: keyof Row & string;
-  } = {},
-): Kin {
-  const { parent, state } = opts;
-  const one = <K extends keyof Row & string>(q: Dialect, col: K, id: number): Row[K] | null => {
-    const row = q.selectFrom(def).select([col]).where("id", "=", id).get();
-    return row === null ? null : row[col];
-  };
-  return {
-    parent: parent?.table ?? null,
-    names: (q) =>
-      q
-        .selectFrom(def)
-        .select(["id", label])
-        .all()
-        .map((r) => ({ id: r.id, label: String(r[label]) })),
-    name: (q, id) => {
-      const got = one(q, label, id);
-      return got === null ? null : String(got);
-    },
-    row: (q, id) => q.selectFrom(def).where("id", "=", id).get(),
-    up:
-      parent === undefined
-        ? null
-        : (q, id) => {
-            const got = one(q, parent.fk, id);
-            return typeof got === "number" ? got : null;
-          },
-    state:
-      state === undefined
-        ? null
-        : (q, id) => {
-            const got = one(q, state, id);
-            return typeof got === "string" ? got : null;
-          },
-  };
-}
-
-/** Which table each entity is, what names one, and the row it hangs off. The one place
- *  the shape of the tree is written down in this client — `where`, `show` and the missing-id
- *  answer all read it rather than each carrying their own copy. */
-const ENTITIES: Readonly<Record<string, Kin>> = {
-  workspace: kin(workspace, "name"),
-  project: kin(project, "name", { parent: { table: "workspace", fk: "workspace_id" }, state: "state" }),
-  release: kin(release, "version", { parent: { table: "project", fk: "project_id" }, state: "state" }),
-  epic: kin(epic, "title", { parent: { table: "release", fk: "release_id" }, state: "state" }),
-  story: kin(story, "title", { parent: { table: "epic", fk: "epic_id" }, state: "state" }),
-  requirement: kin(requirement, "statement", { parent: { table: "story", fk: "story_id" }, state: "state" }),
-  acceptance_criteria: kin(criteria, "statement", {
-    parent: { table: "requirement", fk: "requirement_id" },
-    state: "state",
-  }),
-  acceptance_test: kin(acceptanceTest, "statement", {
-    parent: { table: "acceptance_criteria", fk: "parent_id" },
-    state: "state",
-  }),
-  task: kin(task, "title", { parent: { table: "acceptance_test", fk: "acceptance_test_id" }, state: "state" }),
-  task_test: kin(taskTest, "statement", { parent: { table: "task", fk: "parent_id" }, state: "state" }),
-  assignment: kin(assignment, "slug", { state: "phase" }),
-  role: kin(role, "name"),
-  worker: kin(worker, "name"),
+/** What run.ts lends the verbs in `verbs/run-and-see.ts`: the argv tail they were given,
+ *  and the four things only this file knows — the workspace database, how a refusal is
+ *  said, where you are standing, and the tables. */
+const TABLES: act.Tables = {
+  workspace, project, story, requirement, criteria, acceptanceTest, task, worker, assignment, landedBranch,
 };
+
+const seen = (args: readonly string[]): act.See => ({
+  args, conn: db, fail, hereProject, actor: whoIsAsking, tables: TABLES,
+});
 
 /** `wecode show <entity> <id>` — one record, whatever state it is in, and where it lives.
  *
@@ -1044,25 +208,14 @@ function show(args: readonly string[]): number {
   }
   const q = queries(db());
   const row = kind.row(q, id);
-  if (row === null) return fail(instead(q, entity, id));
+  if (row === null) return fail(ent.instead(q, entity, id));
   for (const [k, v] of Object.entries(row)) {
     if (v === null || v === "") continue;
     process.stdout.write(`${k.padEnd(18)} ${String(v)}\n`);
   }
-  const owner = projectOf(entity, id);
+  const owner = ent.projectOf(at, entity, id);
   if (owner !== null) process.stdout.write(`${"project".padEnd(18)} #${owner.id} ${owner.name}\n`);
   return 0;
-}
-
-/** What to say about an id that is not there: the ids of that entity that are. */
-function instead(q: Dialect, entity: string, id: number): string {
-  // No ORDER BY in the dialect, and the ids are what the answer is about, so they are sorted
-  // here. `show` has already refused a word that is not an entity.
-  const rows = (ENTITIES[entity]?.names(q) ?? []).sort((a, b) => a.id - b.id);
-  if (rows.length === 0) return `no ${entity} #${id}, and no ${entity} at all yet.`;
-  const shown = rows.slice(0, 20).map((r) => `  #${r.id}  ${String(r.label)}`);
-  const more = rows.length > shown.length ? [`  … and ${rows.length - shown.length} more`] : [];
-  return [`no ${entity} #${id}. These ${entity} ids exist:`, ...shown, ...more].join("\n");
 }
 
 /** Every command but init and onboard needs a database. A missing one is the commonest
@@ -1079,133 +232,7 @@ function db() {
 
 class Missing extends Error {}
 
-/** The project this repository is, or null when you are standing outside all of them. */
-function hereProject(): { id: number; name: string } | null {
-  return queries(db())
-    .selectFrom(project)
-    .select(["id", "name"])
-    .where("repo", "=", resolve(process.cwd()))
-    .get();
-}
 
-/** What to say to somebody standing in a directory that is not a project: the command that
- *  would put one here, and — only when the workspace already holds projects — the ids that
- *  could be asked for instead. "no project here" alone left the next move to be guessed,
- *  and the guess was usually that the workspace was broken. */
-function noProjectHere(command: string): string {
-  const rows = queries(db())
-    .selectFrom(project)
-    .select(["id", "name"])
-    .all()
-    .sort((a, b) => a.id - b.id);
-  const shown = rows.slice(0, 5).map((r) => `    #${r.id}  ${r.name}`);
-  const more = rows.length > shown.length ? [`    … and ${rows.length - shown.length} more`] : [];
-  return [
-    // The first clause is kept as it was: another test reads this refusal by that phrase.
-    `no project here — ${resolve(process.cwd())} is not one.`,
-    "  wecode onboard   here, to make this repository one",
-    ...(rows.length === 0 ? [] : [`  ${command} --project <id>   for a project you already have:`, ...shown, ...more]),
-  ].join("\n");
-}
-
-/** `wecode board [--all] [--project N]` — by default, only the project you are standing in.
- *
- *  A board of every project in the workspace cannot answer "what is left here", which is
- *  the question somebody in a repository is asking. `--all` is the workspace-wide view. */
-function showBoard(args: readonly string[]): number {
-  const { values } = parseArgs({
-    args: [...args],
-    options: { all: { type: "boolean" }, project: { type: "string" } },
-  });
-  // Outside every project's repo there is no "here" to narrow to, so the board is the
-  // workspace's — which is what it always was.
-  const asked = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
-  const chosen = values.all === true ? null : asked;
-  if (chosen !== null && !Number.isInteger(chosen)) return fail("wecode board --project <id>");
-
-  const b = board(db(), chosen);
-  const mine = b.projects.find((p) => p.id === chosen);
-  if (chosen !== null && mine === undefined) return fail(`no project #${chosen}`);
-  process.stdout.write(
-    mine === undefined
-      ? `\nall ${b.projects.length} projects in this workspace\n`
-      : `\n#${mine.id} ${mine.what} · wecode board --all for the whole workspace\n`,
-  );
-  const groups: [string, readonly { id: number; what: string; state: string; detail: string }[]][] = [
-    ["RUNNING", b.running],
-    ["NEEDS YOU", b.needs_human],
-    ["STALE", b.stale],
-    ["QUEUE", b.queued],
-    ["FAILED", b.failed],
-    ["OPEN", b.open],
-  ];
-  for (const [title, rows] of groups) {
-    process.stdout.write(`\n${title} (${rows.length})\n`);
-    if (rows.length === 0) {
-      process.stdout.write("  —\n");
-      continue;
-    }
-    for (const r of rows) {
-      // A title longer than the column pushed every other column off the line.
-      const what = r.what.length > 52 ? `${r.what.slice(0, 51)}…` : r.what.padEnd(52);
-      process.stdout.write(`  #${String(r.id).padStart(4)}  ${what}  ${r.state.padEnd(12)} ${r.detail}\n`);
-    }
-  }
-  process.stdout.write("\n");
-  return 0;
-}
-
-/** `wecode lessons [--project N]` — what earlier attempts on this repository learned.
- *
- *  Each line carries the assignment that learned it and how old it is, because those are
- *  what a suspicious lesson is judged on: a lesson is a note about a world that changes. */
-function showLessons(args: readonly string[]): number {
-  const { values } = parseArgs({ args: [...args], options: { project: { type: "string" } } });
-  const chosen = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
-  if (chosen === null) {
-    return fail(noProjectHere("wecode lessons"));
-  }
-  if (!Number.isInteger(chosen)) return fail("wecode lessons --project <id>");
-
-  const conn = db();
-  const found = lessons(conn, chosen);
-  if (found.length === 0) {
-    process.stdout.write("no lessons here yet\n");
-    return 0;
-  }
-  for (const l of found) {
-    const from = l.assignment_id === null ? "by hand" : assignmentName(conn, l.assignment_id);
-    process.stdout.write(`  #${String(l.id).padStart(3)}  ${l.text}\n`);
-    process.stdout.write(`        ${grey(`${from} · ${age(l.created_at)}`)}\n`);
-  }
-  return 0;
-}
-
-/** The assignment a lesson came from, so a suspicious one can be traced back to the attempt
- *  that wrote it. The foreign key is what makes the row certain to be there. */
-function assignmentName(conn: ReturnType<typeof open>, id: number): string {
-  const row = queries(conn).selectFrom(assignment).select(["slug"]).where("id", "=", id).get();
-  return row === null ? `assignment #${id}` : `${row.slug} #${id}`;
-}
-
-function age(at: string): string {
-  const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(at)) / 60_000));
-  if (minutes < 60) return `${minutes}m ago`;
-  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)}h ago`;
-  return `${Math.floor(minutes / (60 * 24))}d ago`;
-}
-
-/** `wecode lesson drop <id>` — the operator's call, like everything else that is a
- *  judgement. A wrong lesson is worse than none, so this is one command with no ceremony. */
-function lesson(args: readonly string[]): number {
-  const [name, raw] = args;
-  if (name !== "drop") return fail("wecode lesson drop <id>");
-  const id = Number(raw);
-  if (!Number.isInteger(id)) return fail("wecode lesson drop <id>");
-  if (!dropLesson(db(), id)) return fail(`no lesson #${id}`);
-  process.stdout.write(`lesson #${id} dropped\n`);
-  return 0;
-}
 
 /** One invocation of the facade: every method on `Verbs` and on `Completions` takes an id
  *  and an actor and answers an Outcome, so a verb resolved off the command line has this
@@ -1256,16 +283,16 @@ function verb(entity: string, rest: readonly string[]): number {
   // every other verb, `create` first, is the row, so it goes on down this function.
   // The split is here rather than in dispatch() so the row stays the default and the
   // drawing the exception, both read in one place.
-  if (entity === "design" && name === "show") return later(projector([name, ...args]));
+  if (entity === "design" && name === "show") return later(see.design([name, ...args]));
 
   // parseArgs would call --help an unknown option. It is the one place a newcomer looks
   // for create's flags, so answer it here, before the flags are parsed at all.
   const asked = args.some((a) => a === "--help" || a === "-h");
-  if (name === "create") return asked ? createHelp(entity) : create(entity, args);
-  if (name === "scope") return asked ? scopeHelp() : scope(entity, args);
-  if (name === "artefact") return asked ? artefactHelp() : artefact(entity, args);
-  if (name === "restate") return asked ? restateHelp() : restateVerb(entity, args);
-  if (name === "retry" && entity === "task") return retry(args);
+  if (name === "create") return asked ? make.createHelp(at, entity) : create(entity, args);
+  if (name === "scope") return asked ? ent.scopeHelp() : ent.scope(at, entity, args);
+  if (name === "artefact") return asked ? make.artefactHelp() : make.artefact(at, entity, args);
+  if (name === "restate") return asked ? use.restateHelp() : restateVerb(entity, args);
+  if (name === "retry" && entity === "task") return ent.retry(at, args);
 
   if (!isStateful(entity)) return fail(`${entity} has no states; its only verb is create`);
   const id = Number(args[0]);
@@ -1283,124 +310,6 @@ function verb(entity: string, rest: readonly string[]): number {
     process.stdout.write(`${c.entity} #${c.id}  ${c.from} → ${c.to}${c.automatic ? "  (cascade)" : ""}\n`);
   }
   return 0;
-}
-
-/** `wecode task retry <id> --reason "<text>"` — the way back from failed.
- *
- *  The reason is required, and attempts go back to zero: a retry with the counter left at
- *  the limit fails the guard again on the next tick, which is how an exhausted task
- *  dangles. The runner never comes down this path — it can push a task to failed and no
- *  further, because a fourth attempt is a judgement about why the first three did not
- *  work. The reason rides on the ledger's actor, which is the only column that survives
- *  with the transition it explains. */
-function retry(args: readonly string[]): number {
-  const { values, positionals } = parseArgs({
-    args: [...args],
-    allowPositionals: true,
-    options: { reason: { type: "string" } },
-  });
-  const id = Number(positionals[0]);
-  const reason = (values.reason ?? "").trim();
-  if (!Number.isInteger(id) || reason === "") {
-    return fail('wecode task retry <id> --reason "<why a further attempt will go differently>"');
-  }
-
-  const wrong = elsewhere("task", id);
-  if (wrong !== null) return fail(wrong);
-
-  const conn = db();
-  const q = queries(conn);
-  const before = q.selectFrom(task).select(["attempts", "max_retry"]).where("id", "=", id).get();
-  if (before === null) return fail(`no task #${id}`);
-
-  const who = whoIsAsking();
-  const out = new Verbs(new Engine(conn)).retryTask(id, attributedTo(who, reason));
-  if (!out.ok) return fail(out.why);
-  // After the transition: a refused retry must not leave the counter reset behind it.
-  q.update(task).set({ attempts: 0, updated_at: new Date().toISOString() }).where("id", "=", id).run();
-
-  for (const c of out.changes) {
-    process.stdout.write(`${c.entity} #${c.id}  ${c.from} → ${c.to}${c.automatic ? "  (cascade)" : ""}\n`);
-  }
-  process.stdout.write(`attempts ${before.attempts} → 0 of ${before.max_retry}  ·  ${who}: ${reason}\n`);
-  return 0;
-}
-
-/** `wecode task scope <id> --write "src/**,tests/**" --tools bash,read` */
-function scope(entity: string, args: readonly string[]): number {
-  if (entity !== "task") return fail("only a task carries a scope");
-  const { values, positionals } = parseArgs({
-    args: [...args],
-    allowPositionals: true,
-    options: { write: { type: "string" }, tools: { type: "string" } },
-  });
-  const id = Number(positionals[0]);
-  if (!Number.isInteger(id)) return fail('wecode task scope <id> --write "src/**" --tools bash');
-
-  // The same guard create has. Ids are global, and this one writes: scoping another
-  // project's task is silent, and was.
-  const wrong = elsewhere("task", id);
-  if (wrong !== null) return fail(wrong);
-
-  const list = (v: string | undefined): string[] =>
-    v === undefined || v === "" ? [] : v.split(",").map((s) => s.trim()).filter((s) => s !== "");
-
-  const learned = projectConfig();
-  const write =
-    values.write === undefined && learned !== null ? [...learned.source, ...learned.tests] : list(values.write);
-  const tools = values.tools === undefined ? ["bash", "read", "edit", "write"] : list(values.tools);
-
-  try {
-    setTaskScope(db(), id, { write, tools });
-    process.stdout.write(`task #${id} scope ${write.join(", ")}\n`);
-    return 0;
-  } catch (err) {
-    return fail((err as Error).message);
-  }
-}
-
-/** `wecode acceptance_test artefact <id> --set "bash test/mail.sh" [--script-path test/mail.sh]`
- *
- *  Without this the only cure for a wrongly typed artefact was to drop the test, which
- *  cascades its parent to a settled state and cannot be undone. */
-function artefact(entity: string, args: readonly string[]): number {
-  if (entity !== "acceptance_test" && entity !== "task_test") {
-    return fail("only an acceptance_test or a task_test carries an artefact");
-  }
-  const { values, positionals } = parseArgs({
-    args: [...args],
-    allowPositionals: true,
-    options: { set: { type: "string" }, "script-path": { type: "string" } },
-  });
-  const id = Number(positionals[0]);
-  const how = `wecode ${entity} artefact <id> --set "<cmd>" [--script-path <path>]`;
-  if (!Number.isInteger(id)) return fail(how);
-
-  // The same guard scope has: ids are global, and this one writes.
-  const wrong = elsewhere(entity, id);
-  if (wrong !== null) return fail(wrong);
-
-  const path = values["script-path"];
-  if (values.set === undefined && path === undefined) return fail(how);
-
-  try {
-    if (values.set !== undefined) {
-      setArtefact(db(), entity, id, values.set);
-      process.stdout.write(`${entity} #${id} artefact ${values.set}\n`);
-    }
-    if (path !== undefined) {
-      // An empty --script-path clears it: the path is spec, and a test may stop having one.
-      setScriptPath(db(), entity, id, path.trim() === "" ? null : path);
-      process.stdout.write(
-        path.trim() === ""
-          ? `${entity} #${id} script path cleared\n`
-          : `${entity} #${id} script path ${path}\n`,
-      );
-    }
-    return 0;
-  } catch (err) {
-    return fail((err as Error).message);
-  }
 }
 
 /** `wecode story restate <id> --to "the words that are right"`
@@ -1433,7 +342,7 @@ function restateVerb(entity: string, args: readonly string[]): number {
   if (!Number.isInteger(id) || values.to === undefined) return fail(how);
 
   // The same guard scope and artefact have: ids are global, and this one writes.
-  const wrong = elsewhere(entity, id);
+  const wrong = ent.elsewhere(at, entity, id);
   if (wrong !== null) return fail(wrong);
 
   try {
@@ -1446,44 +355,6 @@ function restateVerb(entity: string, args: readonly string[]): number {
   }
 }
 
-function restateHelp(): number {
-  process.stdout.write(
-    [
-      `wecode <${Object.keys(RESTATABLE).join("|")}> restate <id> --to "<words>"`,
-      "",
-      "  correct the wording of a record without dropping it. the old wording goes on",
-      "  the ledger, so the correction is itself part of the record.",
-      "",
-      "  the slug does not move: worktrees and branches are named after it.",
-      "  this corrects words only — it can never change a state.",
-      "",
-      '  wecode story restate 201 --to "the typescript build ships a bundle"',
-      "",
-      "",
-    ].join("\n"),
-  );
-  return 0;
-}
-
-function artefactHelp(): number {
-  process.stdout.write(
-    [
-      "wecode <acceptance_test|task_test> artefact <id> [flags]",
-      "",
-      "  the command that proves the test, and where its script is meant to live.",
-      "  changing the command clears any recorded red-at-base run: that run proved",
-      "  something about the old command.",
-      "",
-      "  --set <cmd>          the command — refused when it is empty",
-      "  --script-path <path> where the script lives (empty to clear it)",
-      "",
-      '  wecode acceptance_test artefact 1 --set "bash test/mail.sh" --script-path test/mail.sh',
-      "",
-      "",
-    ].join("\n"),
-  );
-  return 0;
-}
 
 function create(entity: string, args: readonly string[]): number {
   const { values, positionals } = parseArgs({
@@ -1501,7 +372,7 @@ function create(entity: string, args: readonly string[]): number {
   // wrong repository — the agents run wherever the task's project points, which is correct
   // and was not what anybody meant.
   if (Number.isInteger(parent) && values["project"] === undefined) {
-    const wrong = crossesProject(entity, parent);
+    const wrong = ent.crossesProject(at, entity, parent);
     if (wrong !== null) return fail(wrong);
   }
   const make = new Maker(db());
@@ -1509,49 +380,39 @@ function create(entity: string, args: readonly string[]): number {
     if (!Number.isInteger(parent)) throw new Error(`wecode ${entity} create --parent <id> "<text>"`);
     return parent;
   };
+  const rung: rungs.Rung = { make, text, parent: needsParent, path: values["path"] ?? process.cwd() };
+  // A thunk, so the artefact fallback only reads the project's config when a test is what
+  // is being made — it is a question about the working directory, and the other three
+  // never asked it.
+  const job = (): work.Work => ({
+    make, text, parent: needsParent,
+    kind: kindOf(values["kind"]), artefact: artefactOr(values["artefact"]), role: values["role"] ?? "",
+  });
 
   try {
     let id: number;
     switch (entity) {
-      case "workspace":
-        id = make.workspace(text, values["path"] ?? process.cwd());
-        break;
-      case "project":
-        id = make.project(needsParent(), text, values["path"] ?? process.cwd());
-        break;
-      case "release":
-        id = make.release(needsParent(), text);
-        break;
-      case "epic":
-        id = make.epic(needsParent(), text);
-        break;
-      case "story":
-        id = make.story(needsParent(), text);
-        break;
-      case "requirement":
-        id = make.requirement(needsParent(), text);
-        break;
-      case "acceptance_criteria":
-        id = make.criteria(needsParent(), text);
-        break;
-      case "acceptance_test":
-        id = make.acceptanceTest(needsParent(), text, kindOf(values["kind"]), artefactOr(values["artefact"]));
-        break;
-      case "task_test":
-        id = make.taskTest(needsParent(), text, kindOf(values["kind"]), artefactOr(values["artefact"]));
-        break;
-      case "task":
-        id = make.task(needsParent(), text, { role: values["role"] ?? "" });
-        break;
+      case "workspace": id = rungs.workspace(rung); break;
+      case "project": id = rungs.project(rung); break;
+      case "release": id = rungs.release(rung); break;
+      case "epic": id = rungs.epic(rung); break;
+      case "story": id = rungs.story(rung); break;
+      case "requirement": id = work.requirement(job()); break;
+      case "acceptance_criteria": id = work.acceptanceCriteria(job()); break;
+      case "acceptance_test": id = work.acceptanceTest(job()); break;
+      case "task_test": id = work.taskTest(job()); break;
+      case "task": id = work.task(job()); break;
       case "worker":
-        id = make.worker(text, values["role"] ?? "", (values["kind"] ?? "agent") as WorkerKind);
+        id = act.worker({
+          make, text, role: values["role"] ?? "", kind: (values["kind"] ?? "agent") as WorkerKind,
+        });
         break;
       default:
         return fail(`no such entity: ${entity}`);
     }
     // Say what it joined. --parent takes any number, and ids are global: attaching to
     // another project's tree is silent otherwise, and was.
-    process.stdout.write(`${entity} #${id}${where(entity, id)}\n`);
+    process.stdout.write(`${entity} #${id}${ent.under(at, entity, id)}\n`);
     return 0;
   } catch (err) {
     return fail((err as Error).message);
@@ -1562,77 +423,7 @@ function create(entity: string, args: readonly string[]): number {
  *  learned from the repository. Retyping it into every test is how they drift. */
 function artefactOr(given: string | undefined): string | null {
   if (given !== undefined) return given;
-  return projectConfig()?.test ?? null;
-}
-
-function projectConfig(): ReturnType<typeof readProjectConfig> {
-  return readProjectConfig(resolve(process.cwd(), "config/project.yaml"));
-}
-
-/** The project a row belongs to, by walking the tree up one link at a time. Null for the
- *  entities that hang off no project at all — a worker, a role, the workspace itself. */
-function projectOf(entity: string, id: number): { id: number; name: string; repo: string } | null {
-  const q = queries(db());
-  let here = entity;
-  let at = id;
-  // The chain is nine deep at most; the bound stops a cycle in bad data spinning forever.
-  for (let step = 0; step <= Object.keys(ENTITIES).length; step += 1) {
-    if (here === "project") {
-      return q.selectFrom(project).select(["id", "name", "repo"]).where("id", "=", at).get();
-    }
-    const kind = ENTITIES[here];
-    if (kind === undefined || kind.up === null || kind.parent === null) return null;
-    const pid = kind.up(q, at);
-    if (pid === null) return null;
-    here = kind.parent;
-    at = pid;
-  }
-  return null;
-}
-
-/** Refuse a parent whose project is not the one this repository is. */
-function crossesProject(entity: string, parent: number): string | null {
-  const parentEntity = ENTITIES[entity]?.parent;
-  if (parentEntity === undefined || parentEntity === null || parentEntity === "project") return null;
-  return elsewhere(parentEntity, parent);
-}
-
-/** Null when this row is in the project you are standing in, a complaint when it is not. */
-function elsewhere(entity: string, id: number): string | null {
-  const theirs = projectOf(entity, id);
-  if (theirs === null) return null;
-
-  const here = resolve(process.cwd());
-  const mine = queries(db()).selectFrom(project).select(["id", "name"]).where("repo", "=", here).get();
-  if (mine === null || mine.id === theirs.id) return null;
-
-  return (
-    `${entity} #${id} belongs to project #${theirs.id} ${theirs.name} (${theirs.repo}),\n` +
-    `but you are in #${mine.id} ${mine.name}.\n` +
-    `  wecode tree ${mine.id}          to find the right one\n` +
-    `  --project ${theirs.id}          if you meant it`
-  );
-}
-
-/** The parent this row hangs off, named. */
-function where(entity: string, id: number): string {
-  const kind = ENTITIES[entity];
-  if (kind === undefined || kind.up === null || kind.parent === null) return "";
-  const up = ENTITIES[kind.parent];
-  if (up === undefined) return "";
-  try {
-    // The join the SQL spelled, as its two halves: the child names its parent's id, and the
-    // parent names itself. Each half is checked against the table it reads.
-    const q = queries(db());
-    const pid = kind.up(q, id);
-    if (pid === null) return "";
-    const named = up.name(q, pid);
-    if (named === null) return "";
-    const label = named.length > 44 ? `${named.slice(0, 43)}…` : named;
-    return `   under ${kind.parent} #${pid}  ${label}`;
-  } catch {
-    return "";
-  }
+  return ent.projectConfig()?.test ?? null;
 }
 
 function kindOf(v: string | undefined): TestKind {
@@ -1721,113 +512,4 @@ function usage(): number {
   return 0;
 }
 
-/** Which flags each entity's create reads, and what one call looks like. Kept beside the
- *  switch in create() — the two must agree, and nothing else can check that they do. */
-const CREATE_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  workspace: ["path"], project: ["parent", "path"],
-  release: ["parent"], epic: ["parent"], story: ["parent"],
-  requirement: ["parent"], acceptance_criteria: ["parent"],
-  acceptance_test: ["parent", "kind", "artefact"],
-  task_test: ["parent", "kind", "artefact"],
-  task: ["parent", "role"],
-  worker: ["role", "kind"],
-};
 
-const FLAG_MEANS: Readonly<Record<string, string>> = {
-  parent: "<id>     the record it hangs off — required, and ids are global",
-  path: "<dir>      where the repository is (default: the current directory)",
-  kind: "<kind>     acceptance_test / task_test: how it is run; worker: agent or human",
-  artefact: "<cmd>  the command that proves it (default: this project's test command)",
-  role: "<name>     which role does the work",
-};
-
-const CREATE_EXAMPLE: Readonly<Record<string, string>> = {
-  workspace: 'wecode workspace create "acme" --path .',
-  project: 'wecode project create --parent 1 "storefront" --path .',
-  acceptance_test: 'wecode acceptance_test create --parent 1 "mail arrives" --artefact "bash mail.sh"',
-  task_test: 'wecode task_test create --parent 1 "mailer called" --artefact "vitest run"',
-  task: 'wecode task create --parent 1 "send the mail" --role engineer',
-  worker: "wecode worker create ada --role engineer --kind agent",
-};
-
-function createHelp(entity: string): number {
-  const flags = CREATE_FLAGS[entity];
-  if (flags === undefined) return fail(`no such entity: ${entity}`);
-
-  const example = CREATE_EXAMPLE[entity] ?? `wecode ${entity} create --parent 1 "<text>"`;
-  const lines = [`wecode ${entity} create [flags] "<text>"`, "", "  the text is everything that is not a flag", ""];
-  for (const f of flags) lines.push(`  --${f} ${FLAG_MEANS[f]}`);
-  process.stdout.write(`${lines.join("\n")}\n\n  ${example}\n\n`);
-  return 0;
-}
-
-function scopeHelp(): number {
-  process.stdout.write(
-    [
-      "wecode task scope <id> [flags]",
-      "",
-      "  which files that task may change, and which tools its agent may use.",
-      "  two tasks whose write scopes overlap will not run at the same time.",
-      "",
-      "  --write <globs>  comma-separated (default: this project's source and test paths)",
-      "  --tools <names>  comma-separated (default: bash,read,edit,write)",
-      "",
-      '  wecode task scope 1 --write "src/**,tests/**" --tools bash,read',
-      "",
-      "",
-    ].join("\n"),
-  );
-  return 0;
-}
-
-/** Every state and verb an entity has, read off the machine table — so help cannot drift
- *  from what the engine will actually allow. */
-function entityHelp(entity: string): number {
-  if (!isStateful(entity)) return fail(`${entity} has no states. Its only verb is create.`);
-
-  const m = loadMachines()[entity];
-  process.stdout.write(`${entity}\n\n  states  ${m.states.join(" · ")}\n\n`);
-
-  const width = Math.max(...m.transitions.map((t) => t.verb.length));
-  for (const t of m.transitions) {
-    const guard = t.guard === undefined ? "" : `  [${t.guard}]`;
-    const who = t.automatic === true ? "  (automatic — nobody invokes it)" : "";
-    process.stdout.write(`  ${t.verb.padEnd(width)}  ${t.from.join(" | ")} → ${t.to}${guard}${who}\n`);
-  }
-  process.stdout.write(`\n  wecode ${entity} <verb> <id>\n\n`);
-  return 0;
-}
-
-const ROLES = `invariants:
-  never_touch: [".github/**", "infra/**", "**/*.pem", "**/*.key", "**/.env"]
-  never_run: ["git push --force*", "npm publish*", "terraform apply*", "rm -rf /*"]
-
-defaults:
-  budget: { tokens: 250000, seconds: 3600 }
-  harness: claude-code
-
-roles:
-  engineer:
-    worker_kind: agent
-    scope:
-      write: ["src/**", "tests/**"]
-      tools: ["bash", "read", "edit", "write"]
-
-  acceptance-tester:
-    worker_kind: agent
-    scope:
-      write: ["tests/acceptance/**"]
-      tools: ["bash", "read", "edit", "write"]
-    budget: { tokens: 120000, seconds: 1800 }
-`;
-
-const BUDGET = `# Raising max_open is the easiest change in this file and usually the wrong one.
-max_open: 3
-
-order:
-  fresh_first: true
-  oldest_first: true
-
-collision:
-  scope_overlap: refuse
-`;
