@@ -141,6 +141,38 @@ detail:
   # so what will not fit is dropped and counted rather than drawn.
   overrun: "… and {count} more"
 
+  # The foot of a detail page is two lines, not one. The cockpit's bar is a flat list
+  # because every key on it does the same thing wherever the cursor is; a record's page
+  # answers two different questions at once — what can be done to this record, and how to
+  # get back out — and a single line runs them together, so the key that acts on the record
+  # sits between the key that leaves the page and the key that quits the program. The two
+  # levels split them, and nothing else about the bar changes: same gap, same entry.
+  footer:
+    lines: 2
+    sits: last
+    gap: "  "
+    entry: "{key} {does}"
+    # The global level is drawn last, on the terminal's final line, because that is where
+    # it is on every other screen: a key whose position moves with the page is a key the
+    # reader has to look for. The record level is the one that changes, so it is the one
+    # that moves, and it sits above.
+    order: [record, global]
+    global_level: last_line
+    levels:
+      # What this page can do to the record it is showing, including moving the cursor
+      # through the children it lists.
+      - level: record
+        keys: ["j/k", "g/G", enter, a]
+      # What means the same thing on every screen, in the order the cockpit's bar already
+      # names them.
+      - level: global
+        keys: [esc, v, "v t", r, q]
+    # Neither level invents a key. Every key here is one `key_bar` already declares, and a
+    # key `key_bar` withholds from this screen is withheld here too — the detail page does
+    # not fold, so `+/-` appears on neither level.
+    keys_from: key_bar
+    omits: ["+/-"]
+
   # An approval is an assignment whose objective is a design, and the operator is being
   # asked to sign a picture. The page names the design and stops there, so the signature is
   # asked for with no way to look at what is being signed. It is the assignment page with
