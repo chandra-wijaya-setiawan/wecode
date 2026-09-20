@@ -90,6 +90,11 @@ export function boardPage(board: Board, views: readonly View[] = loadViews()): R
   return html(document(boardBoxes(board, views), STYLE));
 }
 
+/** Which reading of the workspace this page is served from. The board is not the record:
+ *  it is the boxes the record was sorted into, so it asks for that reading by name where a
+ *  page of the tree takes the default. See `discover.ts`. */
+export const READS = "board";
+
 /** The page, bound to a way of getting the current rows, and wearing the shell — a page of
  *  this package reaches the server through `shelled` and by no other road.
  *

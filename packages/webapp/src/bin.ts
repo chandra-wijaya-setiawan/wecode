@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 /** The board in a browser, wired to a workspace. This file owns the process — which
  *  database, which port, and a socket closed however the process ends. Everything drawn is
- *  a page's under `pages/`, everything routed is `server.ts`'s, and which page answers which
- *  path is here — the one place a reader can see the whole surface at once.
+ *  a page's under `pages/`, everything routed is `server.ts`'s, and which pages there are
+ *  is the `pages/` directory's: this file names none of them.
+ *
+ *  What it does name is the readings — the handful of questions a page can be served from,
+ *  each a way of reading this database. A page picks one by name; a new page that asks a
+ *  question nobody has asked yet adds a reading here, and a new page that asks an existing
+ *  one needs nothing here at all.
  *
  *  Which workspace, and the refusal to make one, are read the same way `wecode-tui` reads
  *  them: a board is for looking at work that exists, and `open()` would cheerfully write an
@@ -20,10 +25,7 @@ import {
   waitingApprovals,
 } from "@wecode/core";
 import { answerAt } from "./answer.js";
-import { boardAt } from "./pages/board.js";
-import { decisionsAt } from "./pages/decisions.js";
-import { tasksAt } from "./pages/tasks.js";
-import { treeAt } from "./pages/tree.js";
+import { pages } from "./pages/discover.js";
 import { addressOf, serve } from "./server.js";
 
 process.removeAllListeners("warning");
@@ -72,13 +74,20 @@ if (!Number.isInteger(port) || port < 0 || port > 65535) {
 
 const db = open(dbPath);
 
-/** The surface, whole. Each page is read fresh per request, so the routes are bound to a
- *  way of reading the workspace rather than to a reading of it. */
+/** Every question a page may be served from, each a function so that it is asked again on
+ *  every request: work moves without anybody reloading, and a surface served from readings
+ *  taken when the process booted is a surface that is wrong by the time it is read. */
+const readings = {
+  record: () => tree(db),
+  board: () => board(db),
+  approvals: () => waitingApprovals(db),
+};
+
+/** The surface, whole: the pages found under `pages/`, and the one verb this surface has.
+ *  Answering an approval is not a page — it is not under `pages/` and it is not discovered
+ *  — so it is named, at the path it posts to. */
 const routes = {
-  "/": boardAt(() => board(db)),
-  "/tree": treeAt(() => tree(db)),
-  "/tasks": tasksAt(() => tree(db)),
-  "/decisions": decisionsAt(() => waitingApprovals(db)),
+  ...(await pages(readings)),
   "/answer": answerAt(() => db, operator),
 };
 
