@@ -160,3 +160,17 @@ components:
     component: true
     owns: the board, and the few verbs worth typing while looking at a row
     modules: [app, bin, index, list, outline, screens, services, views]
+
+  webapp:
+    package: webapp
+    layer: client
+    component: true
+    owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and served over http. It reads the record and offers no verb, because every verb that changes wecode is the cli's
+    modules: [pages/board, server]
+
+  webapp surface:
+    package: webapp
+    layer: surface
+    component: false
+    owns: the web server's executable and what a client of the package may import
+    modules: [bin, index]
