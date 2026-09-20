@@ -468,8 +468,8 @@ export class Trees {
     return { kind: "merged", sha };
   }
 
-  /** docs/design/14. The `@wecode/ui` → `@wecode/lens` rename moved every tracked file out of
-   *  `packages/ui` and the directory stayed: `node_modules` and `dist` live in it, git neither
+  /** docs/design/14. Renaming a package moves every tracked file out of its old directory and
+   *  the directory stays: `node_modules` and `dist` live in it, and git neither
    *  tracks them nor removes them. What survives is a ghost package — no package in it, a stale
    *  `dist` that imports still resolve into, and a tree audit counting a component renamed away.
    *  Swept only where the merge emptied it and git holds nothing under it any more: one tracked
@@ -483,7 +483,7 @@ export class Trees {
     for (const file of deleted.split("\n").filter((f) => f !== "")) {
       for (let d = dirname(file); d !== "." && d !== "/"; d = dirname(d)) dirs.add(d);
     }
-    // Deepest first: emptying `packages/ui/src` is what makes `packages/ui` removable.
+    // Deepest first: emptying a package's `src` is what makes the package itself removable.
     for (const dir of [...dirs].sort((a, b) => b.length - a.length)) {
       if (!existsSync(join(tree, dir))) continue;
       if ((await git(tree, ["ls-files", "--", dir]).catch(() => "kept")) !== "") continue;
