@@ -11,6 +11,16 @@ import { tmp } from "../../core/test/tmpdir.js";
  *  acceptance_test writes it into the same database the cli is driving. */
 const watchedItFail = (id: number): void => recordRed(open(process.env["WECODE_DB"] as string), id);
 
+/** Nor a verb for the attempt record `task.finish` reads. Settled task_tests no longer
+ *  finish a task on their own: the branch has to hold a commit the task wrote, and an
+ *  attempt's sha is the only thing that says so. */
+const wroteACommit = (task: number, sha = "c0ffee0"): void => {
+  const db = open(process.env["WECODE_DB"] as string);
+  db.prepare("INSERT OR IGNORE INTO worker (id,slug,name,role,kind,created_at,updated_at) VALUES (1,'w','w','engineer','agent','t','t')").run();
+  db.prepare("INSERT INTO assignment (slug,objective_type,objective_id,worker_id,scope,budget,worktree,phase,kind,commit_sha,spent,created_at,updated_at) VALUES (?,'task',?,1,'{}','{}','/tmp','succeeded','work',?,'{}','t','t')").run(sha, task, sha);
+  db.close();
+};
+
 let out: string[];
 let err: string[];
 
@@ -54,6 +64,14 @@ describe("the cli", () => {
 
     out.length = 0;
     run(["task_test", "pass", "1"]);
+    // Every task_test is settled, and the task stays ready: nothing on record says it
+    // wrote anything, which is the second half of `finish`'s guard.
+    expect(said()).not.toContain("task #1");
+
+    out.length = 0;
+    wroteACommit(1);
+    run(["task_test", "invalidate", "1"]);
+    run(["task_test", "pass", "1"]);
     expect(said()).toContain("task #1  ready → done  (cascade)");
 
     out.length = 0;
@@ -88,13 +106,8 @@ describe("answering", () => {
     run(["init"]);
     const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
     const db = new DatabaseSync(process.env["WECODE_DB"] as string);
-    db.prepare(
-      `INSERT INTO worker (slug,name,role,kind,created_at,updated_at) VALUES ('w','w','engineer','agent','t','t')`,
-    ).run();
-    db.prepare(
-      `INSERT INTO assignment (slug,objective_type,objective_id,worker_id,scope,budget,worktree,phase,kind,question,spent,created_at,updated_at)
-       VALUES ('a','task',1,1,'{}','{}','/tmp','waiting','approval','may I?','{}','t','t')`,
-    ).run();
+    db.prepare(`INSERT INTO worker (slug,name,role,kind,created_at,updated_at) VALUES ('w','w','engineer','agent','t','t')`).run();
+    db.prepare(`INSERT INTO assignment (slug,objective_type,objective_id,worker_id,scope,budget,worktree,phase,kind,question,spent,created_at,updated_at) VALUES ('a','task',1,1,'{}','{}','/tmp','waiting','approval','may I?','{}','t','t')`).run();
     db.close();
 
     expect(run(["answer", "1", "yes,", "go", "ahead"])).toBe(0);
@@ -188,9 +201,7 @@ describe("onboarding hires the workers the runner needs", () => {
   let repo: string;
   let was: string;
 
-  const git = (...args: string[]): void => {
-    execFileSync("git", args, { cwd: repo, stdio: "ignore" });
-  };
+  const git = (...args: string[]): void => void execFileSync("git", args, { cwd: repo, stdio: "ignore" });
 
   const workers = (): { id: number; name: string; role: string; kind: string }[] => {
     const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
@@ -280,9 +291,7 @@ describe("a parent in another project", () => {
 
 describe("lessons", () => {
   const conn = (): import("node:sqlite").DatabaseSync =>
-    new (require("node:sqlite") as typeof import("node:sqlite")).DatabaseSync(
-      process.env["WECODE_DB"] as string,
-    );
+    new (require("node:sqlite") as typeof import("node:sqlite")).DatabaseSync(process.env["WECODE_DB"] as string);
 
   /** A project whose repo is where the test is standing, so `wecode lessons` finds it. */
   const project = (): void => {
@@ -293,21 +302,14 @@ describe("lessons", () => {
 
   const learn = (text: string, assignment: number | null = null, at = "2026-09-14T00:00:00.000Z"): void => {
     const db = conn();
-    db.prepare(
-      "INSERT INTO lesson (project_id, text, assignment_id, created_at) VALUES (1, ?, ?, ?)",
-    ).run(text, assignment, at);
+    db.prepare("INSERT INTO lesson (project_id, text, assignment_id, created_at) VALUES (1, ?, ?, ?)").run(text, assignment, at);
     db.close();
   };
 
   const anAssignment = (): void => {
     const db = conn();
-    db.prepare(
-      `INSERT INTO worker (slug,name,role,kind,created_at,updated_at) VALUES ('w','w','engineer','agent','t','t')`,
-    ).run();
-    db.prepare(
-      `INSERT INTO assignment (slug,objective_type,objective_id,worker_id,scope,budget,worktree,phase,spent,created_at,updated_at)
-       VALUES ('send-mail-1','task',1,1,'{}','{}','/tmp','running','{}','t','t')`,
-    ).run();
+    db.prepare(`INSERT INTO worker (slug,name,role,kind,created_at,updated_at) VALUES ('w','w','engineer','agent','t','t')`).run();
+    db.prepare(`INSERT INTO assignment (slug,objective_type,objective_id,worker_id,scope,budget,worktree,phase,spent,created_at,updated_at) VALUES ('send-mail-1','task',1,1,'{}','{}','/tmp','running','{}','t','t')`).run();
     db.close();
   };
 
@@ -548,9 +550,7 @@ describe("telling the orchestrator, rather than being asked", () => {
   it("wait returns 0 when the thing reached what the work wanted", () => {
     tree();
     run(["story", "start", "1"]);
-    const db = new (require("node:sqlite") as typeof import("node:sqlite")).DatabaseSync(
-      process.env["WECODE_DB"] as string,
-    );
+    const db = new (require("node:sqlite") as typeof import("node:sqlite")).DatabaseSync(process.env["WECODE_DB"] as string);
     db.prepare("UPDATE story SET state = 'delivered' WHERE id = 1").run();
     db.close();
 
