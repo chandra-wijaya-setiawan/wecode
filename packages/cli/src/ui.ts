@@ -154,6 +154,7 @@ function lines(file: string, found: readonly Finding[]): readonly string[] {
 interface Shown {
   readonly name: string;
   readonly at: unknown;
+  readonly rows?: readonly string[];
   readonly children?: readonly Shown[];
 }
 
@@ -162,7 +163,7 @@ interface Shown {
  *  against designs and trees, and the tests here drive the command. */
 export interface Ports {
   readonly expected: (design: unknown) => Shown;
-  readonly wireframe: (root: unknown) => string;
+  readonly wireframe: (root: unknown, cell: Size) => string;
 }
 
 /** Where the ports come from when a caller does not say: `@wecode/ui`'s entry point, which
@@ -187,10 +188,14 @@ export type Read = (text: string) => unknown;
  *  so this is the parser itself and not a lookup that can come back empty. */
 const loadRead = (): Read => parse;
 
-/** A captured node as a box: the same coordinates, the same order, `name` read as `title`. */
+/** A captured node as a box: the same coordinates, the same order, `name` read as `title`,
+ *  and the lines it holds carried across unread. A wireframe of a screen that shows only
+ *  the outlines is a picture of a filing cabinet — what a reviewer signs off is the words
+ *  in the boxes, and the design already states them. */
 const asBox = (node: Shown): unknown => ({
   at: node.at,
   title: node.name,
+  ...(node.rows === undefined ? {} : { rows: node.rows }),
   ...(node.children === undefined ? {} : { children: node.children.map(asBox) }),
 });
 
@@ -216,7 +221,7 @@ async function loadSelect(): Promise<Select> {
  *  is a screen of, and the design tree the product's own config says it is. The tree is
  *  `unknown` for the reason the capture is — its shape is `@wecode/ui`'s, and a second
  *  declaration of it here would be a second place to keep right. */
-export type Translate = (name: string, screen: { width: number; height: number }) => unknown;
+export type Translate = (name: string, screen: Size) => unknown;
 
 /** Where the translation comes from when a caller does not say. */
 async function loadTranslate(): Promise<Translate> {
@@ -227,12 +232,18 @@ async function loadTranslate(): Promise<Translate> {
   return screenDesign;
 }
 
-/** The terminal a real screen is drawn for. A design file states its own size, so this is
- *  only asked for by `--real`, where the size is the one thing the config cannot know. */
-function terminal(size: string | undefined): { width: number; height: number } {
-  const said = /^(\d+)x(\d+)$/.exec(size ?? "80x30");
-  if (said === null) throw new Error(`--size is <width>x<height>, not ${String(size)}`);
-  return { width: Number(said[1]), height: Number(said[2]) };
+/** A `<width>x<height>` a caller typed, or the default it left alone. Two flags are written
+ *  this way — the terminal a `--real` screen is drawn for, and the cell it is drawn at —
+ *  and they are read by one function so they cannot come to disagree about the spelling. */
+function pair(flag: string, said: string | undefined, fallback: string): Size {
+  const read = /^(\d+)x(\d+)$/.exec(said ?? fallback);
+  if (read === null) throw new Error(`${flag} is <width>x<height>, not ${String(said)}`);
+  return { width: Number(read[1]), height: Number(read[2]) };
+}
+
+interface Size {
+  readonly width: number;
+  readonly height: number;
 }
 
 export async function design(
@@ -246,6 +257,7 @@ export async function design(
     args: [...args],
     allowPositionals: true,
     options: {
+      cell: { type: "string" },
       from: { type: "string" },
       out: { type: "string" },
       real: { type: "boolean" },
@@ -266,7 +278,7 @@ export async function design(
   let declared: unknown;
   if (values.real === true) {
     try {
-      declared = (await translate())(name, terminal(values.size));
+      declared = (await translate())(name, pair("--size", values.size, "80x30"));
     } catch (err) {
       return fail(`cannot read the real design: ${(err as Error).message}`, 2);
     }
@@ -281,7 +293,7 @@ export async function design(
 
   try {
     const { expected, wireframe } = await ports();
-    writeFileSync(out, wireframe(asBox(expected(declared))));
+    writeFileSync(out, wireframe(asBox(expected(declared)), pair("--cell", values.cell, "8x16")));
   } catch (err) {
     return fail(`cannot draw ${name}: ${(err as Error).message}`, 2);
   }
@@ -300,6 +312,7 @@ function designUsage(code = 0): number {
       "  --from <file>   the design file to read (default design.yaml)",
       "  --real          draw the product's own screen, as its config declares it",
       "  --size <w>x<h>  the terminal a --real screen is drawn for (default 80x30)",
+      "  --cell <w>x<h>  how big one cell of the screen is drawn (default 8x16)",
       "  --out <file>    where to write the wireframe (default <screen>.svg)",
       "",
       "Exit: 0 written, 2 the screen could not be drawn.",
