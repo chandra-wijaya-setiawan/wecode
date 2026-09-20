@@ -81,8 +81,8 @@ components:
     package: runner
     layer: service
     component: true
-    owns: takes an assignment and makes it real — the session it runs in, and what the last attempt left
-    modules: [foreman, ports]
+    owns: takes an assignment and makes it real — the session it runs in, what the last attempt left, and the words a chore's worker is dispatched with
+    modules: [foreman, foreman/prompt, ports]
 
   trees:
     package: runner
