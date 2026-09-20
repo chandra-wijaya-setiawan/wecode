@@ -64,7 +64,7 @@ describe("the file is the routing", () => {
     expect(pathOf("ledger")).toBe("/ledger");
   });
 
-  it("answers at /ledger with no edit to bin.ts", () => {
+  it("the ledger page answers at /ledger through discovery", () => {
     const routes = { [pathOf("ledger")]: ledgerAt(busy) };
     const reply = answer(routes, "GET", "/ledger");
 
