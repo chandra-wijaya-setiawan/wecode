@@ -19,6 +19,10 @@ import {
 // core builds it to, the one specifier that resolves without widening that barrel.
 import { excluded, queries, table, type Dialect } from "@wecode/core/dist/db.js";
 import { fileCeilingInvariant } from "./ceiling.js";
+// The examiner already reads a failing file off the runner's own failure banner and never
+// off the lines it ran and passed. One reading of it, so a tally and a re-run cannot
+// disagree about which file is red.
+import { failingFilesOf } from "./examiner.js";
 import { execFileSync } from "node:child_process";
 import { readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -339,6 +343,19 @@ interface PassRow {
 }
 const doctorPass = table<PassRow>("doctor_pass", ["rowid", "invariant", "world", "reachable", "found", "at"]);
 
+/** One whole-suite run, as the pass recorded it. One row: "how red is the tip" is answered
+ *  by the last run and no other. `files` is the failures' files newline-joined, kept in the
+ *  row that counted them so the number and the names cannot come from two different runs. */
+interface SuiteRow {
+  tip: string;
+  failed: number;
+  passed: number;
+  skipped: number;
+  files: string;
+  at: string;
+}
+const doctorSuite = table<SuiteRow>("doctor_suite", ["tip", "failed", "passed", "skipped", "files", "at"]);
+
 const sqliteMaster = table<{ type: string; name: string }>("sqlite_master", ["type", "name"]);
 
 /** A name that is something to select from. `type IN (…)` has no spelling in the dialect and
@@ -524,6 +541,16 @@ export class Doctor {
          reachable INTEGER NOT NULL,
          found     INTEGER NOT NULL,
          at        TEXT    NOT NULL
+       )`,
+    );
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS doctor_suite (
+         tip     TEXT    NOT NULL,
+         failed  INTEGER NOT NULL,
+         passed  INTEGER NOT NULL,
+         skipped INTEGER NOT NULL,
+         files   TEXT    NOT NULL,
+         at      TEXT    NOT NULL
        )`,
     );
   }
@@ -909,4 +936,76 @@ export function redAtBase(db: DatabaseSync): readonly RedFile[] {
     found.set(t.script_path, { file: t.script_path, test: t.slug, sha: t.red_at_base_sha });
   }
   return [...found.values()];
+}
+
+/** docs/design/19, applied to the tree the pass ran against rather than to the record.
+ *
+ *  The watch called master green for hours off `the-cockpit-matches-its-design` alone while
+ *  the whole suite was red on about a hundred tests: a run narrowed to one file answers for
+ *  that file and nothing else, and no count of the record can find that out. So the suite is
+ *  run whole, at the tip it ran against, and `failed` is the number the board puts beside
+ *  the branch. `files` is the failures' files in the order the runner named them, empty for
+ *  a green run, because a number nobody can act on gets argued with instead. */
+export interface Tally {
+  /** The commit the suite ran against. A tally with no tip is a number about nothing. */
+  readonly tip: string;
+  readonly failed: number;
+  readonly passed: number;
+  readonly skipped: number;
+  readonly files: readonly string[];
+}
+
+/** The runner's summary, read off the line counting tests and not the one above it counting
+ *  files: one red file holding a hundred red tests is a hundred, and `Test Files 1 failed
+ *  (1)` would call it one. A word the summary omits is nought of that kind, which is how
+ *  vitest prints a run with nothing skipped. `null` is output carrying no summary at all — a
+ *  suite that died before it counted anything, which must never read as green. */
+export function tallyOf(coloured: string, tip: string): Tally | null {
+  // A runner that believes it is talking to a terminal writes its counts in escape codes,
+  // and a pass that read only the plain spelling would call such a run uncountable.
+  const output = coloured.replace(/\u001b\[[0-9;]*m/g, "");
+  const line = /^[^\S\n]*Tests[^\S\n]+(.*)$/m.exec(output)?.[1];
+  if (line === undefined) return null;
+  const n = (word: string): number => Number(new RegExp(`(\\d+) ${word}`).exec(line)?.[1] ?? 0);
+  return { tip, failed: n("failed"), passed: n("passed"), skipped: n("skipped"), files: failingFilesOf(output) };
+}
+
+/** The suite as the pass may see it: a tree in, everything the runner printed out. Both
+ *  streams, because vitest counts on stdout and names its failing files on stderr. */
+export type Suite = (cwd: string) => string;
+
+/** A red suite exits non-zero. That is the answer, not an error, so the output is taken off
+ *  the failure exactly as off the success. */
+export const runSuite: Suite = (cwd: string): string => {
+  try {
+    return execFileSync("pnpm", ["exec", "vitest", "run"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string };
+    return `${e.stdout ?? ""}\n${e.stderr ?? ""}`;
+  }
+};
+
+/** Run the whole suite over a tree and say what it came to. The runner is a seam so a test
+ *  can hand in a tree of its own; the default is the one the watch and the tick would use. */
+export const suiteTally = (cwd: string, tip: string, suite: Suite = runSuite): Tally | null => tallyOf(suite(cwd), tip);
+
+/** Written as the doctor's other rows are: replaced, never appended — two rows would leave
+ *  a view to guess which of them the branch is at. A run with no tally to record writes
+ *  nothing and clears nothing: the last real count is still true of the tip it names. */
+export function recordSuite(db: DatabaseSync, tally: Tally | null): void {
+  if (tally === null) return;
+  const q = queries(db);
+  transact(db, () => {
+    q.deleteFrom(doctorSuite).run();
+    q.insertInto(doctorSuite, { ...tally, files: tally.files.join("\n"), at: now() }).run();
+  });
+}
+
+/** What the board reads to say how red the tip is. `null` is no suite has been run against
+ *  this record at all, which is not the same fact as a suite that found nothing. */
+export function lastSuite(db: DatabaseSync): (Tally & { readonly at: string }) | null {
+  if (!hasTable(db, "doctor_suite")) return null;
+  const row = queries(db).selectFrom(doctorSuite).all()[0];
+  if (row === undefined) return null;
+  return { ...row, files: row.files === "" ? [] : row.files.split("\n") };
 }
