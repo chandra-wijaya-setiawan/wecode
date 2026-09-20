@@ -138,7 +138,7 @@ components:
     layer: client
     component: true
     owns: every verb, as a command. The only way an agent reaches wecode
-    modules: [bin, capabilities, delivered, doctor, explore, index, plan, run, scope-proposal, ui, unimported]
+    modules: [bin, capabilities, delivered, doctor, explore, index, paint, plan, run, scope-proposal, ui, unimported]
 
   repo-explorer:
     package: explorer
@@ -173,7 +173,14 @@ components:
     layer: client
     component: true
     owns: the surface a person reviews an artefact on — one session per artefact, the prompts the browser queues against it, the poll a waiting agent is woken by, and the chrome the artefact is framed in before it is served. It holds no opinion about what an artefact says
-    modules: [frame, server, session]
+    modules: [frame, pty, server, session]
+
+  painter overlay:
+    package: painter
+    layer: client
+    component: true
+    owns: what the reviewer sees and does in the browser — picking an element, queueing a prompt against it, the terminal the session is driven from, and the styling of the chrome around them. It runs in the page and decides nothing the server has not already offered
+    modules: [client/overlay, client/overlay.css, client/pick, client/queue, client/terminal]
 
   painter surface:
     package: painter

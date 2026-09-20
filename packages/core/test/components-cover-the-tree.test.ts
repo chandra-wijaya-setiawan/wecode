@@ -92,6 +92,26 @@ describe("the component map", () => {
     }
   });
 
+  it("names the owner of the painter and of the paint verb", () => {
+    const owners: Record<string, [string, string]> = {
+      "painter/frame": ["painter", "painter"],
+      "painter/pty": ["painter", "painter"],
+      "painter/server": ["painter", "painter"],
+      "painter/session": ["painter", "painter"],
+      "painter/index": ["painter", "painter surface"],
+      "painter/client/overlay": ["painter", "painter overlay"],
+      "painter/client/overlay.css": ["painter", "painter overlay"],
+      "painter/client/pick": ["painter", "painter overlay"],
+      "painter/client/queue": ["painter", "painter overlay"],
+      "painter/client/terminal": ["painter", "painter overlay"],
+      "cli/paint": ["cli", "cli"],
+    };
+    for (const [module, [pkg, name]] of Object.entries(owners)) {
+      expect(tree(), module).toContain(module);
+      expect(ownerOf(map, pkg, module.slice(pkg.length + 1))?.name, module).toBe(name);
+    }
+  });
+
   it("keeps the two rows that are not components, and no more", () => {
     const notComponents = map.components.filter((c) => !c.isComponent).map((c) => c.layer);
     expect([...new Set(notComponents)].sort()).toEqual(["files", "surface"]);
