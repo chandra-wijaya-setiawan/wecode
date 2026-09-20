@@ -9,12 +9,6 @@ import {
   OPERATOR,
   currentDatabase,
   databaseOf,
-  listWorkspaces,
-  lessons,
-  dropLesson,
-  tree,
-  type Node,
-  loadMachines,
   open,
   restate,
   isRestatable,
@@ -45,6 +39,13 @@ import * as read from "./verbs/read.js";
 import * as rungs from "./verbs/tree.js";
 // Namespaced for the same reason: `requirement` and `task` are already tables in this file.
 import * as work from "./verbs/work.js";
+// The listings and the two help texts that are not the manual: workspaces, tree, lessons,
+// an entity's states and verbs. Namespaced because `lesson` and `workspaces` are words
+// this file's dispatch spells too.
+import * as use from "./verbs/usage.js";
+// The two commands that hold the process open. Namespaced because `wait` is the name of
+// the head dispatch compares against as well as the name of the function.
+import * as until from "./verbs/wait.js";
 
 const DB = (): string => currentDatabase();
 
@@ -64,10 +65,10 @@ function dispatch(argv: readonly string[]): number {
     return usage();
   }
   // --help after a command is the whole manual; after an entity it is that entity's verbs.
-  if (rest[0] === "--help" || rest[0] === "-h") return isStateful(head) ? entityHelp(head) : usage();
+  if (rest[0] === "--help" || rest[0] === "-h") return isStateful(head) ? use.entityHelp(look, head) : usage();
   if (head === "help") {
     const what = rest[0] ?? "";
-    return isStateful(what) ? entityHelp(what) : usage();
+    return isStateful(what) ? use.entityHelp(look, what) : usage();
   }
   if (head === "board") return read.board(seen(rest));
   if (head === "doctor") return read.doctor(rest);
@@ -80,15 +81,15 @@ function dispatch(argv: readonly string[]): number {
   if (head === "plan") return see.plan(rest);
   if (head === "explore") return later(read.explore(rest));
   if (head === "paint") return later(paint(rest));
-  if (head === "workspaces") return workspaces();
-  if (head === "tree") return showTree(rest);
-  if (head === "watch") return watch(rest);
-  if (head === "wait") return wait(rest);
+  if (head === "workspaces") return use.workspaces(look);
+  if (head === "tree") return use.showTree(look, rest);
+  if (head === "watch") return until.watch(at, rest);
+  if (head === "wait") return until.wait(at, rest);
   // Before verb(): `delivered` is a story state as well as a command, so falling through
   // would read it as an entity and answer "delivered has no states".
   if (head === "delivered") return read.delivered(rest);
-  if (head === "lessons") return showLessons(rest);
-  if (head === "lesson") return lesson(rest);
+  if (head === "lessons") return use.showLessons(look, rest);
+  if (head === "lesson") return use.lesson(look, rest);
   return verb(head, rest);
 }
 
@@ -144,183 +145,6 @@ function init(args: readonly string[]): number {
   return 0;
 }
 
-/** `wecode watch [--project N] [--json]` — one line per state change, forever.
- *
- *  Read off the ledger, which is append-only, so this is a query with a cursor rather than
- *  an event bus. An orchestrator that wants to be told instead of asking runs this in the
- *  background and reads lines. */
-function watch(args: readonly string[]): number {
-  const { values } = parseArgs({
-    args: [...args],
-    options: {
-      project: { type: "string" },
-      json: { type: "boolean" },
-      since: { type: "string" },
-      once: { type: "boolean" },
-    },
-  });
-  const q = queries(db());
-  const narrow = values.project === undefined ? null : Number(values.project);
-
-  // The dialect has no `max(id)` and no LIMIT, so the ledger's high-water mark is the
-  // largest of the ids it hands back. Only the id column crosses.
-  let cursor =
-    values.since === undefined
-      ? q.selectFrom(ledger).select(["id"]).all().reduce((n, r) => Math.max(n, r.id), 0)
-      : Number(values.since);
-
-  const tick = (): void => {
-    // Nor an ORDER BY: the ledger is append-only and read by id, so the ordering the lines
-    // are printed in is done here rather than in SQL.
-    const rows = q
-      .selectFrom(ledger)
-      .where("id", ">", cursor)
-      .all()
-      .sort((a, b) => a.id - b.id);
-
-    for (const r of rows) {
-      cursor = r.id;
-      if (narrow !== null && ent.projectOf(at, r.entity, r.entity_id)?.id !== narrow) continue;
-      process.stdout.write(
-        values.json === true
-          ? `${JSON.stringify(r)}\n`
-          : `${r.at}  ${r.entity} #${r.entity_id}  ${r.from_state} → ${r.to_state}  ${r.verb} by ${r.actor}\n`,
-      );
-    }
-  };
-
-  tick();
-  if (values.once === true) return 0;
-
-  const timer = setInterval(tick, 1000);
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => {
-      clearInterval(timer);
-      process.exit(0);
-    });
-  }
-  return 0;
-}
-
-/** `wecode wait <entity> <id> [--timeout <seconds>]` — block until it settles, then exit.
- *
- *  The exit code is the answer: 0 if it reached a state the work wanted, 1 if it did not.
- *  A harness that can run a command in the background gets a notification for free — the
- *  command finishing *is* the notification. */
-function wait(args: readonly string[]): number {
-  const { values, positionals } = parseArgs({
-    args: [...args],
-    allowPositionals: true,
-    options: { timeout: { type: "string" }, quiet: { type: "boolean" } },
-  });
-  const [entity, raw] = positionals;
-  const id = Number(raw);
-  if (entity === undefined || !Number.isInteger(id)) return fail("wecode wait <entity> <id>");
-  if (!isStateful(entity)) return fail(`${entity} has no states to wait on`);
-
-  const good: Readonly<Record<string, readonly string[]>> = {
-    project: ["dropped"],
-    release: ["released"],
-    epic: ["delivered"],
-    story: ["delivered"],
-    requirement: ["met"],
-    acceptance_criteria: ["accepted"],
-    acceptance_test: ["passed"],
-    task_test: ["passed"],
-    task: ["done"],
-    assignment: ["succeeded"],
-  };
-  const machine = loadMachines()[entity];
-  const settled = new Set([...machine.terminal, ...(good[entity] ?? [])]);
-
-  // Which column holds the state is the entity's business, not this command's: it used to
-  // be `entity === "assignment" ? "phase" : "state"` spliced into the SQL beside the table
-  // name, and both are now the entity's own typed read.
-  const read = ENTITIES[entity]?.state;
-  if (read === undefined || read === null) return fail(`${entity} has no states to wait on`);
-
-  const q = queries(db());
-  const deadline = values.timeout === undefined ? null : Date.now() + Number(values.timeout) * 1000;
-
-  const look = (): string | null => read(q, id);
-
-  if (look() === null) return fail(`no ${entity} #${id}`);
-
-  // Blocking on purpose, and synchronously: the command exists to not return until the
-  // answer is known, and run() is not async. Atomics.wait is the one sleep that parks the
-  // thread rather than the event loop.
-  const park = new Int32Array(new SharedArrayBuffer(4));
-  for (;;) {
-    const state = look();
-    if (state !== null && settled.has(state)) {
-      if (values.quiet !== true) process.stdout.write(`${entity} #${id} ${state}\n`);
-      return (good[entity] ?? []).includes(state) ? 0 : 1;
-    }
-    if (deadline !== null && Date.now() > deadline) {
-      return fail(`${entity} #${id} is still ${state ?? "gone"} after ${values.timeout}s`) + 1;
-    }
-    Atomics.wait(park, 0, 0, 1000);
-  }
-}
-
-/** `wecode tree [project]` — the whole shape, project to task_test. */
-function showTree(args: readonly string[]): number {
-  const only = args[0] === undefined ? undefined : Number(args[0]);
-  const nodes = tree(db(), only);
-  if (nodes.length === 0) return fail(only === undefined ? "no projects yet" : `no project #${only}`);
-
-  const mark: Readonly<Record<string, string>> = {
-    delivered: "✓",
-    released: "✓",
-    met: "✓",
-    accepted: "✓",
-    passed: "✓",
-    done: "✓",
-    dropped: "·",
-    failed: "✗",
-    on_hold: "‖",
-  };
-
-  const walk = (n: Node, prefix: string, last: boolean, top: boolean): void => {
-    const elbow = top ? "" : last ? "└── " : "├── ";
-    const state = mark[n.state] ?? "○";
-    const label = n.label.length > 64 ? `${n.label.slice(0, 63)}…` : n.label;
-    process.stdout.write(`${prefix}${elbow}${state} ${dimNum(n.id)} ${label}  ${grey(n.state)}\n`);
-    const next = top ? "" : prefix + (last ? "    " : "│   ");
-    n.children.forEach((c, i) => walk(c, next, i === n.children.length - 1, false));
-  };
-
-  for (const root of nodes) walk(root, "", true, true);
-  return 0;
-}
-
-const dimNum = (id: number): string => `\u001b[2m#${id}\u001b[0m`;
-const grey = (s: string): string => `\u001b[2m${s}\u001b[0m`;
-
-/** `wecode workspaces` — which ones exist, and which one you are talking to. */
-function workspaces(): number {
-  const known = listWorkspaces();
-  if (known.length === 0) {
-    return fail("no workspaces yet.\n  wecode onboard   in a repository, to make one");
-  }
-  const here = currentDatabase();
-  for (const name of known) {
-    const path = databaseOf(name);
-    const n = existsSync(path) ? projectCount(path) : 0;
-    process.stdout.write(`${path === here ? "*" : " "} ${name.padEnd(16)} ${n} project${n === 1 ? "" : "s"}\n`);
-  }
-  return 0;
-}
-
-function projectCount(path: string): number {
-  const conn = open(path);
-  // No `count(*)` in the dialect. One column of every row is what a count over a table this
-  // size costs anyway, and it is a number nothing has to be cast to.
-  const n = queries(conn).selectFrom(project).select(["id"]).all().length;
-  conn.close();
-  return n;
-}
-
 // ─── the record ──────────────────────────────────────────────────────────────────────────
 //
 // The tables, the row shapes and the shape of the tree live in `verbs/entity.ts` now. They
@@ -334,13 +158,26 @@ export type {
 export { DECLARED } from "./verbs/entity.js";
 
 const {
-  acceptanceTest, assignment, criteria, ledger, project, requirement, story, task, worker,
+  acceptanceTest, assignment, criteria, project, requirement, story, task, worker,
   workspace, landedBranch, ENTITIES,
 } = ent;
 
 /** What the entity half is lent: the workspace database, how a refusal is said, and who is
  *  asking. The three things only this file knows. */
 const at: ent.At = { conn: db, fail, actor: () => whoIsAsking() };
+
+/** What a listing in `verbs/usage.ts` is lent on top of that: the project this repository
+ *  is, which is this file's to answer because it is the one that knows where you stand. */
+const look: use.Look = { ...at, here: () => hereProject() };
+
+/** The project this repository is, or null when you are standing outside all of them. */
+function hereProject(): { id: number; name: string } | null {
+  return queries(db())
+    .selectFrom(project)
+    .select(["id", "name"])
+    .where("repo", "=", resolve(process.cwd()))
+    .get();
+}
 
 /** What run.ts lends the verbs in `verbs/run-and-see.ts`: the argv tail they were given,
  *  and the four things only this file knows — the workspace database, how a refusal is
@@ -393,86 +230,7 @@ function db() {
 
 class Missing extends Error {}
 
-/** The project this repository is, or null when you are standing outside all of them. */
-function hereProject(): { id: number; name: string } | null {
-  return queries(db())
-    .selectFrom(project)
-    .select(["id", "name"])
-    .where("repo", "=", resolve(process.cwd()))
-    .get();
-}
 
-/** What to say to somebody standing in a directory that is not a project: the command that
- *  would put one here, and — only when the workspace already holds projects — the ids that
- *  could be asked for instead. "no project here" alone left the next move to be guessed,
- *  and the guess was usually that the workspace was broken. */
-function noProjectHere(command: string): string {
-  const rows = queries(db())
-    .selectFrom(project)
-    .select(["id", "name"])
-    .all()
-    .sort((a, b) => a.id - b.id);
-  const shown = rows.slice(0, 5).map((r) => `    #${r.id}  ${r.name}`);
-  const more = rows.length > shown.length ? [`    … and ${rows.length - shown.length} more`] : [];
-  return [
-    // The first clause is kept as it was: another test reads this refusal by that phrase.
-    `no project here — ${resolve(process.cwd())} is not one.`,
-    "  wecode onboard   here, to make this repository one",
-    ...(rows.length === 0 ? [] : [`  ${command} --project <id>   for a project you already have:`, ...shown, ...more]),
-  ].join("\n");
-}
-
-/** `wecode lessons [--project N]` — what earlier attempts on this repository learned.
- *
- *  Each line carries the assignment that learned it and how old it is, because those are
- *  what a suspicious lesson is judged on: a lesson is a note about a world that changes. */
-function showLessons(args: readonly string[]): number {
-  const { values } = parseArgs({ args: [...args], options: { project: { type: "string" } } });
-  const chosen = values.project === undefined ? hereProject()?.id ?? null : Number(values.project);
-  if (chosen === null) {
-    return fail(noProjectHere("wecode lessons"));
-  }
-  if (!Number.isInteger(chosen)) return fail("wecode lessons --project <id>");
-
-  const conn = db();
-  const found = lessons(conn, chosen);
-  if (found.length === 0) {
-    process.stdout.write("no lessons here yet\n");
-    return 0;
-  }
-  for (const l of found) {
-    const from = l.assignment_id === null ? "by hand" : assignmentName(conn, l.assignment_id);
-    process.stdout.write(`  #${String(l.id).padStart(3)}  ${l.text}\n`);
-    process.stdout.write(`        ${grey(`${from} · ${age(l.created_at)}`)}\n`);
-  }
-  return 0;
-}
-
-/** The assignment a lesson came from, so a suspicious one can be traced back to the attempt
- *  that wrote it. The foreign key is what makes the row certain to be there. */
-function assignmentName(conn: ReturnType<typeof open>, id: number): string {
-  const row = queries(conn).selectFrom(assignment).select(["slug"]).where("id", "=", id).get();
-  return row === null ? `assignment #${id}` : `${row.slug} #${id}`;
-}
-
-function age(at: string): string {
-  const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(at)) / 60_000));
-  if (minutes < 60) return `${minutes}m ago`;
-  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)}h ago`;
-  return `${Math.floor(minutes / (60 * 24))}d ago`;
-}
-
-/** `wecode lesson drop <id>` — the operator's call, like everything else that is a
- *  judgement. A wrong lesson is worse than none, so this is one command with no ceremony. */
-function lesson(args: readonly string[]): number {
-  const [name, raw] = args;
-  if (name !== "drop") return fail("wecode lesson drop <id>");
-  const id = Number(raw);
-  if (!Number.isInteger(id)) return fail("wecode lesson drop <id>");
-  if (!dropLesson(db(), id)) return fail(`no lesson #${id}`);
-  process.stdout.write(`lesson #${id} dropped\n`);
-  return 0;
-}
 
 /** One invocation of the facade: every method on `Verbs` and on `Completions` takes an id
  *  and an actor and answers an Outcome, so a verb resolved off the command line has this
@@ -531,7 +289,7 @@ function verb(entity: string, rest: readonly string[]): number {
   if (name === "create") return asked ? ent.createHelp(at, entity) : create(entity, args);
   if (name === "scope") return asked ? ent.scopeHelp() : ent.scope(at, entity, args);
   if (name === "artefact") return asked ? ent.artefactHelp() : ent.artefact(at, entity, args);
-  if (name === "restate") return asked ? restateHelp() : restateVerb(entity, args);
+  if (name === "restate") return asked ? use.restateHelp() : restateVerb(entity, args);
   if (name === "retry" && entity === "task") return ent.retry(at, args);
 
   if (!isStateful(entity)) return fail(`${entity} has no states; its only verb is create`);
@@ -595,24 +353,6 @@ function restateVerb(entity: string, args: readonly string[]): number {
   }
 }
 
-function restateHelp(): number {
-  process.stdout.write(
-    [
-      `wecode <${Object.keys(RESTATABLE).join("|")}> restate <id> --to "<words>"`,
-      "",
-      "  correct the wording of a record without dropping it. the old wording goes on",
-      "  the ledger, so the correction is itself part of the record.",
-      "",
-      "  the slug does not move: worktrees and branches are named after it.",
-      "  this corrects words only — it can never change a state.",
-      "",
-      '  wecode story restate 201 --to "the typescript build ships a bundle"',
-      "",
-      "",
-    ].join("\n"),
-  );
-  return 0;
-}
 
 function create(entity: string, args: readonly string[]): number {
   const { values, positionals } = parseArgs({
@@ -770,21 +510,4 @@ function usage(): number {
   return 0;
 }
 
-/** Every state and verb an entity has, read off the machine table — so help cannot drift
- *  from what the engine will actually allow. */
-function entityHelp(entity: string): number {
-  if (!isStateful(entity)) return fail(`${entity} has no states. Its only verb is create.`);
-
-  const m = loadMachines()[entity];
-  process.stdout.write(`${entity}\n\n  states  ${m.states.join(" · ")}\n\n`);
-
-  const width = Math.max(...m.transitions.map((t) => t.verb.length));
-  for (const t of m.transitions) {
-    const guard = t.guard === undefined ? "" : `  [${t.guard}]`;
-    const who = t.automatic === true ? "  (automatic — nobody invokes it)" : "";
-    process.stdout.write(`  ${t.verb.padEnd(width)}  ${t.from.join(" | ")} → ${t.to}${guard}${who}\n`);
-  }
-  process.stdout.write(`\n  wecode ${entity} <verb> <id>\n\n`);
-  return 0;
-}
 
