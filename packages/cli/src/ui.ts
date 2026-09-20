@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { parse } from "yaml";
 
@@ -34,21 +35,38 @@ export interface Finding {
  *  capture, and a second declaration of it here would be a second place to keep right. */
 export type Rules = (capture: unknown) => readonly Finding[];
 
-/** Where the rules come from when a caller does not say.
+/** `@wecode/ui`'s entry point, however it can be reached from here.
  *
- *  Loaded at the moment of use rather than imported at the top, because `packages/cli`
- *  does not depend on `@wecode/ui` yet — declaring that dependency and exporting `check`
- *  from ui's entry point are both outside this change. Until they land the command says
- *  so, in the one sentence that tells a reader what to do about it, and exits 2. */
+ *  Loaded at the moment of use rather than imported at the top, because `packages/cli` does
+ *  not declare `@wecode/ui` — declaring it is a manifest edit and a lockfile with it, both
+ *  outside this change. The package name is tried first so that the day the dependency is
+ *  declared this needs no edit; failing that it is the sibling build in this repository,
+ *  which is where the one copy of these rules actually is. Neither is a second
+ *  implementation: both specifiers name the same module, and if neither resolves the
+ *  command says so in the one sentence that tells a reader what to do about it, and exits
+ *  2 rather than deciding anything itself. */
+async function fromUi(): Promise<Record<string, unknown>> {
+  // Not literal specifiers: a literal `@wecode/ui` would stop this package compiling
+  // before the dependency is declared.
+  const here = fileURLToPath(new URL("../../ui/dist/index.js", import.meta.url));
+  let last = "";
+  for (const from of ["@wecode/ui", here]) {
+    try {
+      return (await import(from)) as Record<string, unknown>;
+    } catch (err) {
+      last = (err as Error).message;
+    }
+  }
+  throw new Error(`@wecode/ui cannot be reached — packages/cli does not depend on it yet: ${last}`);
+}
+
+/** Where the rules come from when a caller does not say. */
 async function loadRules(): Promise<Rules> {
-  // Not a literal specifier: `packages/cli` cannot resolve `@wecode/ui` until it declares
-  // the dependency, and a literal would stop this package compiling before then.
-  const from = "@wecode/ui";
-  const mod = (await import(from)) as { check?: Rules };
-  if (typeof mod.check !== "function") {
+  const { check } = (await fromUi()) as { check?: Rules };
+  if (typeof check !== "function") {
     throw new Error("@wecode/ui exports no check — packages/cli does not depend on it yet");
   }
-  return mod.check;
+  return check;
 }
 
 export async function ui(
@@ -139,18 +157,10 @@ export interface Ports {
   readonly wireframe: (root: unknown) => string;
 }
 
-/** Where the ports come from when a caller does not say. Reached by subpath rather than
- *  through the package entry, because `index.ts` re-exports `wireframe` but not `expected`,
- *  and loaded at the moment of use because `packages/cli` does not depend on `@wecode/ui`
- *  yet — until it does, the command says so in one sentence and exits 2. */
+/** Where the ports come from when a caller does not say: `@wecode/ui`'s entry point, which
+ *  now names `expected` beside `wireframe`. */
 async function loadPorts(): Promise<Ports> {
-  // Not literal specifiers: a literal would stop this package compiling before the
-  // dependency is declared.
-  const from = "@wecode/ui/dist";
-  const shape = async (file: string): Promise<Record<string, unknown>> =>
-    (await import(`${from}/${file}`)) as Record<string, unknown>;
-  const { expected } = (await shape("expected.js")) as Pick<Ports, "expected">;
-  const { wireframe } = (await shape("wireframe.js")) as Pick<Ports, "wireframe">;
+  const { expected, wireframe } = (await fromUi()) as Partial<Ports>;
   if (typeof expected !== "function" || typeof wireframe !== "function") {
     throw new Error("@wecode/ui exports no expected/wireframe — packages/cli does not depend on it yet");
   }
@@ -176,26 +186,29 @@ const asBox = (node: Shown): unknown => ({
   ...(node.children === undefined ? {} : { children: node.children.map(asBox) }),
 });
 
-/** The design a file declares under a name. A design file is a mapping of screen to design
- *  so that one file can hold the screens of one product, which is how a reviewer wants to
- *  read them — `screens:` and then a block per screen. */
-function screen(file: string, name: string, parsed: unknown): unknown {
-  const screens = (parsed as { screens?: unknown } | null)?.screens;
-  if (screens === null || typeof screens !== "object") {
-    throw new Error(`${file} declares no screens`);
+/** What the design a file declares under a name is read out of it by.
+ *
+ *  This used to be a function here, and the gate over the cockpit's design had its own. Two
+ *  readers of one file format is two answers to "is this a design" — the projector could
+ *  refuse a file the gate accepted, and nobody would find out until an operator typed the
+ *  command. So the reading lives in `@wecode/ui` beside `expected`, which is the module
+ *  that has to make sense of what comes back, and both sides point at it. */
+export type Select = (parsed: unknown, name: string, file: string) => unknown;
+
+/** Where the selection comes from when a caller does not say. */
+async function loadSelect(): Promise<Select> {
+  const { designScreen } = (await fromUi()) as { designScreen?: Select };
+  if (typeof designScreen !== "function") {
+    throw new Error("@wecode/ui exports no designScreen — packages/cli does not depend on it yet");
   }
-  const found = (screens as Record<string, unknown>)[name];
-  if (found === undefined) {
-    const has = Object.keys(screens as object).join(", ");
-    throw new Error(`${file} declares no screen ${name} — it declares ${has || "none"}`);
-  }
-  return found;
+  return designScreen;
 }
 
 export async function design(
   args: readonly string[],
   ports: () => Ports | Promise<Ports> = loadPorts,
   read: () => Read | Promise<Read> = loadRead,
+  select: () => Select | Promise<Select> = loadSelect,
 ): Promise<number> {
   const { values, positionals } = parseArgs({
     args: [...args],
@@ -215,7 +228,8 @@ export async function design(
 
   let declared: unknown;
   try {
-    declared = screen(file, name, (await read())(readFileSync(resolve(file), "utf8")));
+    const parsed = (await read())(readFileSync(resolve(file), "utf8"));
+    declared = (await select())(parsed, name, file);
   } catch (err) {
     return fail(`cannot read the design at ${file}: ${(err as Error).message}`, 2);
   }

@@ -113,3 +113,51 @@ export const expected = (design: Design): CapturedNode =>
  *  as the intent and every shortfall backwards. */
 export const against = (design: Design, capture: CapturedNode): Change[] =>
   diff(expected(design), capture);
+
+/** What a design document is not, said in the words the file uses.
+ *
+ *  A separate class rather than `Error`, because both callers below turn a bad design into
+ *  their own refusal — the projector into exit 2, the gate into a `ViewError` — and neither
+ *  should have to tell a design that does not load apart from a bug in the loader. */
+export class DesignError extends Error {}
+
+/** The design document a parsed file is, or the reason it is not one.
+ *
+ *  Parsing is deliberately not here. A design is written as yaml and the two callers each
+ *  already declare a parser; a copy of that dependency in this package would be a second
+ *  opinion about which documents count as yaml, which is the fault this loader exists to
+ *  end. What is here is everything after the parse: the shape, the screen, the sentences.
+ *
+ *  `file` is the path the caller typed, because a reader looking at a refusal wants to
+ *  know which of their files was wrong before they want to know what was wrong with it. */
+export function designDocument(parsed: unknown, file = "the design"): Record<string, unknown> {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new DesignError(`${file} is not a mapping`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** The design one document declares under a name.
+ *
+ *  A design file is a mapping of screen to design so that one file can hold the screens of
+ *  one product, which is how a reviewer wants to read them — `screens:` and then a block per
+ *  screen. A file with no `screens:` is not a smaller design, it is a different kind of
+ *  document, and it is told so rather than drawn as an empty page.
+ *
+ *  The names it does declare go in the refusal, because a caller who typed the wrong screen
+ *  is one word away from the right one and should not have to open the file to find it. */
+export function designScreen(parsed: unknown, name: string, file = "the design"): Design {
+  const screens = designDocument(parsed, file)["screens"];
+  if (screens === null || typeof screens !== "object") {
+    throw new DesignError(`${file} declares no screens`);
+  }
+  const found = (screens as Record<string, unknown>)[name];
+  if (found === undefined) {
+    const has = Object.keys(screens as object).join(", ");
+    throw new DesignError(`${file} declares no screen ${name} — it declares ${has || "none"}`);
+  }
+  if (found === null || typeof found !== "object" || Array.isArray(found)) {
+    throw new DesignError(`${file} declares ${name} as something other than a box`);
+  }
+  return found as Design;
+}
