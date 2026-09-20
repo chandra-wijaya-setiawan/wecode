@@ -104,11 +104,17 @@ describe("a tick, end to end", () => {
     expect(git(repo, "ls-tree", "--name-only", "story/password-reset")).toContain("mail.ts");
   });
 
-  it("never touches the integration checkout", async () => {
+  it("never moves the integration checkout off its branch, and never leaves it stale", async () => {
     await runner().tick();
     await runner().tick();
+
+    // The checkout is never taken off the base — the work happens in trees of wecode's own.
     expect(git(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
-    expect(existsSync(join(repo, "mail.ts"))).toBe(false);
+    // And having landed onto that base, it is brought forward rather than left showing the
+    // pre-land files with the landed path staged as a deletion.
+    expect(git(repo, "ls-tree", "-r", "--name-only", "main").split("\n")).toContain("mail.ts");
+    expect(existsSync(join(repo, "mail.ts"))).toBe(true);
+    expect(git(repo, "status", "--porcelain", "-uno")).toBe("");
   });
 });
 
