@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -98,6 +98,157 @@ function lines(file: string, found: readonly Finding[]): readonly string[] {
     "",
     ...found.map((f) => `  ${f.rule}: ${f.node} — ${f.says}`),
   ];
+}
+
+/** `wecode design show <screen>` — the declared screen, as a picture on disk.
+ *
+ *  `expected` turns a design into a tree and `wireframe` turns a tree into SVG, but nothing
+ *  an operator types reaches either. So a design crossing the desk arrives as yaml, and the
+ *  mockup everyone actually looked at lives in whatever chat message it was pasted into —
+ *  which is to say the screen was signed off against a picture nobody can regenerate. This
+ *  is the verb that closes that: name a screen, get a file, open it.
+ *
+ *  It decides no geometry, the same way `check` decides no rule. The design states every
+ *  number, `expected` adds the offsets up, `wireframe` writes them out, and what lives here
+ *  is the plumbing between them plus the one thing neither side owns — that `expected`
+ *  answers a captured node (`name`, `rows`) and `wireframe` draws a box (`title`), which is
+ *  one rename and is `asBox` below. The two coordinate shapes are never read here, only
+ *  passed along, so there is no second opinion about where a box is.
+ *
+ *  Two exit codes, because writing a file either happened or did not: 0 the wireframe is at
+ *  the path printed, 2 the question could not be asked — no design file, unparseable, no
+ *  such screen in it, a design the projection refuses. There is no 1: a design that is
+ *  wrong about a screen is what `check` and `diff` are for, and this draws what it is
+ *  given. */
+
+/** What a captured node is, as far as the bridge needs to know. `at` is deliberately
+ *  `unknown` — the coordinates belong to the design and to the projection, and a shape for
+ *  them here would be a third place that has to agree about a rectangle. */
+interface Shown {
+  readonly name: string;
+  readonly at: unknown;
+  readonly children?: readonly Shown[];
+}
+
+/** The two ports this command composes, in the order it composes them. They are parameters
+ *  with a default for the same reason the rules are: they are proved in `packages/ui`
+ *  against designs and trees, and the tests here drive the command. */
+export interface Ports {
+  readonly expected: (design: unknown) => Shown;
+  readonly wireframe: (root: unknown) => string;
+}
+
+/** Where the ports come from when a caller does not say. Reached by subpath rather than
+ *  through the package entry, because `index.ts` re-exports `wireframe` but not `expected`,
+ *  and loaded at the moment of use because `packages/cli` does not depend on `@wecode/ui`
+ *  yet — until it does, the command says so in one sentence and exits 2. */
+async function loadPorts(): Promise<Ports> {
+  // Not literal specifiers: a literal would stop this package compiling before the
+  // dependency is declared.
+  const from = "@wecode/ui/dist";
+  const shape = async (file: string): Promise<Record<string, unknown>> =>
+    (await import(`${from}/${file}`)) as Record<string, unknown>;
+  const { expected } = (await shape("expected.js")) as Pick<Ports, "expected">;
+  const { wireframe } = (await shape("wireframe.js")) as Pick<Ports, "wireframe">;
+  if (typeof expected !== "function" || typeof wireframe !== "function") {
+    throw new Error("@wecode/ui exports no expected/wireframe — packages/cli does not depend on it yet");
+  }
+  return { expected, wireframe };
+}
+
+/** How the design file is read. A design is written as yaml, and `packages/cli` cannot
+ *  resolve `yaml` until it depends on it, so json is the fallback rather than the format:
+ *  every yaml document that is also json parses the same either way. */
+export type Read = (text: string) => unknown;
+
+async function loadRead(): Promise<Read> {
+  const from = "yaml";
+  try {
+    const mod = (await import(from)) as { parse?: Read };
+    if (typeof mod.parse === "function") return mod.parse;
+  } catch {
+    // packages/cli does not depend on `yaml`; json is what is left.
+  }
+  return (text: string) => JSON.parse(text) as unknown;
+}
+
+/** A captured node as a box: the same coordinates, the same order, `name` read as `title`. */
+const asBox = (node: Shown): unknown => ({
+  at: node.at,
+  title: node.name,
+  ...(node.children === undefined ? {} : { children: node.children.map(asBox) }),
+});
+
+/** The design a file declares under a name. A design file is a mapping of screen to design
+ *  so that one file can hold the screens of one product, which is how a reviewer wants to
+ *  read them — `screens:` and then a block per screen. */
+function screen(file: string, name: string, parsed: unknown): unknown {
+  const screens = (parsed as { screens?: unknown } | null)?.screens;
+  if (screens === null || typeof screens !== "object") {
+    throw new Error(`${file} declares no screens`);
+  }
+  const found = (screens as Record<string, unknown>)[name];
+  if (found === undefined) {
+    const has = Object.keys(screens as object).join(", ");
+    throw new Error(`${file} declares no screen ${name} — it declares ${has || "none"}`);
+  }
+  return found;
+}
+
+export async function design(
+  args: readonly string[],
+  ports: () => Ports | Promise<Ports> = loadPorts,
+  read: () => Read | Promise<Read> = loadRead,
+): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args: [...args],
+    allowPositionals: true,
+    options: { from: { type: "string" }, out: { type: "string" } },
+  });
+  const [question, name] = positionals;
+  if (question === undefined) return designUsage();
+  if (question !== "show") {
+    fail(`no such question: ${question}`);
+    return designUsage(2);
+  }
+  if (name === undefined) return fail("wecode design show <screen>", 2);
+
+  const file = values.from ?? "design.yaml";
+  const out = resolve(values.out ?? `${name}.svg`);
+
+  let declared: unknown;
+  try {
+    declared = screen(file, name, (await read())(readFileSync(resolve(file), "utf8")));
+  } catch (err) {
+    return fail(`cannot read the design at ${file}: ${(err as Error).message}`, 2);
+  }
+
+  try {
+    const { expected, wireframe } = await ports();
+    writeFileSync(out, wireframe(asBox(expected(declared))));
+  } catch (err) {
+    return fail(`cannot draw ${name}: ${(err as Error).message}`, 2);
+  }
+
+  process.stdout.write(`${out}\n`);
+  return 0;
+}
+
+function designUsage(code = 0): number {
+  process.stdout.write(
+    [
+      "wecode design — the screen as it was declared, drawn before it is built.",
+      "",
+      "  wecode design show <screen>   write a wireframe of the declared screen, and say where",
+      "",
+      "  --from <file>   the design file to read (default design.yaml)",
+      "  --out <file>    where to write the wireframe (default <screen>.svg)",
+      "",
+      "Exit: 0 written, 2 the screen could not be drawn.",
+      "",
+    ].join("\n"),
+  );
+  return code;
 }
 
 function usage(code = 0): number {
