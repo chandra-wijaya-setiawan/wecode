@@ -53,6 +53,8 @@ import { doctor } from "./doctor.js";
 import { explore } from "./explore.js"; import { paint } from "./paint.js";
 import { delivered as deliveredStories } from "./delivered.js";
 import { design as projector } from "./ui.js";
+// Namespaced because `tree` is already the core query that reads the whole shape back.
+import * as rungs from "./verbs/tree.js";
 
 const DB = (): string => currentDatabase();
 
@@ -1509,25 +1511,16 @@ function create(entity: string, args: readonly string[]): number {
     if (!Number.isInteger(parent)) throw new Error(`wecode ${entity} create --parent <id> "<text>"`);
     return parent;
   };
+  const rung: rungs.Rung = { make, text, parent: needsParent, path: values["path"] ?? process.cwd() };
 
   try {
     let id: number;
     switch (entity) {
-      case "workspace":
-        id = make.workspace(text, values["path"] ?? process.cwd());
-        break;
-      case "project":
-        id = make.project(needsParent(), text, values["path"] ?? process.cwd());
-        break;
-      case "release":
-        id = make.release(needsParent(), text);
-        break;
-      case "epic":
-        id = make.epic(needsParent(), text);
-        break;
-      case "story":
-        id = make.story(needsParent(), text);
-        break;
+      case "workspace": id = rungs.workspace(rung); break;
+      case "project": id = rungs.project(rung); break;
+      case "release": id = rungs.release(rung); break;
+      case "epic": id = rungs.epic(rung); break;
+      case "story": id = rungs.story(rung); break;
       case "requirement":
         id = make.requirement(needsParent(), text);
         break;
