@@ -82,7 +82,10 @@ export interface Task extends Stateful {
   readonly max_retry: number;
 }
 
-export type ObjectiveType = "task" | "acceptance_test" | "task_test";
+/** A story is here with the three work kinds because a decision is most often about a story:
+ *  "do we ship this at all" hangs on the story, not on whichever task happened to surface it,
+ *  and an approval hung on a task is answered against words nobody chose for the question. */
+export type ObjectiveType = "task" | "acceptance_test" | "task_test" | "story";
 
 /** Written when the assignment is created, and never rewritten. The scope is copied rather
  *  than referenced, so editing a task's scope cannot widen an attempt already running. */
