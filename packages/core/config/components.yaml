@@ -166,7 +166,7 @@ components:
     layer: client
     component: true
     owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and wrapped in the shell design.yaml declares, served over http. It reads the record, and answers an approval in the operator's own name; that one verb is the exception, because every other verb that changes wecode is an agent's or the cli's
-    modules: [answer, pages/board, pages/decisions, pages/discover, pages/shell, pages/tasks, pages/tree, server]
+    modules: [answer, pages/board, pages/decisions, pages/discover, pages/ledger, pages/projects, pages/shell, pages/tasks, pages/tree, server]
 
   painter:
     package: painter
@@ -188,10 +188,6 @@ components:
     component: false
     owns: what a client of the painter package may import
     modules: [index]
-    owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and served over http. It reads the record and offers no verb, because every verb that changes wecode is the cli's
-    modules: [pages/board, pages/projects, server]
-    owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and wrapped in the shell design.yaml declares, served over http. It reads the record and offers no verb, because every verb that changes wecode is the cli's
-    modules: [pages/board, pages/projects, pages/shell, server]
 
   webapp surface:
     package: webapp
