@@ -184,6 +184,9 @@ importers:
       '@wecode/explorer':
         specifier: workspace:*
         version: link:../explorer
+      '@wecode/painter':
+        specifier: workspace:*
+        version: link:../painter
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
@@ -221,6 +224,8 @@ importers:
       ink-testing-library:
         specifier: ^4.0.0
         version: 4.0.0(@types/react@19.3.0)
+
+  packages/painter: {}
 
   packages/runner:
     dependencies:
