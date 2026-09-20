@@ -21,6 +21,17 @@ import { code, description, loadViews, sectionMark, type View } from "@wecode/tu
 import { html, type Page, type Reply } from "../server.js";
 import { document, shelled } from "./shell.js";
 
+/** How this page looks is not here either. It was — a template string with its own hex
+ *  colours written into it, one of five such strings across the pages, all of them agreeing
+ *  about what "faint" is until one of them was edited. The look is the design's now, and
+ *  `shell.ts` is the only thing that turns it into a sheet, so this file draws markup and
+ *  says nothing about colour, type or space.
+ *
+ *  What it does say is which shape it draws: the design scopes the board's rules to
+ *  `section.board`, so the class below is how a box of this page is told from a `section`
+ *  some other page draws into the same sheet. */
+const SHAPE = "board";
+
 /** Every character HTML has an opinion about. A board's rows are a person's own words —
  *  a story titled `a <script> in the title` is a title, not markup — so nothing reaches
  *  the document without coming through here. */
@@ -61,7 +72,7 @@ function section(view: View, rows: readonly Row[]): string {
               `<span class="what">and ${rows.length - view.rows} more</span></li>`
             : ""
         }</ul>`;
-  return `<section id="${escape(view.name)}">${head}${body}</section>`;
+  return `<section id="${escape(view.name)}" class="${SHAPE}">${head}${body}</section>`;
 }
 
 /** What the board says: its boxes, and nothing around them. The frame is the shell's, so
@@ -70,7 +81,7 @@ export function boardBoxes(board: Board, views: readonly View[] = loadViews()): 
   return views.map((v) => section(v, board[v.filter])).join("");
 }
 
-/** The whole document: the board's boxes, in the shell design.yaml declares. */
+/** The whole document: the board's boxes, in the shell and the look design.yaml declares. */
 export function boardPage(board: Board, views: readonly View[] = loadViews()): Reply {
   return html(document(boardBoxes(board, views)));
 }

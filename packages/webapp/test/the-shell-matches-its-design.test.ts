@@ -22,7 +22,7 @@ import type { Board } from "@wecode/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { addressOf, boardAt, boardPage, serve } from "../src/index.js";
 import { discovered } from "../src/pages/discover.js";
-import { document, loadShell, shelled, ShellError } from "../src/pages/shell.js";
+import { document, loadShell, shelled, ShellError, stylesheet } from "../src/pages/shell.js";
 
 const DESIGN = fileURLToPath(
   new URL("../../tui/config/design.yaml", import.meta.url),
@@ -75,8 +75,8 @@ describe("the shell is the design's, not the page's", () => {
     const shell = loadShell(at);
     expect(shell.title).toBe("elsewhere");
     expect(shell.banner).toBe("a board");
-    expect(document("", shell)).toContain("<title>elsewhere</title>");
-    expect(document("", shell)).toContain("<h1>a board</h1>");
+    expect(document("", "", shell)).toContain("<title>elsewhere</title>");
+    expect(document("", "", shell)).toContain("<h1>a board</h1>");
   });
 
   it("refuses a design that does not declare the frame, and names what is missing", () => {
@@ -111,11 +111,13 @@ describe("the document is the declared frame", () => {
     expect([...body.matchAll(/<main>/g)]).toHaveLength(1);
   });
 
-  it("keeps the one stylesheet in the document", () => {
-    expect(body).toContain("<style>");
+  it("keeps the stylesheet in the document, and it is the declared one", () => {
+    // `stylesheet: inline` is a sentence of the design too: the surface is one workspace's
+    // own board on its own machine, and a second request for a sheet buys nothing. What is
+    // in the sheet is `the-shell-is-the-signed-design.test.ts`'s question.
+    expect(body).toContain(`<style>${stylesheet()}</style>`);
     expect(body).toContain("color-scheme: dark");
     expect(body).not.toContain("<link");
-    expect([...body.matchAll(/<style>/g)]).toHaveLength(1);
   });
 });
 

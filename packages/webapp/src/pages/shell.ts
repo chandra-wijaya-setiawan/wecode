@@ -48,11 +48,14 @@ const FIELDS = ["doctype", "lang", "charset", "viewport", "title", "banner", "bo
 const mapOf = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 
+/** The `renderers.webapp` block of the design at `path`. */
+const webappOf = (path: string): Record<string, unknown> =>
+  mapOf(mapOf(mapOf(parse(readFileSync(path, "utf8")))["renderers"])["webapp"]);
+
 /** The shell `renderers.webapp` declares. A field the design does not say is a refusal and
  *  never a default: a document drawn from a half-read design is a document nothing gates. */
 export function loadShell(path: string = DESIGN): Shell {
-  const webapp = mapOf(mapOf(mapOf(parse(readFileSync(path, "utf8")))["renderers"])["webapp"]);
-  const block = mapOf(webapp["shell"]);
+  const block = mapOf(webappOf(path)["shell"]);
   const shell: Record<string, string> = {};
   for (const field of FIELDS) {
     const said = block[field];
@@ -64,17 +67,107 @@ export function loadShell(path: string = DESIGN): Shell {
   return shell as unknown as Shell;
 }
 
+/** The look `renderers.webapp` declares: the tokens every rule spends, the shape each page
+ *  is allowed to name, and the rules themselves — the frame's, then one block per page. */
+export interface Look {
+  readonly scheme: string;
+  readonly palette: Readonly<Record<string, string>>;
+  readonly type: Readonly<Record<string, string>>;
+  readonly roots: Readonly<Record<string, readonly string[]>>;
+  readonly frame: Rules;
+  readonly pages: Readonly<Record<string, Rules>>;
+}
+
+/** Selector to declarations. A value that is itself a map is a wrapper — an `@media` query
+ *  — and holds selectors of its own. */
+export type Rules = Readonly<Record<string, string | Readonly<Record<string, string>>>>;
+
+const stringsOf = (v: unknown, said: string): Record<string, string> => {
+  const map = mapOf(v);
+  for (const [key, held] of Object.entries(map)) {
+    if (typeof held !== "string") throw new ShellError(`${said}.${key} is not a word`);
+  }
+  return map as Record<string, string>;
+};
+
+/** The look, read off the design. As with the shell, a block the design does not declare is
+ *  a refusal: a surface styled from half a design is a surface nothing signed. */
+export function loadLook(path: string = DESIGN): Look {
+  const block = mapOf(webappOf(path)["look"]);
+  for (const field of ["scheme", "palette", "type", "roots", "frame", "pages"]) {
+    if (!(field in block)) throw new ShellError(`${path}: renderers.webapp.look declares no ${field}`);
+  }
+  const roots: Record<string, readonly string[]> = {};
+  for (const [page, said] of Object.entries(mapOf(block["roots"]))) {
+    if (!Array.isArray(said) || said.some((s) => typeof s !== "string")) {
+      throw new ShellError(`${path}: renderers.webapp.look.roots.${page} is not a list of shapes`);
+    }
+    roots[page] = said as string[];
+  }
+  const pages: Record<string, Rules> = {};
+  for (const [page, said] of Object.entries(mapOf(block["pages"]))) pages[page] = mapOf(said) as Rules;
+  return {
+    scheme: String(block["scheme"]),
+    palette: stringsOf(block["palette"], "palette"),
+    type: stringsOf(block["type"], "type"),
+    roots,
+    frame: mapOf(block["frame"]) as Rules,
+    pages,
+  };
+}
+
+const rule = (selector: string, declarations: string): string => `${selector} { ${declarations} }\n`;
+
+/** The declared rules as text. A nested map is a query, and its own rules go inside it. */
+const rulesOf = (rules: Rules, indent = ""): string =>
+  Object.entries(rules)
+    .map(([selector, held]) =>
+      typeof held === "string"
+        ? indent + rule(selector, held)
+        : `${indent}${selector} {\n${rulesOf(held as Rules, `${indent}  `)}${indent}}\n`,
+    )
+    .join("");
+
+/** The whole surface's stylesheet, built from the declared look and from nothing else.
+ *
+ *  Every page's block is in it, in every document. That is deliberate: a page is a fragment
+ *  and the sheet is the surface's, so a page cannot be served in a look of its own — and it
+ *  is safe because each block is scoped to a shape only its page draws, which the design
+ *  declares as that page's `roots` and the gate holds it to. */
+export function stylesheet(look: Look = loadLook()): string {
+  const tokens = [
+    `color-scheme: ${look.scheme}`,
+    ...Object.entries(look.palette).map(([name, held]) => `--${name}: ${held}`),
+    ...Object.entries(look.type).map(([name, held]) => `--${name}: ${held}`),
+  ].join("; ");
+  return (
+    rule(":root", tokens) +
+    rulesOf(look.frame) +
+    Object.values(look.pages)
+      .map((page) => rulesOf(page))
+      .join("")
+  );
+}
+
 /** The document: the declared frame, with the page's own markup inside the one element the
- *  design gives it. There is no per-page argument: the surface has one stylesheet and it is
- *  here. A page that could hand in rules of its own is a page that can disagree with the
- *  frame about what a heading or a list looks like, and three pages each with a `STYLE`
- *  constant are three surfaces that only look like one until somebody edits one of them. */
-export function document(contents: string, shell: Shell = loadShell()): string {
+ *  design gives it, wearing the declared look.
+ *
+ *  `retired` is the stylesheet a page used to hand in. It is taken and dropped: the look is
+ *  the design's now, so a page that still passes one is served the signed sheet anyway
+ *  rather than its own. The parameter stays only so a page that has not yet stopped passing
+ *  one still compiles; nothing it contains reaches the document. */
+export function document(
+  contents: string,
+  retired = "",
+  shell: Shell = loadShell(),
+  css: string = stylesheet(),
+): string {
+  void retired;
   const { doctype, lang, charset, viewport, title, banner, body } = shell;
   return (
     `${doctype}\n<html lang="${lang}"><head><meta charset="${charset}">` +
     `<meta name="viewport" content="${viewport}">` +
-    `<title>${title}</title><style>${STYLE}</style></head>` +
+    `<title>${title}</title><style>${css}</style></head>` +
     `<body><${body}><h1>${banner}</h1>${contents}</${body}></body></html>\n`
   );
 }
@@ -84,56 +177,15 @@ export function document(contents: string, shell: Shell = loadShell()): string {
 export type Contents = (url: URL) => string;
 
 /** A page, wearing the shell. This is the only way a page of this package becomes a reply,
- *  so "every page is in the shell" is a fact about the code and not a habit. */
-export const shelled = (contents: Contents, shell: Shell = loadShell()): Page =>
-  (url: URL): Reply => html(document(contents(url), shell));
-
-/** The surface's presentation, whole — the frame first, then the shapes each page draws
- *  with. Dark because the cockpit it mirrors is read in a terminal, and monospace for the
- *  one thing a column of ids needs.
+ *  so "every page is in the shell" is a fact about the code and not a habit.
  *
- *  A page's rules live here and not in the page because presentation is one decision across
- *  the surface: a heading is the same size on the board as on the decisions page, and the
- *  grey a secondary column is written in is one grey. Each page's block is selected from the
- *  shape that page draws — the board's boxes are `section`s, a decision is an `article`, the
- *  tree is `ul.tree` — so the blocks are readable apart without being separable, and a rule
- *  common to all three, like what an empty page says, is written once. */
-const STYLE = `
-  :root { color-scheme: dark }
-  body { margin: 0; padding: 1.5rem; background: #111; color: #ddd;
-         font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace }
-  main { display: grid; gap: 1.25rem; max-width: 60rem; margin: 0 auto }
-  h1 { font-size: 1rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
-       margin: 0 0 .5rem; color: #888 }
-  h2 { font-size: 1rem; font-weight: 600; margin: 0 0 .4rem }
-  p.empty { margin: 0; color: #666 }
-
-  section { border-top: 1px solid #333; padding-top: .5rem }
-  section h2 .mark { display: inline-block; width: 1.25rem; color: #6cf }
-  section h2 kbd { float: right; color: #888; font: inherit }
-  section ul { list-style: none; margin: 0; padding: 0 }
-  section li { display: flex; gap: .75rem; padding: .1rem 0 }
-  section li .code { flex: 0 0 9rem; color: #888 }
-  section li .state { flex: 0 0 9rem; color: #6cf }
-  section li .what { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere }
-
-  article { border: 1px solid #333; border-radius: 4px; padding: .75rem 1rem }
-  article h2 { margin: 0 0 .5rem; overflow-wrap: anywhere; white-space: pre-wrap }
-  article h2 .id { color: #888; margin-right: .6rem }
-  article dl { display: grid; grid-template-columns: 6rem 1fr; gap: .2rem .75rem; margin: 0 }
-  article dt { color: #888 }
-  article dd { margin: 0; min-width: 0; overflow-wrap: anywhere }
-  article dd ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap;
-                  gap: .4rem }
-  article dd li { border: 1px solid #444; border-radius: 3px; padding: 0 .4rem; color: #6cf }
-  article dd.open { color: #666 }
-  article p.how { margin: .6rem 0 0; color: #666 }
-
-  ul.tree { list-style: none; margin: 0; padding: 0 }
-  ul.tree ul { list-style: none; margin: 0; padding-left: 1.25rem;
-               border-left: 1px solid #333 }
-  ul.tree li { padding: .1rem 0; min-width: 0; overflow-wrap: anywhere }
-  ul.tree li .label { color: #ddd }
-  ul.tree li .id, ul.tree li .kind, ul.tree li .rollup { color: #888 }
-  ul.tree li .state { color: #6cf }
-`;
+ *  The frame and the sheet are read when the page is wired, not on every request: they are
+ *  the design's, and the design does not change under a running server. What does change is
+ *  the work, and that is what `contents` is asked for each time. */
+export const shelled = (
+  contents: Contents,
+  retired = "",
+  shell: Shell = loadShell(),
+  css: string = stylesheet(),
+): Page =>
+  (url: URL): Reply => html(document(contents(url), retired, shell, css));
