@@ -517,13 +517,18 @@ function files(artefact: string): readonly string[] {
  *  no tests and passes — `vitest run maler` is green forever. It is refused by path, while
  *  the whole file is still being read, because a typo costs a keystroke here and a story at
  *  pass time. A path some task under it will write is not yet a file and is not a mistake.
- *  `gate` adds the converse, for the caller that has a scope of its own: a test file that is
- *  there but outside that scope is a gate the task may not edit. */
-function artefacts(test: string | null, scope: readonly string[], where: string, say: string[], gate = false): void {
+ *  `gate` is the criteria statement, for the caller that has a scope of its own. A test file
+ *  outside that scope is refused only when the task must write it — the statement is not in it
+ *  yet, so the assertion that grades the task is one these hands would have to author. A file
+ *  already carrying the statement is red at base and wants no edit: the task turns it green
+ *  from its own source, and naming it in scope only widens what an agent may break. A path
+ *  that is not a test file at all is not a gate, and is nobody's to write. */
+function artefacts(test: string | null, scope: readonly string[], where: string, say: string[], gate: string | null = null): void {
   for (const path of test === null ? [] : files(test)) {
     if (scope.some((g) => matchesGlob(path, g))) continue;
-    if (!existsSync(resolve(process.cwd(), path))) say.push(`${where}: test: no file matches ${path}`);
-    else if (gate && /\.(test|spec)\.[cm]?[jt]sx?$/.test(path)) say.push(`${where}: test: ${path} is a gate this scope cannot write`);
+    const here = resolve(process.cwd(), path);
+    if (!existsSync(here)) say.push(`${where}: test: no file matches ${path}`);
+    else if (gate !== null && /\.(test|spec)\.[cm]?[jt]sx?$/.test(path) && !readFileSync(here, "utf8").includes(gate)) say.push(`${where}: test: ${path} is a gate this scope cannot write`);
   }
 }
 
@@ -586,19 +591,13 @@ function reach(test: string | null, scope: readonly string[], where: string, say
   }
 }
 
-function criterion(
-  v: unknown,
-  where: string,
-  config: ProjectConfig | null,
-  roles: RoleConfig | null,
-  say: string[],
-): Criteria | null {
+function criterion(v: unknown, where: string, config: ProjectConfig | null, roles: RoleConfig | null, say: string[]): Criteria | null {
   const m = mapping(v, where, KEYS.criteria, say);
   if (m === null) return null;
   const statement = required(m, "statement", where, say);
   const test = optional(m["test"], `${where}: test`, say) ?? config?.test ?? null;
   const tasks = list(m["tasks"], `${where}: tasks`, say)
-    .map((t, i) => task(t, `${where}, task ${i + 1}`, config, roles, say))
+    .map((t, i) => task(t, `${where}, task ${i + 1}`, config, roles, say, statement))
     .filter((t) => t !== null);
   if (statement === null) return null;
 
@@ -638,6 +637,7 @@ function task(
   config: ProjectConfig | null,
   roles: RoleConfig | null,
   say: string[],
+  statement: string | null,
 ): Task | null {
   const m = mapping(v, where, KEYS.task, say);
   if (m === null) return null;
@@ -669,7 +669,7 @@ function task(
     if (!within.ok) say.push(`${where}: ${within.why}`);
   }
 
-  if (m["test"] !== undefined) artefacts(test, scope ?? [], where, say, true);
+  if (m["test"] !== undefined) artefacts(test, scope ?? [], where, say, statement);
 
   // Unlike the path check above, this one judges the fallback test too: a project-wide command
   // that narrows to one package is as unreachable as one the file spells out.

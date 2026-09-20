@@ -1,14 +1,32 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Engine, Maker, open } from "@wecode/core";
 import { DEFAULT_BUDGET, Runner, type Observation, type WorkerAdapter, type Work } from "../src/index.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
+/** Who a tick chooses is decided by the history seeded into the database, never by how long
+ *  the tick took. Every assertion waits for the tick's own answer, so a busy host is slow
+ *  here and nothing more. */
+vi.setConfig({ testTimeout: 0, hookTimeout: 0 });
+
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+/** Runs `body` with the host deliberately busy, so a verdict reached here is the verdict the
+ *  test means rather than one that only holds on an idle machine. */
+async function underLoad<T>(body: () => Promise<T> | T): Promise<T> {
+  const spin = Array.from({ length: 4 }, () =>
+    spawn(process.execPath, ["-e", "for (;;) Math.sqrt(Math.random());"], { stdio: "ignore" }),
+  );
+  try {
+    return await body();
+  } finally {
+    for (const p of spin) p.kill("SIGKILL");
+  }
+}
 
 /** Succeeds having written the one file the task's scope allows, so every attempt ends on the
  *  tick that started it and the worker is free again for the next one. */
@@ -191,6 +209,12 @@ describe("a free worker is picked by how long ago it finished", () => {
     const picked = [await chosen(), await chosen(), await chosen()];
 
     expect(new Set(picked).size).toBe(3);
+    expect(picked).toEqual(workers);
+  });
+
+  it("spreads them the same way with the host under load, because the order is history, not timing", async () => {
+    const picked = await underLoad(async () => [await chosen(), await chosen(), await chosen()]);
+
     expect(picked).toEqual(workers);
   });
 });
