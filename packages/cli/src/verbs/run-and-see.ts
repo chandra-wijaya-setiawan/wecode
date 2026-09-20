@@ -1,11 +1,9 @@
-/** The verbs that run something or show you something: worker, board, doctor, delivered,
- *  plan, land, ask, answer, design, explore, onboard.
+/** The verbs that act: worker, plan, land, ask, answer, onboard.
  *
  *  Where `verbs/tree.ts` and `verbs/work.ts` hold the rungs `create` makes, these are the
- *  words that are not about making a row at all. Five of them — doctor, delivered, plan,
- *  design, explore — already had modules of their own, and are reached through here so
- *  that run.ts's dispatch has one place to look rather than six; the other six had their
- *  bodies in run.ts, and have them here now.
+ *  words that are not about making a row at all. The five that only look — board, doctor,
+ *  delivered, explore, design — are in `verbs/see.ts`; what is left here is the half that
+ *  writes. `plan` stays because it makes rows. These bodies were in run.ts.
  *
  *  Nothing in this file decides what the arguments mean. run.ts parses argv and owns the
  *  record — the table declarations, the database handle, `fail` — and hands both in, so
@@ -23,7 +21,6 @@ import {
   answerApproval,
   raiseApproval,
   APPROVAL_KIND,
-  board as boardOf,
   Engine,
   Maker,
   OPERATOR,
@@ -54,11 +51,7 @@ import type {
   WorkerRow,
   WorkspaceRow,
 } from "../run.js";
-export { doctor } from "../doctor.js";
 export { plan } from "../plan.js";
-export { explore } from "../explore.js";
-export { delivered } from "../delivered.js";
-export { design } from "../ui.js";
 
 type Conn = ReturnType<typeof open>;
 
@@ -105,51 +98,6 @@ export interface Hand {
 }
 
 export const worker = (at: Hand): number => at.make.worker(at.text, at.role, at.kind);
-
-// ─── board ───────────────────────────────────────────────────────────────────────────────
-
-export function board(at: See): number {
-  const { values } = parseArgs({
-    args: [...at.args],
-    options: { all: { type: "boolean" }, project: { type: "string" } },
-  });
-  // Outside every project's repo there is no "here" to narrow to, so the board is the
-  // workspace's — which is what it always was.
-  const asked = values.project === undefined ? at.hereProject()?.id ?? null : Number(values.project);
-  const chosen = values.all === true ? null : asked;
-  if (chosen !== null && !Number.isInteger(chosen)) return at.fail("wecode board --project <id>");
-
-  const b = boardOf(at.conn(), chosen);
-  const mine = b.projects.find((p) => p.id === chosen);
-  if (chosen !== null && mine === undefined) return at.fail(`no project #${chosen}`);
-  process.stdout.write(
-    mine === undefined
-      ? `\nall ${b.projects.length} projects in this workspace\n`
-      : `\n#${mine.id} ${mine.what} · wecode board --all for the whole workspace\n`,
-  );
-  const groups: [string, readonly { id: number; what: string; state: string; detail: string }[]][] = [
-    ["RUNNING", b.running],
-    ["NEEDS YOU", b.needs_human],
-    ["STALE", b.stale],
-    ["QUEUE", b.queued],
-    ["FAILED", b.failed],
-    ["OPEN", b.open],
-  ];
-  for (const [title, rows] of groups) {
-    process.stdout.write(`\n${title} (${rows.length})\n`);
-    if (rows.length === 0) {
-      process.stdout.write("  —\n");
-      continue;
-    }
-    for (const r of rows) {
-      // A title longer than the column pushed every other column off the line.
-      const what = r.what.length > 52 ? `${r.what.slice(0, 51)}…` : r.what.padEnd(52);
-      process.stdout.write(`  #${String(r.id).padStart(4)}  ${what}  ${r.state.padEnd(12)} ${r.detail}\n`);
-    }
-  }
-  process.stdout.write("\n");
-  return 0;
-}
 
 // ─── ask and answer ──────────────────────────────────────────────────────────────────────
 
