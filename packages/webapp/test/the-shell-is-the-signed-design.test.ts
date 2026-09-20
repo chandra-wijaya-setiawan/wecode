@@ -171,6 +171,10 @@ describe("one sheet carries the whole surface, and no page reaches into another"
     expect(Object.keys(LOOK.frame)).toContain("body");
     expect(Object.keys(LOOK.frame)).toContain("main");
     expect(Object.keys(LOOK.frame)).toContain("h1");
+    // The banner's row of ways in is the frame's too: it is the same row in every
+    // document, so no page owns it and no page's scope may hold it.
+    expect(Object.keys(LOOK.frame)).toContain("nav");
+    expect(Object.keys(LOOK.frame)).toContain("nav a");
     const roots = Object.values(LOOK.roots).flat();
     for (const selector of selectors(LOOK.frame)) {
       for (const root of roots) {

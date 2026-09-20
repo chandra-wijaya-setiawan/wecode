@@ -117,6 +117,33 @@ renderers:
       # In the document, not beside it: the surface is one workspace's own board on one
       # workspace's own machine, and a second request for a stylesheet buys nothing.
       stylesheet: inline
+    # What the banner carries under the word: every page of the surface, in the order a
+    # reader meets them. Which page comes first is a decision about the surface and not
+    # about any one page, so it is said here once rather than in five files that would each
+    # have to agree — and it is said in the design, beside the frame the banner is part of,
+    # because an order nobody can read off the design is an order nobody signed.
+    #
+    # `page` is the file in `src/pages`, not a path: where a page answers is `discover.ts`'s
+    # one answer (the board answers at `/`, everything else at its own name) and repeating
+    # it here would be a second one. `says` is what the reader is offered, which is not the
+    # filename — a filename is for the machine.
+    #
+    # Every discovered page is here and nothing else is: a page missing from the order is a
+    # page with no way in, which is the same failure as a page with no file, and
+    # `every-page-opens-with-the-banner.test.ts` holds the list to the directory.
+    banner:
+      order:
+        # The board first, because it is what the surface opens on.
+        - page: board
+          says: Board
+        - page: projects
+          says: Projects
+        - page: tasks
+          says: Tasks
+        - page: decisions
+          says: Decisions
+        - page: tree
+          says: Tree
     # A section of the page is separated by a rule, as it is in the terminal — but the rule
     # is a border on the element, not a row of characters spent out of the height.
     sections:
@@ -181,6 +208,12 @@ renderers:
         body: "margin: 0; padding: 1.75rem clamp(1rem, 4vw, 3rem); background: var(--page); color: var(--ink); font: var(--size)/var(--leading) var(--sans); font-variant-numeric: tabular-nums"
         main: "display: grid; gap: 1.5rem; max-width: 74rem; margin: 0 auto"
         h1: "font-family: var(--serif); font-size: 1.6rem; font-weight: 500; letter-spacing: -.01em; margin: 0; color: var(--ink)"
+        # The banner's way in to every page: one row of names under the word, ruled off
+        # from the page the way the mockup rules it off. It is the frame's and not any
+        # page's, because it is the same row in every document.
+        nav: "display: flex; flex-wrap: wrap; gap: 0 1.5rem; margin: -1rem 0 0; border-bottom: 1px solid var(--rule)"
+        "nav a": "color: var(--faint); text-decoration: none; font-weight: 600; padding: .5rem 0; border-bottom: 2px solid transparent; margin-bottom: -1px"
+        "nav a:hover": "color: var(--ink); border-bottom-color: var(--mark)"
         "p.empty": "margin: 0; color: var(--faint)"
       # One block per page, in the order the sheet writes them.
       pages:
