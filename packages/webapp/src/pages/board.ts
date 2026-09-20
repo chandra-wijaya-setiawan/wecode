@@ -18,23 +18,16 @@ import { code, description, loadViews, sectionMark, type View } from "@wecode/tu
 import { html, type Page, type Reply } from "../server.js";
 import { document, shelled } from "./shell.js";
 
-/** This box's own presentation, and the only thing here that is not read off config: a
- *  stylesheet is how the page looks, not what it says. What a document looks like — its
- *  margins, its type and its banner — is the shell's, so none of it is here. A section is
- *  separated by a rule as design.yaml says it is, drawn as a border rather than as a row of
- *  characters, because a browser has no height to spend. */
-const STYLE = `
-  section { border-top: 1px solid #333; padding-top: .5rem }
-  h2 { font-size: 1rem; font-weight: 600; margin: 0 0 .4rem }
-  h2 .mark { display: inline-block; width: 1.25rem; color: #6cf }
-  h2 kbd { float: right; color: #888; font: inherit }
-  ul { list-style: none; margin: 0; padding: 0 }
-  li { display: flex; gap: .75rem; padding: .1rem 0 }
-  li .code { flex: 0 0 9rem; color: #888 }
-  li .state { flex: 0 0 9rem; color: #6cf }
-  li .what { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere }
-  p.empty { margin: 0; color: #666 }
-`;
+/** How this page looks is not here either. It was — a template string with its own hex
+ *  colours written into it, one of five such strings across the pages, all of them agreeing
+ *  about what "faint" is until one of them was edited. The look is the design's now, and
+ *  `shell.ts` is the only thing that turns it into a sheet, so this file draws markup and
+ *  says nothing about colour, type or space.
+ *
+ *  What it does say is which shape it draws: the design scopes the board's rules to
+ *  `section.board`, so the class below is how a box of this page is told from a `section`
+ *  some other page draws into the same sheet. */
+const SHAPE = "board";
 
 /** Every character HTML has an opinion about. A board's rows are a person's own words —
  *  a story titled `a <script> in the title` is a title, not markup — so nothing reaches
@@ -76,7 +69,7 @@ function section(view: View, rows: readonly Row[]): string {
               `<span class="what">and ${rows.length - view.rows} more</span></li>`
             : ""
         }</ul>`;
-  return `<section id="${escape(view.name)}">${head}${body}</section>`;
+  return `<section id="${escape(view.name)}" class="${SHAPE}">${head}${body}</section>`;
 }
 
 /** What the board says: its boxes, and nothing around them. The frame is the shell's, so
@@ -85,9 +78,9 @@ export function boardBoxes(board: Board, views: readonly View[] = loadViews()): 
   return views.map((v) => section(v, board[v.filter])).join("");
 }
 
-/** The whole document: the board's boxes, in the shell design.yaml declares. */
+/** The whole document: the board's boxes, in the shell and the look design.yaml declares. */
 export function boardPage(board: Board, views: readonly View[] = loadViews()): Reply {
-  return html(document(boardBoxes(board, views), STYLE));
+  return html(document(boardBoxes(board, views)));
 }
 
 /** Which reading of the workspace this page is served from. The board is not the record:
@@ -102,4 +95,4 @@ export const READS = "board";
  *  anybody reloading, and a page served from a snapshot taken when the process booted is a
  *  board that is wrong by the time it is read. */
 export const boardAt = (rows: () => Board, views?: readonly View[]): Page =>
-  shelled(() => (views === undefined ? boardBoxes(rows()) : boardBoxes(rows(), views)), STYLE);
+  shelled(() => (views === undefined ? boardBoxes(rows()) : boardBoxes(rows(), views)));
