@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import { design, type Ports } from "../src/ui.js";
-import { expected } from "../../ui/src/expected.js";
-import { wireframe } from "../../ui/src/wireframe.js";
+import { expected } from "../../lens/src/expected.js";
+import { wireframe } from "../../lens/src/wireframe.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
 /** That `wecode design show` reads a design file the way the gate reads one.
@@ -21,7 +21,7 @@ import { tmp } from "../../core/test/tmpdir.js";
  *  design; this proves which files reach it at all.
  *
  *  The reader is still the command's, because `packages/cli` is the package that declares
- *  `yaml`. What the reader hands back is now read by `@wecode/ui`'s loader, the same one the
+ *  `yaml`. What the reader hands back is now read by `@wecode/lens`'s loader, the same one the
  *  gate reads its design file with — which is why the last case below can say "exactly as
  *  the gate reads it" and mean the one function rather than two that agree today.
  *  the-real-design-projects.test.ts is where that sharing is proved. */

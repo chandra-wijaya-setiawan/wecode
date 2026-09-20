@@ -80,7 +80,7 @@ describe("reading the classes", () => {
 
   it("classifies an undeclared path as exclusive by saying nothing about it", () => {
     declare({ append_only: [MAP] });
-    expect(collisionClasses(db).get("packages/ui/src/check.ts")).toBeUndefined();
+    expect(collisionClasses(db).get("packages/lens/src/check.ts")).toBeUndefined();
   });
 
   it("leaves the rest of the collision block alone", () => {
@@ -97,7 +97,7 @@ describe("reading the classes", () => {
 describe("an exclusive path", () => {
   it("is a lock even when it is written down as exclusive", async () => {
     declare({ exclusive: [MAP] });
-    readyTask("first", ["packages/ui/src/check.ts", MAP]);
+    readyTask("first", ["packages/lens/src/check.ts", MAP]);
     const b = readyTask("second", ["packages/cli/src/ui.ts", MAP]);
 
     await allocate(db, DEFAULT_BUDGET, place);
@@ -111,7 +111,7 @@ describe("an exclusive path", () => {
 describe("an append-only path", () => {
   it("does not make two tasks that both name it exclusive", async () => {
     declare({ append_only: [MAP] });
-    const a = readyTask("ui", ["packages/ui/src/check.ts", MAP]);
+    const a = readyTask("ui", ["packages/lens/src/check.ts", MAP]);
     const b = readyTask("cli", ["packages/cli/src/ui.ts", MAP]);
 
     await allocate(db, DEFAULT_BUDGET, place);
@@ -136,7 +136,7 @@ describe("an append-only path", () => {
 describe("an optimistic path", () => {
   it("does not make two tasks that both name it exclusive", async () => {
     declare({ optimistic: [LESSONS] });
-    const a = readyTask("ui", ["packages/ui/src/check.ts", LESSONS]);
+    const a = readyTask("ui", ["packages/lens/src/check.ts", LESSONS]);
     const b = readyTask("cli", ["packages/cli/src/ui.ts", LESSONS]);
 
     await allocate(db, DEFAULT_BUDGET, place);
@@ -158,8 +158,8 @@ describe("an optimistic path", () => {
 
   it("does not discount the other paths the same pair shares", async () => {
     declare({ optimistic: [LESSONS] });
-    readyTask("first", ["packages/ui/src/check.ts", LESSONS]);
-    const b = readyTask("second", ["packages/ui/src/check.ts", LESSONS]);
+    readyTask("first", ["packages/lens/src/check.ts", LESSONS]);
+    const b = readyTask("second", ["packages/lens/src/check.ts", LESSONS]);
 
     await allocate(db, DEFAULT_BUDGET, place);
     const r = await allocate(db, DEFAULT_BUDGET, place);
@@ -173,7 +173,7 @@ describe("the three classes together", () => {
   it("let through only the pairs no exclusive path holds", async () => {
     declare({ exclusive: ["packages/core/src/order.ts"], append_only: [MAP], optimistic: [LESSONS] });
     const a = readyTask("first", ["packages/core/src/order.ts", MAP, LESSONS]);
-    const b = readyTask("second", ["packages/ui/src/check.ts", MAP, LESSONS]);
+    const b = readyTask("second", ["packages/lens/src/check.ts", MAP, LESSONS]);
     const c = readyTask("third", ["packages/core/src/order.ts", LESSONS]);
 
     for (const _ of [a, b, c]) await allocate(db, DEFAULT_BUDGET, place);
@@ -183,7 +183,7 @@ describe("the three classes together", () => {
 
   it("does not reconsider a role that is at its ceiling", async () => {
     declare({ optimistic: [LESSONS] });
-    readyTask("first", ["packages/ui/src/check.ts", LESSONS]);
+    readyTask("first", ["packages/lens/src/check.ts", LESSONS]);
     const b = readyTask("second", ["packages/cli/src/ui.ts", LESSONS]);
     const config = { ...DEFAULT_BUDGET, max_open_per_role: { engineer: 1 } };
 

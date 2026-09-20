@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import type { Board } from "@wecode/core";
-import { designDocument, DesignError, type Design } from "@wecode/ui";
+import { designDocument, DesignError, type Design } from "@wecode/lens";
 
 const CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
 const DESIGN = fileURLToPath(new URL("../config/design.yaml", import.meta.url));
@@ -40,7 +40,7 @@ export const FILTERS = [
 
 /** One of the two yaml files this module reads, as a mapping.
  *
- *  The shape check is `@wecode/ui`'s rather than this module's: the gate and the projector
+ *  The shape check is `@wecode/lens`'s rather than this module's: the gate and the projector
  *  both answer the question "is this a design file", and two answers to it is a file one of
  *  them accepts and the other refuses. What is left here is which file was read, which the
  *  loader takes so that its refusal names it — a reader looking at `design.yaml is not a
@@ -117,7 +117,7 @@ export function loadOffPage(path: string = CONFIG): readonly View[] {
   );
 }
 
-/** One box of the cockpit's design: `@wecode/ui`'s `Design` under the name this module has
+/** One box of the cockpit's design: `@wecode/lens`'s `Design` under the name this module has
  *  always called it. It was once a structural copy, kept so this module took no dependency
  *  on the gate it feeds — which it now does, because the loader above is the gate's. A copy
  *  that can be the real type is one shape declared twice. */
@@ -176,7 +176,7 @@ function keyBar(design: Record<string, unknown>, kind: string): string {
     .join(gap);
 }
 
-/** The cockpit as design.yaml and views.yaml declare it, as a tree `@wecode/ui` can read.
+/** The cockpit as design.yaml and views.yaml declare it, as a tree `@wecode/lens` can read.
  *
  *  Every box on this page is already written down: views.yaml says which boxes there are,
  *  in what order, under what title, on what letter and what they say when empty; design.yaml
@@ -386,7 +386,7 @@ export function screenNames(paths: Paths = {}): readonly string[] {
 }
 
 /** The translation, by the name of the screen: what these two config files say the screen
- *  is, as a tree `@wecode/ui` can read. This is the one door — the gate holds the drawn
+ *  is, as a tree `@wecode/lens` can read. This is the one door — the gate holds the drawn
  *  screen to it and the projector draws a picture of it, and neither has a translation of
  *  its own, because a second reading of views.yaml is a mockup that can disagree with the
  *  gate: a picture signed off on a screen nobody is held to. */

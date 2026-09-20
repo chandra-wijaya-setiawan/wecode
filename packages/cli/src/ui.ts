@@ -6,14 +6,14 @@ import { parse } from "yaml";
 
 /** `wecode ui check <capture.json>` — the four screen rules, as a command that fails.
  *
- *  A tester can already capture a screen and `@wecode/ui`'s `check` can already read the
+ *  A tester can already capture a screen and `@wecode/lens`'s `check` can already read the
  *  capture, but nothing a tester types puts the two together: the rules only run inside
  *  a suite that already knew to call them. So a clipped box reaches master whenever the
  *  screen it clips has no test of its own, which is exactly the screen nobody wrote a
  *  test for. This is the verb that closes that: point it at a capture and it exits
  *  non-zero on a finding, which is the whole of what a gate needs from it.
  *
- *  No rule lives here. The rules are `@wecode/ui`'s and there is one copy of them; this
+ *  No rule lives here. The rules are `@wecode/lens`'s and there is one copy of them; this
  *  reads a file, hands the tree over, prints what comes back and turns it into an exit
  *  code. That is why the engine is a parameter with a default — the tests drive it with
  *  a stub and prove the command, not the rules, which are proved where they live.
@@ -35,10 +35,10 @@ export interface Finding {
  *  capture, and a second declaration of it here would be a second place to keep right. */
 export type Rules = (capture: unknown) => readonly Finding[];
 
-/** `@wecode/ui`'s entry point, however it can be reached from here.
+/** `@wecode/lens`'s entry point, however it can be reached from here.
  *
  *  Loaded at the moment of use rather than imported at the top, because `packages/cli` does
- *  not declare `@wecode/ui` — declaring it is a manifest edit and a lockfile with it, both
+ *  not declare `@wecode/lens` — declaring it is a manifest edit and a lockfile with it, both
  *  outside this change. The package name is tried first so that the day the dependency is
  *  declared this needs no edit; failing that it is the sibling build in this repository,
  *  which is where the one copy of these rules actually is. Neither is a second
@@ -46,7 +46,7 @@ export type Rules = (capture: unknown) => readonly Finding[];
  *  command says so in the one sentence that tells a reader what to do about it, and exits
  *  2 rather than deciding anything itself. */
 async function reach(pkg: string, sibling: string): Promise<Record<string, unknown>> {
-  // Not literal specifiers: a literal `@wecode/ui` would stop this package compiling
+  // Not literal specifiers: a literal `@wecode/lens` would stop this package compiling
   // before the dependency is declared.
   const here = fileURLToPath(new URL(sibling, import.meta.url));
   let last = "";
@@ -60,7 +60,8 @@ async function reach(pkg: string, sibling: string): Promise<Record<string, unkno
   throw new Error(`${pkg} cannot be reached — packages/cli does not depend on it yet: ${last}`);
 }
 
-const fromUi = (): Promise<Record<string, unknown>> => reach("@wecode/ui", "../../ui/dist/index.js");
+const fromLens = (): Promise<Record<string, unknown>> =>
+  reach("@wecode/lens", "../../lens/dist/index.js");
 
 /** The gate over the product's own screens, reached the same way and for the same reason:
  *  `@wecode/tui` is where views.yaml and design.yaml are read, and reading them a second
@@ -70,9 +71,9 @@ const fromTui = (): Promise<Record<string, unknown>> =>
 
 /** Where the rules come from when a caller does not say. */
 async function loadRules(): Promise<Rules> {
-  const { check } = (await fromUi()) as { check?: Rules };
+  const { check } = (await fromLens()) as { check?: Rules };
   if (typeof check !== "function") {
-    throw new Error("@wecode/ui exports no check — packages/cli does not depend on it yet");
+    throw new Error("@wecode/lens exports no check — packages/cli does not depend on it yet");
   }
   return check;
 }
@@ -159,19 +160,19 @@ interface Shown {
 }
 
 /** The two ports this command composes, in the order it composes them. They are parameters
- *  with a default for the same reason the rules are: they are proved in `packages/ui`
+ *  with a default for the same reason the rules are: they are proved in `packages/lens`
  *  against designs and trees, and the tests here drive the command. */
 export interface Ports {
   readonly expected: (design: unknown) => Shown;
   readonly wireframe: (root: unknown, cell: Size) => string;
 }
 
-/** Where the ports come from when a caller does not say: `@wecode/ui`'s entry point, which
+/** Where the ports come from when a caller does not say: `@wecode/lens`'s entry point, which
  *  now names `expected` beside `wireframe`. */
 async function loadPorts(): Promise<Ports> {
-  const { expected, wireframe } = (await fromUi()) as Partial<Ports>;
+  const { expected, wireframe } = (await fromLens()) as Partial<Ports>;
   if (typeof expected !== "function" || typeof wireframe !== "function") {
-    throw new Error("@wecode/ui exports no expected/wireframe — packages/cli does not depend on it yet");
+    throw new Error("@wecode/lens exports no expected/wireframe — packages/cli does not depend on it yet");
   }
   return { expected, wireframe };
 }
@@ -204,22 +205,22 @@ const asBox = (node: Shown): unknown => ({
  *  This used to be a function here, and the gate over the cockpit's design had its own. Two
  *  readers of one file format is two answers to "is this a design" — the projector could
  *  refuse a file the gate accepted, and nobody would find out until an operator typed the
- *  command. So the reading lives in `@wecode/ui` beside `expected`, which is the module
+ *  command. So the reading lives in `@wecode/lens` beside `expected`, which is the module
  *  that has to make sense of what comes back, and both sides point at it. */
 export type Select = (parsed: unknown, name: string, file: string) => unknown;
 
 /** Where the selection comes from when a caller does not say. */
 async function loadSelect(): Promise<Select> {
-  const { designScreen } = (await fromUi()) as { designScreen?: Select };
+  const { designScreen } = (await fromLens()) as { designScreen?: Select };
   if (typeof designScreen !== "function") {
-    throw new Error("@wecode/ui exports no designScreen — packages/cli does not depend on it yet");
+    throw new Error("@wecode/lens exports no designScreen — packages/cli does not depend on it yet");
   }
   return designScreen;
 }
 
 /** The gate's translation, as this command needs it: a screen's name and the terminal it
  *  is a screen of, and the design tree the product's own config says it is. The tree is
- *  `unknown` for the reason the capture is — its shape is `@wecode/ui`'s, and a second
+ *  `unknown` for the reason the capture is — its shape is `@wecode/lens`'s, and a second
  *  declaration of it here would be a second place to keep right. */
 export type Translate = (name: string, screen: Size) => unknown;
 

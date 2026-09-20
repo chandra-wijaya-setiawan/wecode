@@ -101,7 +101,7 @@ function dispatch(argv: readonly string[]): number {
 
 /** The commands whose answer is not known by the time dispatch returns.
  *
- *  A repository index builds a snapshot, and the projector loads `@wecode/ui` at the moment
+ *  A repository index builds a snapshot, and the projector loads `@wecode/lens` at the moment
  *  of use, so both are async and `run()` is not — bin.ts assigns what run() returns straight to
  *  process.exitCode, and a promise is not an exit code. So the command settles the exit
  *  code itself once the index has answered; node does not exit while that promise is

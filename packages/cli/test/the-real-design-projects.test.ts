@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { design } from "../src/ui.js";
-import { designDocument, designScreen, DesignError } from "../../ui/src/expected.js";
+import { designDocument, designScreen, DesignError } from "../../lens/src/expected.js";
 import { cockpitDesign, ViewError } from "../../tui/src/views.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
@@ -13,12 +13,12 @@ import { tmp } from "../../core/test/tmpdir.js";
  *  the sentences said when neither is there — and the gate over the cockpit had another.
  *  Two readers of one file format is two answers to "is this a design": a file the gate
  *  accepts can fail to draw, and nobody finds out until an operator types the command. The
- *  reader is now `@wecode/ui`'s, beside `expected`, which is the module that has to make
+ *  reader is now `@wecode/lens`'s, beside `expected`, which is the module that has to make
  *  sense of what comes back.
  *
  *  So what is asserted here is the pointing, not the reading: that the projector run with
  *  no ports and no reader stubbed draws a real design file — which it could not do before,
- *  because it could not reach `@wecode/ui` at all — and that the gate refuses the documents
+ *  because it could not reach `@wecode/lens` at all — and that the gate refuses the documents
  *  the loader refuses, in the loader's own words. The loader's rules are proved against the
  *  loader, once, because there is now one place they live. */
 

@@ -12,15 +12,15 @@ import {
   type Screen,
 } from "../src/screens-check.js";
 import type { Snapshot } from "@wecode/core";
-// By path and not by `@wecode/ui`, which is the fact this slice is honest about: the runner
-// does not depend on the ui package, so the rules can be run beside the reporting here but
-// cannot yet be handed to it in production. A built `packages/ui` is a precondition of this
+// By path and not by `@wecode/lens`, which is the fact this slice is honest about: the runner
+// does not depend on the lens package, so the rules can be run beside the reporting here but
+// cannot yet be handed to it in production. A built `packages/lens` is a precondition of this
 // file, as it already is of that package's own suite.
-import { check, type CapturedNode } from "../../ui/dist/check.js";
+import { check, type CapturedNode } from "../../lens/dist/check.js";
 
 /** A screen that draws wrongly is drift, and the doctor is where drift is said out loud.
  *
- *  `packages/ui/src/check.ts` already knows what wrong looks like — a row in two boxes, a
+ *  `packages/lens/src/check.ts` already knows what wrong looks like — a row in two boxes, a
  *  box outside its parent, a key bound twice, a box collapsed to a frame — and already has
  *  its own suite proving each rule. Nothing here re-proves a rule. What is proven here is
  *  the half that was missing: that the findings become violations of one named invariant,

@@ -18,7 +18,7 @@
     "wecode-tui": "./dist/bin.js"
   },
   "devDependencies": {
-    "@wecode/ui": "workspace:*",
+    "@wecode/lens": "workspace:*",
     "@types/react": "^19.3.0",
     "ink-testing-library": "^4.0.0"
   }

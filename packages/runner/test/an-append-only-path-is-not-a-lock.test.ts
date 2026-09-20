@@ -74,7 +74,7 @@ describe("a path declared append-only", () => {
 
   it("does not make two tasks exclusive", async () => {
     declareAppendOnly(MAP);
-    const a = readyTask("ui/check.ts", ["packages/ui/src/check.ts", MAP]);
+    const a = readyTask("lens/check.ts", ["packages/lens/src/check.ts", MAP]);
     const b = readyTask("cli/ui.ts", ["packages/cli/src/ui.ts", MAP]);
 
     const first = await allocate(db, DEFAULT_BUDGET, place);
@@ -89,7 +89,7 @@ describe("a path declared append-only", () => {
   it("lets the whole fleet run where only the map was shared", async () => {
     declareAppendOnly(MAP);
     const ids = [
-      readyTask("ui/check.ts", ["packages/ui/src/check.ts", MAP]),
+      readyTask("lens/check.ts", ["packages/lens/src/check.ts", MAP]),
       readyTask("cli/ui.ts", ["packages/cli/src/ui.ts", MAP]),
       readyTask("runner/screens-check.ts", ["packages/runner/src/screens-check.ts", MAP]),
     ];
@@ -101,8 +101,8 @@ describe("a path declared append-only", () => {
 describe("an ordinary shared path", () => {
   it("is still a lock, even beside an append-only one", async () => {
     declareAppendOnly(MAP);
-    readyTask("first", ["packages/ui/src/check.ts", MAP]);
-    const b = readyTask("second", ["packages/ui/src/check.ts", MAP]);
+    readyTask("first", ["packages/lens/src/check.ts", MAP]);
+    const b = readyTask("second", ["packages/lens/src/check.ts", MAP]);
 
     await allocate(db, DEFAULT_BUDGET, place);
     const r = await allocate(db, DEFAULT_BUDGET, place);
@@ -113,7 +113,7 @@ describe("an ordinary shared path", () => {
 
   it("is still a lock when the map is not declared append-only", async () => {
     declareAppendOnly();
-    readyTask("first", ["packages/ui/src/check.ts", MAP]);
+    readyTask("first", ["packages/lens/src/check.ts", MAP]);
     const b = readyTask("second", ["packages/cli/src/ui.ts", MAP]);
 
     await allocate(db, DEFAULT_BUDGET, place);
@@ -140,7 +140,7 @@ describe("letting one back in", () => {
   it("keeps core's order rather than putting it last", async () => {
     declareAppendOnly(MAP);
     const holder = readyTask("holder", ["packages/core/src/map.ts", MAP]);
-    const retried = readyTask("retried", ["packages/ui/src/check.ts"]);
+    const retried = readyTask("retried", ["packages/lens/src/check.ts"]);
     db.prepare("UPDATE task SET attempts = 2 WHERE id = ?").run(retried);
     const fresh = readyTask("fresh", ["packages/cli/src/ui.ts", MAP]);
 
@@ -157,7 +157,7 @@ describe("letting one back in", () => {
 
   it("does not reconsider a role that is at its ceiling", async () => {
     declareAppendOnly(MAP);
-    readyTask("first", ["packages/ui/src/check.ts", MAP]);
+    readyTask("first", ["packages/lens/src/check.ts", MAP]);
     const b = readyTask("second", ["packages/cli/src/ui.ts", MAP]);
     const config = { ...DEFAULT_BUDGET, max_open_per_role: { engineer: 1 } };
 
