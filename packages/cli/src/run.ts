@@ -28,6 +28,8 @@ import { queries } from "@wecode/core/dist/db.js";
 // scope, artefact, retry. Namespaced because `task`, `project` and `scope` are all words
 // this file uses for something else.
 import * as ent from "./verbs/entity.js";
+// The making verbs: create's help, and the artefact a test is proved by.
+import * as make from "./verbs/make.js";
 import { paint } from "./paint.js";
 // The verbs that act. Namespaced because several of them — `worker`, `answer` — are also
 // words this file uses for a table or a column.
@@ -286,9 +288,9 @@ function verb(entity: string, rest: readonly string[]): number {
   // parseArgs would call --help an unknown option. It is the one place a newcomer looks
   // for create's flags, so answer it here, before the flags are parsed at all.
   const asked = args.some((a) => a === "--help" || a === "-h");
-  if (name === "create") return asked ? ent.createHelp(at, entity) : create(entity, args);
+  if (name === "create") return asked ? make.createHelp(at, entity) : create(entity, args);
   if (name === "scope") return asked ? ent.scopeHelp() : ent.scope(at, entity, args);
-  if (name === "artefact") return asked ? ent.artefactHelp() : ent.artefact(at, entity, args);
+  if (name === "artefact") return asked ? make.artefactHelp() : make.artefact(at, entity, args);
   if (name === "restate") return asked ? use.restateHelp() : restateVerb(entity, args);
   if (name === "retry" && entity === "task") return ent.retry(at, args);
 
