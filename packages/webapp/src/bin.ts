@@ -17,8 +17,11 @@ import {
   listWorkspaces,
   open,
   tree,
+  waitingApprovals,
 } from "@wecode/core";
+import { answerAt } from "./answer.js";
 import { boardAt } from "./pages/board.js";
+import { decisionsAt } from "./pages/decisions.js";
 import { treeAt } from "./pages/tree.js";
 import { addressOf, serve } from "./server.js";
 
@@ -33,8 +36,15 @@ const { values } = parseArgs({
     db: { type: "string" },
     port: { type: "string" },
     host: { type: "string" },
+    operator: { type: "string" },
   },
 });
+
+/** Who an approval answered here is recorded as. The flag, else the actor the rest of
+ *  wecode already reads out of the environment, else nobody — and nobody is a refusal at
+ *  the verb rather than a guess at the port, because a webapp that picked a signatory on
+ *  startup would pick one for every answer given through it. */
+const operator = (): string | null => values.operator ?? process.env["WECODE_ACTOR"] ?? null;
 
 const dbPath =
   values.db ?? (values.workspace === undefined ? currentDatabase() : databaseOf(values.workspace));
@@ -66,6 +76,8 @@ const db = open(dbPath);
 const routes = {
   "/": boardAt(() => board(db)),
   "/tree": treeAt(() => tree(db)),
+  "/decisions": decisionsAt(() => waitingApprovals(db)),
+  "/answer": answerAt(() => db, operator),
 };
 
 const server = await serve(routes, port, values.host ?? "127.0.0.1");
