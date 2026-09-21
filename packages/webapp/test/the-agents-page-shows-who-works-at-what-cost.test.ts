@@ -200,9 +200,11 @@ describe("the agents page answers at /agents through discovery", () => {
     expect(await (await fetch(`${addressOf(server)}/agents`)).text()).toContain(`id="worker-opus"`);
   });
 
-  it("offers no verb, because every verb that changes wecode is an agent's or the cli's", () => {
+  /** The shell's terminal dock is the one verb the document carries, so the page is left
+   *  with the rule that outlives approval 1561: no script, because none is served. */
+  it("offers no verb of its own, because the dock is the only way in", () => {
     const body = agentsPage(withRunning(running(8, "a", "opus · 1m · 1k"))).body;
-    for (const verb of ["<form", "<button", "<input", "onclick"]) {
+    for (const verb of ["onclick"]) {
       expect(body, `the agents page offers ${verb}`).not.toContain(verb);
     }
   });
