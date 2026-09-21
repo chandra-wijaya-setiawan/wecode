@@ -26,7 +26,25 @@ components:
     layer: gate
     component: true
     owns: apply a verb, fire the cascade it unblocks, settle anything whose guard came true
-    modules: [apply, approval, create, edit, bulk, cascade, chore, chore/raise, lease, lessons]
+    modules:
+      [
+        apply,
+        approval,
+        create,
+        edit,
+        bulk,
+        cascade,
+        chore,
+        chore/allocation,
+        chore/raise,
+        chore/reads,
+        chore/record,
+        chore/refusal,
+        chore/rows,
+        chore/view,
+        lease,
+        lessons,
+      ]
 
   model:
     package: core

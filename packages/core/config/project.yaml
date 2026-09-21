@@ -18,7 +18,6 @@ over:
   packages/cli/src/plan.ts: 1112
   packages/runner/src/daemon.ts: 1041
   packages/runner/src/doctor.ts: 923
-  packages/core/src/chore.ts: 861
   packages/tui/src/app.ts: 782
   packages/tui/test/screens.test.ts: 722
   packages/cli/src/doctor.ts: 682
