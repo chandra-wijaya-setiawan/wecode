@@ -93,13 +93,19 @@ export function reckon(board: Board): Reckoning {
   };
 }
 
-const section = (name: string, title: string, body: string): string =>
-  `<section class="ledger" id="${name}"><h2>${escape(title)}</h2>${body}</section>`;
+/** The name the definition gives an element, written into the markup so the drawing and the
+ *  declaration are checkable against each other by anything that can read either. */
+const named = (ui: string): string => ` data-ui="${ui}"`;
+
+const section = (name: string, title: string, body: string, ui = ""): string =>
+  `<section class="ledger" id="${name}"${ui === "" ? "" : named(ui)}>` +
+  `<h2>${escape(title)}</h2>${body}</section>`;
 
 const empty = (said: string): string => `<p class="empty">${escape(said)}</p>`;
 
-const row = (id: string, code: string, what: string, sum: string, why = ""): string =>
-  `<li id="${escape(id)}"><span class="code">${escape(code)}</span>` +
+const row = (id: string, code: string, what: string, sum: string, why = "", ui = ""): string =>
+  `<li id="${escape(id)}"${ui === "" ? "" : named(ui)}>` +
+  `<span class="code">${escape(code)}</span>` +
   `<span class="what">${escape(what)}</span>` +
   `<span class="sum">${escape(sum)}</span>` +
   (why === "" ? "" : `<span class="why">${escape(why)}</span>`) +
@@ -119,6 +125,7 @@ function bought(r: Reckoning): string {
         s.what,
         r.stuck.includes(s) ? "stuck" : "delivered",
         r.stuck.includes(s) ? s.detail : "",
+        "ledger.landed.row",
       ),
     )
     .join("");
@@ -148,15 +155,53 @@ function nothing(r: Reckoning): string {
   return `<p class="total">${escape(many(r.waste.length, "attempt"))} bought nothing</p><ol>${rows}</ol>`;
 }
 
+/** A count the board does not carry. Drawn, with the word the definition gives it, rather
+ *  than left out: a strip missing a count reads as a strip whose count is nothing, and the
+ *  two are different sentences. The mockup's `green` and `refunded` are what became of an
+ *  *attempt*, which is the `ledger` table's to say and not the board's — the board carries
+ *  what is open, and an attempt that went green is closed. */
+const UNCOUNTED = "—";
+
+/** The strip: the five counts the definition names, in its order, each said as the word it
+ *  is given. Every one is the board's own group counted once, or the dash. */
+function strip(board: Board, r: Reckoning): string {
+  const counts: readonly (readonly [string | number, string])[] = [
+    [r.lands.length + r.stuck.length, "landed"],
+    [r.running.length, "attempts"],
+    [UNCOUNTED, "green"],
+    [UNCOUNTED, "refunded"],
+    [board.needs_human.length, "decisions"],
+  ];
+  const said = counts
+    .map(([n, word]) => `<span class="code">${escape(`${n}`)} ${escape(word)}</span>`)
+    .join("");
+  return (
+    `<p class="total" data-ui="ledger.strip">${said}</p>` +
+    empty("green and refunded are what became of an attempt, which the board does not carry")
+  );
+}
+
+/** The rate: what the lands are coming at. The board is a picture of now and holds no clock
+ *  — no land carries the hour it landed — so the rate is the dash and says why, rather than
+ *  a number divided out of the one span the page does have, which is how long the attempts
+ *  still running have been running and is not the day. */
+const rate = (): string =>
+  `<p class="total" data-ui="ledger.rate">lands per hour` +
+  `<span class="apiece">${escape(UNCOUNTED)}</span></p>` +
+  empty("no land on the board carries the hour it landed");
+
 /** What the page says: three sections, and nothing around them. The frame and the look are
  *  the shell's, so this file writes no document and no stylesheet — it writes what goes
  *  inside one. */
 export function ledgerSections(board: Board): string {
   const r = reckon(board);
   return (
-    section("lands", "what it bought", bought(r)) +
-    section("cost", "what it is taking", taking(r)) +
-    section("waste", "what bought nothing", nothing(r))
+    `<section class="ledger" id="ledger" data-ui="ledger">` +
+    `<h2>What did today buy?</h2>${strip(board, r)}` +
+    section("lands", "what it bought", bought(r), "ledger.landed") +
+    section("cost", "what it is taking", taking(r) + rate()) +
+    section("waste", "what bought nothing", nothing(r), "ledger.waste") +
+    `</section>`
   );
 }
 
