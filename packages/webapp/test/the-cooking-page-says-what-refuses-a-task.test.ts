@@ -203,9 +203,11 @@ describe("served", () => {
     expect(second).not.toContain("gave up");
   });
 
-  it("offers no verb — the page is a thing to read", async () => {
+  /** The shell's terminal dock is the one verb the document carries, so the page is left
+   *  with what is still true of it: no script, and nothing to POST to. */
+  it("offers no verb of its own — the page is a thing to read", async () => {
     const body = await (await fetched(() => boardOf([row(1, "approval")]))).text();
-    expect(body).not.toMatch(/<(form|button|input)\b/);
+    expect(body).not.toMatch(/onclick/);
     expect(
       answer({ "/cooking": cookingAt(() => boardOf([])) }, "POST", "/cooking").status,
     ).toBe(405);

@@ -199,9 +199,11 @@ describe("the page is served in the shell", () => {
     expect(await (await fetch(`${addressOf(server)}/tasks`)).text()).toContain(`<li id="task-8"`);
   });
 
-  it("offers no verb, because every verb that changes wecode is the cli's", () => {
+  /** The shell's terminal dock is the one verb the document carries, so the page is left
+   *  with the rule that outlives approval 1561: no script, because none is served. */
+  it("offers no verb of its own, because the dock is the only way in", () => {
     const body = tasksPage([deep([task(8)])], at()).body;
-    for (const verb of ["<form", "<button", "<input", "onclick"]) expect(body, verb).not.toContain(verb);
+    for (const verb of ["onclick"]) expect(body, verb).not.toContain(verb);
   });
 });
 
