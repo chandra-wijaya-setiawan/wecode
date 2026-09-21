@@ -113,16 +113,22 @@ const card = (worker: Worker): string =>
   `<ul class="seats">${worker.seats.map(seatLine).join("")}</ul></li>`;
 
 /** What the page says: one card per agent, and nothing around them. The frame is the
- *  shell's, and the heading is an `h2` because the document's one `h1` is the banner. */
+ *  shell's, and the heading is an `h2` because the document's one `h1` is the banner.
+ *
+ *  The whole of it is in one section, which is the shape `look.roots` scopes this page's
+ *  rules to. It is a section and not a bare run of elements because a bare `h2` in the
+ *  shell's one element is `main > h2`, which is the projects page's root — two pages
+ *  drawing one shape is one page's rules reaching the other's markup. */
 export function agentsContents(board: Board): string {
   const all = workers(board);
-  if (all.length === 0) return `<h2>agents</h2><p class="empty">${NOBODY}</p>`;
-  const spent = all.reduce((n, w) => n + (w.spent ?? 0), 0);
-  return (
-    `<h2>agents</h2>` +
-    `<p class="total">${all.length} working · ${board.running.length} seats · ${spent}k</p>` +
-    `<ul class="agents">${all.map(card).join("")}</ul>`
-  );
+  const inside =
+    all.length === 0
+      ? `<h2>agents</h2><p class="empty">${NOBODY}</p>`
+      : `<h2>agents</h2>` +
+        `<p class="total">${all.length} working · ${board.running.length} seats · ` +
+        `${all.reduce((n, w) => n + (w.spent ?? 0), 0)}k</p>` +
+        `<ul class="agents">${all.map(card).join("")}</ul>`;
+  return `<section class="agents">${inside}</section>`;
 }
 
 /** The whole document: what the page says, in the shell design.yaml declares. */

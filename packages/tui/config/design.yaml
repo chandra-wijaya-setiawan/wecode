@@ -144,6 +144,14 @@ renderers:
           says: Decisions
         - page: tree
           says: Tree
+        # The three that read the board sideways — who is working, what is stuck, what it
+        # all cost — after the four that read the record.
+        - page: agents
+          says: Agents
+        - page: cooking
+          says: In flight
+        - page: ledger
+          says: Ledger
     # A section of the page is separated by a rule, as it is in the terminal — but the rule
     # is a border on the element, not a row of characters spent out of the height.
     sections:
@@ -202,6 +210,9 @@ renderers:
         tree: ["ul.tree"]
         tasks: ["div.inbox", "ul.inbox", "section.detail"]
         projects: ["main > h2", "ul.strip", "ul.cards"]
+        agents: ["section.agents"]
+        cooking: ["section.cooking"]
+        ledger: ["section.ledger"]
       # The document itself — its margins, its type, its banner, and the one line every page
       # says when it has nothing to show.
       frame:
@@ -289,6 +300,51 @@ renderers:
           "ul.cards .meter span": "display: block; height: 100%; background: var(--good)"
           "ul.cards .pulse": "color: var(--faint); display: flex; gap: .5rem; min-width: 0"
           "ul.cards .pulse .spark": "color: var(--good); letter-spacing: .05em"
+        agents:
+          # One card per worker, its seats hanging under it. The card is the projects
+          # page's card, because it is the same thing — a thing with a name, a state and a
+          # list — and a second shape for it would be a second surface.
+          "section.agents ul.agents": "list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr))"
+          "section.agents ul.agents > li.worker": "background: var(--raised); border: 1px solid var(--rule); border-radius: 4px; padding: .8rem 1.25rem; display: grid; grid-template-columns: 1fr auto auto; gap: .2rem .75rem; align-items: baseline; min-width: 0"
+          "section.agents ul.agents > li.worker > span.name": "font-family: var(--serif); font-size: 1.1rem; font-weight: 500; overflow-wrap: anywhere"
+          "section.agents ul.agents > li.worker > span.seats": "color: var(--faint)"
+          "section.agents ul.agents > li.worker > span.cost": "color: var(--mark); font-family: var(--mono); font-size: .92em; font-weight: 600"
+          "section.agents ul.agents > li.worker > span.age": "color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "section.agents ul.agents ul.seats": "grid-column: 1 / -1; list-style: none; margin: .3rem 0 0; padding: 0; border-top: 1px solid var(--rule)"
+          "section.agents ul.agents ul.seats li": "display: flex; flex-wrap: wrap; gap: .1rem .6rem; padding: .15rem 0; min-width: 0"
+          "section.agents ul.agents ul.seats li .id, section.agents ul.agents ul.seats li .age, section.agents ul.agents ul.seats li .cost": "color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "section.agents ul.agents ul.seats li .what": "flex: 1 1 8rem; min-width: 0; overflow-wrap: anywhere"
+          "section.agents ul.agents ul.seats li .phase": "color: var(--mark); font-weight: 600"
+        cooking:
+          # A group per why. The one group that is not a refusal is marked in the good
+          # colour, so the page reads as *these are moving, these are not* at a glance.
+          "section.cooking": "border-top: 2px solid var(--rule); padding-top: .6rem"
+          "section.cooking h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; letter-spacing: -.01em; margin: 0 0 .4rem; display: flex; gap: .5rem; align-items: baseline"
+          "section.cooking h2 .mark": "color: var(--mark)"
+          "section.cooking h2 .count": "margin-left: auto; color: var(--faint); font-family: var(--mono); font-size: .8em"
+          "section.cooking.moving h2 .mark": "color: var(--good)"
+          "section.cooking ul": "list-style: none; margin: 0; padding: 0"
+          "section.cooking li": "display: flex; flex-wrap: wrap; gap: .1rem .75rem; padding: .1rem 0; min-width: 0"
+          "section.cooking li .code": "flex: 0 0 9rem; color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "section.cooking li .state": "flex: 0 0 9rem; color: var(--mark); font-weight: 600"
+          "section.cooking li .what": "flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere"
+          # The why is on every row and the heading says it too, so on a row it is quiet.
+          "section.cooking li .why": "color: var(--faint); font-size: .85em"
+          "section.cooking.moving li .state": "color: var(--good)"
+        ledger:
+          # Three sections, read top to bottom: what it bought, what it is taking, what
+          # bought nothing. The last is not coloured as an alarm — the page names the
+          # failures so they can be read, not so they can be winced at.
+          "section.ledger": "border-top: 2px solid var(--rule); padding-top: .6rem"
+          "section.ledger h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; letter-spacing: -.01em; margin: 0 0 .4rem"
+          "section.ledger p.total": "margin: 0 0 .5rem; color: var(--faint); display: flex; flex-wrap: wrap; gap: .5rem"
+          "section.ledger p.total .apiece": "margin-left: auto; font-family: var(--mono); font-size: .92em"
+          "section.ledger ol": "list-style: none; margin: 0; padding: 0"
+          "section.ledger li": "display: flex; flex-wrap: wrap; gap: .1rem .75rem; padding: .1rem 0; min-width: 0"
+          "section.ledger li .code": "flex: 0 0 9rem; color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "section.ledger li .what": "flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere"
+          "section.ledger li .sum": "flex: 0 0 7rem; color: var(--mark); font-weight: 600"
+          "section.ledger li .why": "flex: 1 1 100%; color: var(--faint); font-size: .85em; overflow-wrap: anywhere"
     # There is no bar. Every key the cockpit's bar names is a verb or a move, and the web
     # surface offers neither: it is read, and what changes wecode is the cli's.
     bars: none

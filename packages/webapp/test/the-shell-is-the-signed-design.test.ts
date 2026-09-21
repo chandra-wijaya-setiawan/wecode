@@ -91,6 +91,17 @@ describe("the look is declared, not written into the pages", () => {
     expect(Object.keys(LOOK.roots).sort()).toEqual([...pages].sort());
   });
 
+  it("scopes and styles the three pages that landed unlooked-at", () => {
+    // agents, cooking and ledger were served out of the one sheet with no block and no
+    // root of their own: every rule in the document reached past them. Named by hand for
+    // the reason the banner's three are — the statement above goes green if the files go.
+    for (const page of ["agents", "cooking", "ledger"]) {
+      expect(Object.keys(LOOK.roots), page).toContain(page);
+      expect(Object.keys(LOOK.pages), page).toContain(page);
+      expect(selectors(LOOK.pages[page] as Rules).length, page).toBeGreaterThan(0);
+    }
+  });
+
   it("restyles the surface when the design is edited", () => {
     const at = edited(`        ink: "#1f2328"`, `        ink: "#0f0"`);
     expect(loadLook(at).palette["ink"]).toBe("#0f0");
