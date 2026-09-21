@@ -10,11 +10,12 @@
  *  one task is a link a person can send. And what has no answer — no tasks, a stale id —
  *  is said rather than drawn as an empty column. */
 import type { Server } from "node:http";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Node, Rollup } from "@wecode/core";
 import { afterEach, describe, expect, it } from "vitest";
-import { addressOf, serve } from "../src/index.js";
+import { addressOf, answer, serve } from "../src/index.js";
+import { discovered, mounted, pathOf } from "../src/pages/discover.js";
 import { items, picked, tasksAt, tasksInbox, tasksPage } from "../src/pages/tasks.js";
 
 const NONE: Rollup = { done: 0, open: 0, failed: 0 };
@@ -268,17 +269,37 @@ describe("the page is served in the shell", () => {
   });
 });
 
+/** The wiring is the file, not a table. `bin.ts` held a route per page once; discovery
+ *  replaced it, so what is asserted here is the three conventions a page keeps — the file
+ *  is under `pages/`, it answers at `/tasks`, and it is served the record — and that
+ *  `bin.ts` names none of it. */
 describe("the surface routes it", () => {
   const BIN = readFileSync(fileURLToPath(new URL("../src/bin.ts", import.meta.url)), "utf8");
+  const PAGES = fileURLToPath(new URL("../src/pages", import.meta.url));
 
-  it("binds /tasks to the page, reading the record through core's tree()", () => {
-    expect(BIN).toContain(`"/tasks": tasksAt(() => tree(db))`);
-    expect(BIN).toContain(`from "./pages/tasks.js"`);
+  it("binds /tasks to the page, reading the record through core's tree()", async () => {
+    expect(discovered(readdirSync(PAGES))).toContain("tasks");
+    expect(pathOf("tasks")).toBe("/tasks");
+
+    const record = deep([node("task", 9, { label: "widen the scope" })]);
+    const module = (await import("../src/pages/tasks.js")) as Record<string, unknown>;
+    const routes = { [pathOf("tasks")]: mounted("tasks", module, { record: () => [record] }) };
+    const reply = answer(routes, "GET", "/tasks");
+    expect(reply.status).toBe(200);
+    expect(reply.body).toContain("widen the scope");
   });
 
   it("leaves the pages that were already there where they were", () => {
-    expect(BIN).toContain(`"/": boardAt(() => board(db))`);
-    expect(BIN).toContain(`"/tree": treeAt(() => tree(db))`);
+    const names = discovered(readdirSync(PAGES));
+    expect(names).toContain("board");
+    expect(names).toContain("tree");
+    expect(pathOf("board")).toBe("/");
+    expect(pathOf("tree")).toBe("/tree");
+  });
+
+  it("is not named in bin.ts, because no page is", () => {
+    expect(BIN).not.toContain("tasksAt");
+    expect(BIN).not.toContain("pages/tasks");
   });
 });
 
