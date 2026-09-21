@@ -19,20 +19,19 @@ over:
   packages/runner/src/daemon.ts: 1041
   packages/runner/src/doctor.ts: 923
   packages/core/src/chore.ts: 861
-  packages/core/src/board.ts: 840
   packages/tui/src/app.ts: 782
   packages/tui/test/screens.test.ts: 722
   packages/cli/src/doctor.ts: 682
   packages/runner/test/pi-adapter.test.ts: 679
   packages/core/src/invariants.ts: 655
   packages/runner/test/foreman.test.ts: 641
+  packages/core/test/typed-board.test.ts: 625
   packages/runner/src/git.ts: 625
   packages/runner/src/examiner.ts: 604
   packages/cli/test/run.test.ts: 578
   packages/runner/src/foreman.ts: 569
   packages/runner/src/healer.ts: 567
   packages/cli/test/plan.test.ts: 556
-  packages/core/test/typed-board.test.ts: 533
   packages/runner/test/typed-runner-doctor.test.ts: 527
   packages/tui/src/outline.tsx: 517
   packages/core/test/typed-chore.test.ts: 516
