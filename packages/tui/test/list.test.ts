@@ -165,6 +165,8 @@ describe("the list's cursor", () => {
 });
 
 describe("the list's colour", () => {
+  /** The colour is on the word it is a fact about — the state cell — and not on the
+   *  sentence around it, so a coloured run reads back as the state and nothing else. */
   it("is the row's state and nothing else", () => {
     const rows = [
       row(1, "land it?", "approval"),
@@ -177,10 +179,12 @@ describe("the list's colour", () => {
 
     // Red is the row that cannot move until a person moves it, and nothing else — a
     // failed row is the runner's own, so it is drawn as plain as an in_progress one.
-    expect(coloured(out, RED)).toEqual(["? #1  approval     land it?"]);
-    expect(coloured(out, YELLOW)).toEqual(["! #2  waiting      waits"]);
+    expect(coloured(out, RED)).toEqual(["approval"]);
+    expect(coloured(out, YELLOW)).toEqual(["waiting"]);
     expect(coloured(out, GREEN)).toEqual([]);
-    expect(coloured(out, DIM)).toEqual(["+ #3  delivered    shipped"]);
+    expect(coloured(out, DIM)).toEqual(["delivered"]);
+    // And the sentence the coloured word sits in is drawn whole.
+    expect(plain(out).split("\n")[0]).toBe("? #1  approval     land it?");
     // A state with nothing to say about itself is drawn plain, and so is the tally.
     expect(plain(out).split("\n")[3]).toBe("  #4  in_progress  going");
     expect(out).toContain("  #4  in_progress  going");
@@ -191,7 +195,8 @@ describe("the list's colour", () => {
     const rows = [1, 2, 3].map((i) => row(i, `t${i}`, "approval"));
     const out = list(rows, 2, null, 80);
 
-    expect(coloured(out, RED)).toEqual(["? #1  approval  t1"]);
+    expect(coloured(out, RED)).toEqual(["approval"]);
+    expect(plain(out).split("\n")[0]).toBe("? #1  approval  t1");
     expect(out).toContain("… and 2 more");
   });
 });
