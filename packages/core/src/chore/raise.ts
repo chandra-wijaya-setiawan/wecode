@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
 import {
   choreAttempts,
@@ -12,6 +14,104 @@ import {
   type ChoreOutcome,
   type ChoreSpec,
 } from "../chore.js";
+import { queries, table } from "../db.js";
+
+const exec = promisify(execFile);
+
+interface SweepStory {
+  readonly slug: string;
+  readonly state: string;
+}
+
+interface Checkout {
+  readonly path: string;
+  readonly branch: string | null;
+}
+
+const stories = table<SweepStory>("story", ["slug", "state"]);
+
+const git = async (repo: string, args: readonly string[]): Promise<string> => {
+  const { stdout } = await exec("git", [...args], { cwd: repo, maxBuffer: 8 * 1024 * 1024 });
+  return stdout.trim();
+};
+
+const checkouts = async (repo: string): Promise<readonly Checkout[]> => {
+  const listing = await git(repo, ["worktree", "list", "--porcelain"]);
+  return listing.split("\n\n").flatMap((block) => {
+    const path = /^worktree (.+)$/m.exec(block)?.[1];
+    if (path === undefined) return [];
+    return [{ path, branch: /^branch refs\/heads\/(.+)$/m.exec(block)?.[1] ?? null }];
+  });
+};
+
+const mergedInto = async (repo: string, branch: string, base: string): Promise<boolean> => {
+  try {
+    await git(repo, ["merge-base", "--is-ancestor", branch, base]);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** What the landed-story cleanup did. Paths and branch names are separate entries so the
+ *  caller can say exactly what disappeared rather than printing a count. */
+export interface LandedSweep {
+  readonly removed: readonly string[];
+  readonly left: readonly { readonly what: string; readonly why: string }[];
+  readonly notice: string;
+}
+
+/** Remove the old story trees after landing has made their branches disposable.
+ *
+ *  This is deliberately a chore-shaped operation, not part of landing itself. Landing is
+ *  allowed to move the base and record that fact; this pass is level-triggered and can find
+ *  leftovers from landings made before it existed. The database supplies the first half of
+ *  the condition (`delivered`), and git supplies the second (`story/x` is an ancestor of
+ *  `master`). A non-delivered story, or a delivered story whose branch has not landed, is
+ *  left alone.
+ *
+ *  A branch is deleted only after its checkout is gone. Ordinary `worktree remove` and
+ *  `branch -d` are intentional: a dirty tree or a branch git cannot safely delete is named
+ *  in `left`, never thrown away. `notice` is part of the result so a caller cannot perform
+ *  this destructive chore silently. */
+export async function sweepLandedStories(
+  db: DatabaseSync,
+  repo: string,
+  base = "master",
+): Promise<LandedSweep> {
+  const removed: string[] = [];
+  const left: { what: string; why: string }[] = [];
+  const trees = await checkouts(repo);
+  const delivered = queries(db).selectFrom(stories).where("state", "=", "delivered").all();
+
+  for (const story of delivered.sort((a, b) => a.slug.localeCompare(b.slug))) {
+    const branch = `story/${story.slug}`;
+    if (!(await mergedInto(repo, branch, base))) continue;
+    const attached = trees.filter((checkout) => checkout.branch === branch);
+    let blocked = false;
+    for (const tree of attached) {
+      try {
+        await git(repo, ["worktree", "remove", tree.path]);
+        removed.push(tree.path);
+      } catch (err) {
+        left.push({ what: tree.path, why: (err as Error).message });
+        blocked = true;
+      }
+    }
+    if (blocked) continue;
+    try {
+      await git(repo, ["branch", "-d", branch]);
+      removed.push(branch);
+    } catch (err) {
+      left.push({ what: branch, why: (err as Error).message });
+    }
+  }
+
+  const notice = removed.length === 0
+    ? "sweep removed nothing"
+    : `sweep removed:\n${removed.map((name) => `  ${name}`).join("\n")}`;
+  return { removed, left, notice };
+}
 
 /** docs/design/18: when wecode owes itself a chore, when it owes it again, and when it
  *  stops owing it.
