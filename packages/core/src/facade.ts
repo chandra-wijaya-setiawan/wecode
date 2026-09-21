@@ -259,7 +259,7 @@ export class Verbs {
 export class Completions {
   constructor(private readonly engine: Engine) {}
 
-  /** epic: in_progress → delivered */
+  /** epic: planned, in_progress → delivered */
   deliverEpic(id: number, actor: string): Outcome {
     return this.engine.apply("epic", id, "deliver", actor);
   }
@@ -299,7 +299,7 @@ export const TRANSITIONS: readonly FacadeTransition[] = [
   { entity: "epic", verb: "start", from: ["planned"], to: "in_progress", method: "startEpic", completion: null },
   { entity: "epic", verb: "hold", from: ["in_progress"], to: "on_hold", method: "holdEpic", completion: null },
   { entity: "epic", verb: "reopen", from: ["on_hold", "delivered", "dropped"], to: "in_progress", method: "reopenEpic", completion: null },
-  { entity: "epic", verb: "deliver", from: ["in_progress"], to: "delivered", method: null, completion: "deliverEpic" },
+  { entity: "epic", verb: "deliver", from: ["planned", "in_progress"], to: "delivered", method: null, completion: "deliverEpic" },
   { entity: "epic", verb: "drop", from: ["planned", "in_progress", "on_hold"], to: "dropped", method: "dropEpic", completion: null },
   { entity: "story", verb: "start", from: ["planned"], to: "in_progress", method: "startStory", completion: null },
   { entity: "story", verb: "hold", from: ["in_progress"], to: "on_hold", method: "holdStory", completion: null },
