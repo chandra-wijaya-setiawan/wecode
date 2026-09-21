@@ -14,6 +14,21 @@
 # the row is restated at what the file now is, so the next change is measured against the
 # truth rather than against a number the tree stopped matching.
 ceiling: 400
+
+# How this repository is built, in sentences a worker can act on.
+#
+# Owned by the operator, not by any module: these are the things every fresh worktree
+# rediscovers the hard way — that it starts without node_modules, that a commit needs an
+# inline identity, which command builds before which tests. The foreman reads this list
+# and hands it to the worker under its own heading, beside the lessons. A lesson is what
+# one attempt learned; a convention is what the operator already knew and chose to say.
+#
+# One sentence per line. Keep the list short: a brief nobody finishes teaches nothing.
+conventions:
+  - A worktree starts without node_modules — run `pnpm install && pnpm -r build` before any test.
+  - git has no user identity here — commit with `git -c user.name=... -c user.email=... commit`.
+  - Build before you prove: `pnpm -r build`, then `pnpm exec vitest run <file>` for one test file.
+  - Every `.ts`/`.tsx` under `packages/*/src` and `packages/*/test` has a line ceiling in packages/core/config/project.yaml.
 over:
   packages/cli/src/plan.ts: 1112
   packages/runner/src/daemon.ts: 1041
@@ -26,10 +41,10 @@ over:
   packages/runner/test/foreman.test.ts: 641
   packages/core/test/typed-board.test.ts: 625
   packages/runner/src/git.ts: 625
+  packages/runner/src/foreman.ts: 624
   packages/core/test/typed-chore.test.ts: 614
   packages/runner/src/examiner.ts: 604
   packages/cli/test/run.test.ts: 578
-  packages/runner/src/foreman.ts: 569
   packages/runner/src/healer.ts: 567
   packages/cli/test/plan.test.ts: 556
   packages/runner/test/typed-runner-doctor.test.ts: 527
