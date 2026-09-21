@@ -97,10 +97,40 @@ export function loadBanner(path: string = DESIGN): readonly Tab[] {
   });
 }
 
-/** The banner as markup: the word, and under it one row of ways in, in the declared order. */
+/** What the banner's last control opens, and what it is. The dock is one element of the
+ *  document, not one per page, because there is one session behind it: two docks would be
+ *  two places the same output could be read and two command lines disagreeing about which
+ *  one the next word goes to.
+ *
+ *  It is opened and closed by the popover attributes rather than by script, because this
+ *  package serves no script — every page test says so — and a dock that needs one would be
+ *  a dock that is open for nobody with script off. So `popover` is the closed state, the
+ *  banner's button is the way in, and the dock's own button is the way back out. */
+export const DOCK = "terminal";
+
+/** The button that ends the banner. */
+const terminalButton = (): string =>
+  `<button type="button" popovertarget="${DOCK}" data-ui="shell.terminal">terminal</button>`;
+
+/** The dock along the foot: what the session has said, and the line the next word is typed
+ *  on. Both are drawn empty — what fills them is the session, and that is not this file's.
+ *  The form goes nowhere yet for the same reason; it is the shape, not the wiring. */
+const dockOf = (): string =>
+  `<aside id="${DOCK}" popover data-ui="shell.dock">` +
+  `<button type="button" popovertarget="${DOCK}" popovertargetaction="hide" ` +
+  `data-ui="shell.dock.close">close</button>` +
+  `<pre data-ui="shell.dock.output"></pre>` +
+  `<form data-ui="shell.dock.command">` +
+  `<label for="${DOCK}-line">&gt;</label>` +
+  `<input id="${DOCK}-line" name="line" type="text" autocomplete="off">` +
+  `</form></aside>`;
+
+/** The banner as markup: the word, and under it one row of ways in, in the declared order,
+ *  ending in the control that opens the dock. */
 const bannerOf = (banner: string, tabs: readonly Tab[]): string =>
   `<h1>${banner}</h1><nav>` +
   tabs.map((tab) => `<a href="${tab.at}">${tab.says}</a>`).join("") +
+  terminalButton() +
   `</nav>`;
 
 /** The look `renderers.webapp` declares: the tokens every rule spends, the shape each page
@@ -205,7 +235,7 @@ export function document(
     `${doctype}\n<html lang="${lang}"><head><meta charset="${charset}">` +
     `<meta name="viewport" content="${viewport}">` +
     `<title>${title}</title><style>${css}</style></head>` +
-    `<body><${body}>${bannerOf(banner, tabs)}${contents}</${body}></body></html>\n`
+    `<body><${body}>${bannerOf(banner, tabs)}${contents}</${body}>${dockOf()}</body></html>\n`
   );
 }
 
