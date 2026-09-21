@@ -10,14 +10,15 @@
  *  edited design moves the page. The second is that the omitted levels are *gone* rather
  *  than folded — a task hangs under its story even though the record puts a requirement,
  *  a criterion and an acceptance test in between. */
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Node, Rollup } from "@wecode/core";
 import { afterEach, describe, expect, it } from "vitest";
-import { addressOf, serve } from "../src/index.js";
+import { addressOf, answer, serve } from "../src/index.js";
+import { discovered, mounted, pathOf } from "../src/pages/discover.js";
 import {
   loadLevels,
   shown,
@@ -261,15 +262,32 @@ describe("the page is served in the shell", () => {
   });
 });
 
+/** The wiring is the file. `bin.ts` carried a route per page once; discovery replaced that
+ *  table, so what is held here is the file being under `pages/`, answering at `/tree`, and
+ *  being handed the record — and `bin.ts` naming none of it. */
 describe("the surface routes it", () => {
   const BIN = readFileSync(fileURLToPath(new URL("../src/bin.ts", import.meta.url)), "utf8");
+  const PAGES = fileURLToPath(new URL("../src/pages", import.meta.url));
 
-  it("binds /tree to the page, reading the record through core's tree()", () => {
-    expect(BIN).toContain(`"/tree": treeAt(() => tree(db))`);
-    expect(BIN).toContain(`from "./pages/tree.js"`);
+  it("binds /tree to the page, reading the record through core's tree()", async () => {
+    expect(discovered(readdirSync(PAGES))).toContain("tree");
+    expect(pathOf("tree")).toBe("/tree");
+
+    const record = node("project", 1, { label: "the whole record" });
+    const module = (await import("../src/pages/tree.js")) as Record<string, unknown>;
+    const routes = { [pathOf("tree")]: mounted("tree", module, { record: () => [record] }) };
+    const reply = answer(routes, "GET", "/tree");
+    expect(reply.status).toBe(200);
+    expect(reply.body).toContain("the whole record");
   });
 
   it("leaves the board where it was", () => {
-    expect(BIN).toContain(`"/": boardAt(() => board(db))`);
+    expect(discovered(readdirSync(PAGES))).toContain("board");
+    expect(pathOf("board")).toBe("/");
+  });
+
+  it("is not named in bin.ts, because no page is", () => {
+    expect(BIN).not.toContain("treeAt");
+    expect(BIN).not.toContain("pages/tree");
   });
 });
