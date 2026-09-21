@@ -7,26 +7,28 @@
  *  that the designer sees what they would see in their own terminal, so the far end must
  *  believe it has one.
  *
- *  Why `script` and not a pty binding. There is no pty binding in this dependency tree and
- *  none can be added without a native build — the tui's own pty harness records the same
- *  constraint and reaches for the same answer. util-linux's `script` allocates a pty,
- *  execs a command inside it and copies both ways, which is exactly the primitive wanted
- *  and is already how this repository drives a terminal under test. `stty` inside it gives
- *  the terminal a size; without it the pty is 0x0 and the far end falls back to a width
- *  nobody asked for.
+ *  Why node-pty and not `script`. This terminal was first built on util-linux's `script`,
+ *  which allocates a pty, execs a command inside it and copies both ways — but a size can
+ *  be given to it exactly once, as an `stty` before the command starts, and never again.
+ *  A pane is not opened once and sized once: its window moves, and every move has to reach
+ *  the session or the agent inside keeps drawing at the size it opened at, whatever the
+ *  window now does. node-pty holds the pty itself and exposes `resize` on it, so the size
+ *  is a thing the holder can change for as long as the session runs. The price is a
+ *  native build: the pty is a C++ addon compiled by node-gyp when it is installed, and the
+ *  workspace allows that build beside esbuild's in `pnpm-workspace.yaml` — a machine with
+ *  no toolchain cannot install this package at all.
  *
  *  What this file is not. It does not know about the pane, a socket, or a browser. It
  *  turns a command into an object that takes keystrokes and emits output, and the transport
  *  between that object and the screen is somebody else's sentence. */
-import { spawn, type ChildProcess } from "node:child_process";
-
-/** Shell-quote, because the command goes to `script -c` as one string. */
-const quote = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
+import { spawn, type IPty } from "node-pty";
 
 export class SessionError extends Error {}
 
 export interface SessionOptions {
-  /** The program to run in the pty, and its arguments. */
+  /** The program to run in the pty, and its arguments. The program is exec'd directly —
+   *  not through a shell — so it is a path or a name to find on one, and the arguments
+   *  arrive verbatim with no quoting to get wrong. */
   readonly command: string;
   /** The rest may be given as `undefined` as well as left out, because the caller is
    *  often forwarding options it was itself given — `exactOptionalPropertyTypes` would
@@ -56,22 +58,23 @@ export type Output = (chunk: string) => void;
 
 /** A running session. Keystrokes in, output out, and closed however the holder ends. */
 export class Session {
-  private readonly child: ChildProcess;
+  private readonly pty: IPty;
   private readonly listeners = new Set<Output>();
   private readonly leaving: ((code: number) => void)[] = [];
   private code: number | null = null;
   /** Everything drawn so far, so a screen that attaches late is not attaching to nothing. */
   private drawn = "";
 
-  private constructor(child: ChildProcess) {
-    this.child = child;
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => {
+  private constructor(pty: IPty) {
+    this.pty = pty;
+    pty.onData((chunk: string) => {
       this.drawn += chunk;
       for (const listener of this.listeners) listener(chunk);
     });
-    child.on("exit", (code, signal) => {
-      this.code = code ?? (signal === null ? 0 : 1);
+    pty.onExit(({ exitCode, signal }) => {
+      // A death by signal carries no exit code the far end chose, so it is not reported
+      // as the clean zero the pty hands back for one: it is a leaving, and it left wrong.
+      this.code = signal ? 1 : exitCode;
       for (const done of this.leaving.splice(0)) done(this.code);
     });
   }
@@ -80,16 +83,14 @@ export class Session {
    *  outlives it, so the session's exit is the pty's exit and nothing lingers holding it
    *  open. */
   static open(options: SessionOptions): Session {
-    const cols = options.cols ?? DEFAULT_COLS;
-    const rows = options.rows ?? DEFAULT_ROWS;
-    const argv = [options.command, ...(options.args ?? [])].map(quote).join(" ");
-    const inner = `stty rows ${rows} cols ${cols}; exec ${argv}`;
-    const child = spawn("script", ["-qfec", inner, "/dev/null"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      cwd: options.cwd,
+    const pty = spawn(options.command, [...(options.args ?? [])], {
+      name: "xterm-256color",
+      cols: options.cols ?? DEFAULT_COLS,
+      rows: options.rows ?? DEFAULT_ROWS,
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       env: { TERM: "xterm-256color", ...process.env, ...options.env },
     });
-    return new Session(child);
+    return new Session(pty);
   }
 
   /** Whether the session is still running. */
@@ -122,7 +123,16 @@ export class Session {
    *  designer cannot press Ctrl-C in. */
   keys(input: string): void {
     if (!this.running) throw new SessionError("the session has left");
-    this.child.stdin?.write(input);
+    this.pty.write(input);
+  }
+
+  /** Tell the far end the terminal is now this size. A pane calls this every time its
+   *  window moves, because the size the session opened at is a fact about the window the
+   *  moment it opened and about nothing after: the far end is told the new one, and the
+   *  running program hears it as the window-change a real terminal would have sent. */
+  resize(cols: number, rows: number): void {
+    if (!this.running) throw new SessionError("the session has left");
+    this.pty.resize(cols, rows);
   }
 
   /** A prompt the designer sent from the pane rather than typed: the text, then the key
@@ -141,13 +151,13 @@ export class Session {
    *  this guarantees is that it sees one submit, at the end. */
   prompt(text: string): void {
     if (!this.running) throw new SessionError("the session has left");
-    this.child.stdin?.write(text.replaceAll("\r\n", "\n").replaceAll("\n", " ") + ENTER);
+    this.pty.write(text.replaceAll("\r\n", "\n").replaceAll("\n", " ") + ENTER);
   }
 
   /** Close it however it got here, and hand back the exit code. Safe to call twice. */
   async close(): Promise<number> {
     if (this.code !== null) return this.code;
-    this.child.kill("SIGTERM");
+    this.pty.kill();
     return this.left();
   }
 
