@@ -187,21 +187,38 @@ describe("the chore-raising conditions, in their own module", () => {
     for (const name of RAISING) expect(Object.keys(core)).toContain(name);
   });
 
-  /** The conditions decide; the record writes. `raise.ts` owns no table and spells no SQL,
-   *  so the `chore` table stays declared exactly once, in chore.ts. */
-  it("leaves the tables, and the SQL, on the record's side", () => {
-    expect(raise).not.toMatch(/\btable<|\bqueries\s*\(/);
+  /** The sweep condition reads its own table, but the chore record is still declared only
+   *  in chore.ts. Its read goes through the dialect, just like the record's reads do. */
+  it("keeps the chore table on the record's side and the sweep read on the dialect", () => {
+    const tables = [...raise.matchAll(/table<[^>]*>\(\s*"(\w+)",\s*\[([^\]]*)\]/g)].map((m) => ({
+      name: m[1],
+      columns: [...m[2].matchAll(/"(\w+)"/g)].map((c) => c[1]),
+    }));
+
+    expect(tables.map((table) => table.name)).not.toContain("chore");
+    expect(raise).toContain('import { queries, table } from "../db.js"');
     expect(raise.match(/\b(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/g)).toBeNull();
     expect(source).toMatch(/table<ChoreRow>\(\s*"chore"/);
+
+    for (const declared of tables) {
+      const actual = (db.prepare(`PRAGMA table_info(${declared.name})`).all() as { name: string }[]).map((c) => c.name);
+      for (const column of declared.columns) expect(actual, `${declared.name}.${column}`).toContain(column);
+    }
   });
 
-  /** The two modules import each other, which is only safe while nothing here is read
-   *  while the module is evaluating. Every statement at the top level must be an import. */
+  /** The two modules import each other. Top-level setup is now needed by the sweep, but it
+   *  must not read a chore.ts binding while either module is evaluating. */
   it("touches chore.ts only from inside a function, so the cycle stays a module cycle", () => {
+    const imported = [...(raise.match(/^import \{([^}]*)\} from "\.\.\/chore\.js"/m)?.[1] ?? "").matchAll(/^\s*(?:type\s+)?(\w+)/gm)].map(
+      (m) => m[1],
+    );
     const top = raise
       .split("\n")
       .filter((l) => /^(const|let|var|new |[A-Za-z_$][\w$]*\s*\()/.test(l));
-    expect(top, "top-level statements in chore/raise.ts").toEqual([]);
+
+    for (const statement of top) {
+      for (const name of imported) expect(statement, `${name} at module evaluation`).not.toMatch(new RegExp(`\\b${name}\\b`));
+    }
   });
 });
 
