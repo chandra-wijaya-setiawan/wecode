@@ -9,6 +9,10 @@
     "build": "tsc -b"
   },
   "dependencies": {
+    "@xterm/xterm": "6.0.0",
     "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "happy-dom": "20.14.5"
   }
 }
