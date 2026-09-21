@@ -11,10 +11,14 @@ import { tmp } from "../../core/test/tmpdir.js";
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
-/** Does the work and reports failure: the shape of the three tasks that sat at 3 of 3. */
+/** Does the work and reports failure: the shape of the three tasks that sat at 3 of 3.
+ *
+ *  It writes before it fails. An attempt that commits nothing has its retry refunded, so a
+ *  worker that touches the tree is the only one whose failures ever reach the limit. */
 class Loser implements WorkerAdapter {
   readonly kind = "agent";
-  async start(): Promise<Observation> {
+  async start(w: Work): Promise<Observation> {
+    writeFileSync(join(w.worktree, "mail.ts"), `half a mailer, attempt ${w.id}\n`);
     return { phase: "failed", session: "s1", spent: { tokens: 5, seconds: 1 }, commit: null, reason: "no mail" };
   }
   async poll(w: Work): Promise<Observation> {
@@ -121,7 +125,9 @@ describe("a task that has used every attempt", () => {
 
     const r = await runner().tick();
 
+    expect(attemptsOf(task)).toBe(1);
     expect(r.exhausted).toContain(task);
+    expect(stateOf(task)).toBe("failed");
     expect(r.drift.map((d) => d.task)).toEqual([task]);
   });
 
