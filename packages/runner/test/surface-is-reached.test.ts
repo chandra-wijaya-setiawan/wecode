@@ -17,6 +17,7 @@ let criteria: number;
  *  to a tree can be confused with what it did to the database. */
 let home: string;
 let tree: string;
+let worker: number;
 
 const stateOf = (table: string, id: number): string =>
   (db.prepare(`SELECT state FROM ${table} WHERE id = ?`).get(id) as { state: string }).state;
@@ -67,7 +68,23 @@ function readyTask(artefact: string, acceptance = "true"): { task: number; taskT
   engine.apply("acceptance_test", at, "deliver", "chief");
   engine.apply("task", task, "start", "chief");
   recordRed(db, at);
+  attempt(task);
   return { task, taskTest, acceptance: at };
+}
+
+/** The attempt the task was worked on, and the sha it left. A task finishes on its own
+ *  commit, and `taskFinishesOnItsOwnWork` reads that off the record alone — so a fixture
+ *  whose task has to reach `done` before an acceptance_test may run has to write one. */
+function attempt(task: number): void {
+  const id = make.assignment({
+    objective_type: "task",
+    objective_id: task,
+    worker_id: worker,
+    scope: { write: ["src/**"], tools: [] },
+    budget: { tokens: 1000, seconds: 60 },
+    worktree: tree,
+  });
+  db.prepare("UPDATE assignment SET phase = 'succeeded', commit_sha = ? WHERE id = ?").run(git("rev-parse", "HEAD"), id);
 }
 
 beforeEach(() => {
@@ -82,6 +99,7 @@ beforeEach(() => {
   story = make.story(e, "s");
   const req = make.requirement(story, "r");
   criteria = make.criteria(req, "c");
+  worker = make.worker("claude-1", "engineer", "agent");
   for (const [entity, id] of [
     ["project", p],
     ["release", rel],
