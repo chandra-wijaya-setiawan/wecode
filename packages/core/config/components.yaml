@@ -40,7 +40,7 @@ components:
     layer: presentation
     component: true
     owns: the filters over the record, the walk down the tree, and what is next up
-    modules: [board, board/row, tree, order, delivered]
+    modules: [board, board/facts, board/panels, board/pulse, board/row, board/rows, board/walk, tree, order, delivered]
 
   ledger:
     package: core
