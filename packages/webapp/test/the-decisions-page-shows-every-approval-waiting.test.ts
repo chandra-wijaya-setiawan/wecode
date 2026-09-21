@@ -115,10 +115,17 @@ describe("the decisions page", () => {
     const body = await (
       await fetched(() => [approval(1, { options: ["yes", "no"] }), approval(2)])
     ).text();
+    // Everything but the banner. The shell's one row of links is the way from a page to
+    // another page and is held by the banner's own test; it is not a way of answering
+    // anything, and it arrives in every document whatever the page is. What is left after
+    // it is the page, and the rule is about the page.
+    const nav = body.indexOf("<nav>");
+    expect(nav, "the document carries no banner").toBeGreaterThan(-1);
+    const page = body.slice(0, nav) + body.slice(body.indexOf("</nav>") + "</nav>".length);
     for (const control of ["<form", "<button", "<input", "<select", "<textarea", "<a "]) {
-      expect(body, `the page offers a ${control}`).not.toContain(control);
+      expect(page, `the page offers a ${control}`).not.toContain(control);
     }
-    expect(body).not.toContain("method=");
+    expect(page).not.toContain("method=");
   });
 
   it("serves nothing but GET at the page's path", async () => {

@@ -93,6 +93,17 @@ describe("it names every page the package serves, and only those", () => {
     expect(ORDER.map((tab) => tab.page).sort()).toEqual([...pages].sort());
   });
 
+  it("names the three that landed as files without a way in", () => {
+    // agents, cooking and ledger were served — discovery found their files — and the
+    // banner named none of them, so the only way to any of the three was to type the
+    // path. Named here by hand as well as by the directory above: the general statement
+    // goes green again the moment somebody deletes the pages, and this one does not.
+    for (const page of ["agents", "cooking", "ledger"]) {
+      expect(pages, page).toContain(page);
+      expect(ORDER.map((tab) => tab.page), page).toContain(page);
+    }
+  });
+
   it("names each page once, so a page has one way in and not two", () => {
     const named = ORDER.map((tab) => tab.page);
     expect(named.length).toBe(new Set(named).size);
