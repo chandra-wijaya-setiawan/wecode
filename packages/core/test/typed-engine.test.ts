@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Engine, Repo, SCHEMA_VERSION, diagnose, guards, open } from "../src/index.js";
+import { recordAttemptCommit } from "./db.js";
 import { freshDb, recordRed, seed, stateOf } from "./helpers.js";
 import { tmp } from "./tmpdir.js";
 
@@ -87,16 +88,21 @@ describe("the engine, the guards and the store, ported onto the typed layer", ()
       })),
     );
 
-    expect(declared.map((d) => d.name).sort()).toEqual([
+    expect([...new Set(declared.map((d) => d.name))].sort()).toEqual([
       "acceptance_criteria",
       "acceptance_test",
+      "assignment",
+      "design",
       "epic",
       "requirement",
       "schema_version",
       "sqlite_master",
       "story",
       "task",
+      "worker",
     ]);
+    // A table may be declared twice, by two modules reading two parts of it, so the names
+    // above are a set — but each declaration is held against the schema on its own.
     for (const d of declared) {
       const actual = (db.prepare(`PRAGMA table_info(${d.name})`).all() as { name: string }[]).map((c) => c.name);
       expect(actual.length, d.name).toBeGreaterThan(0);
@@ -109,6 +115,12 @@ describe("the engine, the guards and the store, ported onto the typed layer", ()
  *  which is why it is the sweep that must read every entity's own table. The fixture moves
  *  rows behind the engine's back, exactly as the things settle() exists to catch do. */
 describe("the level-triggered sweep, through the typed layer", () => {
+  // `task.finish` asks for a commit the task's own branch carries as well as for its tests,
+  // so the attempt that wrote one is on the record before the sweep reads anything.
+  beforeEach(() => {
+    recordAttemptCommit(db, tree.task);
+  });
+
   const behindTheEnginesBack = (): void => {
     db.prepare("UPDATE task SET state = 'ready' WHERE id = ?").run(tree.task);
     db.prepare("UPDATE task_test SET state = 'passed' WHERE id = ?").run(tree.taskTest);
@@ -173,6 +185,30 @@ describe("the level-triggered sweep, through the typed layer", () => {
 
   it("stops when nothing more can move", () => {
     expect(engine.settle()).toEqual([]);
+  });
+});
+
+/** Why the sweep above has to record an attempt at all. `finish` is one guard asking two
+ *  questions, and the second is read off the record of what was committed — so a task whose
+ *  tests all pass on a branch holding no commit of its own stays where it is, and the whole
+ *  chain above it stays with it. Spelled out here so a fixture that stops finishing tasks
+ *  reads as this rule rather than as the sweep breaking. */
+describe("a task finishes on its own work, not on its tests alone", () => {
+  beforeEach(() => {
+    db.prepare("UPDATE task SET state = 'ready' WHERE id = ?").run(tree.task);
+    db.prepare("UPDATE task_test SET state = 'passed' WHERE id = ?").run(tree.taskTest);
+  });
+
+  it("leaves a task whose branch carries no commit exactly where it was", () => {
+    expect(engine.settle()).toEqual([]);
+    expect(stateOf(db, "task", tree.task)).toBe("ready");
+    expect(engine.may("task", tree.task, "finish").ok).toBe(false);
+  });
+
+  it("finishes it once an attempt has committed", () => {
+    recordAttemptCommit(db, tree.task);
+    expect(engine.settle().map((c) => c.entity)).toEqual(["task"]);
+    expect(stateOf(db, "task", tree.task)).toBe("done");
   });
 });
 
