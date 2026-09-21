@@ -157,28 +157,47 @@ function nothing(r: Reckoning): string {
 
 /** A count the board does not carry. Drawn, with the word the definition gives it, rather
  *  than left out: a strip missing a count reads as a strip whose count is nothing, and the
- *  two are different sentences. The mockup's `green` and `refunded` are what became of an
- *  *attempt*, which is the `ledger` table's to say and not the board's — the board carries
- *  what is open, and an attempt that went green is closed. */
+ *  two are different sentences. `green` and `refunded` are what became of an *attempt* and
+ *  `decisions answered` is what became of a *question* — the board carries what is still
+ *  open, and an attempt that went green and a question somebody answered are both closed.
+ *  The board's `needs_human` is not that count under another name: those are the decisions
+ *  nobody has answered, and saying them under the word `answered` would be a lie with a
+ *  true number in it, which is worse than a dash. */
 const UNCOUNTED = "—";
 
-/** The strip: the five counts the definition names, in its order, each said as the word it
- *  is given. Every one is the board's own group counted once, or the dash. */
-function strip(board: Board, r: Reckoning): string {
-  const counts: readonly (readonly [string | number, string])[] = [
-    [r.lands.length + r.stuck.length, "landed"],
-    [r.running.length, "attempts"],
-    [UNCOUNTED, "green"],
-    [UNCOUNTED, "refunded"],
-    [board.needs_human.length, "decisions"],
-  ];
-  const said = counts
-    .map(([n, word]) => `<span class="code">${escape(`${n}`)} ${escape(word)}</span>`)
-    .join("");
-  return (
-    `<p class="total" data-ui="ledger.strip">${said}</p>` +
-    empty("green and refunded are what became of an attempt, which the board does not carry")
-  );
+/** Why three of the five say the dash, on the page, so the dash is read as *the board does
+ *  not know* rather than as a nought. */
+const WHY_UNCOUNTED =
+  "green, refunded and decisions answered are what became of an attempt or of a question, " +
+  "and the board carries what is still open";
+
+/** The five counts the definition declares under `ledger.strip`, in its order. The name
+ *  each is drawn under and the words it is said by are both the definition's; `held` is
+ *  where its number is counted off the reading, and is nothing where the board holds no
+ *  such thing. No number is written down here: the mockup's own counts are its sample data,
+ *  and a page that spelled them would say the same thing on every workspace forever. */
+const COUNTS: readonly {
+  readonly id: string;
+  readonly says: string;
+  readonly held: ((r: Reckoning) => number) | null;
+}[] = [
+  { id: "landed", says: "stories landed", held: (r) => r.lands.length + r.stuck.length },
+  { id: "attempts", says: "attempts", held: (r) => r.running.length },
+  { id: "green", says: "green", held: null },
+  { id: "refunded", says: "refunded (no commit)", held: null },
+  { id: "decisions", says: "decisions answered", held: null },
+];
+
+/** The strip: the five counts, in the definition's order, each under its own name and said
+ *  in its own words. A cell carries no class — the look styles the strip itself as a row of
+ *  what it holds, and a class it does not name would be a look this page had invented. */
+function strip(r: Reckoning): string {
+  const said = COUNTS.map(
+    ({ id, says, held }) =>
+      `<span${named(`ledger.strip.${id}`)}>` +
+      `${escape(`${held === null ? UNCOUNTED : held(r)}`)} ${escape(says)}</span>`,
+  ).join("");
+  return `<p class="total" data-ui="ledger.strip">${said}</p>${empty(WHY_UNCOUNTED)}`;
 }
 
 /** The rate: what the lands are coming at. The board is a picture of now and holds no clock
@@ -197,7 +216,7 @@ export function ledgerSections(board: Board): string {
   const r = reckon(board);
   return (
     `<section class="ledger" id="ledger" data-ui="ledger">` +
-    `<h2>What did today buy?</h2>${strip(board, r)}` +
+    `<h2>What did today buy?</h2>${strip(r)}` +
     section("lands", "what it bought", bought(r), "ledger.landed") +
     section("cost", "what it is taking", taking(r) + rate()) +
     section("waste", "what bought nothing", nothing(r), "ledger.waste") +
