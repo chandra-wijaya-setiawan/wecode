@@ -50,7 +50,7 @@ components:
     package: core
     layer: gate
     component: true
-    owns: the entities, their state machines as data, and one named guard per constrained transition
+    owns: the entities, their state machines as data, one named guard per constrained transition, and which landed branches are safe to remove
     modules: [types, entities, machines, guards, checks, invariants, land, facade, facade-gen]
 
   views:
