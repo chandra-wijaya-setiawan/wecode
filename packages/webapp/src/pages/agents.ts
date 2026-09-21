@@ -55,16 +55,33 @@ const FLEET: readonly (readonly [string, string, string])[] = [
   ["agents.today", "Today", "no day on the board — the ledger counts it"],
 ];
 
-/** One seat: the work an agent has in hand, and what it has cost so far. */
+/** One seat: the work an agent has in hand, what it is running as, and what it has cost
+ *  so far. The three settings are optional on the board row because older records do not
+ *  have them; absence stays absence rather than becoming a page-invented setting. */
 export interface Seat {
   readonly id: number;
   readonly what: string;
   readonly phase: string;
+  readonly model: string | null;
+  readonly effort: string | null;
+  readonly harness: string | null;
   /** Minutes since the seat was cut, when the row dates it. */
   readonly minutes: number | null;
   /** Thousands of tokens spent, when the row counts them. */
   readonly spent: number | null;
 }
+
+type RecordedRow = Row & {
+  readonly model?: string | null;
+  readonly effort?: string | null;
+  readonly harness?: string | null;
+};
+
+const recorded = (row: Row, key: "model" | "effort" | "harness"): string | null => {
+  const record = row as RecordedRow;
+  if (key in record) return typeof record[key] === "string" ? record[key]! : null;
+  return new RegExp(`(?:^| · )${key}=([^ ·]+)`).exec(row.detail)?.[1] ?? null;
+};
 
 /** One agent, with every seat it is holding. */
 export interface Worker {
@@ -96,6 +113,9 @@ export function seatOf(row: Row): { readonly worker: string; readonly seat: Seat
       id: row.id,
       what: row.what,
       phase: row.state,
+      model: recorded(row, "model"),
+      effort: recorded(row, "effort"),
+      harness: recorded(row, "harness"),
       minutes: number(age?.trim(), "m"),
       spent: number(cost?.trim(), "k"),
     },
@@ -132,10 +152,16 @@ export function workers(board: Board): readonly Worker[] {
     .sort((a, b) => (b.spent ?? 0) - (a.spent ?? 0) || a.name.localeCompare(b.name));
 }
 
+const setting = (name: "model" | "effort" | "harness", value: string | null): string =>
+  value === null ? "" : `<span class="${name}">${escape(value)}</span>`;
+
 const seatLine = (seat: Seat): string =>
   `<li id="seat-${seat.id}"><span class="id">#${seat.id}</span>` +
   `<span class="what">${escape(seat.what)}</span>` +
   `<span class="phase">${escape(seat.phase)}</span>` +
+  setting("model", seat.model) +
+  setting("effort", seat.effort) +
+  setting("harness", seat.harness) +
   (seat.minutes === null ? "" : `<span class="age">${seat.minutes}m</span>`) +
   (seat.spent === null ? "" : `<span class="cost">${seat.spent}k</span>`) +
   `</li>`;

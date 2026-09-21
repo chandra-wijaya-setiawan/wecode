@@ -385,8 +385,8 @@ renderers:
           "section.agents ul.agents > li.worker > span.age": "color: var(--faint); font-family: var(--mono); font-size: .92em"
           "section.agents ul.agents ul.seats": "grid-column: 1 / -1; list-style: none; margin: .3rem 0 0; padding: 0; border-top: 1px solid var(--rule)"
           "section.agents ul.agents ul.seats li": "display: flex; flex-wrap: wrap; gap: .1rem .6rem; padding: .15rem 0; min-width: 0"
-          "section.agents ul.agents ul.seats li .id, section.agents ul.agents ul.seats li .age, section.agents ul.agents ul.seats li .cost": "color: var(--faint); font-family: var(--mono); font-size: .92em"
-          "section.agents ul.agents ul.seats li .what": "flex: 1 1 8rem; min-width: 0; overflow-wrap: anywhere"
+          "section.agents ul.agents ul.seats li .id, section.agents ul.agents ul.seats li .age, section.agents ul.agents ul.seats li .cost, section.agents ul.agents ul.seats li .model, section.agents ul.agents ul.seats li .effort, section.agents ul.agents ul.seats li .harness": "color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "section.agents ul.agents ul.seats li .what": "flex: 1 1 8rem; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; text-overflow: ellipsis"
           "section.agents ul.agents ul.seats li .phase": "color: var(--mark); font-weight: 600"
         cooking:
           # A group per why. The one group that is not a refusal is marked in the good
