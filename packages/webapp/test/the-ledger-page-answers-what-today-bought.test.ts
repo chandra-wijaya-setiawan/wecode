@@ -5,11 +5,24 @@
  *  `row`, `ledger.rate` or `ledger.waste` was anywhere in the markup, so nothing could check
  *  the drawing against the declaration.
  *
- *  Two of the strip's counts are the mockup's and not the board's: `green` and `refunded` are
- *  what became of an attempt, and the board carries what is *open*. Those are drawn as the
- *  dash with their word, because a node left out reads as a count of nothing — a different
- *  sentence, and a false one. The same goes for the rate: no land on the board carries an
- *  hour, so there is no lands-per-hour to divide.
+ *  The strip is the part this file was written for a second time. It was there, and the five
+ *  counts the definition hangs under it — `ledger.strip.landed`, `.attempts`, `.green`,
+ *  `.refunded`, `.decisions` — were not: the words were the page's own and no cell carried a
+ *  name, so nothing could be checked against the declaration. Each is now drawn under its own
+ *  name, in the definition's words, and every number in it is a group of the board counted
+ *  here and now. The mockup's `54 / 135 / 128 / 21 / 6` are its sample data: a page that
+ *  spelled one of them would say the same thing on every workspace forever, so the proof
+ *  below is that the counts move when the board does, and that an empty board says no digit
+ *  but nought.
+ *
+ *  Three of the five are the mockup's and not the board's. `green` and `refunded` are what
+ *  became of an attempt and `decisions answered` is what became of a question; the board
+ *  carries what is still *open*, so it holds none of the three. They are drawn as the dash
+ *  with their word, because a node left out reads as a count of nothing — a different
+ *  sentence, and a false one. `needs_human` is not `decisions answered` under another name:
+ *  it is the decisions nobody has answered, and drawing it there would be a lie with a true
+ *  number in it. The same goes for the rate: no land on the board carries an hour, so there
+ *  is no lands-per-hour to divide.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -54,14 +67,29 @@ const busy = (): Board =>
 const DECLARED: readonly (readonly [string, string | null])[] = [
   ["ledger", "What did today buy?"],
   ["ledger.strip", null],
+  ["ledger.strip.landed", "stories landed"],
+  ["ledger.strip.attempts", "attempts"],
+  ["ledger.strip.green", "green"],
+  ["ledger.strip.refunded", "refunded (no commit)"],
+  ["ledger.strip.decisions", "decisions answered"],
   ["ledger.landed", null],
   ["ledger.landed.row", null],
   ["ledger.rate", "lands per hour"],
   ["ledger.waste", null],
 ];
 
-/** The strip's five counts, in the definition's order, with the word each is said by. */
-const COUNTS: readonly string[] = ["landed", "attempts", "green", "refunded", "decisions"];
+/** The strip's five counts, in the definition's order: the last word of each id — the whole
+ *  id is `ledger.strip.` and this — and the words the definition gives that count. */
+const COUNTS: readonly (readonly [string, string])[] = [
+  ["landed", "stories landed"],
+  ["attempts", "attempts"],
+  ["green", "green"],
+  ["refunded", "refunded (no commit)"],
+  ["decisions", "decisions answered"],
+];
+
+/** The counts the board holds nothing for, and which therefore say the dash. */
+const UNHELD: readonly string[] = ["green", "refunded", "decisions"];
 
 describe("every node the definition declares is drawn, by its own name", () => {
   const body = ledgerSections(busy());
@@ -77,6 +105,11 @@ describe("every node the definition declares is drawn, by its own name", () => {
   it("nests them as the definition parents them", () => {
     for (const [outer, inner] of [
       ["ledger", "ledger.strip"],
+      ["ledger.strip", "ledger.strip.landed"],
+      ["ledger.strip", "ledger.strip.attempts"],
+      ["ledger.strip", "ledger.strip.green"],
+      ["ledger.strip", "ledger.strip.refunded"],
+      ["ledger.strip", "ledger.strip.decisions"],
       ["ledger", "ledger.landed"],
       ["ledger.landed", "ledger.landed.row"],
       ["ledger", "ledger.rate"],
@@ -104,23 +137,64 @@ describe("every node the definition declares is drawn, by its own name", () => {
   });
 });
 
-describe("the strip says the five counts the definition names", () => {
-  const body = ledgerSections(busy());
-  const said = body.slice(body.indexOf(`data-ui="ledger.strip"`)).split("</p>")[0] ?? "";
+/** The strip as drawn for one board: everything up to the `</p>` that closes it, which is
+ *  every cell and nothing after them. */
+const stripOf = (board: Board): string => {
+  const drawn = ledgerSections(board);
+  return drawn.slice(drawn.indexOf(`data-ui="ledger.strip"`)).split("</p>")[0] ?? "";
+};
 
-  it("says each of them by its own word, in the definition's order", () => {
+/** One cell of a drawn strip, by the last word of its id. */
+const cellOf = (strip: string, id: string): string =>
+  strip.slice(strip.indexOf(`<span data-ui="ledger.strip.${id}">`)).split("</span>")[0] ?? "";
+
+describe("the strip draws the five counts the definition names, each under its own name", () => {
+  const body = ledgerSections(busy());
+  const said = stripOf(busy());
+
+  it("carries every one of the five names, inside the strip and not beside it", () => {
+    for (const [id] of COUNTS) {
+      expect(body, id).toContain(`data-ui="ledger.strip.${id}"`);
+      // `said` stops at the strip's own `</p>`, so a cell found here is a cell inside it.
+      expect(said, id).toContain(`data-ui="ledger.strip.${id}"`);
+      expect([...body.matchAll(new RegExp(`data-ui="ledger\\.strip\\.${id}"`, "g"))], id)
+        .toHaveLength(1);
+    }
+  });
+
+  it("says each of them in the definition's words, in the definition's order", () => {
     let at = -1;
-    for (const word of COUNTS) {
-      const next = said.indexOf(word);
-      expect(next, word).toBeGreaterThan(at);
+    for (const [id, says] of COUNTS) {
+      const next = said.indexOf(`data-ui="ledger.strip.${id}"`);
+      expect(next, id).toBeGreaterThan(at);
+      expect(cellOf(said, id), id).toContain(says);
       at = next;
     }
   });
 
-  it("counts the lands, the attempts and the decisions off the board's own groups", () => {
-    expect(said).toContain("3 landed");
-    expect(said).toContain("2 attempts");
-    expect(said).toContain("1 decisions");
+  it("counts the lands and the attempts off the board's own groups", () => {
+    expect(cellOf(said, "landed")).toContain("3 stories landed");
+    expect(cellOf(said, "attempts")).toContain("2 attempts");
+  });
+
+  it("counts what this board holds and not a number written into the page", () => {
+    // The same page, a different workspace: a count that is drawn rather than spelled moves
+    // with the record. The mockup's own 54 and 135 are its sample data and are nowhere.
+    const other = stripOf(
+      boardOf({
+        delivered: [row(1, "one land", "delivered", "story")],
+        running: [
+          row(2, "a go", "running", "ada · 1m · 1k"),
+          row(3, "another", "running", "grace · 2m · 2k"),
+          row(4, "a third", "running", "hedy · 3m · 3k"),
+        ],
+      }),
+    );
+
+    expect(cellOf(other, "landed")).toContain("1 stories landed");
+    expect(cellOf(other, "attempts")).toContain("3 attempts");
+    expect(body).not.toContain("54 stories landed");
+    expect(body).not.toContain("135 attempts");
   });
 
   it("counts a land that will not merge among the landed, as the section below does", () => {
@@ -129,19 +203,32 @@ describe("the strip says the five counts the definition names", () => {
   });
 
   it("draws a count the board does not carry as the dash, not as a zero", () => {
-    expect(said).toContain("— green");
-    expect(said).toContain("— refunded");
+    for (const id of UNHELD) {
+      expect(cellOf(said, id), id).toContain("—");
+      expect(cellOf(said, id), id).not.toMatch(/\d/);
+    }
     expect(said).not.toContain("0 green");
-    expect(body).toContain("green and refunded are what became of an attempt");
+    expect(body).toContain("green, refunded and decisions answered are what became of");
+    expect(body).toContain("the board carries what is still open");
   });
 
-  it("says nothing but dashes when the workspace is empty, and still says every word", () => {
-    const bare = ledgerSections(boardOf());
-    const strip = bare.slice(bare.indexOf(`data-ui="ledger.strip"`)).split("</p>")[0] ?? "";
+  it("does not say the decisions still waiting under the word answered", () => {
+    // `needs_human` is a question nobody has answered. The busy board holds one, and the
+    // count that would be a lie with a true number in it is the dash instead.
+    expect(busy().needs_human).toHaveLength(1);
+    expect(cellOf(said, "decisions")).not.toContain("1");
+    expect(said).not.toContain("1 decisions answered");
+  });
 
-    for (const word of COUNTS) expect(strip, word).toContain(word);
-    expect(strip).toContain("0 landed");
-    expect(strip).toContain("— green");
+  it("says nought and dashes when the workspace is empty, and still says every word", () => {
+    const bare = stripOf(boardOf());
+
+    for (const [id, says] of COUNTS) expect(cellOf(bare, id), id).toContain(says);
+    expect(cellOf(bare, "landed")).toContain("0 stories landed");
+    expect(cellOf(bare, "attempts")).toContain("0 attempts");
+    // Nothing has happened, so no count can honestly be anything but nought or the dash —
+    // any other digit in the strip is a number the page brought with it.
+    expect(bare).not.toMatch(/[1-9]/);
   });
 });
 
@@ -174,9 +261,14 @@ describe("the nodes are drawn on the markup the page already had", () => {
 
   it("leaves every one of them inside a shape the look already styles", () => {
     // `ledger`'s only root is `section.ledger`, and this page may not edit the design. So
-    // every node is a `section.ledger`, or a `p.total` or an `li` inside one.
+    // every node is a `section.ledger`, or a `p.total` or an `li` inside one — or one of
+    // the strip's cells, which are the children of a `p.total` the look lays out as a row
+    // and so carry no class of their own: a class the design does not name would be this
+    // page inventing a look, and an unnamed one would be a rule that reaches nothing.
     for (const [, drawn] of body.matchAll(/(<[a-z]+[^>]*data-ui="[^"]+"[^>]*>)/g)) {
-      expect(drawn, drawn).toMatch(/^<(section class="ledger"|p class="total"|li )/);
+      expect(drawn, drawn).toMatch(
+        /^<(section class="ledger"|p class="total"|li |span data-ui="ledger\.strip\.)/,
+      );
     }
   });
 
