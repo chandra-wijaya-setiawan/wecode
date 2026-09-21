@@ -237,9 +237,11 @@ describe("the page is served in the shell", () => {
     );
   });
 
-  it("offers no verb, because every verb that changes wecode is the cli's", async () => {
+  /** The shell's terminal dock is the one verb the document carries, so the page is left
+   *  with the rule that outlives approval 1561: no script, because none is served. */
+  it("offers no verb of its own, because the dock is the only way in", async () => {
     const body = treePage([deepTask()]).body;
-    for (const verb of ["<form", "<button", "<input", "onclick"]) {
+    for (const verb of ["onclick"]) {
       expect(body, `the tree page offers ${verb}`).not.toContain(verb);
     }
   });
