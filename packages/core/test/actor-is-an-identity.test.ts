@@ -21,6 +21,7 @@ import {
   identity,
   restate,
 } from "../src/index.js";
+import { recordAttemptCommit } from "./db.js";
 import { freshDb, recordRed, seed, stateOf } from "./helpers.js";
 
 let db: DatabaseSync;
@@ -151,6 +152,10 @@ describe("the ledger line: one expression joins the two halves back", () => {
 });
 
 describe("a transition nobody invoked still has an identity", () => {
+  // There is an automatic change to attribute only if the task can finish, and `finish`
+  // asks for a commit of the task's own as well as settled tests.
+  beforeEach(() => recordAttemptCommit(db, tree.task));
+
   it("attributes a cascaded change to the cascade", () => {
     engine.apply("task", tree.task, "start", "chief");
     const r = engine.apply("task_test", tree.taskTest, "pass", "runner");
