@@ -9,13 +9,23 @@
  *
  *  Three things live here, and they are separate on purpose:
  *    - the wire, which is the only thing the two halves have to agree on;
- *    - `keyOf` and `Screen`, which are the terminal — pure, and therefore checkable
- *      without a browser;
+ *    - `keyOf` and the screen, which are the terminal — `keyOf` for the keys going up,
+ *      and xterm.js for everything coming down, pinned to an exact version in
+ *      package.json because a terminal emulator is not a thing to float on whoever
+ *      installs next. The screen is xterm.js and not a re-implementation of one: this
+ *      pane once kept a hand-written screen that deleted every escape sequence before
+ *      writing, which kept the text and lost the terminal — no colour, no cursor
+ *      addressing, no clear, no alternate screen, and a TUI drawn in frames it could
+ *      not erase. Interpreting the bytes is the terminal's own job, and the bytes reach
+ *      it exactly as they left the far end.
  *    - `attach`, which wires those to whatever the page actually put on the screen.
  *
  *  Nothing in this file touches a global. It is a browser module, but every DOM thing it
- *  needs is a parameter, so the same code that runs in the pane runs under the test
- *  runner, and what is proved is the code that ships rather than a copy of it. */
+ *  needs is a parameter — including the terminal instance and the element it opens on —
+ *  so the same code that runs in the pane runs under the test runner, and what is proved
+ *  is the code that ships rather than a copy of it. */
+
+import type { Terminal } from "@xterm/xterm";
 
 // ─── the wire ───────────────────────────────────────────────────────────────────────
 
@@ -109,66 +119,12 @@ export function keyOf(event: Key): string {
 
 // ─── the screen ─────────────────────────────────────────────────────────────────────
 
-const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][A-Za-z0-9]|\x1b[=>]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
-
-/** What the session has drawn, as the text a reader sees.
- *
- *  This is a screen and not a buffer: carriage return goes back to the start of the line
- *  and overwrites it, and backspace takes a character off, which is how a spinner is one
- *  spinner rather than four hundred frames of one. Escape sequences are dropped rather
- *  than obeyed — a full terminal emulator is a bigger thing than this pane is, and the
- *  bytes are kept whole on the wire so that a better screen can be dropped in here
- *  without either half changing. */
-export class Screen {
-  private lines: string[] = [""];
-  private column = 0;
-
-  /** Everything the far end has drawn. */
-  get text(): string {
-    return this.lines.join("\n");
-  }
-
-  /** How many lines are on it. */
-  get rows(): number {
-    return this.lines.length;
-  }
-
-  /** Take a chunk of the session's output. */
-  write(chunk: string): this {
-    for (const ch of chunk.replace(ANSI, "")) {
-      if (ch === "\n") {
-        this.lines.push("");
-        this.column = 0;
-      } else if (ch === "\r") {
-        this.column = 0;
-      } else if (ch === "\b" || ch === "\x7f") {
-        this.column = Math.max(0, this.column - 1);
-      } else if (ch >= " " || ch === "\t") {
-        const line = this.lines[this.lines.length - 1] ?? "";
-        const padded = line.length < this.column ? line.padEnd(this.column, " ") : line;
-        this.lines[this.lines.length - 1] =
-          padded.slice(0, this.column) + ch + padded.slice(this.column + 1);
-        this.column += 1;
-      }
-    }
-    return this;
-  }
-
-  /** Drop everything above the last `rows` lines. A pane holds a window, not a history. */
-  clamp(rows: number): this {
-    if (rows > 0 && this.lines.length > rows) this.lines = this.lines.slice(-rows);
-    return this;
-  }
-}
+/** Where xterm.js opens. Named through xterm's own declaration of `open`, because this
+ *  file compiles without the DOM's types and must not guess at an element's shape: the
+ *  pane asks for whatever xterm.js says it can open on, and the page gives it that. */
+export type Mount = Parameters<Terminal["open"]>[0];
 
 // ─── the pane ───────────────────────────────────────────────────────────────────────
-
-/** As much of an element as the pane writes to. */
-export interface Text {
-  textContent: string | null;
-  scrollTop?: number;
-  scrollHeight?: number;
-}
 
 /** As much of an element as the pane listens to. */
 export interface Listens {
@@ -178,8 +134,8 @@ export interface Listens {
 /** The parts of the page this pane drives. Named, so the markup can move without this
  *  file moving with it. */
 export interface Parts {
-  /** Where the session's screen goes. */
-  readonly screen: Text;
+  /** Where xterm.js opens — the screen the far end draws on, owned by the far end. */
+  readonly screen: Mount;
   /** What has the keyboard focus while the designer is driving the session. */
   readonly keyboard: Listens;
   /** The box a prompt is composed in. */
@@ -194,8 +150,8 @@ export type Send = (message: ToSession) => void;
 export interface Attached {
   /** Take a frame from the session. */
   readonly receive: (frame: string) => void;
-  /** The screen behind the pane, for anything that wants to read it. */
-  readonly screen: Screen;
+  /** The xterm.js terminal behind the pane, for anything that wants to read or size it. */
+  readonly terminal: Terminal;
 }
 
 /** Wire the parts to a session.
@@ -209,14 +165,8 @@ export interface Attached {
  *  The composer is the other door. What is typed there is not keystrokes: it is a prompt,
  *  and it reaches the session only when it is sent, at which point the box is emptied so
  *  that a sent prompt cannot be sent twice. */
-export function attach(parts: Parts, send: Send, rows = 0): Attached {
-  const screen = new Screen();
-
-  const draw = (): void => {
-    if (rows > 0) screen.clamp(rows);
-    parts.screen.textContent = screen.text;
-    if (parts.screen.scrollHeight !== undefined) parts.screen.scrollTop = parts.screen.scrollHeight;
-  };
+export function attach(parts: Parts, terminal: Terminal, send: Send): Attached {
+  terminal.open(parts.screen);
 
   parts.keyboard.addEventListener("keydown", ((event: Key & { preventDefault?: () => void }) => {
     const data = keyOf(event);
@@ -239,16 +189,19 @@ export function attach(parts: Parts, send: Send, rows = 0): Attached {
   parts.send.addEventListener("click", sendPrompt);
 
   return {
-    screen,
+    terminal,
     receive(frame: string): void {
       const message = decode(frame);
       if (message === null) return;
       if (message.kind === "output") {
-        screen.write(message.chunk);
-        draw();
+        // Verbatim, because the pane owns the bytes and the terminal owns the meaning.
+        terminal.write(message.chunk);
       } else if (message.kind === "exit") {
-        screen.write(`\n[session left with ${message.code}]\n`);
-        draw();
+        // A farewell on a line of its own: CRLF and not a bare LF, because a LF alone moves
+        // down without returning and would staircase, and no leading CRLF at all when the
+        // far end already ended its own last line.
+        const lead = terminal.buffer.active.cursorX === 0 ? "" : "\r\n";
+        terminal.write(`${lead}[session left with ${message.code}]\r\n`);
       }
     },
   };
@@ -262,11 +215,13 @@ export const IDS = {
   send: "session-send",
 } as const;
 
-/** The right pane's markup: a screen, and a box to send a prompt from. A `<pre>` because
- *  the far end laid the columns out already and any other element would re-wrap them. */
+/** The right pane's markup: a screen, and a box to send a prompt from. A `<div>` for the
+ *  screen because xterm.js builds its own element inside whatever it is given — a `<pre>`
+ *  would only sit between the terminal and its text — and it is focusable because the
+ *  designer types into it. */
 export const pane = (): string =>
   `<section id="${IDS.pane}" class="pane pane-right">` +
-  `<pre id="${IDS.screen}" class="screen" tabindex="0" aria-label="the designer's session"></pre>` +
+  `<div id="${IDS.screen}" class="screen" tabindex="0" aria-label="the designer's session"></div>` +
   `<form id="${IDS.composer}-form" class="composer">` +
   `<textarea id="${IDS.composer}" rows="2" aria-label="a prompt to send"></textarea>` +
   `<button id="${IDS.send}" type="submit">send</button>` +
