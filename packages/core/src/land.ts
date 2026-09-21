@@ -114,6 +114,22 @@ export interface LandingPlace {
   readonly trees: readonly Checkout[];
 }
 
+/** A branch the landing may be allowed to remove. The ref is safe to delete only when
+ * the merge actually carried it; an unmerged branch may still be somebody's unread work. */
+export interface LandedBranch {
+  readonly branch: string;
+  readonly merged: boolean;
+}
+
+/** The refs cleanup may remove after the landing. Git cleanup is performed by the runner;
+ * this pure rule keeps it from turning "under this story" into permission to delete work. */
+export function branchesToRemoveAfterLanding(
+  storyBranch: string,
+  tasks: readonly LandedBranch[],
+): readonly string[] {
+  return [...new Set([storyBranch, ...tasks.filter((task) => task.merged).map((task) => task.branch)])];
+}
+
 /** Why this tree may not land the story, or null when it may.
  *
  *  Paths are compared as given: a caller holding symlinked paths — a macOS `/tmp`, a
