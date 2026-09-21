@@ -266,6 +266,9 @@ importers:
       '@wecode/core':
         specifier: workspace:*
         version: link:../core
+      '@wecode/painter':
+        specifier: workspace:*
+        version: link:../painter
       '@wecode/tui':
         specifier: workspace:*
         version: link:../tui

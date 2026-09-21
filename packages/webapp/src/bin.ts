@@ -13,6 +13,7 @@
  *  them: a board is for looking at work that exists, and `open()` would cheerfully write an
  *  empty workspace wherever the operator happened to be standing. */
 import { existsSync } from "node:fs";
+import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import {
   board,
@@ -26,6 +27,7 @@ import {
 } from "@wecode/core";
 import { answerAt } from "./answer.js";
 import { pages } from "./pages/discover.js";
+import { SHELL_AT, shellAt } from "./pages/shell.js";
 import { addressOf, serve } from "./server.js";
 
 process.removeAllListeners("warning");
@@ -83,14 +85,26 @@ const readings = {
   approvals: () => waitingApprovals(db),
 };
 
-/** The surface, whole: the pages found under `pages/`, and the one verb this surface has.
- *  Answering an approval is not a page — it is not under `pages/` and it is not discovered
- *  — so it is named, at the path it posts to. */
+/** The shell behind the dock, opened where this board's workspace is. The database's own
+ *  directory rather than wherever the operator happened to start the process, so
+ *  `--workspace` and `--db` move the shell with the board — and it is certainly a directory
+ *  that exists, because the check above has just said the database in it does. */
+const shell = shellAt(() => dirname(dbPath));
+
+/** The surface, whole: the pages found under `pages/`, and the two things that are not
+ *  pages. Answering an approval is not a page and neither is the dock's shell — neither is
+ *  under `pages/` and neither is discovered — so both are named, at the paths they answer
+ *  on. */
 const routes = {
   ...(await pages(readings)),
   "/answer": answerAt(() => db, operator),
+  [SHELL_AT]: shell.route,
 };
 
+/** One socket, on one host. The pages, the one verb and the dock's shell all answer on it,
+ *  so the shell is reachable exactly where the board is and nowhere else: a shell given a
+ *  listener of its own would be a second decision about who can reach the operator's
+ *  machine, taken here rather than by whoever passed `--host`. */
 const server = await serve(routes, port, values.host ?? "127.0.0.1");
 process.stdout.write(`workspace ${values.workspace ?? currentWorkspace()} at ${addressOf(server)}\n`);
 
@@ -98,6 +112,7 @@ let closed = false;
 const leave = (code: number): void => {
   if (closed) process.exit(code);
   closed = true;
+  shell.close();
   server.close(() => {
     db.close();
     process.exit(code);

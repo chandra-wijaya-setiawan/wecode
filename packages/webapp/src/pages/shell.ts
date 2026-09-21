@@ -14,9 +14,17 @@
  *  package rather than declaring a second copy of either. */
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
-import { html, type Page, type Reply } from "../server.js";
+import { html, text, type Handler, type Page, type Reply, type Verb } from "../server.js";
 import { pathOf } from "./discover.js";
+/** The dock's far end and the dock's pane, both the painter's. Deep specifiers because the
+ *  package's barrel offers the review session and not these two modules; the pty is
+ *  `pty.ts` and the browser half is `client/terminal.ts`, and a copy of either here would be
+ *  a second terminal to keep right. */
+import { DEFAULT_ROWS, Session } from "@wecode/painter/dist/pty.js";
+import { attach, decode, encode } from "@wecode/painter/dist/client/terminal.js";
+import type { Parts, Screen, ToSession } from "@wecode/painter/dist/client/terminal.js";
 
 /** Where the design is, and what reads it. Both are resolved through `@wecode/tui`: the
  *  file is that package's, and `yaml` is the dependency that package already has for it.
@@ -112,9 +120,11 @@ export const DOCK = "terminal";
 const terminalButton = (): string =>
   `<button type="button" popovertarget="${DOCK}" data-ui="shell.terminal">terminal</button>`;
 
-/** The dock along the foot: what the session has said, and the line the next word is typed
- *  on. Both are drawn empty — what fills them is the session, and that is not this file's.
- *  The form goes nowhere yet for the same reason; it is the shape, not the wiring. */
+/** The dock along the foot: what the shell has said, and the line the next word is typed
+ *  on. Both are drawn empty, because what fills them is the far end — the shell behind
+ *  `SHELL_AT`, which `dock()` further down attaches this markup to. The markup names no
+ *  wiring of its own for the same reason it carries no script: the pane owns the bytes and
+ *  the far end owns the screen. */
 const dockOf = (): string =>
   `<aside id="${DOCK}" popover data-ui="shell.dock">` +
   `<button type="button" popovertarget="${DOCK}" popovertargetaction="hide" ` +
@@ -257,3 +267,181 @@ export const shelled = (
   tabs: readonly Tab[] = loadBanner(),
 ): Page =>
   (url: URL): Reply => html(document(contents(url), retired, shell, css, tabs));
+
+// ─── the far end ────────────────────────────────────────────────────────────────────
+
+/** Where the shell behind the dock answers. The dock's own name, because it is the dock's
+ *  far end and not a page: it is not under `pages/`, it is not discovered, and `bin.ts`
+ *  names it at the path it is polled on — the way the one other non-page route is named. */
+export const SHELL_AT = `/${DOCK}`;
+
+/** Whose shell the dock runs. The login shell out of the password database, else what the
+ *  operator's own terminal put in the environment; `/bin/sh` is the last resort and not a
+ *  choice, because a dock that always ran `sh` is a dock none of their prompt, aliases or
+ *  history is in. */
+export const loginShell = (): string => userInfo().shell ?? process.env["SHELL"] ?? "/bin/sh";
+
+/** As much of a pty as the dock needs: what it has drawn, whether it is still there, and
+ *  the two ways in. The painter's `Session` is one of these — naming the shape rather than
+ *  the class is what lets the route's decisions be proved without spawning a shell per
+ *  claim, while the shell that actually runs is the painter's and not a stand-in. */
+export interface Shelled {
+  readonly output: string;
+  readonly running: boolean;
+  readonly exit: number | null;
+  keys(input: string): void;
+  prompt(text: string): void;
+  close(): Promise<number>;
+}
+
+/** How one is opened: a command, and where it runs. */
+export type Opens = (options: { readonly command: string; readonly cwd: string }) => Shelled;
+
+/** One poll of the shell: everything it has drawn since the cursor asked from, as frames
+ *  the pane's own `receive` takes verbatim, and the cursor to ask from next.
+ *
+ *  Frames rather than text, because the wire is the painter's and the pane must not be
+ *  taught a second one. A cursor rather than a stream, because a reply of this surface is
+ *  whole — `server.ts` writes a body and ends it — and a pane holding a cursor cannot lose
+ *  a chunk to a dropped connection the way a followed stream can. */
+export interface Drawn {
+  readonly at: number;
+  readonly frames: readonly string[];
+}
+
+const json = (value: unknown): Reply => ({
+  status: 200,
+  type: "application/json; charset=utf-8",
+  body: JSON.stringify(value),
+});
+
+/** The shell the dock is a pane on, and the way to let go of it.
+ *
+ *  It is opened on the first poll and not before: a board nobody has opened the dock on
+ *  should not have a shell running behind it. It is one shell, because there is one dock —
+ *  the document carries a single `#terminal` for exactly that reason, and two shells would
+ *  be two screens the next keystroke could go to.
+ *
+ *  GET is the pane attaching, `?from=<n>` being how much of the screen it already holds.
+ *  `from=0` is a pane attaching fresh, and that is also the one thing that replaces a shell
+ *  which has left: a dock reopened after `exit` gets a new shell, and a dock in the middle
+ *  of a session that re-reads from 0 gets the screen it already had.
+ *
+ *  POST is a frame going the other way — the keystrokes, unread, because what a key means
+ *  is the far end's. A frame that is not one is refused rather than guessed at, and a key
+ *  pressed at a shell that has left is told so rather than dropped. */
+export function shellAt(
+  where: () => string,
+  opens: Opens = (options) => Session.open(options),
+): { readonly route: Handler; readonly close: () => void } {
+  let held: Shelled | null = null;
+  let told = false;
+
+  const opened = (fresh: boolean): Shelled => {
+    if (held === null || (fresh && !held.running)) {
+      held = opens({ command: loginShell(), cwd: where() });
+      told = false;
+    }
+    return held;
+  };
+
+  const get: Page = (url) => {
+    const asked = Number(url.searchParams.get("from") ?? 0);
+    const from = Number.isInteger(asked) && asked >= 0 ? asked : 0;
+    const shell = opened(from === 0);
+    const drawn = shell.output;
+    const frames: string[] = [];
+    if (from < drawn.length) frames.push(encode({ kind: "output", chunk: drawn.slice(from) }));
+    // Once, and only after the screen has been handed over: a pane told twice that the
+    // shell left would print it twice, and one told before the last chunk would print it
+    // above the shell's own goodbye.
+    if (!shell.running && !told) {
+      told = true;
+      frames.push(encode({ kind: "exit", code: shell.exit ?? 0 }));
+    }
+    return json({ at: drawn.length, frames } satisfies Drawn);
+  };
+
+  const post: Verb = (_url, body) => {
+    const message = decode(body);
+    if (message === null || (message.kind !== "keys" && message.kind !== "prompt")) {
+      return text(400, "that is not a frame the shell takes — keys or prompt");
+    }
+    if (held === null || !held.running) return text(409, "the shell has left — attach again");
+    if (message.kind === "keys") held.keys(message.data);
+    else held.prompt(message.text);
+    return json({ at: held.output.length });
+  };
+
+  /** The process that owns the socket owns this too. A board killed at the terminal must
+   *  not leave the operator's shell running behind it, and the kill is not waited on —
+   *  a shutdown that hangs on a shell refusing to die is a shutdown nobody can use. */
+  const close = (): void => {
+    void held?.close();
+    held = null;
+  };
+
+  return { route: { get, post }, close };
+}
+
+// ─── the dock's pane ────────────────────────────────────────────────────────────────
+
+/** Where the pane sends what it has, and where it takes the screen from. Both are the
+ *  browser's `fetch` against `SHELL_AT` in the page, and both are a parameter here, so the
+ *  pane can be driven against the route itself with no socket and no browser in the way. */
+export interface Wire {
+  /** A frame going up. */
+  readonly send: (frame: string) => Promise<unknown>;
+  /** Everything drawn since a cursor. */
+  readonly drawn: (from: number) => Promise<Drawn>;
+}
+
+export interface Docked {
+  /** The screen behind the pane, for anything that wants to read it. */
+  readonly screen: Screen;
+  /** Take whatever the shell has drawn since the last pump, and say where the cursor is. */
+  readonly pump: () => Promise<number>;
+}
+
+/** The dock's pane: the painter's terminal, attached to the shell behind the route.
+ *
+ *  `attach` is the painter's and is not reimplemented here. That is the whole point — the
+ *  pane owns the bytes and nothing else, the far end owns the screen, a keystroke goes up
+ *  unread and an escape sequence comes down whole. What this adds is the transport: one
+ *  frame up per press, and a `pump` that carries the cursor so a chunk is drawn once.
+ *
+ *  The window is the pty's own row count, so the pane holds exactly the screen the far end
+ *  was told it was drawing to rather than a history of it.
+ *
+ *  Nothing here reads a global, the way nothing in the painter's pane does: every part of
+ *  the page arrives as a parameter. No document of this surface carries a script yet, so
+ *  what runs this in a browser is still to come — but the wire and the screen are this
+ *  function, and they are provable without one. */
+export function dock(parts: Parts, wire: Wire, rows: number = DEFAULT_ROWS): Docked {
+  const pane = attach(parts, (message: ToSession) => void wire.send(encode(message)), rows);
+  let at = 0;
+  return {
+    screen: pane.screen,
+    pump: async (): Promise<number> => {
+      const drawn = await wire.drawn(at);
+      for (const frame of drawn.frames) pane.receive(frame);
+      at = drawn.at;
+      return at;
+    },
+  };
+}
+
+/** Which element of the dock is which part of the pane. One list, so the markup above and
+ *  the pane cannot drift, and the names are the `data-ui` ones the dock is already drawn
+ *  under rather than a second set invented for script.
+ *
+ *  The line is both the keyboard and the composer: it is where the designer's keys are, and
+ *  `attach` defaults-prevents every press that makes bytes, so Enter goes down the wire as
+ *  CR instead of submitting the form. The form is wired all the same — a submit that does
+ *  arrive carries a whole line, and a line sent whole must not be dropped. */
+export const PARTS = {
+  screen: `[data-ui="shell.dock.output"]`,
+  keyboard: `#${DOCK}-line`,
+  composer: `#${DOCK}-line`,
+  send: `[data-ui="shell.dock.command"]`,
+} as const;
