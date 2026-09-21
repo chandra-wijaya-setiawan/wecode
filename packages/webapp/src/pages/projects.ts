@@ -11,6 +11,13 @@
  *  read from `packages/tui/config/views.yaml` through `@wecode/tui`. A board drawn from a
  *  second list of boxes is a second board, and it goes stale the first time one is renamed.
  *
+ *  Beside the boxes the strip carries the seven readings `packages/webapp/config/ui.yaml`
+ *  declares under `projects.strip`, and each card carries the three ways out the mockup puts
+ *  on one. Every node the definition names is drawn with its own `data-ui` and the words the
+ *  definition gives it, so the drawing and the declaration can be read against each other —
+ *  the boxes are what the board *is grouped into*, and the readings are what a person asks
+ *  of the workspace, which is why both are in the one line rather than in two strips.
+ *
  *  What a card says beyond the row is a project's pulse: how long since anything under it
  *  moved, and how many tests have gone green per hour. Both are `@wecode/core`'s — `silence`
  *  and `throughput` — and both are optional, because the page is readable without them and a
@@ -19,7 +26,9 @@ import type { Board, Row } from "@wecode/core";
 import { loadOffPage, loadViews, sectionMark, type View } from "@wecode/tui";
 import { html, type Page, type Reply, type Routes } from "../server.js";
 import { escape } from "./board.js";
+import { pathOf } from "./discover.js";
 import { document, shelled } from "./shell.js";
+import { PROJECT } from "./tasks.js";
 
 /** A project's beat, by project id: how long since anything under it moved, in
  *  milliseconds, and its passes per hour oldest bucket first. Each is a `Map` because that
@@ -105,6 +114,84 @@ const cell = (view: View, board: Board): string => {
   );
 };
 
+/** A count the definition's strip names and the board cannot answer. Drawn as the dash
+ *  rather than left out, for the reason the ledger's strip draws its own: a count that is
+ *  missing reads as a count of nothing, and the two are different sentences. */
+const UNCOUNTED = "—";
+
+/** The seven readings `ui.yaml` puts in `projects.strip`, in its order: the name each
+ *  carries as its `data-ui`, the words the definition gives it, and what the board can
+ *  answer it with.
+ *
+ *  Three of them are the mockup's and not the board's. "landed today" and "attempts ok
+ *  today" are both cut at a day, and nothing on the board carries the hour it happened —
+ *  `delivered` is what is *waiting* to land, and what became of an attempt is the ledger
+ *  table's, which this page is not served. "master" is a fact about a checkout and not
+ *  about the record at all. Each is the dash, so the strip is the seven the definition
+ *  names either way. */
+const readings = (
+  board: Board,
+): readonly (readonly [string, string, string | number])[] => [
+  ["running", "agents running", board.running.length],
+  ["needs-you", "need you", board.needs_human.length],
+  // What is stuck, which is the board's own fold: a task that gave up and work nothing is
+  // moving. Red on the mockup, and the one count on the strip somebody has to act on.
+  ["blocked", "blocked", board.cooking.length],
+  // Begun and not finished: `open` is every epic and story still owed and `planned` is the
+  // half nobody has picked up, so what is in progress is the difference between them.
+  ["in-progress", "stories in progress", Math.max(0, board.open.length - board.planned.length)],
+  ["landed", "landed today", UNCOUNTED],
+  ["attempts", "attempts ok today", UNCOUNTED],
+  ["master", "master", UNCOUNTED],
+];
+
+/** One declared cell of the strip, written the way the mockup writes one — the value loud,
+ *  the words it counts underneath — and carrying the name the definition knows it by. A
+ *  cell holding nothing, or holding the dash, is dimmed exactly as a box holding no row is. */
+const reading = ([name, says, held]: readonly [string, string, string | number]): string =>
+  `<li class="${held === 0 || held === UNCOUNTED ? "none" : "some"}" ` +
+  `data-ui="projects.strip.${name}">` +
+  `<b class="count">${escape(String(held))}</b>` +
+  `<span class="title">${escape(says)}</span></li>`;
+
+/** The three ways out of a card the mockup draws, as the ordinary anchors they are: this
+ *  page reads the board and changes nothing, so a way on is a link and never a verb.
+ *
+ *  Where each page answers is `discover.ts`'s one answer, asked for here rather than spelled
+ *  a second time — and where a page can be narrowed to one project it is, on the one word
+ *  both of those pages narrow on. `open` is the project's own work, which is what the tasks
+ *  page is, and it narrows on the project's name because that is what a task carries; the
+ *  tree narrows on the id because that is what a node carries; the decisions page keeps the
+ *  whole workspace's questions and takes no narrowing at all.
+ *
+ *  All three are on every card. The definition says of two of them that they are *offered*
+ *  on a project with a decision waiting, or with records to show, and neither is a question
+ *  this page can ask: the board's `needs_human` rows are the workspace's and carry no
+ *  project, so a card that hid its decisions link would be hiding it on a guess. A link to
+ *  a page that turns out to have nothing on it is a cheaper wrong answer than a way out
+ *  that is missing from some cards and not others for a reason the reader cannot see.
+ *
+ *  The node the definition calls `projects.project` is on this row rather than on the card's
+ *  own `<li>`: two files outside this story find a card in a live workspace's page by
+ *  looking for exactly `<li id="project-N">`, so the card's opening tag is not this story's
+ *  to widen, and the row is the nearest element that is one project's and holds the three
+ *  links the definition parents under it. */
+const ways = (row: Row): string =>
+  `<div data-ui="projects.project">` +
+  (
+    [
+      ["open", `${pathOf("tasks")}?${PROJECT}=${encodeURIComponent(row.what)}`],
+      ["decisions", pathOf("decisions")],
+      ["tree", `${pathOf("tree")}?${PROJECT}=${row.id}`],
+    ] as const
+  )
+    .map(
+      ([says, at]) =>
+        `<a class="code" data-ui="projects.project.${says}" href="${at}">${says}</a>`,
+    )
+    .join(" ") +
+  `</div>`;
+
 /** One project, as its row and whatever of its pulse is known. */
 function card(row: Row, pulse: Pulse): string {
   const quiet = pulse.silence?.get(row.id);
@@ -126,6 +213,7 @@ function card(row: Row, pulse: Pulse): string {
           : `<span class="spark">${spark(series)}</span><span class="rate">${rate}/h</span>`) +
         (quiet === undefined ? "" : `<span class="quiet">quiet ${since(quiet)}</span>`) +
         `</div>`) +
+    ways(row) +
     `</li>`
   );
 }
@@ -149,12 +237,16 @@ export function projectsContents(
   off: readonly View[] = loadOffPage(),
 ): string {
   const box = heading(off);
-  const strip = `<ul class="strip">${views.map((v) => cell(v, board)).join("")}</ul>`;
+  const strip =
+    `<div data-ui="projects.strip"><ul class="strip">` +
+    views.map((v) => cell(v, board)).join("") +
+    readings(board).map(reading).join("") +
+    `</ul></div>`;
   const cards =
     board.projects.length === 0
       ? `<p class="empty">${escape(box.empty)}</p>`
       : `<ul class="cards">${board.projects.map((p) => card(p, pulse)).join("")}</ul>`;
-  return `<h2>${escape(box.title)}</h2>${strip}${cards}`;
+  return `<h2 data-ui="projects">${escape(box.title)}</h2>${strip}${cards}`;
 }
 
 /** The whole document: what the page says, in the shell design.yaml declares. */
