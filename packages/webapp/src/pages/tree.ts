@@ -12,9 +12,18 @@
  *  outnumber the work. So they are not folded away, they are gone: a task hangs under the
  *  story it is work on, through however many levels of proof the record put in between.
  *
- *  There is no fold marker. The design gives a parent one because a terminal row is either
- *  open or closed and the mark says which; a nested list is open, and a mark saying so on
- *  every parent would say only "this row has children", which the list already says.
+ *  A parent is a disclosure, the way a comment thread's is: the reader closes a branch they
+ *  are not reading and opens it again later, and the browser keeps the marker and the
+ *  keyboard for us. Every one is open when the page arrives — a tree that hides work by
+ *  default is a tree nobody trusts — and a leaf gets none, because there is nothing to
+ *  disclose. Approval 1561 settled that this surface may carry controls; a disclosure is
+ *  the mildest of them, and it changes nothing in wecode, only what this reader is looking
+ *  at.
+ *
+ *  The page arrives narrowed to work that is still owed. Delivered, done and dropped are
+ *  what the machines call terminal, and a record that keeps everything it ever finished
+ *  buries what is left; so `open` is on unless the query says `open=0`, and the chip that
+ *  says so is the one the reader turns off to see the rest.
  *
  *  The nodes arrive as nodes, not as a database, for the reason the board's do: where a
  *  workspace is, is `bin.ts`'s.
@@ -125,10 +134,16 @@ export function shown(nodes: readonly Node[], levels: Levels = loadLevels()): re
   });
 }
 
-const branch = (node: Node): string =>
-  `<li id="${escape(node.entity)}-${node.id}" data-ui="${NODE}">${row(node)}${
-    node.children.length === 0 ? "" : `<ul>${node.children.map(branch).join("")}</ul>`
-  }</li>`;
+/** One row and whatever hangs under it. A parent's row goes in the `<summary>` of an open
+ *  `<details>`, so the whole branch closes and opens on that row; a leaf is the row alone. */
+const branch = (node: Node): string => {
+  const open = `<li id="${escape(node.entity)}-${node.id}" data-ui="${NODE}">`;
+  if (node.children.length === 0) return `${open}${row(node)}</li>`;
+  return (
+    `${open}<details open><summary>${row(node)}</summary>` +
+    `<ul>${node.children.map(branch).join("")}</ul></details></li>`
+  );
+};
 
 /** What the page says: the tree, and nothing around it. The frame is the shell's. */
 export function treeBranches(nodes: readonly Node[], levels?: Levels): string {
@@ -205,20 +220,34 @@ export function chips(nodes: readonly Node[]): readonly Chip[] {
   ];
 }
 
-/** Where a chip sends the reader: the query it is on now, with this chip's own parameter
- *  put on, or taken off again if it is already on. Everything else in the query survives —
- *  that is what makes the chips add up rather than replace one another. */
+/** The one chip that is on when nobody asked, and the word that turns it off. A chip which
+ *  is on by default cannot be turned off by dropping its parameter — an absent parameter is
+ *  what "on" looks like — so turning it off is a value of its own. */
+const BY_DEFAULT = "open";
+const OFF = "0";
+
+const isOn = (url: URL, chip: Chip): boolean =>
+  chip.param === BY_DEFAULT
+    ? url.searchParams.get(chip.param) !== OFF
+    : url.searchParams.get(chip.param) === chip.value;
+
+/** Where a chip sends the reader: the query it is on now, with this chip turned the other
+ *  way. Everything else in the query survives — that is what makes the chips add up rather
+ *  than replace one another. */
 export function chipHref(url: URL, chip: Chip): string {
   const query = new URLSearchParams(url.searchParams);
-  if (query.get(chip.param) === chip.value) query.delete(chip.param);
+  const on = isOn(url, chip);
+  if (chip.param === BY_DEFAULT) {
+    if (on) query.set(chip.param, OFF);
+    else query.delete(chip.param);
+  } else if (on) query.delete(chip.param);
   else query.set(chip.param, chip.value);
   const said = query.toString();
   return said === "" ? "?" : `?${said}`;
 }
 
-const isOn = (url: URL, chip: Chip): boolean => url.searchParams.get(chip.param) === chip.value;
-
-/** The record as the query asks for it. A project narrows to that project's own tree. A
+/** The record as the query asks for it, and `open` counts as asked for until the query says
+ *  otherwise. A project narrows to that project's own tree. A
  *  state chip keeps a row that matches every chip that is on — and keeps a row that matches
  *  none of them but has a kept row under it, because a row shown without the rows it hangs
  *  under is a row nobody can place. */
@@ -228,7 +257,9 @@ export function narrowed(nodes: readonly Node[], url: URL): readonly Node[] {
     project === null
       ? nodes
       : nodes.filter((n) => n.entity === "project" && String(n.id) === project);
-  const asked = Object.keys(KEEPS).filter((param) => url.searchParams.has(param));
+  const asked = Object.keys(KEEPS).filter((param) =>
+    param === BY_DEFAULT ? url.searchParams.get(param) !== OFF : url.searchParams.has(param),
+  );
   if (asked.length === 0) return roots;
   const kept = (node: Node): Node | null => {
     const children = node.children.map(kept).filter((k): k is Node => k !== null);
@@ -239,7 +270,7 @@ export function narrowed(nodes: readonly Node[], url: URL): readonly Node[] {
 }
 
 /** The filter row: the word the declaration gives it, then its chips, each one a link. The
- *  chips are links and never controls — every verb that changes wecode is the cli's, and
+ *  chips are links and never forms — every verb that changes wecode is the cli's, and
  *  narrowing a reading changes nothing. */
 function filterRow(nodes: readonly Node[], url: URL): string {
   const drawn = chips(nodes)
@@ -253,8 +284,7 @@ function filterRow(nodes: readonly Node[], url: URL): string {
 }
 
 /** The whole page: the section the declaration names, the filter row, and the tree under
- *  whatever the query left of the record. There is no fold here and there is none in a row
- *  — see the note at the top of this file. */
+ *  whatever the query left of the record. */
 export function treeSection(nodes: readonly Node[], url: URL, levels?: Levels): string {
   const roots = narrowed(nodes, url);
   const body =
