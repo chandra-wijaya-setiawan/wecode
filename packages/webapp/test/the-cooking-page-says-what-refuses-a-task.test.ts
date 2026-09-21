@@ -12,7 +12,18 @@
  *  does not, which is the reason the page exists. And that the wording of every refusal
  *  comes out of views.yaml, read through the same loader the terminal reads it through: a
  *  page that spelled *gave up* itself would go on saying it after the config said
- *  something else. */
+ *  something else.
+ *
+ *  And that the page is drawn as the definition declares it. None of `cooking`,
+ *  `cooking.task`, `cooking.seats` or `cooking.red-at-base` was anywhere in the markup, so
+ *  nothing could check the drawing against the declaration. The two cards ask the board
+ *  something the board does not hold — it has no roster of seats and no test run — so each
+ *  is drawn as the dash and the reason, because a node left out reads as a node whose
+ *  answer is nothing, which is a different sentence and a false one.
+ *
+ *  `cooking.task.retry` and `cooking.task.drop` are held undrawn here, and that is asserted
+ *  rather than assumed: they are verbs, this surface offers none, and they are the same two
+ *  the task detail withholds in `the-task-detail-offers-its-actions.test.ts`. */
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -50,13 +61,15 @@ const boardOf = (rows: readonly Row[]): Board =>
     cooking: rows,
   }) satisfies Board;
 
-/** The group headings the page came out with, in the order it wrote them. */
+/** The group headings the page came out with, in the order it wrote them. A group's head
+ *  is the marked one; the page's own `<h2>Cooking</h2>` is not a group and is held below. */
 const headings = (body: string): readonly string[] =>
-  [...body.matchAll(/<h2>.*?<\/span>([^<]*)</g)].map((m) => m[1] as string);
+  [...body.matchAll(/<h2><span class="mark">[^<]*<\/span>([^<]*)</g)].map((m) => m[1] as string);
 
-/** The markup of the rows, one per entry, in document order. */
+/** The markup of the rows, one per entry, in document order. A row is the one `li` that
+ *  carries a class — the page's two cards are `li`s of their own and are held elsewhere. */
 const lines = (body: string): readonly string[] =>
-  [...body.matchAll(/<li class="[^"]*">.*?<\/li>/g)].map((m) => m[0]);
+  [...body.matchAll(/<li class="[^"]*"[^>]*>.*?<\/li>/g)].map((m) => m[0]);
 
 /** What one row's why column says. */
 const whyOf = (line: string): string => /<span class="why">([^<]*)</.exec(line)?.[1] ?? "no why";
@@ -170,7 +183,9 @@ describe("the page is the whole list", () => {
 
   it("says views.yaml's own sentence when nothing is stuck", () => {
     const view = loadViews().find((v) => v.filter === "cooking");
-    expect(cookingGroups([])).toBe(`<p class="empty">${view?.empty as string}</p>`);
+    const body = cookingGroups([]);
+    expect(body).toContain(`<p class="empty">${view?.empty as string}</p>`);
+    expect(lines(body)).toEqual([]);
   });
 });
 
@@ -179,6 +194,130 @@ describe("a row is a person's words, not markup", () => {
     const body = cookingGroups([row(1, "failed", `a <script> in the "title"`)]);
     expect(body).toContain("&lt;script&gt;");
     expect(body).not.toContain("<script>");
+  });
+});
+
+/** The nodes `packages/webapp/config/ui.yaml` declares under `cooking`: the id each carries
+ *  as its `data-ui`, and the words the definition gives it. Written out here rather than
+ *  read off that file because the file is not in this tree — it has never landed on master
+ *  and this story may not add it. When it lands, this table is what it is read against. */
+const DECLARED: readonly (readonly [string, string | null])[] = [
+  ["cooking", "Cooking"],
+  ["cooking.task", null],
+  ["cooking.seats", "Seats"],
+  ["cooking.red-at-base", "Red at base"],
+];
+
+/** The two the definition declares and this page deliberately does not draw. Both are
+ *  buttons offered on a ticket that is out of attempts, and this surface has no verb. */
+const WITHHELD: readonly string[] = ["cooking.task.retry", "cooking.task.drop"];
+
+/** A page with something under every declared node. */
+const busy = (): string =>
+  cookingGroups([row(1, "running"), row(2, "failed"), row(3, "approval"), row(4, "running")]);
+
+describe("every node the definition declares is drawn, by its own name", () => {
+  const body = busy();
+  const where = (id: string): number => body.indexOf(`data-ui="${id}"`);
+
+  it("draws each declared node, carrying its id and saying what the definition says", () => {
+    for (const [id, says] of DECLARED) {
+      expect(body, id).toContain(`data-ui="${id}"`);
+      if (says !== null) expect(body.slice(where(id), where(id) + 200), id).toContain(says);
+    }
+  });
+
+  it("says the lead the definition gives the page, in the definition's words", () => {
+    expect(body).toContain("Tickets that are moving — the wecode workers move them for you.");
+  });
+
+  it("nests them as the definition parents them", () => {
+    for (const inner of ["cooking.task", "cooking.seats", "cooking.red-at-base"]) {
+      expect(where("cooking"), `cooking before ${inner}`).toBeLessThan(where(inner));
+    }
+    // One element holds the whole page, so the outer node closes after the last of them.
+    expect(body.startsWith(`<section class="cooking" data-ui="cooking">`)).toBe(true);
+    expect(body.endsWith("</section>")).toBe(true);
+  });
+
+  it("orders the row, the seats and the red at base as the definition orders them", () => {
+    expect(where("cooking.task")).toBeLessThan(where("cooking.seats"));
+    expect(where("cooking.seats")).toBeLessThan(where("cooking.red-at-base"));
+  });
+
+  it("draws the page's node once, and the ticket's row once per ticket", () => {
+    expect([...body.matchAll(/data-ui="cooking"/g)]).toHaveLength(1);
+    expect([...body.matchAll(/data-ui="cooking\.task"/g)]).toHaveLength(4);
+    expect([...cookingGroups([]).matchAll(/data-ui="cooking\.task"/g)]).toHaveLength(0);
+  });
+
+  it("draws every node on a board with nothing in it, because a node is not its content", () => {
+    const bare = cookingGroups([]);
+
+    for (const [id] of DECLARED) {
+      if (id !== "cooking.task") expect(bare, id).toContain(`data-ui="${id}"`);
+    }
+  });
+
+  it("leaves every one of them inside a shape the look already styles", () => {
+    // `cooking`'s only root is `section.cooking`, and this page may not edit the design. So
+    // every node is a `section.cooking`, or an `li` inside one.
+    for (const [, drawn] of body.matchAll(/(<[a-z0-9]+[^>]*data-ui="[^"]+"[^>]*>)/g)) {
+      expect(drawn, drawn).toMatch(/^<(section class="cooking"|li )/);
+    }
+  });
+});
+
+describe("a card the board cannot answer says the dash and why, not a number it made up", () => {
+  const said = (body: string, id: string): string =>
+    body.slice(body.indexOf(`data-ui="${id}"`)).split("</li>")[0] ?? "";
+
+  it("counts the seats it can — a moving row is a worker holding one", () => {
+    expect(said(busy(), "cooking.seats")).toContain("2 busy");
+    expect(said(cookingGroups([row(1, "failed")]), "cooking.seats")).toContain("0 busy");
+  });
+
+  it("draws the idle seats as the dash, because the board holds no roster", () => {
+    const seats = said(busy(), "cooking.seats");
+
+    expect(seats).toContain("— idle");
+    expect(seats).not.toContain("0 idle");
+    expect(seats).toContain("the board names only who is working");
+  });
+
+  it("draws red at base as the dash and a reason, with no test run of its own", () => {
+    const red = said(busy(), "cooking.red-at-base");
+
+    expect(red).toContain("—");
+    expect(red).toContain("red at base lives on the acceptance test in the record");
+    expect(red).toContain("the board carries no test run");
+    expect(red).not.toMatch(/\d/);
+  });
+
+  it("draws both cards whether or not anything is cooking", () => {
+    for (const id of ["cooking.seats", "cooking.red-at-base"]) {
+      expect(cookingGroups([]), id).toContain(`data-ui="${id}"`);
+    }
+  });
+});
+
+describe("the two verbs the definition declares on a row are not drawn", () => {
+  it("names neither of them anywhere in the markup", () => {
+    const body = busy();
+
+    for (const id of WITHHELD) expect(body, id).not.toContain(id);
+    expect(body).not.toContain("retry with reason");
+    expect(body).not.toMatch(/<button|<form|<input/);
+  });
+
+  it("says in the page's own words why they are held back", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("../src/pages/cooking.ts", import.meta.url)),
+      "utf8",
+    );
+
+    for (const id of WITHHELD) expect(source, id).toContain(id);
+    expect(source).toContain("this surface offers none");
   });
 });
 

@@ -21,7 +21,19 @@
  *  in `READS`. See `discover.ts` — there is no table to add it to.
  *
  *  Read-only, like every page of this surface: `renderers.webapp` says the web offers no
- *  verb, so a row that wants a person says what to type and offers nothing to click. */
+ *  verb, so a row that wants a person says what to type and offers nothing to click.
+ *
+ *  Every node `packages/webapp/config/ui.yaml` declares under `cooking` is drawn here,
+ *  carrying its `data-ui` name and the words the definition gives it — the page itself
+ *  with its lead, the ticket row, the seats card and the red-at-base card. The last two
+ *  ask the board something the board does not hold, so each is drawn as the dash and the
+ *  reason rather than left out: a node nothing is said under reads as a node whose answer
+ *  is nothing, and that is a different sentence.
+ *
+ *  `cooking.task.retry` and `cooking.task.drop` are not drawn. Both are verbs on a ticket
+ *  that is out of attempts, and this surface offers none — they are the same two verbs the
+ *  task detail withholds, and they belong with that page's own pair rather than repeated
+ *  here on a row that is only a reading. */
 import type { Board, Row } from "@wecode/core";
 import { code, description, loadViews, mark, why, groupCooking, type View } from "@wecode/tui";
 import { html, type Page, type Reply } from "../server.js";
@@ -35,11 +47,18 @@ const MOVING = "a worker has it";
 /** Is this row moving, or is its why the thing refusing it? */
 export const moving = (row: Row): boolean => why(row) === MOVING;
 
+/** The name the definition gives an element, written into the markup so the drawing and
+ *  the declaration are checkable against each other by anything that can read either. */
+const named = (ui: string): string => ` data-ui="${ui}"`;
+
 /** One row: what it is, what state it is in, what it says, and its why in full. The why is
  *  on every row and not only on the head — a row copied out of this page alone still has
- *  to say what is holding it. */
+ *  to say what is holding it.
+ *
+ *  This is `cooking.task`, the one node the definition declares once and the page draws per
+ *  record: a ticket that is moving, running, blocked, ready or failed. */
 const line = (row: Row): string =>
-  `<li class="${moving(row) ? "moving" : "refused"}">` +
+  `<li class="${moving(row) ? "moving" : "refused"}"${named("cooking.task")}>` +
   `<span class="code">${escape(code(row))}</span>` +
   `<span class="state">${escape(row.state)}</span>` +
   `<span class="what">${escape(description(row))}</span>` +
@@ -73,19 +92,68 @@ function group(rows: readonly Row[]): string {
   );
 }
 
-/** What the page says: its groups, and nothing around them. The frame is the shell's, and
- *  so is the look — this page names no stylesheet of its own, because the whole surface's
- *  is `renderers.webapp.look` and a page that carried a second one would be a second look.
+/** The words the definition gives the page itself: what it is called, and what it says the
+ *  page is for. Neither is this file's sentence — both are read off the signed mockup. */
+const SAYS = "Cooking";
+const LEAD = "Tickets that are moving — the wecode workers move them for you.";
+
+/** What a declared reading shows when the board does not carry it. A dash rather than a
+ *  zero, for the reason a null minute is not a zero one: nothing measured is not the same
+ *  as measured as none. */
+const NOTHING = "—";
+
+/** One card: the word the definition labels it with, what the page can say for it, and why
+ *  that is all. It is a row of a list inside the page's own section, so the look already
+ *  dresses it — the surface gains a reading, not a second shape. */
+const card = (ui: string, says: string, said: string, why: string): string =>
+  `<li${named(ui)}><span class="state">${escape(says)}</span>` +
+  `<span class="what">${escape(said)}</span>` +
+  `<span class="why">${escape(why)}</span></li>`;
+
+/** The two cards the definition declares under the rows.
+ *
+ *  Seats is half a question this page can answer. A moving row is a seat a worker is
+ *  holding, so the busy count is the page's own rows counted once — but the board names
+ *  only who is working, so there is no roster to take idle off and no role on a row to
+ *  split either by. Red at base is none of it: which test was already failing is the
+ *  record's, on the acceptance test, and this page is served the board. */
+const cards = (rows: readonly Row[]): string =>
+  `<ul>` +
+  card(
+    "cooking.seats",
+    "Seats",
+    `${rows.filter(moving).length} busy · ${NOTHING} idle`,
+    "the board names only who is working — no roster of seats, and no role on a row",
+  ) +
+  card(
+    "cooking.red-at-base",
+    "Red at base",
+    NOTHING,
+    "red at base lives on the acceptance test in the record — the board carries no test run",
+  ) +
+  `</ul>`;
+
+/** What the page says: its lead, its groups and its two cards, and nothing around them. The
+ *  frame is the shell's, and so is the look — this page names no stylesheet of its own,
+ *  because the whole surface's is `renderers.webapp.look` and a page that carried a second
+ *  one would be a second look.
  *
  *  Empty is views.yaml's word for the Cooking box — *nothing is stuck* — because this page
  *  and that box keep the same rows, and a page that invented its own sentence for having
- *  none of them would be saying a second thing about one fact. */
+ *  none of them would be saying a second thing about one fact. The cards are drawn either
+ *  way: a node is not its content, and a card that vanished when the page went quiet would
+ *  read as a card that failed to draw. */
 export function cookingGroups(rows: readonly Row[], views: readonly View[] = loadViews()): string {
-  if (rows.length === 0) {
-    const view = views.find((v) => v.filter === "cooking");
-    return `<p class="empty">${escape(view === undefined ? "nothing is stuck" : view.empty)}</p>`;
-  }
-  return grouped(rows).map(group).join("");
+  const view = views.find((v) => v.filter === "cooking");
+  const inside =
+    rows.length === 0
+      ? `<p class="empty">${escape(view === undefined ? "nothing is stuck" : view.empty)}</p>`
+      : grouped(rows).map(group).join("");
+  return (
+    `<section class="cooking"${named("cooking")}>` +
+    `<h2>${escape(SAYS)}</h2><p class="empty">${escape(LEAD)}</p>` +
+    `${inside}${cards(rows)}</section>`
+  );
 }
 
 /** The whole document: the groups, in the shell design.yaml declares. */
