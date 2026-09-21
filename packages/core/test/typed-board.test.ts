@@ -2,10 +2,13 @@ import { readFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
+import type { Aged, Row } from "../src/board/row.js";
+import { byId, elapsed, folded, instant, lastLine, minutes, thousands } from "../src/board/row.js";
 import { board, clearRefusal, Engine, openAssignments, recordRefusal, recordScopeRefusal } from "../src/index.js";
 import { freshDb, seed } from "./helpers.js";
 
 const source = readFileSync(fileURLToPath(new URL("../src/board.ts", import.meta.url)), "utf8");
+const rowSource = readFileSync(fileURLToPath(new URL("../src/board/row.ts", import.meta.url)), "utf8");
 
 /** The module with its prose taken out. The comments quote the SQL the port replaced —
  *  which is the only way a reader can see what `storyOfTask` used to be — so "no SQL left"
@@ -529,5 +532,94 @@ describe("the slots an assignment holds, counted through the layer", () => {
 
   it("is zero on a workspace nothing has ever run", () => {
     expect(openAssignments(db)).toBe(0);
+  });
+});
+
+/** The row shaping is the half of the board with no database in it: what a row says, how
+ *  its detail is spelled, and how a folded row is ordered and aged. It lives in
+ *  `src/board/row.ts`, and these hold it there — both that the module is what it claims to
+ *  be, and that `board.ts` calls it rather than keeping a second copy. */
+describe("what a row says, moved out of the board", () => {
+  it("is a module of its own, and the board imports it", () => {
+    expect(rowSource).not.toBe("");
+    expect(source).toContain('from "./board/row.js"');
+  });
+
+  it("keeps the record out of it: no database, no dialect, no table", () => {
+    expect(rowSource).not.toMatch(/\bfrom "node:sqlite"/);
+    expect(rowSource).not.toMatch(/\bfrom "\.\.\/db\.js"/);
+    expect(rowSource).not.toMatch(/\bimport\b/);
+  });
+
+  /** A second copy of `minutes` or `withAge` in `board.ts` would pass every behaviour test
+   *  below and still be the defect this story is about, so the absence is spelled out. */
+  it("leaves no second copy of the shaping behind in the board", () => {
+    for (const moved of ["instant", "elapsed", "minutes", "thousands", "byId", "lastLine", "withAge", "oldestFirst"]) {
+      expect(code, moved).not.toMatch(new RegExp(`(const|function)\\s+${moved}\\b[^;]*=?\\s*\\(`));
+    }
+  });
+
+  it("still hands `Row` and `lastLine` out of board.js, which is where every caller asks", async () => {
+    const board = await import("../src/board.js");
+    expect(board.lastLine).toBe(lastLine);
+  });
+
+  it("reads a timestamp the way the dialect read it, Z supplied or not", () => {
+    expect(instant("2026-09-13T00:00:00.000Z")).toBe(Date.parse("2026-09-13T00:00:00.000Z"));
+    expect(instant("2026-09-13 00:00:00")).toBe(Date.parse("2026-09-13T00:00:00Z"));
+    expect(Number.isNaN(instant("no such time"))).toBe(true);
+  });
+
+  it("counts minutes by truncation, and an undateable row as no time at all", () => {
+    const asOf = Date.parse("2026-09-13T01:00:00.000Z");
+    expect(elapsed("2026-09-13T00:30:30.000Z", asOf)).toBeCloseTo(29.5, 5);
+    expect(minutes("2026-09-13T00:30:30.000Z", asOf)).toBe(29);
+    expect(minutes("not a time", asOf)).toBe(0);
+  });
+
+  it("divides a budget the way SQLite divides it, and reads malformed JSON as nothing", () => {
+    expect(thousands('{"tokens":2500}')).toBe(2);
+    expect(thousands('{"tokens":2500.5}')).toBeCloseTo(2.5005, 5);
+    expect(thousands(null)).toBe(0);
+    expect(thousands("{")).toBe(0);
+    expect(thousands('{"seconds":9}')).toBe(0);
+  });
+
+  it("cuts a test's output down to its last non-blank line", () => {
+    expect(lastLine("running\n\nAssertionError: expected 2\n\n")).toBe("AssertionError: expected 2");
+    expect(lastLine(null)).toBe("");
+    expect(lastLine("  \n \n")).toBe("");
+    expect(lastLine("x".repeat(400))).toHaveLength(120);
+  });
+
+  it("draws every panel in id order", () => {
+    const row = (id: number): Row => ({ id, what: "w", state: "s", detail: "d" });
+    expect([row(3), row(1), row(2)].sort(byId).map((r) => r.id)).toEqual([1, 2, 3]);
+  });
+
+  it("folds the aged rows oldest first, an undateable row last", () => {
+    const at = (id: number, since: string): Aged => ({ since, row: { id, what: "w", state: "s", detail: "" } });
+    const asOf = Date.parse("2026-09-13T01:00:00.000Z");
+    const rows = folded(
+      [
+        at(2, "2026-09-13T00:50:00.000Z"),
+        at(9, "nothing can date this"),
+        at(1, "2026-09-13T00:50:00.000Z"),
+        at(3, "2026-09-13T00:10:00.000Z"),
+      ],
+      asOf,
+    );
+    expect(rows.map((r) => r.id)).toEqual([3, 1, 2, 9]);
+  });
+
+  it("leads the detail with the age, and does not say the same minutes twice", () => {
+    const asOf = Date.parse("2026-09-13T01:00:00.000Z");
+    const since = "2026-09-13T00:10:00.000Z";
+    const shape = (detail: string): string => folded([{ since, row: { id: 1, what: "w", state: "s", detail } }], asOf)[0]?.detail ?? "";
+    expect(shape("")).toBe("50m");
+    expect(shape("gave up · 3 passes")).toBe("50m · gave up · 3 passes");
+    expect(shape("gave up · 50m")).toBe("50m · gave up");
+    // A different number is about something else, so it stays where it was.
+    expect(shape("gave up · 12m")).toBe("50m · gave up · 12m");
   });
 });
