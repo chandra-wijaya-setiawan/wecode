@@ -11,8 +11,10 @@
  *  time: the edge that exists is the other way, that file re-exporting these four so run.ts
  *  imports the same names it always did. */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import {
   answerApproval,
@@ -207,6 +209,7 @@ export function onboard(at: See): number {
 
   write(join(config, "roles.yaml"), rolesFor(learned));
   ignore(resolve(root, ".gitignore"), ".wecode/");
+  const skill = installSkill();
 
   // The workspace is named once, and the repository remembers which one it joined.
   //
@@ -245,7 +248,7 @@ export function onboard(at: See): number {
   const existing = q.selectFrom(at.tables.project).select(["id"]).where("repo", "=", root).get();
   if (existing !== null) {
     process.stdout.write(
-      `project #${existing.id} is already onboarded here\n${workerLines(hired).join("\n")}${hired.length > 0 ? "\n" : ""}`,
+      `project #${existing.id} is already onboarded here\nskill       ${skill}\n${workerLines(hired).join("\n")}${hired.length > 0 ? "\n" : ""}`,
     );
     return 0;
   }
@@ -262,6 +265,7 @@ export function onboard(at: See): number {
       `test        ${learned.test}`,
       learned.typecheck === null ? null : `typecheck   ${learned.typecheck}`,
       `source      ${learned.source.join(", ")}`,
+      `skill       ${skill}`,
       "",
       `workspace   ${wsName}  (${path})`,
       `project #${projectId}  release #${releaseId}`,
@@ -274,6 +278,32 @@ export function onboard(at: See): number {
       .join("\n"),
   );
   return 0;
+}
+
+/** The orchestrator's guidance, as configuration the operator owns rather than a file
+ *  hand-placed on one machine. `config/orchestrator-skill.md` ships with the cli and is
+ *  copied over the installed copy every onboard, so the text a session reads is the text
+ *  this build carries. Unconditional: guidance that goes stale silently is worse than an
+ *  edit lost in the place the file says not to edit. */
+const SKILL = fileURLToPath(new URL("../../config/orchestrator-skill.md", import.meta.url));
+
+/** Where Claude Code looks for skills. `CLAUDE_CONFIG_DIR` is its own knob, so an operator
+ *  with a config directory elsewhere — and a test — moves the install by setting it. A test
+ *  that did not set it gets a temporary directory rather than the operator's real skills,
+ *  the same rule `core`'s home reader uses: onboarding runs in a dozen tests, and none of
+ *  them should be able to write into the home a person is working in. */
+function skillsHome(): string {
+  const explicit = process.env["CLAUDE_CONFIG_DIR"];
+  if (explicit !== undefined) return explicit;
+  const test = process.env["VITEST"] !== undefined || process.env["NODE_ENV"] === "test";
+  return test ? mkdtempSync(join(tmpdir(), "wecode-skills-")) : join(homedir(), ".claude");
+}
+
+function installSkill(): string {
+  const path = join(skillsHome(), "skills", "wecode", "SKILL.md");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, readFileSync(SKILL, "utf8"));
+  return path;
 }
 
 /** A line in .gitignore, added once. */
