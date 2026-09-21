@@ -224,15 +224,15 @@ export class Foreman {
           if (!this.verbs.answerAssignment(row.id, "operator").ok) continue;
           seen = await adapter.answer(work, row.answer);
         } else {
-          // Poll first, judge the deadline after. An assignment the adapter has never heard
-          // of — the runner restarted under it — is lost, not overdue, and the difference
-          // matters: a restart backdates nothing, so every open row looks overdue at once.
-          // Judging first reported two live sessions as timeouts and began them again.
+          // Poll first: an unknown session is lost, not overdue, and must be recovered.
           seen = await adapter.poll(work);
           if (isLost(seen)) seen = await this.recover(adapter, work);
           else if (this.overdue(row)) {
             await adapter.kill(work);
             seen = { phase: "failed", session: row.session, spent: zero(), reason: "timeout" };
+          } else if (seen.phase === "running" && seen.spent.tokens > work.budget.tokens) {
+            await adapter.kill(work);
+            seen = { phase: "failed", session: row.session, spent: seen.spent, reason: "budget_exceeded", lesson: `Stopped after spending its budget: ${seen.spent.tokens} tokens of ${work.budget.tokens} allowed.` };
           }
         }
       } catch (err) {
