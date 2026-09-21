@@ -44,10 +44,21 @@ const empty = (): Board => ({
 });
 
 /** A running row as `board()` writes one: the objective, the phase, and a detail of who is
- *  on it, how long it has been open and what it has spent. */
-const running = (id: number, what: string, detail: string, state = "running"): Row => ({
-  id, what, state, detail,
-});
+ *  on it, how long it has been open and what it has spent. The optional settings stand for
+ *  the assignment's recorded dispatch values, which the page must not replace with its own. */
+type SeatSettings = {
+  readonly model?: string | null;
+  readonly effort?: string | null;
+  readonly harness?: string | null;
+};
+
+const running = (
+  id: number,
+  what: string,
+  detail: string,
+  state = "running",
+  settings: SeatSettings = {},
+): Row => ({ id, what, state, detail, ...settings }) as Row;
 
 const withRunning = (...rows: readonly Row[]): Board => ({ ...empty(), running: rows });
 
@@ -60,7 +71,40 @@ describe("the page is the running box, agent first", () => {
   it("reads a seat's worker, age and cost off the row's own detail", () => {
     const { worker, seat } = seatOf(running(8, "task #12", "opus · 14m · 37k"));
     expect(worker).toBe("opus");
-    expect(seat).toEqual({ id: 8, what: "task #12", phase: "running", minutes: 14, spent: 37 });
+    expect(seat).toEqual({
+      id: 8,
+      what: "task #12",
+      phase: "running",
+      model: null,
+      effort: null,
+      harness: null,
+      minutes: 14,
+      spent: 37,
+    });
+  });
+
+  it("reads the model, effort and harness from the assignment row", () => {
+    const row = running(8, "task #12", "opus · 14m · 37k", "running", {
+      model: "claude-opus-5",
+      effort: "high",
+      harness: "claude-code",
+    });
+    expect(seatOf(row).seat).toMatchObject({
+      model: "claude-opus-5",
+      effort: "high",
+      harness: "claude-code",
+    });
+    const body = agentsContents(withRunning(row));
+    expect(body).toContain(`<span class="model">claude-opus-5</span>`);
+    expect(body).toContain(`<span class="effort">high</span>`);
+    expect(body).toContain(`<span class="harness">claude-code</span>`);
+  });
+
+  it("does not invent a model, effort or harness missing from the record", () => {
+    const body = agentsContents(withRunning(running(8, "task #12", "opus · 14m · 37k")));
+    for (const name of ["model", "effort", "harness"]) {
+      expect(body, name).not.toContain(`<span class="${name}">`);
+    }
   });
 
   it("gathers an agent's seats under one card, however far apart the board sorts them", () => {
@@ -246,6 +290,20 @@ describe("the agents page answers at /agents through discovery", () => {
     for (const verb of ["onclick"]) {
       expect(body, `the agents page offers ${verb}`).not.toContain(verb);
     }
+  });
+});
+
+describe("the running seat look", () => {
+  it("limits the work to two elided lines instead of wrapping it forever", () => {
+    const design = readFileSync(
+      fileURLToPath(new URL("../../tui/config/design.yaml", import.meta.url)),
+      "utf8",
+    );
+    const what = design.match(/"section\.agents ul\.agents ul\.seats li \.what": "([^"]+)"/)?.[1] ?? "";
+    expect(what).toContain("-webkit-line-clamp: 2");
+    expect(what).toContain("overflow: hidden");
+    expect(what).toContain("text-overflow: ellipsis");
+    expect(what).not.toContain("overflow-wrap");
   });
 });
 
