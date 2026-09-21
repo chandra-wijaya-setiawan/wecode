@@ -1,12 +1,34 @@
 /** The cockpit, proved the way it is used: the built binary in a terminal of its own. */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parse } from "yaml";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { open } from "@wecode/core";
 import { Cockpit, text } from "./pty.js";
 import { seed } from "./seed.js";
+
+/** The glyph each head opens with is read out of the config the board reads it out of, so
+ *  a mark this file looks for cannot be a transcription of one — it is the same character,
+ *  from the same line, and an edit to the design moves the screen and this file at once.
+ *  `proposal.marks` is the design's answer for the seven boxes; the lead section is not one
+ *  of them — no filter, no letter, no glyph in the proposal — so it keeps views.yaml's. */
+const config = <T,>(name: string): T =>
+  parse(readFileSync(fileURLToPath(new URL(`../config/${name}`, import.meta.url)), "utf8")) as T;
+
+const marks = config<{ proposal: { marks: Record<string, string> } }>("design.yaml").proposal.marks;
+const lead = config<{ services: { mark: string } }>("views.yaml").services.mark;
+
+/** A section the design forgot would spell its head `undefined NAME`, which is still a
+ *  string a head can be looked for by — so a missing glyph is a red here and not a silent
+ *  pass over a head nobody drew. */
+const mark = (section: string): string => {
+  const glyph = marks[section];
+  expect(glyph, `the design marks no ${section}`).toHaveLength(1);
+  return glyph as string;
+};
 
 let dir: string;
 let db: string;
@@ -69,16 +91,18 @@ describe("the built cockpit, driven in a terminal", () => {
       const frame = cockpit.frame();
       // A head is a mark and a name now, with its count at the far right of the same line,
       // so the head is matched by its mark and name and the count is looked for on that
-      // line rather than pinned to the padding between them.
+      // line rather than pinned to the padding between them. The count carries the letter
+      // that opens the box, raised — plain on Queue, which is the one key Unicode has no
+      // superscript for.
       const heads = [
-        ["= SERVICES", ""],
-        ["? NEEDS YOU", "0ⁿ"],
-        ["> RUNNING", "0ʳ"],
-        ["- QUEUE", "1q"],
-        ["* COOKING", "0ᶜ"],
-        [". PLANNED", "0ᵖ"],
-        ["+ DELIVERED", "0ᵈ"],
-        ["x DROPPED", "0ˣ"],
+        [`${lead} SERVICES`, ""],
+        [`${mark("needs_you")} NEEDS YOU`, "0ⁿ"],
+        [`${mark("running")} RUNNING`, "0ʳ"],
+        [`${mark("queue")} QUEUE`, "1q"],
+        [`${mark("cooking")} COOKING`, "0ᶜ"],
+        [`${mark("planned")} PLANNED`, "0ᵖ"],
+        [`${mark("delivered")} DELIVERED`, "0ᵈ"],
+        [`${mark("dropped")} DROPPED`, "0ˣ"],
       ];
       const lines = frame.split("\n");
       for (const [head, count] of heads) {
