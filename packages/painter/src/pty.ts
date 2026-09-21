@@ -28,13 +28,16 @@ export class SessionError extends Error {}
 export interface SessionOptions {
   /** The program to run in the pty, and its arguments. */
   readonly command: string;
-  readonly args?: readonly string[];
-  readonly cwd?: string;
-  readonly env?: NodeJS.ProcessEnv;
+  /** The rest may be given as `undefined` as well as left out, because the caller is
+   *  often forwarding options it was itself given — `exactOptionalPropertyTypes` would
+   *  otherwise make a plain pass-through a type error. */
+  readonly args?: readonly string[] | undefined;
+  readonly cwd?: string | undefined;
+  readonly env?: NodeJS.ProcessEnv | undefined;
   /** The size the far end is told the terminal is. A pane that lies about its size draws
    *  a screen that does not fit it, so these are not decoration. */
-  readonly cols?: number;
-  readonly rows?: number;
+  readonly cols?: number | undefined;
+  readonly rows?: number | undefined;
 }
 
 export const DEFAULT_COLS = 100;
