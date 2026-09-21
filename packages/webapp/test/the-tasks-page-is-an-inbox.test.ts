@@ -249,7 +249,9 @@ describe("the component map claims the page", () => {
  *  as its `data-ui`, and the `says` the definition gives it. Written out here rather than
  *  read off that file because the file is not in this tree — it has never landed on master
  *  and this story may not add it. When it lands, this table is what it is read against.
- *  `project` and `seat` are declared with a `repeats` and no `says`. */
+ *  `project` and `seat` are declared with a `repeats` and no `says`; the four the definition
+ *  declares under `tasks.detail` are verbs, are not drawn, and are held in
+ *  `the-task-detail-offers-its-actions` rather than here. */
 const DECLARED: readonly (readonly [string, string | null])[] = [
   ["tasks", "Tasks"],
   ["tasks.filter", "filter:"],
@@ -303,11 +305,6 @@ describe("every node the definition declares is drawn, by its own name", () => {
     expect(body).toContain(`<span class="tag none" data-ui="tasks.filter.seat">no seat in the record</span>`);
     const loose = tasksInbox([node("requirement", 1, { children: [task(8)] })], at());
     expect(loose).toContain(`<span class="tag none" data-ui="tasks.filter.project">no project`);
-  });
-
-  it("draws none of the four that are verbs, which wait on the operator", () => {
-    for (const id of ["transcript", "diff", "retry", "drop"]) expect(body, id).not.toContain(`tasks.detail.${id}`);
-    for (const says of ["read transcript", "open diff", "retry with reason"]) expect(body, says).not.toContain(says);
   });
 });
 
