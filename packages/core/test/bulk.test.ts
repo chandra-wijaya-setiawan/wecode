@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { Engine, bulkDrop } from "../src/index.js";
+import { recordAttemptCommit } from "./db.js";
 import { freshDb, recordRed, seed, stateOf } from "./helpers.js";
 
 let db: DatabaseSync;
@@ -22,6 +23,14 @@ const task = (slug: string): number => {
   return id;
 };
 
+/** Take a task all the way to done. `finish` needs its tests settled *and* a commit its
+ *  own branch carries, so the attempt is recorded alongside the passing test. */
+const finish = (id: number, testId: number): void => {
+  recordAttemptCommit(db, id);
+  engine.apply("task", id, "start", "chief");
+  engine.apply("task_test", testId, "pass", "runner");
+};
+
 const ledgerLines = (): number => (db.prepare("SELECT count(*) AS n FROM ledger").get() as { n: number }).n;
 
 beforeEach(() => {
@@ -35,8 +44,7 @@ describe("a bulk drop is all or nothing", () => {
   it("refuses the whole list when one id refuses, and names the offender", () => {
     const second = task("second");
     // done is terminal for a task: the drop verb does not exist from there.
-    engine.apply("task", tree.task, "start", "chief");
-    engine.apply("task_test", tree.taskTest, "pass", "runner");
+    finish(tree.task, tree.taskTest);
     expect(stateOf(db, "task", tree.task)).toBe("done");
 
     const before = ledgerLines();
@@ -54,8 +62,8 @@ describe("a bulk drop is all or nothing", () => {
   });
 
   it("refuses a done task rather than skipping it silently", () => {
-    engine.apply("task", tree.task, "start", "chief");
-    engine.apply("task_test", tree.taskTest, "pass", "runner");
+    finish(tree.task, tree.taskTest);
+    expect(stateOf(db, "task", tree.task)).toBe("done");
 
     const asked = engine.may("task", tree.task, "drop");
     expect(asked.ok).toBe(false);
@@ -69,8 +77,7 @@ describe("a bulk drop is all or nothing", () => {
 
   it("names every offender in the list, not just the first", () => {
     const second = task("second");
-    engine.apply("task", tree.task, "start", "chief");
-    engine.apply("task_test", tree.taskTest, "pass", "runner");
+    finish(tree.task, tree.taskTest);
     db.prepare("UPDATE task SET state = 'dropped' WHERE id = ?").run(second);
 
     const r = bulkDrop(db, [tree.task, second], "chief");
