@@ -248,6 +248,26 @@ renderers:
           "article dd ul": "list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .4rem"
           "article dd li": "border: 1px solid var(--rule); border-radius: 3px; padding: 0 .4rem; color: var(--mark); font-family: var(--mono); font-size: .92em"
           "article dd.open": "color: var(--faint)"
+          # The card takes the answer. The form is the one place on this surface a person
+          # says something back, so it is drawn as a row of choices with the send beside
+          # them rather than as a panel — a card is still the unit, and the verb belongs to
+          # the question it settles.
+          "article form.answer": "display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .9rem; margin: .8rem 0 0; padding-top: .7rem; border-top: 1px solid var(--rule)"
+          "article form.answer ul.choices": "list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .4rem"
+          "article form.answer ul.choices li": "min-width: 0"
+          # An option is a chip that is picked, and it is the same chip the answers row
+          # draws, so the two readings of one option look like one option.
+          "article form.answer ul.choices label": "display: flex; align-items: baseline; gap: .35rem; border: 1px solid var(--rule); border-radius: 3px; padding: .1rem .5rem; color: var(--mark); font-family: var(--mono); font-size: .92em; cursor: pointer"
+          "article form.answer ul.choices label:hover": "background: var(--page)"
+          "article form.answer ul.choices label:focus-within": "border-color: var(--mark)"
+          "article form.answer ul.choices label span": "overflow-wrap: anywhere"
+          # The way past the list. Faint, because it is what a reader falls back to.
+          "article form.answer label.note": "display: flex; align-items: baseline; gap: .4rem; flex: 1 1 12rem; min-width: 0"
+          "article form.answer label.note span": "color: var(--faint); font-size: .75rem; text-transform: uppercase; letter-spacing: var(--tracking)"
+          "article form.answer label.note input": "flex: 1 1 auto; min-width: 0; background: var(--page); border: 1px solid var(--rule); border-radius: 3px; padding: .2rem .45rem; color: var(--ink); font: inherit"
+          "article form.answer label.note input:focus": "outline: none; border-color: var(--mark)"
+          "article form.answer button": "border: 1px solid var(--mark); border-radius: 3px; background: var(--mark); padding: .25rem 1rem; color: var(--raised); font: inherit; font-weight: 600; cursor: pointer"
+          "article form.answer button:hover": "background: var(--ink); border-color: var(--ink)"
           "article p.how": "margin: .6rem 0 0; color: var(--faint); font-family: var(--serif)"
         tree:
           "ul.tree": "list-style: none; margin: 0; padding: 0"
