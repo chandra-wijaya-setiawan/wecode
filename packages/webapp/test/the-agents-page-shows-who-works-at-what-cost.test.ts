@@ -10,7 +10,16 @@
  *  row's own detail, so an unattributable seat is still shown and still counted. Nobody
  *  working is said rather than drawn blank. And the page is not registered anywhere: it is
  *  a file in `src/pages/` exporting `agentsAt`, which is the whole of what makes it answer
- *  at `/agents`. */
+ *  at `/agents`.
+ *
+ *  Since the roster grew, an agent's card carries the `data-ui` name the definition
+ *  declares it under and hangs its seats in a nested list, below the readings of the agent
+ *  itself, and three cards the board carries nothing for — chore, idle and today — stand
+ *  beside the agents in the same list. Held here is only what that costs this file's
+ *  meaning: the card is still one per agent, the seats are still under their own agent,
+ *  and the three spare cards are drawn without being counted as anybody working. The ids,
+ *  the definition's words and the nesting are proved against the definition itself in
+ *  `the-agents-page-shows-who-is-working`. */
 import type { Server } from "node:http";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -95,10 +104,25 @@ describe("the page is the running box, agent first", () => {
 
   it("draws each agent as its name, how many seats it holds and what it is spending", () => {
     const body = agentsContents(withRunning(running(8, "task #12", "opus · 14m · 37k")));
-    expect(body).toContain(`<li class="worker" id="worker-opus">`);
+    expect(body).toContain(`<li class="worker" id="worker-opus" data-ui="agents.running">`);
     expect(body).toContain(`<span class="name">opus</span>`);
     expect(body).toContain(`<span class="seats">1 working</span>`);
     expect(body).toContain(`<span class="cost">37k</span>`);
+  });
+
+  it("hangs an agent's seats in a list of their own, under the readings of the agent", () => {
+    const body = agentsContents(
+      withRunning(
+        running(8, "task #12", "opus · 14m · 37k"),
+        running(10, "task #14", "opus · 40m · 5k"),
+      ),
+    );
+    const card = body.slice(body.indexOf(`id="worker-opus"`));
+    const seats = card.indexOf(`<ul class="seats">`);
+    expect(card.slice(0, seats)).not.toContain(`id="seat-`);
+    expect(card.indexOf(`data-ui="agents.running.last-said"`)).toBeGreaterThan(seats);
+    expect(card.indexOf(`data-ui="agents.running.last-said"`)).toBeLessThan(card.indexOf(`id="seat-8"`));
+    expect(card.indexOf(`id="seat-8"`)).toBeLessThan(card.indexOf(`id="seat-10"`));
   });
 
   it("draws each seat as the work, the phase it is in and what it has cost", () => {
@@ -117,6 +141,17 @@ describe("the page is the running box, agent first", () => {
       withRunning(running(8, "a", "opus · 1m · 37k"), running(9, "b", "sonnet · 2m · 3k")),
     );
     expect(body).toContain(`<p class="total">2 working · 2 seats · 40k</p>`);
+  });
+
+  /** The chore, idle and today cards are cards of the same list, so a count of cards is
+   *  not a count of agents: what the total says is who the board has running. */
+  it("counts the agents and not the cards, though chore, idle and today stand beside them", () => {
+    const body = agentsContents(withRunning(running(8, "a", "opus · 1m · 37k")));
+    expect(body).toContain(`<p class="total">1 working · 1 seats · 37k</p>`);
+    for (const id of ["agents.chore", "agents.idle", "agents.today"]) {
+      expect(body, id).toContain(`<li class="worker" id="${id.replace(".", "-")}" data-ui="${id}">`);
+    }
+    expect([...body.matchAll(/<li class="worker"/g)]).toHaveLength(4);
   });
 });
 
@@ -139,6 +174,10 @@ describe("a seat nothing can be read off is still a seat", () => {
   it("says so rather than coming back blank when nobody is working", () => {
     expect(agentsContents(empty())).toContain("nobody is working right now");
     expect(agentsContents(empty())).not.toContain(`<ul class="agents">`);
+    // No list, so none of the cards in it either — the word is the whole of the answer.
+    for (const id of ["agents.running", "agents.chore", "agents.idle", "agents.today"]) {
+      expect(agentsContents(empty()), id).not.toContain(`data-ui="${id}"`);
+    }
   });
 
   it("writes an agent's own words as words and not as markup", () => {
