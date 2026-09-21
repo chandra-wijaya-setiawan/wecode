@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import {
   addLesson,
@@ -103,6 +104,41 @@ const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
  *  registered under this kind and there never will be one, so the absence is the normal
  *  case rather than a misconfigured runner. */
 const PERSON = "human";
+
+/** Where the operator writes them, relative to the repository root. The same file the
+ *  ceiling lives in: one place the people who own the tree change, not two. */
+export const CONVENTIONS_CONFIG = join("packages", "core", "config", "project.yaml");
+
+/** The heading the conventions are handed over under, beside the lessons. */
+export const CONVENTIONS_HEADING = "How this repository is built:";
+
+/** The operator's conventions, read off the project config by hand.
+ *
+ *  A list of scalars is the whole grammar this needs, and reading it this way keeps the
+ *  runner's dependency list where it is — the same bargain `ceiling.ts` struck with the
+ *  same file. Everything indented under `conventions:` and starting `- ` is a sentence;
+ *  the block ends at the first line that is neither, so a comment between keys or a key
+ *  that follows cannot leak in. */
+/** The instruction with the conventions under it, so they arrive immediately above the
+ *  lessons every adapter renders next. Nothing is added when there are none: a heading
+ *  with no sentences under it is how the rest of the brief stops being read. */
+export function withConventions(instruction: string, said: readonly string[]): string {
+  if (said.length === 0) return instruction;
+  return [instruction, "", CONVENTIONS_HEADING, ...said.map((s) => `- ${s}`)].join("\n");
+}
+
+export function readConventions(text: string): string[] {
+  const lines = text.split("\n");
+  const at = lines.findIndex((l) => l.trimEnd() === "conventions:");
+  if (at === -1) return [];
+  const said: string[] = [];
+  for (const line of lines.slice(at + 1)) {
+    const row = /^\s+-\s+(.*\S)\s*$/.exec(line);
+    if (row === null) break;
+    said.push((row[1] ?? "").replace(/^["']|["']$/g, ""));
+  }
+  return said;
+}
 
 /** Where the assignments being watched live, when the foreman has to ask git something the
  *  record does not hold — the name of the base branch a merge chore's brief has to say. */
@@ -289,7 +325,7 @@ export class Foreman {
       // chore deliberately does not.
       objective_type: row.objective_type as Work["objective_type"],
       objective_id: row.objective_id,
-      instruction: await this.instructionFor(row),
+      instruction: withConventions(await this.instructionFor(row), this.conventionsFor(row)),
       scope: JSON.parse(row.scope) as Work["scope"],
       budget: JSON.parse(row.budget) as Budget,
       worktree: row.worktree,
@@ -299,6 +335,25 @@ export class Foreman {
       ...(learned.length > 0 ? { lessons: learned } : {}),
       history: this.historyFor(row),
     };
+  }
+
+  /** How this project is built, as the operator wrote it down. Read off the repository the
+   *  assignment belongs to, per call rather than once at construction: a convention edited
+   *  between two ticks is meant to reach the next worker, not the next daemon. A repository
+   *  that declares none hands over nothing at all, heading included. */
+  private conventionsFor(row: OpenRow): readonly string[] {
+    const project = this.projectOf(row.id);
+    const repo =
+      project === null
+        ? null
+        : (this.q.selectFrom(tbl.project).select(["repo"]).where("id", "=", project).get()?.repo ?? null);
+    const root = this.opts.repoRoot ?? repo;
+    if (root === null) return [];
+    try {
+      return readConventions(readFileSync(join(root, CONVENTIONS_CONFIG), "utf8"));
+    } catch {
+      return [];
+    }
   }
 
   /** The ten newest lessons of this assignment's project, newest first — core's own reader,
