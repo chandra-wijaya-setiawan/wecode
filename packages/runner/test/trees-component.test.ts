@@ -48,20 +48,22 @@ const MUTATING: readonly string[] = [
   "worktree",
 ];
 
-/** The two modules that do not go through `trees` yet, and the verbs each still runs itself.
+/** The modules that do not go through `trees` yet, and the verbs each still runs itself.
  *
- *  This is debt, written down as data rather than left to be discovered: `daemon.ts` puts a
- *  story tree back on its base to prove a test there, and `land-chore.ts` carries a second
- *  implementation of the landing merge — a detached tree, a merge, and a compare-and-swap
- *  `update-ref` — that `Trees.land` already knows how to make. Both belong behind methods on
- *  `Trees`, and moving them needs those files in a scope this story did not have.
+ *  This is debt, written down as data rather than left to be discovered: `land-chore.ts`
+ *  carries a second implementation of the landing merge — a detached tree, a merge, and a
+ *  compare-and-swap `update-ref` — that `Trees.land` already knows how to make, and the two
+ *  tick steps split out of `daemon.ts` still put a story tree back on its base and merge a
+ *  branch to prove a test there. All three belong behind methods on `Trees`, and moving them
+ *  needs those files in a scope this story did not have.
  *
  *  The list is asserted exactly, in both directions. A new bypass anywhere in the runner
- *  fails the first test below; migrating one of these two and leaving the row behind fails
+ *  fails the first test below; migrating one of these and leaving the row behind fails
  *  the second. It can only shrink. */
 const OUTSTANDING: Readonly<Record<string, readonly string[]>> = {
-  "daemon.ts": ["checkout", "merge", "reset"],
   "land-chore.ts": ["merge", "update-ref", "worktree"],
+  "tick/prove-stories.ts": ["merge"],
+  "tick/red-at-base.ts": ["checkout", "reset"],
 };
 
 /** A git invocation, in any of the three shapes the runner writes one: `exec("git", [...])`
@@ -125,7 +127,7 @@ describe("trees, as a component of its own", () => {
   it("takes it off the foreman, which no longer owns a tree", () => {
     const foreman = map.components.find((c) => c.name === "foreman");
     expect(foreman?.modules).not.toContain("git");
-    expect(foreman?.modules).toEqual(["foreman", "ports"]);
+    expect(foreman?.modules).toEqual(["foreman", "foreman/prompt", "ports"]);
   });
 
   it("is the only box that claims it", () => {
@@ -185,7 +187,11 @@ describe("every branch and worktree operation goes through it", () => {
   });
 
   it("names the modules that do not go through it yet, and no others", () => {
-    expect(Object.keys(OUTSTANDING).sort()).toEqual(["daemon.ts", "land-chore.ts"]);
+    expect(Object.keys(OUTSTANDING).sort()).toEqual([
+      "land-chore.ts",
+      "tick/prove-stories.ts",
+      "tick/red-at-base.ts",
+    ]);
     for (const module of Object.keys(OUTSTANDING)) {
       expect(modules(), `${module} is listed as outstanding but is not a module`).toContain(module);
     }
