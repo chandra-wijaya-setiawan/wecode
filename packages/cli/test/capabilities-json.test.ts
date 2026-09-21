@@ -173,11 +173,19 @@ suite("every command the document names", () => {
 
 suite("a command added without a line in the manual", () => {
   /** run.ts with one more command in dispatch and nothing about it in usage() — the exact
-   *  drift this whole file exists to catch. */
+   *  drift this whole file exists to catch. The anchor is whatever line dispatches `board`
+   *  today, found rather than typed out: a fixture that names the body of that line turns
+   *  into a copy of run.ts the moment the line is rewritten, and then proves nothing. */
+  const DISPATCHES_BOARD = /^.*head === "board".*$/m;
   const undocumentedCommand = runSource.replace(
-    'if (head === "board") return showBoard(rest);',
-    'if (head === "board") return showBoard(rest);\n  if (head === "frobnicate") return frobnicate(rest);',
+    DISPATCHES_BOARD,
+    (line) => `${line}\n  if (head === "frobnicate") return frobnicate(rest);`,
   );
+
+  it("is built on a line run.ts actually has, so the fixture cannot become a no-op", () => {
+    expect(DISPATCHES_BOARD.test(runSource), "run.ts dispatches no board").toBe(true);
+    expect(undocumentedCommand.split("\n").length).toBe(runSource.split("\n").length + 1);
+  });
 
   it("is named as undocumented", () => {
     expect(undocumentedCommand).not.toBe(runSource);
