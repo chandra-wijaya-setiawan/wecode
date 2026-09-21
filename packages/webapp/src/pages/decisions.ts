@@ -7,12 +7,16 @@
  *  than rows — a card is the unit that fits a whole question — and it is the same rows,
  *  read through `waitingApprovals`, not a second opinion about what is waiting.
  *
- *  The page itself draws no control. `POST /answer` — `answer.ts` — is the surface's one
- *  verb and will answer a card's question, but what this document offers is still the
- *  question and the command that settles it: a card that grew a button would be a design
- *  change to `renderers.webapp`, which says the web surface has no bars, and design.yaml
- *  is where that is decided rather than here. So the verb exists, reachable by anything
- *  that can post, and the card goes on naming the command a reader has to hand.
+ *  So the card takes the answer. `POST /answer` — `answer.ts` — is the surface's one verb,
+ *  and a page that made a person read the question here and then go and find a terminal to
+ *  answer it in was printing the command instead of doing the thing. The card carries a
+ *  form: one radio per declared option in that option's own words, a note for an answer
+ *  nobody listed, and a button. The command stays on the card beside it, because a reader
+ *  with a terminal already open still has one.
+ *
+ *  Only the form is new markup, and every shape it draws is declared in the `decisions`
+ *  block of `renderers.webapp`: this file writes markup, design.yaml says what it looks
+ *  like, and a shape the design does not name is a shape nobody signed.
  *
  *  The approvals arrive as a function, not as a database: what is proved here is the page,
  *  and where a workspace is, is `bin.ts`'s.
@@ -39,7 +43,8 @@ const answerWith = (id: number): string => `wecode answer ${id} "<text>"`;
  *  says that plainly: a question with nothing behind it is a thing a person needs told,
  *  not a card that renders empty. */
 function evidence(said: Evidence | null): string {
-  if (said === null) return `<dd class="open">the work this asked about is gone</dd>`;
+  if (said === null)
+    return `<dd class="open">the work this asked about is gone</dd>`;
   return (
     `<dd>${escape(said.type)} #${said.id} · ${escape(said.statement)}` +
     ` · ${escape(said.state)}</dd>`
@@ -56,6 +61,42 @@ function options(offered: readonly string[] | null): string {
   return `<dd><ul>${offered.map((o) => `<li>${escape(o)}</li>`).join("")}</ul></dd>`;
 }
 
+/** Where the answer is posted. `bin.ts` mounts `answer.ts` here; the form has to spell the
+ *  path it posts to, and this is the one place on the page that spells it. */
+const ANSWER_AT = "/answer";
+
+/** The two fields `answer.ts` reads. Named here so the markup cannot drift from the verb. */
+const ID_FIELD = "id";
+const ANSWER_FIELD = "answer";
+
+/** One radio per declared option, in the option's own words — the words are the value as
+ *  well as the label, because `answerApproval` matches the answer against the options as
+ *  they were written and a prettier label would be a second vocabulary. */
+function choices(offered: readonly string[] | null): string {
+  if (offered === null || offered.length === 0) return "";
+  const one = (o: string): string =>
+    `<li><label><input type="radio" name="${ANSWER_FIELD}" value="${escape(o)}">` +
+    `<span>${escape(o)}</span></label></li>`;
+  return `<ul class="choices">${offered.map(one).join("")}</ul>`;
+}
+
+/** The form that settles the question.
+ *
+ *  The note carries the same field name as the radios and is written after them, so a
+ *  browser sends the picked option first and `answer.ts` reads that — the note is for an
+ *  answer nobody listed, which is every answer when the question declared no options. */
+function form(approval: Approval): string {
+  return (
+    `<form class="answer" method="post" action="${ANSWER_AT}">` +
+    `<input type="hidden" name="${ID_FIELD}" value="${approval.id}">` +
+    choices(approval.options) +
+    `<label class="note"><span>anything else</span>` +
+    `<input type="text" name="${ANSWER_FIELD}" autocomplete="off"></label>` +
+    `<button type="submit">send</button>` +
+    `</form>`
+  );
+}
+
 /** One approval, whole. */
 function card(approval: Approval): string {
   const asked = approval.question ?? "";
@@ -64,6 +105,7 @@ function card(approval: Approval): string {
     `<h2><span class="id">#${approval.id}</span>${escape(asked)}</h2>` +
     `<dl><dt>about</dt>${evidence(approval.evidence)}` +
     `<dt>answers</dt>${options(approval.options)}</dl>` +
+    form(approval) +
     `<p class="how">${escape(answerWith(approval.id))}</p>` +
     `</article>`
   );
