@@ -42,11 +42,22 @@ const SHEET = stylesheet(LOOK);
 
 const NONE: Rollup = { done: 0, open: 0, failed: 0 };
 
-const emptyBoard = (): Board => ({
-  projects: [], stale: [], running: [], needs_human: [], queued: [], failed: [],
-  dropped: [], unproven: [], open: [], planned: [], delivered: [], unmergeable: [],
-  cooking: [],
-});
+/** A board with something in every box the pages read. The boxes are not decoration here:
+ *  a page handed an empty board draws its one empty line, which wears the shell as
+ *  faithfully as a full page and proves nothing about the shape the design scopes that
+ *  page's rules to — so the agents, cooking and ledger pages would pass their root gate
+ *  while drawing no root at all. */
+const aBoard = (): Board => {
+  const running = [{ id: 8, what: "widen the scope", state: "attempting", detail: "opus · 14m · 37k" }];
+  return {
+    projects: [], stale: [], running, needs_human: [], queued: [],
+    failed: [{ id: 9, what: "a task that bought nothing", state: "failed", detail: "the gate refused it" }],
+    dropped: [], unproven: [], open: [], planned: [],
+    delivered: [{ id: 10, what: "a story that landed", state: "delivered", detail: "" }],
+    unmergeable: [],
+    cooking: running,
+  };
+};
 
 const node = (entity: string, id: number, children: readonly Node[] = []): Node => ({
   entity, id, label: `a ${entity}`, state: "planned", folded: false, rollup: NONE, children,
@@ -68,7 +79,7 @@ const anApproval = (): readonly Approval[] => [
 
 /** The readings `bin.ts` offers, answered out of hand-made work rather than a database:
  *  what is being proved is the frame around a page, not its arithmetic. */
-const readings = { record: aTree, board: emptyBoard, approvals: anApproval };
+const readings = { record: aTree, board: aBoard, approvals: anApproval };
 
 const NAMES = discovered(readdirSync(new URL("../src/pages", import.meta.url)));
 
