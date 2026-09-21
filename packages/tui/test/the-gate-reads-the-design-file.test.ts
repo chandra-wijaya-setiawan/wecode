@@ -31,7 +31,7 @@ import { loadMachines, open, SCHEMA_VERSION } from "@wecode/core";
 // does not have to know that `expected` lives in expected.js.
 import { against, check, expected, type CapturedNode } from "@wecode/lens";
 import { App } from "../src/app.js";
-import { Cockpit } from "../src/screens.js";
+import { Cockpit, raised } from "../src/screens.js";
 import {
   cockpitDesign,
   detailDesign,
@@ -91,13 +91,20 @@ const frame = (): string[] =>
 
 /** The same capture the cockpit's own gate takes: a section owns the full width from its
  *  head down to the next one, the bar is the last line, and the blank the body stops short
- *  of it belongs to nobody. */
-const HEAD = /^──\s(?:\S\s)?(.+?)\s(?:\[(\S)\]\s)?─/;
+ *  of it belongs to nobody. A head is `proposal.head`'s line — the section's glyph in
+ *  column zero, the name in capitals, and the count with its raised letter at the right
+ *  edge, which the countless lead section does without. */
+const HEAD = /^(\S) ([A-Z][A-Z ]*?)(?:\s{2,}(\d+(?:\/\d+)?)(\S))?$/;
+
+const LETTERS = "abcdefghijklmnopqrstuvwxyz";
+const unraised = (glyph: string | undefined): string | undefined =>
+  glyph === undefined ? undefined : (LETTERS.split("").find((l) => raised(l) === glyph) ?? glyph);
 
 function capture(out: readonly string[]): CapturedNode {
   const heads = out.flatMap((line, at) => (HEAD.test(line) ? [at] : []));
   const children = heads.map((at, i): CapturedNode => {
-    const [, name = "", key] = HEAD.exec(out[at] ?? "") ?? [];
+    const [, , name = "", , glyph] = HEAD.exec(out[at] ?? "") ?? [];
+    const key = unraised(glyph);
     const under = out.slice(at + 1, heads[i + 1] ?? out.length);
     const blank = under.indexOf("");
     const body = blank === -1 ? under : under.slice(0, blank);
