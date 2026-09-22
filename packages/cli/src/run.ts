@@ -34,8 +34,8 @@ import { paint } from "./paint.js";
 // The verbs that act. Namespaced because several of them — `worker`, `answer` — are also
 // words this file uses for a table or a column.
 import * as act from "./verbs/run-and-see.js";
-// The verbs that only look: board, doctor, delivered, explore, design. Namespaced for the
-// same reason — `board` and `design` are also words this file uses.
+// The verbs that only look: standup, board, doctor, delivered, explore, design. Namespaced
+// for the same reason — `board` and `design` are also words this file uses.
 import * as see from "./verbs/see.js";
 // Namespaced because `tree` is already the core query that reads the whole shape back.
 import * as rungs from "./verbs/tree.js";
@@ -72,6 +72,7 @@ function dispatch(argv: readonly string[]): number {
     const what = rest[0] ?? "";
     return isStateful(what) ? use.entityHelp(look, what) : usage();
   }
+  if (head === "standup") return see.standup(seen(rest));
   if (head === "board") return see.board(seen(rest));
   if (head === "doctor") return see.doctor(rest);
   if (head === "init") return init(rest);
@@ -231,8 +232,6 @@ function db() {
 }
 
 class Missing extends Error {}
-
-
 
 /** One invocation of the facade: every method on `Verbs` and on `Completions` takes an id
  *  and an actor and answers an Outcome, so a verb resolved off the command line has this
@@ -455,6 +454,7 @@ function usage(): number {
       "  task_test            the task's own unit test",
       "",
       "START HERE",
+      "  wecode standup [--all]                     the whole situation, ordered, and the next step",
       "  wecode onboard [name] [--workspace <ws>]   learn this repo, join a workspace, write config",
       "  wecode init [name]                         an empty workspace, before you have a repo",
       "  wecode board [--all]                       what is running, waiting, queued, failed",
