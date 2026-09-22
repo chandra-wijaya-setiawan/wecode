@@ -183,7 +183,7 @@ components:
     package: webapp
     layer: client
     component: true
-    owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and wrapped in the shell design.yaml declares, served over http. It reads the record, and answers an approval in the operator's own name; that one verb is the exception, because every other verb that changes wecode is an agent's or the cli's
+    owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and wrapped in the shell design.yaml declares, served over http. It reads the record, and answers an approval in the operator's own name; that one verb is the exception, because every other verb that changes wecode is an agent's or the cli's. Behind the dock it runs one shell — the operator's own login shell, in the painter's pty, in the directory of the workspace being served, on this surface's own socket and no other — and the painter's terminal is the pane on it; the shell is not wecode's to decide, so nothing here reads what is typed
     modules: [answer, pages/agents, pages/board, pages/cooking, pages/decisions, pages/discover, pages/ledger, pages/projects, pages/shell, pages/tasks, pages/tree, server]
 
   painter:
