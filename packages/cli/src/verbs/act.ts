@@ -2,16 +2,14 @@
  *
  *  These were in `verbs/run-and-see.ts` until that file went over its ceiling. What is left
  *  there is `land`, the one acting verb that moves a git ref rather than writing a row; the
- *  four here are the ones that only touch the workspace — a worker made, a question raised,
- *  an answer recorded, a repository met for the first time.
- *
- *  Nothing in this file decides what the arguments mean. run.ts parses argv and owns the
- *  record — the table declarations, the database handle, `fail` — and hands both in. The
- *  context comes from `verbs/run-and-see.ts` as a type only, so there is no cycle at run
- *  time: the edge that exists is the other way, that file re-exporting these four so run.ts
- *  imports the same names it always did. */
+ *  four here only touch the workspace — a worker made, a question raised, an answer
+ *  recorded, a repository met for the first time. None of them decides what the arguments
+ *  mean: run.ts parses argv and owns the record — the table declarations, the database
+ *  handle, `fail` — and hands both in. The context is a type from `verbs/run-and-see.ts`,
+ *  so there is no cycle at run time; the edge that exists is the other way, that file
+ *  re-exporting these four under the names run.ts always imported. */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,14 +40,13 @@ import type { See, Tables } from "./run-and-see.js";
 type Conn = ReturnType<typeof open>;
 
 /** Making a worker: the one `create` case that is neither a rung of the tree nor a piece of
- *  the work, which is why it is here rather than in those two files. */
+ *  the work, which is why it is here rather than in those two files. `text` is what the
+ *  positionals spelled — the worker's name; `role` is `--role`, the role this worker answers
+ *  for; `kind` is `--kind`, already narrowed to an agent unless a person is said. */
 export interface Hand {
   readonly make: Maker;
-  /** What the positionals spelled: the worker's name. */
   readonly text: string;
-  /** `--role`, the role this worker answers for. */
   readonly role: string;
-  /** `--kind`, already narrowed: an agent unless a person is said. */
   readonly kind: WorkerKind;
 }
 
@@ -62,11 +59,11 @@ export const worker = (at: Hand): number => at.make.worker(at.text, at.role, at.
  *  A decision the operator must make is a row in needs you, not a line in a report: six of
  *  them on 20 Sep reached the operator only as chat messages, because a story titled NEEDS
  *  APPROVAL sits in `planned` among fifty others. A bare id is a task, which is what every
- *  existing caller means; `story <id>` hangs the question on the story, for the decisions
- *  about the whole of it rather than about one attempt. An option is the answer and what
- *  taking it costs, split on the first `=`; only the answers are stored as options, since an
- *  answer is checked against them, and the costs go into the question, which is what a person
- *  reads before choosing. No options is an open question, and any words settle it. */
+ *  existing caller means; `story <id>` hangs the question on the whole story rather than on
+ *  one attempt. An option is the answer and what taking it costs, split on the first `=`:
+ *  only the answers are stored as options, since an answer is checked against them, and the
+ *  costs go into the question a person reads before choosing. No options is an open
+ *  question, and any words settle it. */
 export function ask(at: See): number {
   const { values, positionals } = parseArgs({
     args: [...at.args],
@@ -100,9 +97,8 @@ export function ask(at: See): number {
   }
 }
 
-/** Who is asked, or why nobody can be. A name given is honoured or nothing; with no name,
- *  the sole human worker — a workspace with two people has no obvious one to burden, and
- *  choosing would be wecode deciding whose signature a decision needs. */
+/** Who is asked, or why nobody can be. A name given is honoured or nothing; with no name, the
+ *  sole human worker — with two, choosing would be wecode deciding whose signature is needed. */
 function operator(conn: Conn, tables: Tables, named: string | undefined): { id: number; name: string } {
   const people = queries(conn).selectFrom(tables.worker).all().filter((w) => w.kind === "human");
   const found = named === undefined ? (people.length === 1 ? people[0] : undefined) : people.find((w) => w.name === named);
@@ -136,10 +132,10 @@ export function answer(at: See): number {
   if (row === null) return at.fail(`no assignment #${id}`);
   if (row.phase !== "waiting") return at.fail(`assignment #${id} is ${row.phase}, and is not waiting on anybody`);
 
-  // An approval closes as well as records: it has no work to go back to, so core checks the
-  // answer against the options offered and finishes it, in the answerer's own name. Where
-  // the workspace has no person on record there is no such name, and the answer is written
-  // the way every other needs_human is — a row left waiting would be worse than a record.
+  // An approval closes as well as records: with no work to go back to, core checks the answer
+  // against the options offered and finishes it in the answerer's own name. Where the workspace
+  // has no person on record there is no such name, and the answer is written the way every
+  // other needs_human is — a row left waiting would be worse than a record.
   if (row.kind === APPROVAL_KIND) {
     try {
       const by = operator(conn, at.tables, process.env["WECODE_ACTOR"]).name;
@@ -161,10 +157,10 @@ export function answer(at: See): number {
 
 // ─── onboard ─────────────────────────────────────────────────────────────────────────────
 
-/** `wecode onboard [name]` — what happens when wecode meets a repository.
- *
- *  It learns the stack, records what it learned, and registers the project. Before this,
- *  every test carried a hand-typed command and every scope a hand-typed path. */
+/** `wecode onboard [name]` — what happens when wecode meets a repository. It learns the
+ *  stack, records what it learned, registers the project, and writes the guidance where
+ *  every harness reads it. Before this, every test carried a hand-typed command and every
+ *  scope a hand-typed path. */
 export function onboard(at: See): number {
   const { values, positionals } = parseArgs({
     args: [...at.args],
@@ -176,28 +172,24 @@ export function onboard(at: See): number {
 
   if (!existsSync(join(root, ".git"))) {
     return at.fail(
-      "this is not a git repository, and wecode works in branches and worktrees.\n" +
-        "  git init && git add -A && git commit -m \"seed\"",
+      'this is not a git repository, and wecode works in branches and worktrees.\n  git init && git add -A && git commit -m "seed"',
     );
   }
   if (gitConfig("user.email") === "") {
     return at.fail(
-      "this repository has no git identity, so nothing an agent writes could be attributed.\n" +
-        '  git config user.name "Your Name" && git config user.email you@example.com',
+      'this repository has no git identity, so nothing an agent writes could be attributed.\n  git config user.name "Your Name" && git config user.email you@example.com',
     );
   }
   if (execFileSync("git", ["rev-list", "-n", "1", "--all"], { cwd: root, encoding: "utf8" }).trim() === "") {
     return at.fail(
-      "this repository has no commits, so there is nothing to cut a branch from.\n" +
-        '  git add -A && git commit -m "seed"',
+      'this repository has no commits, so there is nothing to cut a branch from.\n  git add -A && git commit -m "seed"',
     );
   }
 
   const stack = detect(root);
   if (stack === null) {
     return at.fail(
-      "no stack recognised here. wecode looks for a lock file or a manifest — see config/stacks.yaml.\n" +
-        "  add one there, or write config/project.yaml by hand.",
+      "no stack recognised here. wecode looks for a lock file or a manifest — see config/stacks.yaml.\n  add one there, or write config/project.yaml by hand.",
     );
   }
 
@@ -209,12 +201,11 @@ export function onboard(at: See): number {
 
   write(join(config, "roles.yaml"), rolesFor(learned));
   ignore(resolve(root, ".gitignore"), ".wecode/");
-  const skill = installSkill();
+  const { skill, guidance } = install(root);
 
-  // The workspace is named once, and the repository remembers which one it joined.
-  //
-  // Falling back to "default" while other workspaces exist put a project on a board its
-  // owner was not looking at. If there is a choice to make, it is made out loud.
+  // The workspace is named once, and the repository remembers which one it joined. Falling
+  // back to "default" while other workspaces exist put a project on a board its owner was
+  // not looking at. If there is a choice to make, it is made out loud.
   const known = listWorkspaces();
   const chosen = values.workspace ?? readPointer(root) ?? process.env["WECODE_WORKSPACE"];
   if (chosen === undefined && known.length > 0 && !known.includes("default")) {
@@ -240,15 +231,15 @@ export function onboard(at: See): number {
     q.selectFrom(at.tables.workspace).select(["id"]).where("name", "=", wsName).get()?.id ??
     make.workspace(wsName, workspaceDir(wsName));
 
-  // Roles without workers is a board nothing can be dispatched from: the runner refuses
-  // every candidate with "no worker free for role engineer", and nowhere does it say a
-  // worker is a thing you make. So onboarding makes one per agent role, named after it.
+  // Roles without workers is a board nothing can be dispatched from: the runner refuses every
+  // candidate with "no worker free for role engineer", and nowhere does it say a worker is a
+  // thing you make. So onboarding makes one per agent role, named after it.
   const hired = hire(conn, at.tables, make, join(config, "roles.yaml"));
 
   const existing = q.selectFrom(at.tables.project).select(["id"]).where("repo", "=", root).get();
   if (existing !== null) {
     process.stdout.write(
-      `project #${existing.id} is already onboarded here\nskill       ${skill}\n${workerLines(hired).join("\n")}${hired.length > 0 ? "\n" : ""}`,
+      `project #${existing.id} is already onboarded here\nskill       ${skill}\nguidance    ${guidance.join("\n            ")}\n${workerLines(hired).join("\n")}${hired.length > 0 ? "\n" : ""}`,
     );
     return 0;
   }
@@ -266,6 +257,7 @@ export function onboard(at: See): number {
       learned.typecheck === null ? null : `typecheck   ${learned.typecheck}`,
       `source      ${learned.source.join(", ")}`,
       `skill       ${skill}`,
+      `guidance    ${guidance.join("\n            ")}`,
       "",
       `workspace   ${wsName}  (${path})`,
       `project #${projectId}  release #${releaseId}`,
@@ -280,18 +272,31 @@ export function onboard(at: See): number {
   return 0;
 }
 
-/** The orchestrator's guidance, as configuration the operator owns rather than a file
- *  hand-placed on one machine. `config/orchestrator-skill.md` ships with the cli and is
- *  copied over the installed copy every onboard, so the text a session reads is the text
- *  this build carries. Unconditional: guidance that goes stale silently is worse than an
- *  edit lost in the place the file says not to edit. */
+/** The orchestrator's guidance, as configuration the operator owns rather than a file hand-
+ *  placed on one machine. `config/orchestrator-skill.md` ships with the cli, and every
+ *  onboard writes it out again, so the text a session reads is the text this build carries.
+ *
+ *  Installed as a Claude skill it reached one harness of four: codex, pi and opencode read
+ *  nothing there, and each finds its own file in the repository being onboarded instead —
+ *  CLAUDE.md for Claude Code, AGENTS.md for the rest. So the same sentences go to both,
+ *  generated from this one source under a line saying where they came from; only the
+ *  frontmatter is left behind, being Claude Code's skill machinery and not guidance.
+ *
+ *  Generated rather than symlinked, because git records a symlink as mode 120000 and a
+ *  checkout on NTFS materialises that as a nine-byte text file holding only the target's
+ *  name — which is what the firstmate repository on this machine has. Whatever is already at
+ *  the path is removed rather than opened: a write through a symlink lands in its target,
+ *  here the source. And all three are written every time, so a drifted copy is refused
+ *  rather than carried forward — guidance that goes stale silently is worse than an edit
+ *  lost in the place the file says not to edit. */
 const SKILL = fileURLToPath(new URL("../../config/orchestrator-skill.md", import.meta.url));
+const HARNESS = ["CLAUDE.md", "AGENTS.md"] as const;
+const FROM = `<!-- Generated by \`wecode onboard\` from packages/cli/config/orchestrator-skill.md, in the repository wecode is installed from. Edit it there: an edit here is overwritten at the next onboard. -->\n\n`;
 
 /** Where Claude Code looks for skills. `CLAUDE_CONFIG_DIR` is its own knob, so an operator
  *  with a config directory elsewhere — and a test — moves the install by setting it. A test
- *  that did not set it gets a temporary directory rather than the operator's real skills,
- *  the same rule `core`'s home reader uses: onboarding runs in a dozen tests, and none of
- *  them should be able to write into the home a person is working in. */
+ *  that did not gets a temporary directory instead: onboarding runs in a dozen of them, and
+ *  none should be able to write into the home a person is working in. */
 function skillsHome(): string {
   const explicit = process.env["CLAUDE_CONFIG_DIR"];
   if (explicit !== undefined) return explicit;
@@ -299,11 +304,17 @@ function skillsHome(): string {
   return test ? mkdtempSync(join(tmpdir(), "wecode-skills-")) : join(homedir(), ".claude");
 }
 
-function installSkill(): string {
-  const path = join(skillsHome(), "skills", "wecode", "SKILL.md");
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, readFileSync(SKILL, "utf8"));
-  return path;
+function install(root: string): { skill: string; guidance: string[] } {
+  const source = readFileSync(SKILL, "utf8");
+  const generated = FROM + source.split(/^---$/m).slice(2).join("---").trimStart();
+  const skill = join(skillsHome(), "skills", "wecode", "SKILL.md");
+  const guidance = HARNESS.map((name) => join(root, name));
+  for (const path of [skill, ...guidance]) {
+    mkdirSync(dirname(path), { recursive: true });
+    rmSync(path, { force: true });
+    writeFileSync(path, path === skill ? source : generated);
+  }
+  return { skill, guidance };
 }
 
 /** A line in .gitignore, added once. */
@@ -313,8 +324,7 @@ function ignore(path: string, line: string): void {
   writeFileSync(path, had === "" || had.endsWith("\n") ? `${had}${line}\n` : `${had}\n${line}\n`);
 }
 
-/** Written only where there is nothing: onboarding twice must not overwrite what the
- *  operator edited in between. */
+/** Written only where there is nothing: onboarding twice must not overwrite an edit. */
 function write(path: string, body: string): void {
   if (existsSync(path)) return;
   mkdirSync(dirname(path), { recursive: true });
@@ -328,19 +338,15 @@ interface Hired {
 }
 
 /** One agent worker per agent role, named after the role. A role that already has a worker
- *  keeps it: onboarding twice must not double the workforce. Human roles are people, and
- *  wecode does not get to hire those. */
+ *  keeps it: onboarding twice must not double the workforce. Human roles are people, whom
+ *  wecode does not get to hire. */
 function hire(conn: Conn, tables: Tables, make: Maker, rolesFile: string): Hired[] {
   const hired: Hired[] = [];
   const q = queries(conn);
   for (const want of Object.values(loadRoles(rolesFile).roles)) {
     if (want.worker_kind !== "agent") continue;
     const had = q.selectFrom(tables.worker).select(["id"]).where("role", "=", want.name).get();
-    hired.push(
-      had === null
-        ? { id: make.worker(want.name, want.name, "agent"), role: want.name, fresh: true }
-        : { id: had.id, role: want.name, fresh: false },
-    );
+    hired.push({ id: had?.id ?? make.worker(want.name, want.name, "agent"), role: want.name, fresh: had === null });
   }
   return hired;
 }
@@ -384,8 +390,7 @@ max_needs_human: 3
 `;
 
 /** What git says this repository is configured as, or "" when it says nothing. Lives here
- *  because `onboard` refuses without it; `land` reads it through this same function rather
- *  than keeping a second copy. */
+ *  because `onboard` refuses without it; `land` reads it through this same function. */
 export function gitConfig(key: string): string {
   try {
     return execFileSync("git", ["config", "--get", key], { encoding: "utf8" }).trim();
