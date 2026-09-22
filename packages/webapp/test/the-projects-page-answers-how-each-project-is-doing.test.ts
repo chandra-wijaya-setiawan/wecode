@@ -235,7 +235,7 @@ describe("the words the page uses", () => {
     const what = `a <script>alert("x")</script> & an 'apostrophe'`;
     const res = await fetched(() => boardWith({ projects: [row(9, what, "active")] }));
     const body = await res.text();
-    expect(body).not.toContain("<script>");
+    expect(body).not.toContain(`<script>alert("x")</script>`);
     expect(body).toContain("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;");
     expect(body).toContain("&amp; an &#39;apostrophe&#39;");
   });

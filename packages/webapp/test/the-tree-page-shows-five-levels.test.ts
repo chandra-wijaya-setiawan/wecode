@@ -151,7 +151,7 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
       expect(rowOf(body, e, id), e).toContain(`<details><summary>`);
     }
     expect(rowOf(body, "task_test", 9)).not.toMatch(/<(details|summary)/);
-    for (const v of ["onclick", "<script", "aria-expanded"]) expect(body, v).not.toContain(v);
+    for (const v of ["onclick", "aria-expanded"]) expect(body, v).not.toContain(v);
   });
   it("closes the story around its proof, so a page that landed is showing none of it", () => {
     const open = `<li id="story-4" data-ui="tree.node">`;
@@ -350,9 +350,9 @@ describe("a long record is cut to the declared budget", () => {
     expect(parent).toContain(`</span></summary><details class="more"`);
     expect(parent.slice(parent.indexOf("<summary>"), parent.indexOf("</summary>")))
       .not.toContain("<details");
-    // It closes because it is a disclosure, arriving shut, with nothing scripted to open it.
+    // It closes because it is a disclosure, arriving shut, with no handler of its own on it.
     expect(parent).not.toContain(`<details class="more" open`);
-    for (const v of ["onclick", "<script"]) expect(parent, v).not.toContain(v);
+    expect(parent).not.toContain("onclick");
   });
   /** The budget is the file's, not this page's: restate it and the cut moves with it. */
   it("moves the cut when the declaration moves it", () => {

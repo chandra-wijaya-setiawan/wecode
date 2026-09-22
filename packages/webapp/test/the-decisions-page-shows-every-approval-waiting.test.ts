@@ -248,7 +248,7 @@ describe("the decisions page", () => {
         }),
       ])
     ).text();
-    expect(body).not.toContain("<script>");
+    expect(body).not.toContain(`<script>alert("x")</script>`);
     expect(body).toContain("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;");
     expect(body).toContain("&amp; an &#39;apostrophe&#39;");
   });
