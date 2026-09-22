@@ -200,7 +200,7 @@ describe("the page is served in the shell", () => {
   });
 
   /** The shell's terminal dock is the one verb the document carries, so the page is left
-   *  with the rule that outlives approval 1561: no script, because none is served. */
+   *  with what outlives approval 1561: no verb of its own, whatever the shell serves. */
   it("offers no verb of its own, because the dock is the only way in", () => {
     const body = tasksPage([deep([task(8)])], at()).body;
     for (const verb of ["onclick"]) expect(body, verb).not.toContain(verb);
