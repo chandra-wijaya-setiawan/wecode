@@ -623,6 +623,19 @@ shared:
       omits: [requirement, acceptance_criteria, acceptance_test, task_test]
       omitted_to: detail
       fold_reaches: task
+      # What the *web* tree does with those same four, which is not what a terminal can
+      # afford to do with them. The cockpit's outline is one box of a screen that is a
+      # fixed number of rows tall, so a proof row drawn there is a work row taken away; a
+      # page in a browser is as long as it needs to be, and a row inside a shut fold costs
+      # the reader nothing at all until they open it.
+      #
+      # So on the web the four are levels the tree shows: in the record's own order, under
+      # the story they prove, each folding like the levels above it. They arrive folded
+      # shut, so the page still lands at story level — a reader scrolling for what is
+      # moving sees exactly what they saw before, and the reader asking what a story was
+      # accepted on opens the story and finds it there rather than on another page.
+      web:
+        folds: [requirement, acceptance_criteria, acceptance_test, task_test]
 
     # Depth is the indent and nothing else. The rail said what the indent was already
     # saying, at two columns a level on every level above the row — at depth nine that is

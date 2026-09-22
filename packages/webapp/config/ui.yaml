@@ -1,0 +1,58 @@
+# What the tree page offers a reader, in words rather than in the page.
+#
+# `packages/webapp/src/pages/tree.ts` draws the tree; what the tree is made of is not its
+# to decide. How deep it goes is the design's — `shared.outline.levels` in
+# `packages/tui/config/design.yaml`, one answer for every renderer of it. What is left out
+# of the arriving page, what the reader is offered for putting it back, and how much of a
+# record's own text a row spends are this file's: they are decisions about the surface, and
+# a word or a number spelled in the page is a decision nobody can read off a file.
+#
+# Every `id` here is a `data-ui` name the page carries into its markup, so the drawing and
+# the declaration are checkable against each other by name rather than by eye.
+tree:
+  # The filter, which is one dropdown and not a row of chips. The row asked the reader six
+  # questions — owed work, which project, under way, stopped — to arrive at one reading,
+  # and the reading is binary: the work still owed, or the whole record. So it is one
+  # question with two answers, and the answer it arrives holding is the first.
+  #
+  # The choice travels in the query string, which is what makes a narrowed tree a link a
+  # person can send, bookmark and reload. The default is the answer nobody asked for, so it
+  # is the absent parameter: `/tree` and `/tree?show=open` are the same page.
+  filter:
+    id: tree.filter
+    says: "filter:"
+    param: show
+    default: open
+    options:
+      - id: tree.filter.open
+        value: open
+        says: open only
+        # The states a row is left out by. Written out here rather than read off the
+        # machines' own idea of terminal: `failed` is terminal too, and a failed row is
+        # exactly what a reader who asked for the work still owed needs to see. "Finished"
+        # and "not owed" are two lists, and this is the second one.
+        excludes: [released, done, delivered, dropped]
+      - id: tree.filter.all
+        value: all
+        says: all
+        # All of it. A dropdown with an option that narrows nothing is how a reader gets
+        # the rest of the record back without having to know what the query string is.
+        excludes: []
+  # A record's own text, which the record wrote and which no length was ever agreed for. A
+  # requirement's statement runs to a paragraph; drawn whole, one of them is taller than
+  # the branch it sits in and the tree stops reading as a tree.
+  text:
+    # The most lines of it a row shows before the rest goes behind the fold. Three, which
+    # is what the terminal's row already spends — `shared.outline.row.max_lines` — because
+    # a row of the same tree should not be two different heights on two renderers.
+    budget: 3
+    # How wide a line of it is reckoned to be, in characters. A row is as wide as the
+    # reader's window and nothing tells the page how wide that is, so the budget is spent
+    # against a declared width rather than a measured one: this is a width, chosen here,
+    # wide enough that a one-line statement stays one line.
+    columns: 96
+    # The fold the rest is behind. Not a truncation: the text is all in the document, and
+    # the reader opens it in place and closes it again without leaving the page.
+    more:
+      id: tree.node.more
+      says: more
