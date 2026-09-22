@@ -110,9 +110,11 @@ export function loadBanner(path: string = DESIGN): readonly Tab[] {
  *  two places the same output could be read and two command lines disagreeing about which
  *  one the next word goes to.
  *
- *  It is opened and closed by the popover attributes and not by script: `popover` is the
- *  closed state, the banner's button is the way in, the dock's own button is the way back
- *  out, and a reader with script turned off still meets a dock that opens. */
+ *  It is opened and closed by the popover attributes rather than by a handler of its own,
+ *  so the state belongs to the browser: `popover` is shut, the banner's button is the way
+ *  in, the dock's own button the way back out. Not for want of script to serve — the pane
+ *  behind the dock is script, and approval 1561 settled that this surface may draw a
+ *  terminal — but because two places holding the open-or-shut state is one too many. */
 export const DOCK = "terminal";
 
 /** The button that ends the banner. */
@@ -120,9 +122,8 @@ const terminalButton = (): string =>
   `<button type="button" popovertarget="${DOCK}" data-ui="shell.terminal">terminal</button>`;
 
 /** The dock along the foot: what the shell has said, and the line the next word is typed
- *  on. Both are drawn empty, because what fills them is the far end — the shell behind
- *  `SHELL_AT`, which `dock()` further down attaches this markup to, naming these elements
- *  in `PARTS` rather than in a second set of hooks for script. */
+ *  on. Both drawn empty, because what fills them is the far end — the shell behind
+ *  `SHELL_AT`, which `dock()` attaches this markup to, naming its elements in `PARTS`. */
 const dockOf = (): string =>
   `<aside id="${DOCK}" popover data-ui="shell.dock">` +
   `<button type="button" popovertarget="${DOCK}" popovertargetaction="hide" ` +
@@ -427,8 +428,7 @@ export function dock(parts: Parts, wire: Wire, terminal: Terminal = new (emulato
 }
 
 /** Which element of the dock is which part of the pane. One list, so the markup above and
- *  the pane cannot drift, and the names are the `data-ui` ones the dock is already drawn
- *  under rather than a second set invented for script.
+ *  the pane cannot drift, under the `data-ui` names the dock is already drawn with.
  *
  *  The line is both the keyboard and the composer: it is where the designer's keys are, and
  *  `attach` defaults-prevents every press that makes bytes, so Enter goes down the wire as

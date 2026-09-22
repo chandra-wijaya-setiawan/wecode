@@ -343,7 +343,7 @@ describe("served", () => {
   });
 
   /** The shell's terminal dock is the one verb the document carries, so the page is left
-   *  with what is still true of it: no script, and nothing to POST to. */
+   *  with what is still true of it: no handler of its own, and nothing to POST to. */
   it("offers no verb of its own — the page is a thing to read", async () => {
     const body = await (await fetched(() => boardOf([row(1, "approval")]))).text();
     expect(body).not.toMatch(/onclick/);

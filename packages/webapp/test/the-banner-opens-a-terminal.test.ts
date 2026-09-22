@@ -67,9 +67,21 @@ describe("the banner ends in a terminal button", () => {
     expect(nav(BODY)).toContain(`popovertarget="${DOCK}"`);
   });
 
-  it("opens the dock with no script, because the surface serves none", () => {
-    expect(BODY).not.toContain("<script");
+  /** What is still true after approval 1561 is where the open-or-shut state lives: the
+   *  popover attributes, which are the browser's. What is no longer true is that the
+   *  document carries no script — the operator's mockup draws a terminal, and the pane
+   *  behind the dock is script — so only the handler of one's own is forbidden here. */
+  it("opens the dock through the popover and not a handler of its own", () => {
     expect(BODY).not.toContain("onclick");
+  });
+
+  /** And the frame lets a page's own script through, which is the retirement itself: the
+   *  shell writes `contents` as it is given them, so markup a page means to serve arrives
+   *  in the document rather than being dropped or escaped on the way. */
+  it("carries a page's script into the document rather than refusing it", () => {
+    const served = document(`<script type="module" src="/dock.js"></script>`);
+    expect(served).toContain(`<script type="module" src="/dock.js"></script>`);
+    expect(served).not.toContain("&lt;script");
   });
 });
 
@@ -167,8 +179,8 @@ describe("it sits down the right edge, full height, over the page", () => {
 
   it("lies over the page instead of pushing it aside", () => {
     // `position: fixed` takes it out of the flow, and nothing anywhere else in the look
-    // reserves room for it — the mockup's `body.docked { padding-right }` is not here and
-    // cannot be, because with no script the document has no way to know the dock is open.
+    // reserves room for it — the mockup's `body.docked { padding-right }` is not here,
+    // because the look is one sheet for both states and the dock lies over what it covers.
     expect(LOOK.frame["body"]).not.toContain("padding-right");
     expect(Object.keys(LOOK.frame).join(" ")).not.toContain("docked");
     const width = /width: ([^;]*)/.exec(self())?.[1] as string;

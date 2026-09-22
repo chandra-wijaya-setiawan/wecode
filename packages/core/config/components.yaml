@@ -186,6 +186,13 @@ components:
     owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and wrapped in the shell design.yaml declares, served over http. It reads the record, and answers an approval in the operator's own name; that one verb is the exception, because every other verb that changes wecode is an agent's or the cli's. Behind the dock it runs one shell — the operator's own login shell, in the painter's pty, in the directory of the workspace being served, on this surface's own socket and no other — and the painter's terminal is the pane on it; the shell is not wecode's to decide, so nothing here reads what is typed
     modules: [answer, pages/agents, pages/board, pages/cooking, pages/decisions, pages/discover, pages/ledger, pages/projects, pages/shell, pages/tasks, pages/tree, server]
 
+  webapp dock:
+    package: webapp
+    layer: client
+    component: true
+    owns: what a browser is sent for the terminal in the dock — the script the pane runs in the page, the emulator and sheet it is unreadable without, and the one line in a served document that asks for them. It runs in the page and decides nothing the pages have not already drawn; the pane itself is the webapp's, handed over as its own source rather than written out twice
+    modules: [browser/dock]
+
   painter:
     package: painter
     layer: client
