@@ -20,13 +20,13 @@ import { pathOf } from "./discover.js";
 /** The dock's far end and the dock's pane, both the painter's. Deep specifiers because the
  *  package's barrel offers the review session and not these two modules; the pty is
  *  `pty.ts` and the browser half is `client/terminal.ts`, and a copy of either here would be
- *  a second terminal to keep right. The emulator is xterm.js at the version the painter's
- *  pane is pinned to — this surface constructs the terminal and `attach` drives it, so both
- *  halves of one screen must be one emulator. */
+ *  a second terminal to keep right. `@xterm/xterm` is a type here and never a value: it is a
+ *  browser library shipped as CommonJS and this module is the one that renders HTML, and a
+ *  server that imports it does not start — node refuses the named export before a byte. */
 import { DEFAULT_ROWS, Session } from "@wecode/painter/dist/pty.js";
 import { attach, decode, encode } from "@wecode/painter/dist/client/terminal.js";
 import type { Parts } from "@wecode/painter/dist/client/terminal.js";
-import { Terminal } from "@xterm/xterm";
+import type { Terminal } from "@xterm/xterm";
 
 /** Where the design is, and what reads it. Both are resolved through `@wecode/tui`, because
  *  where a dependency's files sit is the package manager's business — and `createRequire`
@@ -110,9 +110,9 @@ export function loadBanner(path: string = DESIGN): readonly Tab[] {
  *  two places the same output could be read and two command lines disagreeing about which
  *  one the next word goes to.
  *
- *  It is opened and closed by the popover attributes rather than by script, because this
- *  package serves no script — every page test says so. So `popover` is the closed state,
- *  the banner's button is the way in, and the dock's own button is the way back out. */
+ *  It is opened and closed by the popover attributes and not by script: `popover` is the
+ *  closed state, the banner's button is the way in, the dock's own button is the way back
+ *  out, and a reader with script turned off still meets a dock that opens. */
 export const DOCK = "terminal";
 
 /** The button that ends the banner. */
@@ -393,9 +393,13 @@ export interface Docked {
   readonly pump: () => Promise<number>;
 }
 
-/** The window a pane's own terminal opens with: the pty's own row count, so the pane holds
- *  exactly the screen the far end was told it was drawing to rather than a history of it. */
+/** The window a pane's own terminal opens with — the pty's own rows, so the pane holds the
+ *  screen the far end was told it was drawing to and not a history of it — and the emulator
+ *  that opens on it, required when it is wanted rather than imported at the top of the file,
+ *  because the module graph a binary loads must not hold a browser library. */
 const WINDOW = { rows: DEFAULT_ROWS };
+const emulator = (): { new (window: { rows: number }): Terminal } =>
+  (here("@xterm/xterm") as { Terminal: { new (window: { rows: number }): Terminal } }).Terminal;
 
 /** The dock's pane: an xterm.js terminal, attached to the shell behind the route.
  *
@@ -404,13 +408,11 @@ const WINDOW = { rows: DEFAULT_ROWS };
  *  unread and an escape sequence comes down whole. What this adds is the transport: one
  *  frame up per press, and a `pump` that carries the cursor so a chunk is drawn once.
  *
- *  The terminal is this surface's to construct and the painter's to drive: `attach` takes
- *  one and opens it on the screen it was given, and what it hands back is the `receive`
- *  the frames go into and that same terminal. Handed in rather than reached for, so the
- *  pane is provable with no browser — the way nothing in the painter's pane reads a global
- *  either. No document of this surface carries a script yet, so what runs this in a browser
- *  is still to come; the wire and the screen are this function all the same. */
-export function dock(parts: Parts, wire: Wire, terminal: Terminal = new Terminal(WINDOW)): Docked {
+ *  This function runs in a browser, where `bin.ts` ships its own source rather than a copy
+ *  typed into a string. So it may reach for nothing but its parameters, `attach`, `encode`,
+ *  `WINDOW` and `emulator` — the names that file defines again on the browser's side — and
+ *  it reads no global, which is also what lets these tests drive it with no browser. */
+export function dock(parts: Parts, wire: Wire, terminal: Terminal = new (emulator())(WINDOW)): Docked {
   const pane = attach(parts, terminal, (message) => void wire.send(encode(message)));
   let at = 0;
   return {
