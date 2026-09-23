@@ -90,7 +90,12 @@ async function fetched(board: () => Board, path = "/cooking"): Promise<Response>
 describe("the page is found, not registered", () => {
   it("answers at /cooking off the pages directory alone", async () => {
     const routes = await pages(
-      { record: () => [], board: () => boardOf([row(1, "failed")]), approvals: () => [] },
+      {
+        record: () => [],
+        board: () => boardOf([row(1, "failed")]),
+        approvals: () => [],
+        sketches: () => [],
+      },
       new URL("../src/pages/", import.meta.url),
     );
 

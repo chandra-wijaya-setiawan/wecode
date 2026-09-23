@@ -54,6 +54,10 @@ const UNCLAIMED = [
   "runner_lease",
   "schema_version",
   "scope_refusal",
+  // 016. A sketch has no state and no parent, so it is not one of the tree entities
+  // entities.ts declares — its shape is `SketchRow` in src/sketch.ts, and
+  // a-sketch-is-a-record.test.ts is what holds that shape against pragma_table_info.
+  "sketch",
 ];
 
 describe("every entity row shape against pragma_table_info", () => {
