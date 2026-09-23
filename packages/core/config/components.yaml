@@ -194,6 +194,13 @@ components:
     owns: what a browser is sent for the terminal in the dock — the script the pane runs in the page, the emulator and sheet it is unreadable without, and the one line in a served document that asks for them. It runs in the page and decides nothing the pages have not already drawn; the pane itself is the webapp's, handed over as its own source rather than written out twice
     modules: [browser/dock]
 
+  webapp review:
+    package: webapp
+    layer: client
+    component: true
+    owns: what a browser is sent for reviewing a sketch — the painter's own pick, annotate and queue machine, served as the files it already is — and where a round of notes goes when the reviewer sends it. A round is typed at the shell the dock is already holding, on the route that already carries the keystrokes, as one line an agent can act on. The review loop is the painter's and is not written a second time here; what this decides is only the wording of a round and the far end it lands on
+    modules: [browser/annotate]
+
   painter:
     package: painter
     layer: client
