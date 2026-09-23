@@ -25,7 +25,7 @@ import { pathOf } from "./discover.js";
  *  server that imports it does not start — node refuses the named export before a byte. */
 import { DEFAULT_ROWS, Session } from "@wecode/painter/dist/pty.js";
 import { attach, decode, encode } from "@wecode/painter/dist/client/terminal.js";
-import type { Parts } from "@wecode/painter/dist/client/terminal.js";
+import type { Box, Parts, Size } from "@wecode/painter/dist/client/terminal.js";
 import type { Terminal } from "@xterm/xterm";
 
 /** Where the design is, and what reads it. Both are resolved through `@wecode/tui`, because
@@ -301,6 +301,11 @@ export interface Shelled {
   keys(input: string): void;
   prompt(text: string): void;
   close(): Promise<number>;
+  /** Tell the far end the window is now this many cells. Optional because this shape is
+   *  what the dock *asks* of a pty rather than what a pty is — a stand-in that cannot be
+   *  resized is still a shell the route's own decisions can be stated against. The
+   *  painter's `Session` has it, and that is the one that runs. */
+  resize?(cols: number, rows: number): void;
 }
 
 /** How one is opened: a command, and where it runs. */
@@ -334,8 +339,9 @@ const json = (value: unknown): Reply => ({
  *  of a session that re-reads from 0 gets the screen it already had.
  *
  *  POST is a frame going the other way — the keystrokes, unread, because what a key means
- *  is the far end's. A frame that is not one is refused rather than guessed at, and a key
- *  pressed at a shell that has left is told so rather than dropped. */
+ *  is the far end's, and the pane's size, which is news about the window rather than
+ *  anything the designer said. A frame that is not one is refused rather than guessed at,
+ *  and a key pressed at a shell that has left is told so rather than dropped. */
 export function shellAt(
   where: () => string,
   opens: Opens = (options) => Session.open(options),
@@ -370,12 +376,16 @@ export function shellAt(
 
   const post: Verb = (_url, body) => {
     const message = decode(body);
-    if (message === null || (message.kind !== "keys" && message.kind !== "prompt")) {
-      return text(400, "that is not a frame the shell takes — keys or prompt");
+    if (message === null || message.kind === "output" || message.kind === "exit") {
+      return text(400, "that is not a frame the shell takes — keys, prompt or resize");
     }
     if (held === null || !held.running) return text(409, "the shell has left — attach again");
     if (message.kind === "keys") held.keys(message.data);
-    else held.prompt(message.text);
+    else if (message.kind === "prompt") held.prompt(message.text);
+    // Answered whether or not the pty can take it: a size is the pane telling the far end
+    // about its window, not a request that can fail, and a reader whose dock returned 500
+    // for dragging a window would have nothing to do about it.
+    else held.resize?.(message.cols, message.rows);
     return json({ at: held.output.length });
   };
 
@@ -407,6 +417,10 @@ export interface Docked {
   readonly terminal: Terminal;
   /** Take whatever the shell has drawn since the last pump, and say where the cursor is. */
   readonly pump: () => Promise<number>;
+  /** Fit the screen to the box it is drawn in and tell the far end, given the pane's box
+   *  and the box the emulator's grid currently fills. Both are measured by whoever holds
+   *  the elements: this module renders HTML on a server and has none. */
+  readonly fit: (pane: Box, grid: Box) => Size | null;
 }
 
 /** The window a pane's own terminal opens with — the pty's own rows, so the pane holds the
@@ -433,6 +447,7 @@ export function dock(parts: Parts, wire: Wire, terminal: Terminal = new (emulato
   let at = 0;
   return {
     terminal: pane.terminal,
+    fit: pane.fit,
     pump: async (): Promise<number> => {
       const drawn = await wire.drawn(at);
       for (const frame of drawn.frames) pane.receive(frame);

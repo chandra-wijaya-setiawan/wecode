@@ -32,10 +32,19 @@ import type { Terminal } from "@xterm/xterm";
 /** Up: what the pane has for the session. `keys` is raw — bytes the keyboard made.
  *  `prompt` is a whole message the designer composed and sent, which the far side
  *  submits; they are different messages because they are different acts, and a pane that
- *  sent a prompt as keystrokes could not tell a half-typed line from a sent one. */
+ *  sent a prompt as keystrokes could not tell a half-typed line from a sent one.
+ *
+ *  `resize` is neither: it is not something the designer said, it is the window they are
+ *  reading in. A pty is opened at a size and keeps drawing at that size until it is told
+ *  another one, so a pane whose box changed and said nothing has a far end composing
+ *  frames for a screen that is no longer there — wrapped lines, a status bar in the
+ *  middle of the pane, a full-screen program redrawing at the wrong width. It goes up the
+ *  same wire as the keys because it is the same session, and it is a message of its own
+ *  because no sequence of keystrokes can say it. */
 export type ToSession =
   | { readonly kind: "keys"; readonly data: string }
-  | { readonly kind: "prompt"; readonly text: string };
+  | { readonly kind: "prompt"; readonly text: string }
+  | { readonly kind: "resize"; readonly cols: number; readonly rows: number };
 
 /** Down: what the session has for the pane. Output is a chunk of the pty's bytes, escapes
  *  and all — the screen interprets them, because that is what a terminal is. */
@@ -44,6 +53,10 @@ export type FromSession =
   | { readonly kind: "exit"; readonly code: number };
 
 export const encode = (message: ToSession | FromSession): string => JSON.stringify(message);
+
+/** A count of cells off the wire. Whole and at least one, because a pty resized to nought
+ *  columns is a pty nothing can draw on, and a fraction of a column is not a thing. */
+const whole = (v: unknown): boolean => typeof v === "number" && Number.isInteger(v) && v >= 1;
 
 /** A frame off the wire, or null if it is not one. Null rather than a throw: a socket can
  *  be handed anything, and a pane that dies on one bad frame is a pane that dies. */
@@ -58,6 +71,9 @@ export function decode(frame: string): ToSession | FromSession | null {
   const m = read as Record<string, unknown>;
   if (m["kind"] === "keys" && typeof m["data"] === "string") return { kind: "keys", data: m["data"] };
   if (m["kind"] === "prompt" && typeof m["text"] === "string") return { kind: "prompt", text: m["text"] };
+  if (m["kind"] === "resize" && whole(m["cols"]) && whole(m["rows"])) {
+    return { kind: "resize", cols: m["cols"] as number, rows: m["rows"] as number };
+  }
   if (m["kind"] === "output" && typeof m["chunk"] === "string") return { kind: "output", chunk: m["chunk"] };
   if (m["kind"] === "exit" && typeof m["code"] === "number") return { kind: "exit", code: m["code"] };
   return null;
@@ -124,6 +140,49 @@ export function keyOf(event: Key): string {
  *  pane asks for whatever xterm.js says it can open on, and the page gives it that. */
 export type Mount = Parameters<Terminal["open"]>[0];
 
+// ─── fitting the screen to the box it is in ─────────────────────────────────────────
+
+/** A box, in pixels. */
+export interface Box {
+  readonly width: number;
+  readonly height: number;
+}
+
+/** A screen, in cells. */
+export interface Size {
+  readonly cols: number;
+  readonly rows: number;
+}
+
+/** What the pane's box holds, in the cells the emulator is drawing now — or null when
+ *  there is nothing to apply.
+ *
+ *  Pixels in, cells out, and nothing else: no element, no emulator and no browser. The
+ *  cell is not measured, it is divided out of what is already on the screen — the grid
+ *  xterm has drawn is `now.cols` by `now.rows` cells and takes `grid` pixels, so one cell
+ *  is `grid.width / now.cols` across. That is the whole trick, and it is why this needs
+ *  none of xterm's internals to ask the question the fit addon asks: the emulator has
+ *  already told us how big a cell is by drawing some.
+ *
+ *  Null has three causes and they are one answer — there is no resize to make:
+ *    - nothing is drawn yet, so a cell has no size and the division is a guess. A pane
+ *      fitted before its first frame would resize to whatever zero divided by zero is.
+ *    - the box will not hold a single cell, which is a dock the reader has shut or a
+ *      window dragged to nothing. A pty told it is nought columns wide is a pty every
+ *      program on it draws garbage into.
+ *    - it already fits, which is the common case: the fit runs on every window resize,
+ *      and a frame up the wire per pixel of drag is a frame the far end redraws for. */
+export function fits(pane: Box, grid: Box, now: Size): Size | null {
+  const width = grid.width / now.cols;
+  const height = grid.height / now.rows;
+  if (!(width > 0) || !(height > 0)) return null;
+  const cols = Math.floor(pane.width / width);
+  const rows = Math.floor(pane.height / height);
+  if (!(cols >= 1) || !(rows >= 1)) return null;
+  if (cols === now.cols && rows === now.rows) return null;
+  return { cols, rows };
+}
+
 // ─── the pane ───────────────────────────────────────────────────────────────────────
 
 /** As much of an element as the pane listens to. */
@@ -152,6 +211,11 @@ export interface Attached {
   readonly receive: (frame: string) => void;
   /** The xterm.js terminal behind the pane, for anything that wants to read or size it. */
   readonly terminal: Terminal;
+  /** Fit the screen to the box it is drawn in, and tell the session. Hands back the size
+   *  it settled on, or null when there was no resize to make. The two boxes are the
+   *  caller's to measure, because measuring an element is the page's business and the
+   *  arithmetic is not. */
+  readonly fit: (pane: Box, grid: Box) => Size | null;
 }
 
 /** Wire the parts to a session.
@@ -190,6 +254,17 @@ export function attach(parts: Parts, terminal: Terminal, send: Send): Attached {
 
   return {
     terminal,
+    /** Both ends, in one act, in this order: the emulator is resized first so the screen
+     *  the reader is looking at is the right shape before the far end starts drawing to
+     *  it, and the frame goes up second so what arrives next is drawn at the size that is
+     *  already there. Told the other way round, every fit costs one frame of garbage. */
+    fit(pane: Box, grid: Box): Size | null {
+      const size = fits(pane, grid, { cols: terminal.cols, rows: terminal.rows });
+      if (size === null) return null;
+      terminal.resize(size.cols, size.rows);
+      send({ kind: "resize", cols: size.cols, rows: size.rows });
+      return size;
+    },
     receive(frame: string): void {
       const message = decode(frame);
       if (message === null) return;

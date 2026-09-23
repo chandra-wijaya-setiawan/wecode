@@ -104,6 +104,42 @@ let pane = null;
 let beating = null;
 let busy = false;
 
+// The two boxes a fit is arithmetic on, measured here because measuring an element is a
+// browser's act and the arithmetic is not — \`fits\` in the painter's half takes pixels and
+// gives back cells, and is proved without any of this.
+//
+// The pane's box is the panel's own rectangle less the padding the design gives it: the
+// padding is room the emulator does not get. The grid's box is \`.xterm-screen\`, the element
+// xterm draws the cells into — its rectangle over the terminal's own cols and rows is one
+// cell, which is how the screen is fitted without asking xterm for a measurement it does
+// not publish.
+const boxOf = (element) => {
+  const rect = element.getBoundingClientRect();
+  const style = window.getComputedStyle(element);
+  const spent = (near, far) =>
+    (Number.parseFloat(style[near]) || 0) + (Number.parseFloat(style[far]) || 0);
+  return {
+    width: rect.width - spent("paddingLeft", "paddingRight"),
+    height: rect.height - spent("paddingTop", "paddingBottom"),
+  };
+};
+
+const gridOf = (terminal) => {
+  const drawn = terminal.element && terminal.element.querySelector(".xterm-screen");
+  return drawn ? drawn.getBoundingClientRect() : null;
+};
+
+// Fit the screen to the panel, and let \`fits\` refuse it. It is asked on every beat rather
+// than on a window's resize event, because the box moves for reasons a window does not —
+// the dock being opened is one, and so is the emulator finishing its first frame — and
+// because a fit that has nothing to do costs three rectangles and an answer of null.
+const fit = () => {
+  if (pane === null) return;
+  const grid = gridOf(pane.terminal);
+  if (grid === null) return;
+  pane.fit(boxOf(one(PARTS.screen)), grid);
+};
+
 // One poll at a time: two in flight would both ask from the same cursor and the screen
 // would be drawn twice. A poll that throws is the board gone, so the beat stops rather than
 // filling the console every fiftieth of a second.
@@ -111,6 +147,9 @@ const beat = async () => {
   if (pane === null || busy) return;
   busy = true;
   try {
+    // Before the poll, so what the far end draws next is drawn at the size it has just
+    // been told about rather than at the one the pane has already stopped showing.
+    fit();
     await pane.pump();
   } catch {
     window.clearInterval(beating);

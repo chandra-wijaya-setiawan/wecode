@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import pkg from "../package.json";
 import { Terminal } from "@xterm/xterm";
-import { attach, encode, IDS, keyOf, pane } from "../src/client/terminal.js";
+import { attach, decode, encode, fits, IDS, keyOf, pane } from "../src/client/terminal.js";
 import type { ToSession } from "../src/client/terminal.js";
 
 const settled = (terminal: Terminal): Promise<void> =>
@@ -120,5 +120,101 @@ describe("the unchanged wire and controls", () => {
     expect(markup).toContain(`<div id="${IDS.screen}"`);
     expect(markup).not.toContain("<pre");
     for (const id of Object.values(IDS)) expect(markup).toContain(`id="${id}"`);
+  });
+});
+
+/** The emulator is fitted to the box it is drawn in, and the size goes up the wire.
+ *
+ *  A pty is opened at a size and keeps composing frames for that size until it is told
+ *  another one. So a pane whose box is not the pty's size is not a smaller view of the
+ *  session — it is a different screen: lines wrap where the far end did not wrap them, a
+ *  status bar lands in the middle of the pane, and a full-screen program redraws at a
+ *  width nothing is showing. Two things have to happen and they are one act: the emulator
+ *  takes the new grid, and the far end is told.
+ *
+ *  The arithmetic is stated on pixels rather than on elements. A fit that could only be
+ *  checked by laying out a document in a browser is a fit nothing checks — so `fits` takes
+ *  the pane's box, the box the emulator's grid currently fills, and the grid it currently
+ *  is, and hands back cells. One cell is the grid's box over the grid's cells, which is
+ *  how this asks xterm how big a cell is without asking xterm anything: the emulator has
+ *  already said, by drawing some. */
+describe("the fit", () => {
+  const grid = { width: 400, height: 160 }; // 40 × 8 cells, so a cell is 10 × 20
+  const now = { cols: 40, rows: 8 };
+
+  it("divides the cell out of what is drawn, and fills the box with it", () => {
+    expect(fits({ width: 800, height: 240 }, grid, now)).toEqual({ cols: 80, rows: 12 });
+  });
+
+  it("floors, because half a column is not a column the far end can draw in", () => {
+    // 795/10 is 79.5 and 235/20 is 11.75. A pane that rounded up would hand the far end a
+    // column and a row it has no pixels for, and the last of each would be clipped.
+    expect(fits({ width: 795, height: 235 }, grid, now)).toEqual({ cols: 79, rows: 11 });
+  });
+
+  it("refuses a box nothing is drawn in yet, rather than dividing by nothing", () => {
+    // The dock before its first frame, and the dock while it is shut: `display: none`
+    // measures zero. Either way there is no cell to divide by and nothing to propose.
+    expect(fits({ width: 800, height: 240 }, { width: 0, height: 0 }, now)).toBeNull();
+    expect(fits({ width: 800, height: 240 }, grid, { cols: 0, rows: 0 })).toBeNull();
+  });
+
+  it("refuses a box that will not hold one whole cell", () => {
+    // A pty resized to nought columns is a pty every program on it draws garbage into, so
+    // a window dragged down to nothing leaves the session at the size it last had.
+    expect(fits({ width: 0, height: 0 }, grid, now)).toBeNull();
+    expect(fits({ width: 9, height: 240 }, grid, now)).toBeNull();
+    expect(fits({ width: 800, height: 19 }, grid, now)).toBeNull();
+  });
+
+  it("refuses a size the screen already is, so a drag is not a frame per pixel", () => {
+    expect(fits({ width: 400, height: 160 }, grid, now)).toBeNull();
+    // …and a box that grew by less than a cell is the same size, which is the common one:
+    // the fit runs on every beat and almost every beat has nothing to do.
+    expect(fits({ width: 409, height: 179 }, grid, now)).toBeNull();
+  });
+});
+
+describe("the fit reaches the emulator and the far end together", () => {
+  /** The grid the pane is told the emulator is filling. A terminal of 24 × 6 in cells of
+   *  10 × 20, so a box of 800 × 240 is 80 × 12. */
+  const grid = { width: 240, height: 120 };
+
+  it("resizes the terminal and sends the size up the same wire as the keys", () => {
+    const page = wired();
+    page.terminal.resize(24, 6);
+    expect(page.fit({ width: 800, height: 240 }, grid)).toEqual({ cols: 80, rows: 12 });
+    // The emulator first: the screen the reader is looking at is the right shape before
+    // the far end starts composing frames for it.
+    expect([page.terminal.cols, page.terminal.rows]).toEqual([80, 12]);
+    expect(page.sent).toEqual([{ kind: "resize", cols: 80, rows: 12 }]);
+  });
+
+  it("sends nothing when there is nothing to fit", () => {
+    const page = wired();
+    page.terminal.resize(24, 6);
+    // Already the size it should be, and a grid nothing has drawn into: both are `fits`
+    // answering null, and a null must not reach the wire as a frame.
+    expect(page.fit({ width: 240, height: 120 }, grid)).toBeNull();
+    expect(page.fit({ width: 800, height: 240 }, { width: 0, height: 0 })).toBeNull();
+    expect(page.sent).toEqual([]);
+    expect([page.terminal.cols, page.terminal.rows]).toEqual([24, 6]);
+  });
+
+  it("is a frame of the wire, read back as one, and a broken one is not", () => {
+    // The far end decodes what the pane encoded, so the two halves agree on the message
+    // rather than on a shape one of them invented.
+    expect(decode(encode({ kind: "resize", cols: 80, rows: 12 }))).toEqual({
+      kind: "resize",
+      cols: 80,
+      rows: 12,
+    });
+    // A count of cells is whole and at least one. A pty asked for nought columns, or for
+    // 79.5 of them, is a pty asked for a screen that cannot exist — and a socket can be
+    // handed anything, so it is refused here rather than passed on to `resize`.
+    expect(decode(`{"kind":"resize","cols":0,"rows":12}`)).toBeNull();
+    expect(decode(`{"kind":"resize","cols":79.5,"rows":12}`)).toBeNull();
+    expect(decode(`{"kind":"resize","cols":80}`)).toBeNull();
+    expect(decode(`{"kind":"resize","cols":"80","rows":"12"}`)).toBeNull();
   });
 });
