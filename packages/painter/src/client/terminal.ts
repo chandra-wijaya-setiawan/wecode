@@ -154,6 +154,52 @@ export interface Size {
   readonly rows: number;
 }
 
+/** As much of a computed style as a box is measured from: the sides of an element that are
+ *  not room. Strings, because that is what a browser hands back, and every one optional
+ *  because this is a shape a `CSSStyleDeclaration` happens to have and not one anybody
+ *  builds. */
+export interface Edges {
+  readonly paddingTop?: string;
+  readonly paddingRight?: string;
+  readonly paddingBottom?: string;
+  readonly paddingLeft?: string;
+  readonly borderTopWidth?: string;
+  readonly borderRightWidth?: string;
+  readonly borderBottomWidth?: string;
+  readonly borderLeftWidth?: string;
+}
+
+/** A length off a computed style, or nought. Nought and not a refusal: a browser answers
+ *  `"0px"` for a side with nothing on it, `"medium"` for a border width nobody gave a
+ *  length, and nothing at all for a property it does not know — and a measurement that
+ *  threw on any of those is a pane that never fits. */
+const length = (said: string | undefined): number => Number.parseFloat(said ?? "") || 0;
+
+/** The part of an element's rectangle a cell may be drawn in.
+ *
+ *  A rectangle is the border box: everything the browser painted, which includes the
+ *  padding the design asked for around the screen and any rule drawn round it. Neither is
+ *  somewhere the emulator may put a cell. A pane fitted to the whole rectangle is told it
+ *  is wider than it is, so the far end composes a column whose right-hand edge is under the
+ *  border — a frame drawn to the edge of a screen the reader cannot see the edge of.
+ *
+ *  Never below nought, because a box smaller than its own trim is a pane so narrow there is
+ *  nothing in it, and `fits` has an answer for that already. */
+export function roomIn(rect: Box, edges: Edges): Box {
+  const spent = (near: string | undefined, far: string | undefined): number =>
+    length(near) + length(far);
+  return {
+    width: Math.max(
+      0,
+      rect.width - spent(edges.paddingLeft, edges.paddingRight) - spent(edges.borderLeftWidth, edges.borderRightWidth),
+    ),
+    height: Math.max(
+      0,
+      rect.height - spent(edges.paddingTop, edges.paddingBottom) - spent(edges.borderTopWidth, edges.borderBottomWidth),
+    ),
+  };
+}
+
 /** What the pane's box holds, in the cells the emulator is drawing now — or null when
  *  there is nothing to apply.
  *
@@ -222,8 +268,9 @@ export interface Attached {
   /** Fit the screen to the box it is drawn in, and tell the session. Hands back the size
    *  it settled on, or null when there was no resize to make. The two boxes are the
    *  caller's to measure, because measuring an element is the page's business and the
-   *  arithmetic is not. */
-  readonly fit: (pane: Box, grid: Box) => Size | null;
+   *  arithmetic is not — and `trim` is the screen's computed style, handed over for the
+   *  same reason: a browser reads it, `roomIn` above says what it costs. */
+  readonly fit: (pane: Box, grid: Box, trim?: Edges) => Size | null;
 }
 
 /** Wire the parts to a session.
@@ -271,9 +318,15 @@ export function attach(parts: Parts, terminal: Terminal, send: Send): Attached {
     /** Both ends, in one act, in this order: the emulator is resized first so the screen
      *  the reader is looking at is the right shape before the far end starts drawing to
      *  it, and the frame goes up second so what arrives next is drawn at the size that is
-     *  already there. Told the other way round, every fit costs one frame of garbage. */
-    fit(pane: Box, grid: Box): Size | null {
-      const size = fits(pane, grid, { cols: terminal.cols, rows: terminal.rows });
+     *  already there. Told the other way round, every fit costs one frame of garbage.
+     *
+     *  The trim comes off before anything is divided, because what a caller measured is a
+     *  rectangle and a rectangle is not all room. Absent, nothing comes off — a pane whose
+     *  screen the design gives no padding and no border has a box that is already the
+     *  whole of it, and saying so is not something a page should have to. */
+    fit(pane: Box, grid: Box, trim?: Edges): Size | null {
+      const room = trim === undefined ? pane : roomIn(pane, trim);
+      const size = fits(room, grid, { cols: terminal.cols, rows: terminal.rows });
       if (size === null) return null;
       terminal.resize(size.cols, size.rows);
       send({ kind: "resize", cols: size.cols, rows: size.rows });

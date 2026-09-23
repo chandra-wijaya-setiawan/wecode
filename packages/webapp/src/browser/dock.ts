@@ -1,31 +1,195 @@
-/** The dock's browser half: the files a reader's browser asks for, and the one line in the
- *  document that asks for the first of them.
+/** The dock: all of the terminal down the side of every document bar the markup of it.
  *
- *  Everything about the dock that runs in a page is here, and nothing about it is in the
- *  document. That is the whole shape of this file. `pages/shell.ts` draws the dock — an
- *  `<aside>` down the side with a screen and a command line in it — and owns the far end,
- *  `dock()` the pane, and `docking()` the open-or-shut state that the root's class is. But a
- *  pane needs an emulator, and the emulator is a browser library: the module that renders
- *  HTML cannot import it, because node refuses its named export before a byte is served,
- *  which is exactly how this board once stopped starting. So the pane runs in a file a
- *  browser fetches, and this is the file that says what is in it.
+ *  `pages/shell.ts` draws the dock — an `<aside>` with a screen and a command line in it —
+ *  and owns the far end it is a pane on. Everything else about it is here: the names the
+ *  markup and the script agree on, the pane itself, the open-or-shut state the root's class
+ *  is, and the files a browser is sent so that any of it runs.
  *
- *  Four files are served and one line refers to them. The line is the `<script>` tag, and
- *  it is put into a served document here rather than in `document()` — the document is the
- *  design's sentence and a page is a fragment, so what the surface *wires* is the wiring's
- *  to say. A page's markup is untouched either way: the tag goes in immediately before
- *  `</body>`, after everything a page or the shell drew.
+ *  It is one file because all of it runs in a page. A pane needs an emulator, and the
+ *  emulator is a browser library: the module that renders HTML cannot import it, because
+ *  node refuses its named export before a byte is served, which is exactly how this board
+ *  once stopped starting. So the pane runs in a file a browser fetches, and the pane, the
+ *  turning and the names they share live beside the thing that serves them.
  *
- *  Nothing here runs under the test runner, and it must not be proved by being called: what
- *  matters about a served script is that a browser can fetch it and parse it, which is a
- *  question for a board that is listening. `test/the-terminal-runs-in-the-browser.test.ts`
- *  asks a real one. */
+ *  Four files are served and one line refers to them: the `<script>` tag, put into a served
+ *  document here rather than in `document()`, because the document is the design's sentence
+ *  and what the surface *wires* is the wiring's to say. A page's markup is untouched either
+ *  way — the tag goes immediately before `</body>`, after everything a page or the shell
+ *  drew.
+ *
+ *  What is served is not proved by being called: that a browser can fetch and parse it is a
+ *  question for a board that is listening, and `the-terminal-runs-in-the-browser.test.ts`
+ *  asks a real one. What is *not* served — `dock()` and `docking()` — reads no global and
+ *  takes only parameters, which is what lets `the-dock-runs-a-shell.test.ts` drive it. */
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_ROWS } from "@wecode/painter/dist/pty.js";
-import { CONTROLS, dock, DOCKED, docking, PARTS, REMEMBERED, SHELL_AT } from "../pages/shell.js";
+import { attach, encode } from "@wecode/painter/dist/client/terminal.js";
+import type { Box, Edges, Parts, Size } from "@wecode/painter/dist/client/terminal.js";
+import type { Terminal } from "@xterm/xterm";
 import type { Handler, Page, Reply, Routes, Verb } from "../server.js";
+/** Type-only, and it must stay that way: the far end is `pages/shell.ts`'s, that file
+ *  imports this one for the dock's names, and a value crossing back would be a cycle at
+ *  load. `import type` is erased, so this is one module reading the other's sentence about
+ *  what a poll answers with rather than keeping a second copy of it. */
+import type { Drawn } from "../pages/shell.js";
+
+/** Where a dependency's files sit is the package manager's business: resolved, not pathed. */
+const here = createRequire(fileURLToPath(import.meta.url));
+
+// ─── the names the markup and the script share ──────────────────────────────────────
+
+/** What the banner's last control opens, and what it is. The dock is one element of the
+ *  document, not one per page, because there is one session behind it: two docks would be
+ *  two places the same output could be read and two command lines disagreeing about which
+ *  one the next word goes to. */
+export const DOCK = "terminal";
+
+/** The class the root element wears while the dock is open, and where a browser remembers
+ *  that it is.
+ *
+ *  It was a popover, which is the browser's own top-layer box: drawn over the page, unable
+ *  to make room beside it, and — because the top layer belongs to the document — shut by
+ *  every link a reader follows. A sidebar is the other thing: a column of the window, with
+ *  the page taking the width that is left, which is one class answering both. And because
+ *  this surface is eight documents rather than one, "open" has to survive a navigation, so
+ *  it is remembered rather than held in a page that is about to be thrown away. */
+export const DOCKED = "docked";
+export const REMEMBERED = `wecode.${DOCK}`;
+
+/** The two controls that turn it, under the `data-ui` names they are drawn with. One list,
+ *  so the markup and the script that wires it cannot drift. */
+export const CONTROLS = {
+  open: `[data-ui="shell.terminal"]`,
+  shut: `[data-ui="shell.dock.close"]`,
+} as const;
+
+/** Where the shell behind the dock answers. The dock's own name, because it is the dock's
+ *  far end and not a page: it is not under `pages/`, it is not discovered, and `bin.ts`
+ *  names it at the path it is polled on — the way the one other non-page route is named. */
+export const SHELL_AT = `/${DOCK}`;
+
+/** Which element of the dock is which part of the pane. One list, so the markup and the
+ *  pane cannot drift, under the `data-ui` names the dock is already drawn with.
+ *
+ *  The line is both the keyboard and the composer: it is where the designer's keys are, and
+ *  `attach` defaults-prevents every press that makes bytes, so Enter goes down the wire as
+ *  CR instead of submitting the form. The form is wired all the same — a submit that does
+ *  arrive carries a whole line, which must not be dropped. */
+export const PARTS = {
+  screen: `[data-ui="shell.dock.output"]`,
+  keyboard: `#${DOCK}-line`,
+  composer: `#${DOCK}-line`,
+  send: `[data-ui="shell.dock.command"]`,
+} as const;
+
+// ─── the dock's pane ────────────────────────────────────────────────────────────────
+
+/** Where the pane sends what it has, and where it takes the screen from. Both are the
+ *  browser's `fetch` against `SHELL_AT` in the page, and both are a parameter here, so the
+ *  pane can be driven against the route itself with no socket and no browser in the way. */
+export interface Wire {
+  /** A frame going up. */
+  readonly send: (frame: string) => Promise<unknown>;
+  /** Everything drawn since a cursor. */
+  readonly drawn: (from: number) => Promise<Drawn>;
+}
+
+export interface Docked {
+  /** The emulator behind the pane, for anything that wants to read or size the screen. */
+  readonly terminal: Terminal;
+  /** Take whatever the shell has drawn since the last pump, and say where the cursor is. */
+  readonly pump: () => Promise<number>;
+  /** Fit the screen to the box it is drawn in and tell the far end, given the screen's
+   *  rectangle, the box the emulator's grid currently fills, and the screen's computed
+   *  style — a rectangle is not all room, and what the trim costs is the painter's to
+   *  subtract. All three are measured by whoever holds the elements. */
+  readonly fit: (pane: Box, grid: Box, trim?: Edges) => Size | null;
+}
+
+/** The window a pane's own terminal opens with — the pty's own rows, so the pane holds the
+ *  screen the far end was told it was drawing to and not a history of it — and the emulator
+ *  that opens on it, required when wanted rather than imported, because the module graph a
+ *  binary loads must not hold a browser library. */
+const WINDOW = { rows: DEFAULT_ROWS };
+const emulator = (): { new (window: { rows: number }): Terminal } =>
+  (here("@xterm/xterm") as { Terminal: { new (window: { rows: number }): Terminal } }).Terminal;
+
+/** The dock's pane: an xterm.js terminal, attached to the shell behind the route.
+ *
+ *  `attach` is the painter's and is not reimplemented here. That is the whole point — the
+ *  pane owns the bytes and nothing else, the far end owns the screen, a keystroke goes up
+ *  unread and an escape sequence comes down whole. What this adds is the transport: one
+ *  frame up per press, and a `pump` that carries the cursor so a chunk is drawn once.
+ *
+ *  This runs in a browser, where `dockScript` below ships its own source rather than a copy
+ *  typed into a string. So it reaches for nothing but its parameters, `attach`, `encode`,
+ *  `WINDOW` and `emulator` — the names that script defines again on the browser's side —
+ *  and reads no global, which is also what lets a test drive it with no browser at all. */
+export function dock(parts: Parts, wire: Wire, terminal: Terminal = new (emulator())(WINDOW)): Docked {
+  const pane = attach(parts, terminal, (message) => void wire.send(encode(message)));
+  let at = 0;
+  return {
+    terminal: pane.terminal,
+    fit: pane.fit,
+    pump: async (): Promise<number> => {
+      const drawn = await wire.drawn(at);
+      for (const frame of drawn.frames) pane.receive(frame);
+      at = drawn.at;
+      return at;
+    },
+  };
+}
+
+// ─── opening it ─────────────────────────────────────────────────────────────────────
+
+/** As much of the root element, and of the browser's store, as the sidebar needs. Named
+ *  shapes rather than the DOM's own types: a shape a statement can hand in is what lets the
+ *  turning be proved with no browser at all. */
+export interface Rooted {
+  readonly classList: { toggle(name: string, on: boolean): void; contains(name: string): boolean };
+}
+
+export interface Remembers {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+export interface Sidebar {
+  /** Open or shut as the reader left it, applied without being written back. */
+  readonly restore: () => void;
+  /** Turned by a reader, which is the act that is remembered. */
+  readonly turn: (open: boolean) => void;
+  /** Read off the root, because a second copy of the state is a second answer. */
+  readonly opened: () => boolean;
+}
+
+/** The sidebar's one piece of state: a class on the root, a word in the store, and `shown`
+ *  for what is neither — the pane, the focus and the poll, which are the wiring's.
+ *
+ *  `held` may be null, because reaching for `localStorage` throws outright in a document
+ *  that is not allowed one, and a dock that forgets is better than a script that died
+ *  before it wired anything.
+ *
+ *  Shipped as its own source, like `dock()`, so it reaches for nothing but its parameters,
+ *  `DOCKED` and `REMEMBERED`, and reads no global. */
+export function docking(root: Rooted, held: Remembers | null, shown: (open: boolean) => void): Sidebar {
+  const show = (open: boolean): void => {
+    root.classList.toggle(DOCKED, open);
+    shown(open);
+  };
+  return {
+    restore: () => show(held?.getItem(REMEMBERED) === "open"),
+    turn: (open: boolean) => {
+      held?.setItem(REMEMBERED, open ? "open" : "shut");
+      show(open);
+    },
+    opened: () => root.classList.contains(DOCKED),
+  };
+}
+
+// ─── what a browser is sent ─────────────────────────────────────────────────────────
 
 /** Where the dock's pane is served from. Four files, and none of them is a page — nothing
  *  under `pages/` answers here — so they sit under the dock's own path, beside the far end
@@ -34,7 +198,7 @@ const BROWSER = {
   /** The script the dock's pane is, and the few lines that start it. */
   dock: `${SHELL_AT}.js`,
   /** The painter's browser half — the wire, `keyOf` and `attach` — served as the file it
-   *  already is, so both halves of one terminal are one file and not two to keep right. */
+   *  already is, so both halves of one terminal are one file. */
   pane: `${SHELL_AT}.pane.js`,
   /** xterm.js at the version this package pins, as its own ES module. */
   emulator: `${SHELL_AT}.emulator.js`,
@@ -43,27 +207,23 @@ const BROWSER = {
 } as const;
 
 /** The line that makes the dock a terminal rather than a box. A module, because the script
- *  it asks for imports two others; deferred by being a module as well, so it runs with the
- *  dock's markup already parsed and `one()` below can find it. */
+ *  it asks for imports two others — and deferred by being one, so it runs with the dock's
+ *  markup parsed and `one()` below can find it. */
 const SCRIPT = `<script type="module" src="${BROWSER.dock}"></script>`;
 
 /** The pane as a browser runs it.
  *
- *  `dock` is handed over as its own source rather than written out a second time: it is
- *  `pages/shell.ts`'s function, the one the pane's own tests drive against the real route,
- *  so what a reader is served is the pane that was proved. Around it is only what no test
- *  runner can stand in for — the emulator, the document and `fetch` — and the four free
- *  names that function lives under, defined again here on the browser's side.
+ *  `dock` and `docking` are handed over as their own source rather than written out a
+ *  second time: they are what this package's own tests drive against the real route and the
+ *  real markup, so what a reader is served is what was proved. Around them is only what no
+ *  test runner can stand in for — the emulator, the document and `fetch` — and the free
+ *  names they live under, defined again here on the browser's side.
  *
- *  Nothing is attached until the dock is first opened. A sidebar the root's class is not on
- *  is `display: none`, and a terminal opened on a box with no size measures a screen of
- *  nothing; it is also how a board nobody opened the dock on never starts a shell. While it
- *  is open the pane asks the far end for what has been drawn since its cursor, and a frame
- *  going up asks again as soon as it lands, so an echo does not wait for the next beat.
- *
- *  The turning itself is `docking()`, which is `pages/shell.ts`'s as `dock()` is: what a
- *  reader is served is the code that was proved. What is left here is the browser — the root
- *  element, the store and the two clicks. */
+ *  Nothing is attached until the dock is first opened: a sidebar the root's class is not on
+ *  is `display: none`, a terminal opened on a box with no size measures a screen of nothing,
+ *  and a board nobody opened the dock on should start no shell. While it is open the pane
+ *  asks the far end for what has been drawn since its cursor, and a frame going up asks
+ *  again as soon as it lands, so an echo does not wait for the next beat. */
 const dockScript = (): string =>
   `import { Terminal } from "${BROWSER.emulator}";
 import { attach, encode } from "${BROWSER.pane}";
@@ -104,25 +264,20 @@ let pane = null;
 let beating = null;
 let busy = false;
 
-// The two boxes a fit is arithmetic on, measured here because measuring an element is a
-// browser's act and the arithmetic is not — \`fits\` in the painter's half takes pixels and
-// gives back cells, and is proved without any of this.
+// What the fit is arithmetic on. Only the measuring is here, because reading a rectangle
+// and a computed style off an element is a browser's act and nothing else in the fit is:
+// the pane takes the trim off the rectangle and divides what is left into cells, and both
+// halves of that are the painter's and are proved with no browser at all.
 //
-// The pane's box is the panel's own rectangle less the padding the design gives it: the
-// padding is room the emulator does not get. The grid's box is \`.xterm-screen\`, the element
-// xterm draws the cells into — its rectangle over the terminal's own cols and rows is one
-// cell, which is how the screen is fitted without asking xterm for a measurement it does
-// not publish.
-const boxOf = (element) => {
-  const rect = element.getBoundingClientRect();
-  const style = window.getComputedStyle(element);
-  const spent = (near, far) =>
-    (Number.parseFloat(style[near]) || 0) + (Number.parseFloat(style[far]) || 0);
-  return {
-    width: rect.width - spent("paddingLeft", "paddingRight"),
-    height: rect.height - spent("paddingTop", "paddingBottom"),
-  };
-};
+// The screen's rectangle is the border box, so the padding the design gives it and any rule
+// drawn round it go up as the style rather than being subtracted here — a pane fitted to
+// the whole rectangle composes a column whose edge is under the border.
+//
+// The grid's box is \`.xterm-screen\`, the element xterm draws the cells into — its rectangle
+// over the terminal's own cols and rows is one cell, which is how the screen is fitted
+// without asking xterm for a measurement it does not publish.
+const boxOf = (element) => element.getBoundingClientRect();
+const trimOf = (element) => window.getComputedStyle(element);
 
 const gridOf = (terminal) => {
   const drawn = terminal.element && terminal.element.querySelector(".xterm-screen");
@@ -137,7 +292,8 @@ const fit = () => {
   if (pane === null) return;
   const grid = gridOf(pane.terminal);
   if (grid === null) return;
-  pane.fit(boxOf(one(PARTS.screen)), grid);
+  const screen = one(PARTS.screen);
+  pane.fit(boxOf(screen), grid, trimOf(screen));
 };
 
 // One poll at a time: two in flight would both ask from the same cursor and the screen
@@ -205,11 +361,6 @@ const fileAt = (path: string, type: string): Reply => {
   return { status: 200, type: `${type}; charset=utf-8`, body: held };
 };
 
-/** Where a dependency's files sit is the package manager's business, so they are resolved
- *  rather than reached for by path — and resolved now, while somebody is watching the board
- *  start, rather than leaving a dock that is dead on a page nobody has opened yet. */
-const here = createRequire(fileURLToPath(import.meta.url));
-
 /** The four files, at the four paths, each answered with what was read at wiring time. */
 export const browser = (): Routes => {
   const held: Readonly<Record<string, Reply>> = {
@@ -222,8 +373,7 @@ export const browser = (): Routes => {
 };
 
 /** One reply, asking for the dock's script. A document and nothing else: a stylesheet, a
- *  redirect from the one verb, or the JSON the far end answers with are all replies of this
- *  surface and none of them has a `</body>` to put a tag before. */
+ *  redirect, or the JSON the far end answers with has no `</body>` to put a tag before. */
 const asking = (reply: Reply): Reply =>
   reply.type.startsWith(HTML) && reply.body.includes(CLOSE)
     ? { ...reply, body: reply.body.replace(CLOSE, `${SCRIPT}${CLOSE}`) }
@@ -239,8 +389,7 @@ const asked = (handler: Handler): Handler => {
 };
 
 /** The routes given, each answering as it did with the script tag in whatever document it
- *  hands back. This is how the dock's browser half is referred to at all: one place, over
- *  every page there is, so a page added tomorrow carries the terminal without knowing it —
- *  and a page is still only a fragment, which is what keeps the document the design's. */
+ *  hands back — one place, over every page there is, so a page added tomorrow carries the
+ *  terminal without knowing it, and is still only a fragment. */
 export const docked = (routes: Routes): Routes =>
   Object.fromEntries(Object.entries(routes).map(([at, handler]) => [at, asked(handler)]));

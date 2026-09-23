@@ -233,8 +233,8 @@ describe("the script the document asks for is served", () => {
     expect(script).toContain(`data-ui=\\"shell.dock.output\\"`);
     expect(script).toContain("/terminal?from=");
     // It also measures, which is what makes the pane a window rather than a fixed grid: the
-    // panel's box less its padding, and the box xterm's grid fills, handed over each beat.
-    for (const held of [".xterm-screen", "getComputedStyle", "paddingLeft", "pane.fit("]) expect(script, held).toContain(held);
+    // screen's rectangle, the box xterm's grid fills, and the screen's own trim, each beat.
+    for (const held of [".xterm-screen", "getComputedStyle", "grid, trimOf("]) expect(script, held).toContain(held);
     expect(script).toMatch(/fit\(\);\n\s*await pane\.pump\(\)/);
     // And what it imports is served by this same board, at the paths it names. A script
     // that parses and then fails on its first import is a dock that stays an empty box —

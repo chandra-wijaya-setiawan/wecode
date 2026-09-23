@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import pkg from "../package.json";
 import { Terminal } from "@xterm/xterm";
-import { attach, decode, encode, fits, IDS, keyOf, pane } from "../src/client/terminal.js";
+import { attach, decode, encode, fits, IDS, keyOf, pane, roomIn } from "../src/client/terminal.js";
 import type { ToSession } from "../src/client/terminal.js";
 
 const settled = (terminal: Terminal): Promise<void> =>
@@ -225,6 +225,57 @@ describe("the fit", () => {
   });
 });
 
+/** What the pane's box is, before `fits` divides it.
+ *
+ *  A browser measures an element as a rectangle, and a rectangle is the border box: it is
+ *  everything that was painted, padding and rule included. Neither is room — the emulator
+ *  may not put a cell under the border the design drew round the screen, nor in the gap it
+ *  asked for inside it — so a pane fitted to the rectangle is told it is bigger than it is,
+ *  and the far end composes a frame whose last column the reader cannot see the edge of.
+ *
+ *  It is here rather than in the page that measures, for the reason `fits` is: an element
+ *  is the browser's, the subtraction is not, and arithmetic that can only be checked by
+ *  laying out a document is arithmetic nothing checks. What the page hands in is a
+ *  rectangle and a computed style, which is what it already has. */
+describe("the room in a rectangle", () => {
+  const rect = { width: 800, height: 240 };
+  const px = (n: number): string => `${n}px`;
+
+  it("is the whole rectangle when nothing is spent on trim", () => {
+    expect(roomIn(rect, {})).toEqual(rect);
+  });
+
+  it("takes off the padding, which is the gap the design asked for inside the screen", () => {
+    const edges = { paddingLeft: px(14), paddingRight: px(14), paddingTop: px(9), paddingBottom: px(9) };
+    expect(roomIn(rect, edges)).toEqual({ width: 772, height: 222 });
+  });
+
+  it("takes off the border too, which is the pixel the old sheet ruled the screen with", () => {
+    // The rule that used to run along the top and bottom of the dock's screen. Two pixels
+    // is less than a row, so the pane that ignored them fitted a row too many exactly when
+    // the panel's height landed near a boundary — and drew its last one under the rule.
+    const edges = { borderTopWidth: px(1), borderBottomWidth: px(1), borderLeftWidth: px(1), borderRightWidth: px(1) };
+    expect(roomIn(rect, edges)).toEqual({ width: 798, height: 238 });
+  });
+
+  it("reads what a browser actually answers, and calls the rest nought", () => {
+    // `0px` for a side with nothing on it, `medium` for a border width nobody gave a length
+    // to, and nothing at all for a property this browser does not know. A measurement that
+    // threw or gave NaN on any of them is a pane that never fits at all.
+    const edges = { paddingLeft: "0px", paddingRight: "", borderLeftWidth: "medium", borderRightWidth: undefined };
+    expect(roomIn(rect, edges)).toEqual(rect);
+  });
+
+  it("never goes below nought, however much trim is on a box with nothing in it", () => {
+    // A dock the reader has shut measures zero and still has its padding declared. Negative
+    // pixels are not a box; `fits` has the answer for a box too small to hold a cell.
+    expect(roomIn({ width: 0, height: 0 }, { paddingLeft: px(14), paddingTop: px(9) })).toEqual({
+      width: 0,
+      height: 0,
+    });
+  });
+});
+
 describe("the fit reaches the emulator and the far end together", () => {
   /** The grid the pane is told the emulator is filling. A terminal of 24 × 6 in cells of
    *  10 × 20, so a box of 800 × 240 is 80 × 12. */
@@ -238,6 +289,27 @@ describe("the fit reaches the emulator and the far end together", () => {
     // the far end starts composing frames for it.
     expect([page.terminal.cols, page.terminal.rows]).toEqual([80, 12]);
     expect(page.sent).toEqual([{ kind: "resize", cols: 80, rows: 12 }]);
+  });
+
+  it("takes the screen's own trim off before it divides, when the page hands it in", () => {
+    const page = wired();
+    page.terminal.resize(24, 6);
+    // The same 800 × 240 rectangle, with the dock's padding and a rule round it declared:
+    // 800 − 2×14 − 2×1 is 770, and 240 − 2×9 − 2×1 is 220, which is 77 × 11 cells and not
+    // 80 × 12. Those three columns are what the pane used to claim it had and did not.
+    const trim = {
+      paddingLeft: "14px",
+      paddingRight: "14px",
+      paddingTop: "9px",
+      paddingBottom: "9px",
+      borderTopWidth: "1px",
+      borderBottomWidth: "1px",
+      borderLeftWidth: "1px",
+      borderRightWidth: "1px",
+    };
+    expect(page.fit({ width: 800, height: 240 }, grid, trim)).toEqual({ cols: 77, rows: 11 });
+    expect([page.terminal.cols, page.terminal.rows]).toEqual([77, 11]);
+    expect(page.sent).toEqual([{ kind: "resize", cols: 77, rows: 11 }]);
   });
 
   it("sends nothing when there is nothing to fit", () => {

@@ -266,14 +266,35 @@ renderers:
         # the palette's and the type's and a width is neither.
         "html.docked body": "padding-right: calc(min(100vw, max(33vw, 32rem)) + clamp(1rem, 4vw, 3rem))"
         # The way back out, at the top, where a reader looks for it. Quiet: it is the one
-        # control on a panel whose content is the point.
-        "#terminal button": "align-self: flex-end; flex: 0 0 auto; border: 0; background: none; padding: .55rem .9rem; color: var(--faint); font: inherit; font-family: var(--mono); font-size: .92em; cursor: pointer"
+        # control on a panel whose content is the point. It is stretched across the panel so
+        # that the rule along its foot is the whole width of one — the line that used to be
+        # the screen's own top border, moved onto the chrome, for the reason below.
+        "#terminal button": "align-self: stretch; text-align: right; flex: 0 0 auto; border: 0; border-bottom: 1px solid var(--rule); background: none; padding: .55rem .9rem; color: var(--faint); font: inherit; font-family: var(--mono); font-size: .92em; cursor: pointer"
         "#terminal button:hover": "color: var(--ink)"
-        # What the session has said fills everything between the two, in the face a terminal
-        # is read in, and scrolls on its own rather than taking the window with it.
-        "#terminal pre": "flex: 1 1 auto; min-height: 0; margin: 0; padding: .9rem; overflow: auto; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); color: var(--ink); font-family: var(--mono); font-size: .92em; line-height: var(--leading); white-space: pre-wrap; overflow-wrap: anywhere"
-        # The line the next word is typed on, along the foot and always in view.
-        "#terminal form": "flex: 0 0 auto; display: flex; gap: .5rem; align-items: baseline; padding: .6rem .9rem; min-width: 0"
+        # The screen fills everything between the two, and it is a terminal's box rather than
+        # a transcript's.
+        #
+        # Those are different things to declare. A transcript is text the browser lays out:
+        # it wraps where the panel ends, it scrolls itself, and it is read in whatever
+        # leading the document sets. A terminal lays itself out — the emulator is told how
+        # many cells it has and draws exactly that grid, with its own viewport and its own
+        # scrollback inside — so every one of those declarations is the document answering a
+        # question the emulator has already answered, and answering it differently:
+        # `white-space: pre-wrap` wraps rows the emulator wrapped itself, `overflow: auto`
+        # is a second scroller around the one the emulator brought, and a leading of the
+        # document's is a cell of a height the emulator did not choose.
+        #
+        # So what is left is the box and nothing in it: room to grow, a floor of nothing so
+        # a flex child may actually shrink, the padding the design wants around the cells,
+        # and `overflow: hidden` because anything the grid does not cover is the panel's
+        # ground and not somewhere to scroll to. The rules that used to be drawn across it
+        # are on the chrome above and below now, because the pane's box is what the fit
+        # divides into cells — a border is two pixels of the reader's screen that the
+        # emulator is told it has and does not.
+        "#terminal pre": "flex: 1 1 auto; min-height: 0; min-width: 0; margin: 0; padding: .9rem; overflow: hidden; color: var(--ink); font-family: var(--mono); font-size: .92em"
+        # The line the next word is typed on, along the foot and always in view, ruled off
+        # from the screen above it.
+        "#terminal form": "flex: 0 0 auto; display: flex; gap: .5rem; align-items: baseline; border-top: 1px solid var(--rule); padding: .6rem .9rem; min-width: 0"
         "#terminal form label": "color: var(--faint); font-family: var(--mono)"
         "#terminal form input": "flex: 1 1 auto; min-width: 0; background: var(--page); border: 1px solid var(--rule); border-radius: 3px; padding: .25rem .5rem; color: var(--ink); font-family: var(--mono); font-size: .92em"
         "#terminal form input:focus": "outline: none; border-color: var(--mark)"
