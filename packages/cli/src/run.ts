@@ -93,6 +93,8 @@ function dispatch(argv: readonly string[]): number {
   if (head === "delivered") return see.delivered(rest);
   if (head === "lessons") return use.showLessons(look, rest);
   if (head === "lesson") return use.lesson(look, rest);
+  // The workspace directory, not the database: only this file knows where you are standing.
+  if (head === "sketch") return make.sketch(at, rest, dirname(DB()));
   return verb(head, rest);
 }
 
@@ -354,7 +356,6 @@ function restateVerb(entity: string, args: readonly string[]): number {
   }
 }
 
-
 function create(entity: string, args: readonly string[]): number {
   const { values, positionals } = parseArgs({
     args: [...args],
@@ -466,6 +467,7 @@ function usage(): number {
       '  wecode <test> artefact <id> --set "<cmd>"   fix the command a test is proved by',
       '  wecode <entity> restate <id> --to "<words>" fix the wording, keeping the slug',
       "  wecode plan <file.yaml> [--epic <id>]      a whole story as one document (--dry-run to look)",
+      "  wecode sketch create|list|drop             a drawing, before there is work to hang it on",
       "  wecode worker create <name> --role engineer --kind agent",
       "",
       "MOVING WORK",
@@ -511,5 +513,3 @@ function usage(): number {
   );
   return 0;
 }
-
-
