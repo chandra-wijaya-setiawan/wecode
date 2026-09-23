@@ -10,7 +10,10 @@ import type { ToSession } from "../src/client/terminal.js";
 const settled = (terminal: Terminal): Promise<void> =>
   new Promise((resolve) => terminal.write("", resolve));
 
-function wired() {
+/** A pane over a real emulator. `door` is whether the page hands in a composer and a way of
+ *  sending it: `pane()` draws neither any more, and the webapp's dock still draws both, so
+ *  both shapes are the shape of a page that exists. */
+function wired(door = true) {
   const handlers = new Map<string, ((event: never) => void)[]>();
   const on = (type: string, handler: (event: never) => void): void =>
     void handlers.set(type, [...(handlers.get(type) ?? []), handler]);
@@ -21,8 +24,9 @@ function wired() {
   const composer = { value: "" };
   const sent: ToSession[] = [];
   const terminal = new Terminal();
+  const keyboard = { addEventListener: on };
   const attached = attach(
-    { screen, keyboard: { addEventListener: on }, composer, send: { addEventListener: on } },
+    door ? { screen, keyboard, composer, send: { addEventListener: on } } : { screen, keyboard },
     terminal,
     (message) => sent.push(message),
   );
@@ -110,16 +114,62 @@ describe("the unchanged wire and controls", () => {
     expect(keyOf({ key: "ArrowUp" })).toBe("\x1b[A");
   });
 
-  it("keeps the prompt door and pane markup", () => {
+  it("keeps the prompt door for a page that draws one", () => {
     const page = wired();
     page.composer.value = "draw the board";
     page.click();
     expect(page.sent).toEqual([{ kind: "prompt", text: "draw the board" }]);
     expect(page.composer.value).toBe("");
+  });
+});
+
+/** The composer is cut from the pane.
+ *
+ *  It was a box under the screen: the designer typed a line into it and pressed a button,
+ *  and the line went up as a prompt. That is what a transcript needs, and the screen is not
+ *  a transcript any more — it is a terminal, and the keyboard reaches the far end one
+ *  keystroke at a time, through the shell's own line editor, with history and Ctrl-C and a
+ *  cursor. Two boxes were two answers to where the next word goes, and the lower one could
+ *  say nothing but a whole line.
+ *
+ *  So `pane()` draws a screen and nothing else, and the screen has the pane's whole box —
+ *  which is what the fit below then has something to divide. The door is not deleted from
+ *  the wire or from `attach`, because a page may still draw one and the webapp's dock does;
+ *  it is a part a page hands in, and a pane handed neither wires neither. */
+describe("the composer is cut from the pane", () => {
+  it("draws a screen and nothing else", () => {
     const markup = pane();
     expect(markup).toContain(`<div id="${IDS.screen}"`);
     expect(markup).not.toContain("<pre");
     for (const id of Object.values(IDS)) expect(markup).toContain(`id="${id}"`);
+    // Nothing to type a line into, nothing to send it with, and no id left naming either.
+    for (const gone of ["<textarea", "<form", "<button", "composer", "prompt", "send"]) {
+      expect(markup, gone).not.toContain(gone);
+    }
+    expect(Object.keys(IDS).sort()).toEqual(["pane", "screen"]);
+  });
+
+  it("wires nothing for a door the page did not draw, and still takes every key", () => {
+    const page = wired(false);
+    page.press({ key: "x" });
+    expect(page.sent).toEqual([{ kind: "keys", data: "x" }]);
+    // A click, which is what a composer's own button raises. It must reach nothing: a pane
+    // with no composer has no box to read and no empty prompt to send, and a listener on an
+    // element that is not there is the shape of a pane that quietly does nothing.
+    page.click();
+    expect(page.sent).toEqual([{ kind: "keys", data: "x" }]);
+  });
+
+  it("is why there is a fit: the screen is the pane, so the pane's box is the screen's", () => {
+    const page = wired(false);
+    page.terminal.resize(24, 6);
+    // The grid as drawn — 24 × 6 cells in 240 × 120 pixels — and the pane's whole box, which
+    // is now the screen's whole box because there is nothing under it taking a strip.
+    expect(page.fit({ width: 800, height: 240 }, { width: 240, height: 120 })).toEqual({
+      cols: 80,
+      rows: 12,
+    });
+    expect(page.sent).toEqual([{ kind: "resize", cols: 80, rows: 12 }]);
   });
 });
 

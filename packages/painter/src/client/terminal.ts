@@ -197,10 +197,18 @@ export interface Parts {
   readonly screen: Mount;
   /** What has the keyboard focus while the designer is driving the session. */
   readonly keyboard: Listens;
-  /** The box a prompt is composed in. */
-  readonly composer: { value: string };
-  /** What sending it looks like — the form, or the button. */
-  readonly send: Listens;
+  /** The box a prompt is composed in, and what sending it looks like — the form, or the
+   *  button. Both optional, and only useful together: a pane that has no composer has no
+   *  send either, and one without the other is a door with nothing behind it.
+   *
+   *  Optional because the composer is no longer what a pane is. It was there when the
+   *  screen was a transcript and a whole line was the only thing that could be said; now
+   *  the screen is a terminal, the keyboard reaches the far end a keystroke at a time, and
+   *  a second box to type into is a second place the next word might go — the reader types
+   *  a line into it, presses enter at the screen, and neither of them has their sentence.
+   *  So a pane may simply be a screen, and `pane()` below is one. */
+  readonly composer?: { value: string };
+  readonly send?: Listens;
 }
 
 /** Where the pane sends what it has. */
@@ -226,9 +234,12 @@ export interface Attached {
  *  that makes none is left to the browser, which is how Cmd-C still copies and Tab out of
  *  an unfocused pane still moves focus.
  *
- *  The composer is the other door. What is typed there is not keystrokes: it is a prompt,
- *  and it reaches the session only when it is sent, at which point the box is emptied so
- *  that a sent prompt cannot be sent twice. */
+ *  The composer is the other door, and a page need not have one. What is typed there is not
+ *  keystrokes: it is a prompt, and it reaches the session only when it is sent, at which
+ *  point the box is emptied so that a sent prompt cannot be sent twice. A page that hands in
+ *  neither is a page whose only way in is the keyboard, and nothing is wired for the door it
+ *  does not have — a listener on an element that is not there is the shape of a pane that
+ *  quietly does nothing. */
 export function attach(parts: Parts, terminal: Terminal, send: Send): Attached {
   terminal.open(parts.screen);
 
@@ -239,18 +250,21 @@ export function attach(parts: Parts, terminal: Terminal, send: Send): Attached {
     send({ kind: "keys", data });
   }) as (event: never) => void);
 
-  const sendPrompt = ((event?: { preventDefault?: () => void }) => {
-    event?.preventDefault?.();
-    const text = parts.composer.value;
-    if (text.trim() === "") return;
-    parts.composer.value = "";
-    send({ kind: "prompt", text });
-  }) as (event: never) => void;
+  const { composer, send: sends } = parts;
+  if (composer !== undefined && sends !== undefined) {
+    const sendPrompt = ((event?: { preventDefault?: () => void }) => {
+      event?.preventDefault?.();
+      const text = composer.value;
+      if (text.trim() === "") return;
+      composer.value = "";
+      send({ kind: "prompt", text });
+    }) as (event: never) => void;
 
-  // Both, because `send` may be the form or the button inside it, and a button inside a
-  // form raises only the form's submit.
-  parts.send.addEventListener("submit", sendPrompt);
-  parts.send.addEventListener("click", sendPrompt);
+    // Both, because `send` may be the form or the button inside it, and a button inside a
+    // form raises only the form's submit.
+    sends.addEventListener("submit", sendPrompt);
+    sends.addEventListener("click", sendPrompt);
+  }
 
   return {
     terminal,
@@ -286,18 +300,24 @@ export function attach(parts: Parts, terminal: Terminal, send: Send): Attached {
 export const IDS = {
   pane: "session",
   screen: "session-screen",
-  composer: "session-prompt",
-  send: "session-send",
 } as const;
 
-/** The right pane's markup: a screen, and a box to send a prompt from. A `<div>` for the
- *  screen because xterm.js builds its own element inside whatever it is given — a `<pre>`
- *  would only sit between the terminal and its text — and it is focusable because the
- *  designer types into it. */
+/** The right pane's markup: a screen, and nothing else in it.
+ *
+ *  A `<div>` for the screen because xterm.js builds its own element inside whatever it is
+ *  given — a `<pre>` would only sit between the terminal and its text — and it is focusable
+ *  because the designer types into it.
+ *
+ *  Nothing else, because the pane is the session and the session is the whole of it. The
+ *  composer that used to sit under the screen was a box the designer typed a line into and
+ *  pressed a button to send, which is what a transcript needs and what a terminal is
+ *  instead of: the screen takes the keys itself, one at a time, and the far end's own shell
+ *  is what a line is composed in. Two boxes were two answers to where the next word goes,
+ *  and the one below could only ever say a whole line — no Ctrl-C, no arrow through the
+ *  history, nothing half-typed. With it gone the screen has the pane's whole box, which is
+ *  what `fit` above is for: the emulator's grid is however many cells the pane holds, and
+ *  the far end is told. */
 export const pane = (): string =>
   `<section id="${IDS.pane}" class="pane pane-right">` +
   `<div id="${IDS.screen}" class="screen" tabindex="0" aria-label="the designer's session"></div>` +
-  `<form id="${IDS.composer}-form" class="composer">` +
-  `<textarea id="${IDS.composer}" rows="2" aria-label="a prompt to send"></textarea>` +
-  `<button id="${IDS.send}" type="submit">send</button>` +
-  `</form></section>`;
+  `</section>`;
