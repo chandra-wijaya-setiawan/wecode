@@ -108,26 +108,41 @@ export function loadBanner(path: string = DESIGN): readonly Tab[] {
 /** What the banner's last control opens, and what it is. The dock is one element of the
  *  document, not one per page, because there is one session behind it: two docks would be
  *  two places the same output could be read and two command lines disagreeing about which
- *  one the next word goes to.
- *
- *  It is opened and closed by the popover attributes rather than by a handler of its own,
- *  so the state belongs to the browser: `popover` is shut, the banner's button is the way
- *  in, the dock's own button the way back out. Not for want of script to serve — the pane
- *  behind the dock is script, and approval 1561 settled that this surface may draw a
- *  terminal — but because two places holding the open-or-shut state is one too many. */
+ *  one the next word goes to. */
 export const DOCK = "terminal";
 
-/** The button that ends the banner. */
-const terminalButton = (): string =>
-  `<button type="button" popovertarget="${DOCK}" data-ui="shell.terminal">terminal</button>`;
+/** The class the root element wears while the dock is open, and where a browser remembers
+ *  that it is.
+ *
+ *  It was a popover, which is the browser's own top-layer box: drawn over the page, unable
+ *  to make room beside it, and — because the top layer belongs to the document — shut by
+ *  every link a reader follows. A sidebar is the other thing: a column of the window, with
+ *  the page taking the width that is left, which is one class answering both. And because
+ *  this surface is eight documents rather than one, "open" has to survive a navigation, so
+ *  it is remembered rather than held in a page that is about to be thrown away. */
+export const DOCKED = "docked";
+export const REMEMBERED = `wecode.${DOCK}`;
 
-/** The dock along the foot: what the shell has said, and the line the next word is typed
+/** The two controls that turn it, under the `data-ui` names they are drawn with. One list,
+ *  so the markup below and the script that wires it cannot drift. */
+export const CONTROLS = {
+  open: `[data-ui="shell.terminal"]`,
+  shut: `[data-ui="shell.dock.close"]`,
+} as const;
+
+/** The button that ends the banner. It names what it turns rather than targeting a popover,
+ *  and whether it is open now is said by `aria-expanded`, which the script keeps true — the
+ *  state is a class on the root and a reader on a screen reader is owed it too. */
+const terminalButton = (): string =>
+  `<button type="button" aria-controls="${DOCK}" aria-expanded="false" ` +
+  `data-ui="shell.terminal">terminal</button>`;
+
+/** The dock down the side: what the shell has said, and the line the next word is typed
  *  on. Both drawn empty, because what fills them is the far end — the shell behind
  *  `SHELL_AT`, which `dock()` attaches this markup to, naming its elements in `PARTS`. */
 const dockOf = (): string =>
-  `<aside id="${DOCK}" popover data-ui="shell.dock">` +
-  `<button type="button" popovertarget="${DOCK}" popovertargetaction="hide" ` +
-  `data-ui="shell.dock.close">close</button>` +
+  `<aside id="${DOCK}" data-ui="shell.dock">` +
+  `<button type="button" data-ui="shell.dock.close">close</button>` +
   `<pre data-ui="shell.dock.output"></pre>` +
   `<form data-ui="shell.dock.command">` +
   `<label for="${DOCK}-line">&gt;</label>` +
@@ -440,3 +455,53 @@ export const PARTS = {
   composer: `#${DOCK}-line`,
   send: `[data-ui="shell.dock.command"]`,
 } as const;
+
+// ─── opening it ─────────────────────────────────────────────────────────────────────
+
+/** As much of the root element, and of the browser's store, as the sidebar needs. Named
+ *  shapes rather than the DOM's own types, for the reason the pane's parts are: this module
+ *  renders HTML on a server and must not reach for a browser's types, and a shape a
+ *  statement can hand in is what lets the turning be proved with no browser at all. */
+export interface Rooted {
+  readonly classList: { toggle(name: string, on: boolean): void; contains(name: string): boolean };
+}
+
+export interface Remembers {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+export interface Sidebar {
+  /** Open or shut as the reader left it, applied without being written back. */
+  readonly restore: () => void;
+  /** Turned by a reader, which is the act that is remembered. */
+  readonly turn: (open: boolean) => void;
+  /** Read off the root, because a second copy of the state is a second answer. */
+  readonly opened: () => boolean;
+}
+
+/** The sidebar's one piece of state: a class on the root, a word in the store, and `shown`
+ *  for what is neither — the pane, the focus and the poll, which are the wiring's.
+ *
+ *  `held` may be null, because reaching for `localStorage` throws outright in a document
+ *  that is not allowed one, and a dock that forgets is better than a script that died
+ *  before it wired anything.
+ *
+ *  Like `dock()`, this runs in a browser, where `browser/dock.ts` ships its own source
+ *  rather than a copy typed into a string. So it reaches for nothing but its parameters and
+ *  `DOCKED` and `REMEMBERED` — the two names that file defines again on the browser's
+ *  side — and it reads no global, which is what lets these tests turn it. */
+export function docking(root: Rooted, held: Remembers | null, shown: (open: boolean) => void): Sidebar {
+  const show = (open: boolean): void => {
+    root.classList.toggle(DOCKED, open);
+    shown(open);
+  };
+  return {
+    restore: () => show(held?.getItem(REMEMBERED) === "open"),
+    turn: (open: boolean) => {
+      held?.setItem(REMEMBERED, open ? "open" : "shut");
+      show(open);
+    },
+    opened: () => root.classList.contains(DOCKED),
+  };
+}

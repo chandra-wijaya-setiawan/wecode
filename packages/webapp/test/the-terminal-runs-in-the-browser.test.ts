@@ -16,6 +16,9 @@
  *    - the path that document names answers 200 as javascript, and the script it hands back
  *      is the pane: it imports the painter's half and the emulator, at paths this board also
  *      answers on;
+ *    - the dock that document draws is a sidebar — an aside and no popover — whose sheet
+ *      and whose script name one class on the root between them, which is the only way the
+ *      button opens anything at all;
  *    - the route that script polls opens a pty session — proved by typing into it and
  *      reading back what the shell printed, which is the one thing no stand-in can fake.
  *
@@ -237,6 +240,87 @@ describe("the script the document asks for is served", () => {
       expect(reply.status, `${at} answered ${reply.status}`).toBe(200);
       expect(reply.headers.get("content-type"), at).toContain("text/javascript");
     }
+  });
+});
+
+/** The sheet in the document a browser is served, which is where the whole look is: this
+ *  surface serves one workspace's own board and asks for no second file for it. */
+const sheetOf = (body: string): string =>
+  body.slice(body.indexOf("<style>") + "<style>".length, body.indexOf("</style>"));
+
+/** One rule out of it, by selector, whole. */
+function ruled(sheet: string, selector: string): string {
+  const found = new RegExp(`(?:^|\\n)${selector.replace(/[[\]().*+?^$|\\#]/g, "\\$&")} \\{([^}]*)\\}`);
+  const held = found.exec(sheet);
+  expect(held, `the sheet declares no ${selector}`).not.toBeNull();
+  return (held as RegExpExecArray)[1] as string;
+}
+
+describe("the dock a browser is served is a sidebar", () => {
+  it("draws it as an aside and not a popover, on every page", async () => {
+    const board = await boot();
+    for (const at of ["/", "/tasks", "/tree"]) {
+      const body = await documentOf(board, at);
+      expect(body, at).toContain(`<aside id="terminal"`);
+      // A popover is the browser's top layer, and the top layer belongs to the document: a
+      // reader who followed a link would be served a page with the terminal shut behind
+      // them, which is the one thing a session they are watching must not do.
+      expect(body, at).not.toContain("popover");
+    }
+  });
+
+  it("serves a sheet that opens it on a class the root wears, and makes room beside it", async () => {
+    const board = await boot();
+    const sheet = sheetOf(await documentOf(board, "/"));
+    // Shut is what every document is served in, so the panel is `display: none` until the
+    // class goes on — a page load with the terminal standing open is a page load that
+    // flashes one on every page of the surface.
+    expect(ruled(sheet, "#terminal")).toContain("display: none");
+    const shape = /\nhtml\.([a-z-]+) #terminal \{/.exec(sheet);
+    expect(shape, "the sheet opens the dock on no class at all").not.toBeNull();
+    const held = (shape as RegExpExecArray)[1] as string;
+    expect(ruled(sheet, `html.${held} #terminal`)).toContain("display: flex");
+    // …and the page is the width that is left. The panel is `position: fixed`, so nothing
+    // makes that room on its own.
+    expect(ruled(sheet, `html.${held} body`)).toContain("padding-right");
+    expect(ruled(sheet, "body"), "every document would stand aside for a shut dock")
+      .not.toContain("padding-right");
+  });
+
+  it("serves a script that turns that class, from the controls the document draws", async () => {
+    const board = await boot();
+    const body = await documentOf(board, "/");
+    const script = await (await got(board, asks(body).src)).text();
+    // The class in the script is the class the sheet opens on. Two spellings of one word is
+    // a dock whose button does nothing at all, and nothing in either file would say so.
+    const held = (/\nhtml\.([a-z-]+) #terminal \{/.exec(sheetOf(body)) as RegExpExecArray)[1];
+    expect(script).toContain(`const DOCKED = "${held as string}"`);
+    expect(script).toContain("classList.toggle(DOCKED");
+    expect(script).toContain("window.document.documentElement");
+    // And what it listens to is markup this document holds: a selector for an element the
+    // board never draws is a script that throws before it wires anything.
+    const controls = /const CONTROLS = (\{.*\});/.exec(script);
+    expect(controls, "the script names no controls").not.toBeNull();
+    const named = JSON.parse((controls as RegExpExecArray)[1] as string) as Record<string, string>;
+    expect(Object.keys(named).sort()).toEqual(["open", "shut"]);
+    for (const selector of Object.values(named)) {
+      const attribute = selector.slice(1, -1).replace(/[[\]().*+?^$|\\]/g, "\\$&");
+      expect([...body.matchAll(new RegExp(attribute, "g"))], selector).toHaveLength(1);
+      expect(script).toContain(`one(CONTROLS.${selector === named["open"] ? "open" : "shut"})`);
+    }
+    expect([...script.matchAll(/addEventListener\("click"/g)]).toHaveLength(2);
+  });
+
+  it("serves a script that remembers it, so a link the reader follows keeps it open", async () => {
+    const board = await boot();
+    const script = await (await got(board, asks(await documentOf(board, "/")).src)).text();
+    expect(script).toContain("window.localStorage");
+    expect(script).toMatch(/const REMEMBERED = "wecode\.terminal"/);
+    // Read on the way in and written on a turn: a store only ever written is a dock that
+    // opens shut, and one only ever read is a dock nobody's last answer reaches.
+    expect(script).toContain("getItem(REMEMBERED)");
+    expect(script).toContain("setItem(REMEMBERED");
+    expect(script.trimEnd().endsWith("sidebar.restore();"), "the script never restores it").toBe(true);
   });
 });
 
