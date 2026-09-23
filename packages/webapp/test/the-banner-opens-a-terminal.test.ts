@@ -1,22 +1,21 @@
-/** The mockup's banner ends in a terminal button, and the button opens a dock along the
- *  right edge of the window. These hold the two halves of that to the markup: the button is
- *  the last thing in the banner's row, and the dock is in the document of every page, closed.
+/** The mockup's banner ends in a terminal button, and the button opens a dock down the right
+ *  edge of the window. These hold the drawing of that — the button is the last thing in the
+ *  banner's row and the dock is in the document of every page — and the two things that make
+ *  it a sidebar rather than a popover: the design says where it sits and what room the page
+ *  gives it, and `docking()` turns it.
  *
- *  And they hold a third thing, which is where the dock sits. A popover nothing styles is
- *  drawn by the browser alone — a small box in the middle of the window, sized to whatever
- *  is inside it — so a dock the design says nothing about is not a dock. What it should be
- *  is the mockup's: down the right edge, full height, over the page rather than shoving it,
- *  about a third of the window wide, close at the top, the session's output filling the
- *  middle in the mono face, the command line along the foot. That is said in
- *  `renderers.webapp.look.frame`, because the dock is in every document and is no page's,
- *  and it is said in the palette and type tokens and in nothing else. This file reads it
- *  back off the design.
+ *  A popover is the browser's own top-layer box. It is drawn over the page and cannot make
+ *  room beside it, and — because the top layer belongs to the document — every link a reader
+ *  follows shuts it, which on a surface of eight documents is a terminal that closes itself
+ *  whenever the reader looks at anything. So the state is a class the root element wears,
+ *  remembered across a navigation, and one sheet answers both the panel and the room.
  *
- *  Only the drawing is gated here. What fills the dock — the session's output, and what
- *  happens when a line is typed — comes next, so the output is asserted empty rather than
- *  asserted about, and the form is asserted to exist rather than to go anywhere. */
+ *  What fills the dock is `the-dock-runs-a-shell.test.ts`'s, so the output is asserted empty
+ *  rather than asserted about, and the form is asserted to exist rather than to go
+ *  anywhere. */
 import { describe, expect, it } from "vitest";
-import { document, DOCK, loadLook, type Rules, stylesheet } from "../src/pages/shell.js";
+import { CONTROLS, DOCK, DOCKED, docking, document, loadLook, REMEMBERED, stylesheet } from "../src/pages/shell.js";
+import type { Remembers, Rules } from "../src/pages/shell.js";
 
 const BODY = document(`<section class="board"><h2>a page</h2></section>`);
 const LOOK = loadLook();
@@ -36,9 +35,14 @@ const declarations = (rules: Rules): readonly string[] =>
     typeof held === "string" ? [held] : declarations(held as Rules),
   );
 
-/** The rules the design declares about the dock, which are the ones keyed to its own id. */
-const DOCK_RULES = Object.entries(LOOK.frame).filter(([selector]) =>
-  selector.startsWith(`#${DOCK}`),
+/** The rule that makes room for the dock, which is the one rule about it that is not keyed
+ *  to its id: the panel is out of the flow, so the width it takes is the document's to give
+ *  back, and the document is the root and the body. */
+const ROOM = `html.${DOCKED} body`;
+
+/** The rules the design declares about the dock: the ones naming its id, and that one. */
+const DOCK_RULES = Object.entries(LOOK.frame).filter(
+  ([selector]) => selector.includes(`#${DOCK}`) || selector === ROOM,
 ) as readonly (readonly [string, string])[];
 
 /** One of them, by selector. Asked for by name so a missing rule fails as itself rather
@@ -50,7 +54,27 @@ function said(selector: string): string {
 }
 
 const DOCK_DECLARATIONS = DOCK_RULES.map(([, held]) => held);
-const EVERY_DECLARATION = [LOOK.frame, ...Object.values(LOOK.pages)].flatMap(declarations);
+
+/** A root element and a browser's store, as much of each as the sidebar reaches for. The
+ *  classes worn and the words held are readable, because what is asserted below is what the
+ *  turning left on the document and what it left for the next one. */
+function rooted(): { readonly worn: Set<string>; readonly root: Parameters<typeof docking>[0] } {
+  const worn = new Set<string>();
+  const classList = {
+    toggle: (name: string, on: boolean): void => void (on ? worn.add(name) : worn.delete(name)),
+    contains: (name: string): boolean => worn.has(name),
+  };
+  return { worn, root: { classList } };
+}
+
+function storing(): Remembers & { readonly held: Record<string, string> } {
+  const held: Record<string, string> = {};
+  return {
+    held,
+    getItem: (key) => held[key] ?? null,
+    setItem: (key, value) => void (held[key] = value),
+  };
+}
 
 describe("the banner ends in a terminal button", () => {
   it("carries one button, named for what it is", () => {
@@ -63,16 +87,28 @@ describe("the banner ends in a terminal button", () => {
     expect(row.lastIndexOf("<a ")).toBeLessThan(row.indexOf("<button"));
   });
 
-  it("points it at the dock", () => {
-    expect(nav(BODY)).toContain(`popovertarget="${DOCK}"`);
+  it("says what it turns, and whether it is open, rather than targeting a popover", () => {
+    expect(nav(BODY)).toContain(`aria-controls="${DOCK}"`);
+    // Served shut, as the sheet serves the panel: the script at the foot is what turns both,
+    // so a document that claimed to be open would be claiming it for a page load.
+    expect(nav(BODY)).toContain(`aria-expanded="false"`);
+    expect(BODY, "the popover is what a navigation shuts").not.toContain("popover");
   });
 
-  /** What is still true after approval 1561 is where the open-or-shut state lives: the
-   *  popover attributes, which are the browser's. What is no longer true is that the
-   *  document carries no script — the operator's mockup draws a terminal, and the pane
-   *  behind the dock is script — so only the handler of one's own is forbidden here. */
-  it("opens the dock through the popover and not a handler of its own", () => {
+  /** What is still true after approval 1561 is that no element carries a handler of its
+   *  own: the markup is the shell's and the wiring is `browser/dock.ts`'s, one place, over
+   *  every page there is. What is no longer true is that the document carries no script —
+   *  the operator's mockup draws a terminal, and the pane behind the dock is script. */
+  it("opens the dock from the served script and not from a handler in the markup", () => {
     expect(BODY).not.toContain("onclick");
+  });
+
+  it("names two controls, each of them one element of the document", () => {
+    for (const selector of Object.values(CONTROLS)) {
+      // The selectors are attributes, so the attribute itself is what the document holds.
+      const attribute = selector.slice(1, -1).replace(/[[\]().*+?^$|\\]/g, "\\$&");
+      expect([...BODY.matchAll(new RegExp(attribute, "g"))], selector).toHaveLength(1);
+    }
   });
 
   /** And the frame lets a page's own script through, which is the retirement itself: the
@@ -92,13 +128,10 @@ describe("the dock is in the document", () => {
     expect(BODY.indexOf(`id="${DOCK}"`)).toBeLessThan(BODY.indexOf("</body>"));
   });
 
-  it("is closed until the button is pressed", () => {
-    expect(BODY).toMatch(new RegExp(`<aside id="${DOCK}" popover[\\s>]`));
-  });
-
-  it("is closable again from inside", () => {
-    expect(BODY).toContain(`popovertargetaction="hide"`);
-    expect(BODY).toContain(`data-ui="shell.dock.close"`);
+  it("is an aside and not a popover, and is closable again from inside", () => {
+    expect(BODY).toMatch(new RegExp(`<aside id="${DOCK}" data-ui="shell\\.dock">`));
+    expect(drawn(BODY)).not.toContain("popover");
+    expect(drawn(BODY)).toContain(`data-ui="shell.dock.close"`);
   });
 
   it("holds the session's output and a command line, both empty", () => {
@@ -122,7 +155,7 @@ describe("the dock is in the document", () => {
 });
 
 describe("the design says where the dock sits", () => {
-  it("says it at all, which is what stops the browser centring a small box", () => {
+  it("says it at all, which is what stops the browser drawing a box of its own choosing", () => {
     expect(DOCK_RULES.length).toBeGreaterThan(0);
     for (const [selector] of DOCK_RULES) expect(SHEET, selector).toContain(`${selector} {`);
     expect(BODY).toContain(`#${DOCK} {`);
@@ -131,19 +164,22 @@ describe("the design says where the dock sits", () => {
   it("says it in the frame, because the dock is in every document and is no page's", () => {
     for (const [page, rules] of Object.entries(LOOK.pages)) {
       for (const selector of Object.keys(rules)) {
-        expect(selector.startsWith(`#${DOCK}`), `${page} styles ${selector}`).toBe(false);
+        expect(selector.includes(`#${DOCK}`), `${page} styles ${selector}`).toBe(false);
+        expect(selector.includes(DOCKED), `${page} styles ${selector}`).toBe(false);
       }
     }
   });
 
-  it("keys every rule to the dock's own id, so none of it reaches the page", () => {
+  it("keys every rule to the dock's own id, bar the one that makes room for it", () => {
     // The whole sheet is in every document. A rule about the dock written loose would be a
     // rule about everybody's `pre`, `form` and `button`.
     const dock = drawn(BODY);
     for (const [selector] of DOCK_RULES) {
+      if (selector === ROOM) continue;
       // Every tag the selector descends into is one the dock actually draws: a rule about
       // markup nobody writes is a decision nobody can read off the page.
-      for (const part of selector.slice(`#${DOCK}`.length).split(/[\s>]+/).filter(Boolean)) {
+      const under = selector.slice(selector.indexOf(`#${DOCK}`) + `#${DOCK}`.length);
+      for (const part of under.split(/[\s>]+/).filter(Boolean)) {
         const named = part.split(":")[0] as string;
         if (named === "") continue; // a state of the dock itself, not a tag inside it
         expect(dock, `${selector} styles a ${named} the dock never draws`).toContain(`<${named}`);
@@ -152,42 +188,24 @@ describe("the design says where the dock sits", () => {
     // …and no rule about the dock is written anywhere but under its id, where a `pre` or a
     // `button` of its own would be a `pre` or a `button` of every page's.
     for (const [selector] of Object.entries(LOOK.frame)) {
-      if (selector.startsWith(`#${DOCK}`)) continue;
+      if (selector.includes(`#${DOCK}`)) continue;
       for (const tag of ["pre", "aside", "form"]) expect(selector.split(/[\s>]+/), tag).not.toContain(tag);
     }
   });
 });
 
-describe("it sits down the right edge, full height, over the page", () => {
+describe("it sits down the right edge, full height, as a column of the window", () => {
   /** The dock's own rule, asked for when a statement needs it rather than when the file is
    *  read — a missing rule is one red statement here and not a file that will not load. */
   const self = (): string => said(`#${DOCK}`);
 
-  it("is pinned to the right edge rather than centred by the popover's own margin", () => {
-    // A popover is `inset: 0; margin: auto`, which is the small centred box. Both are
-    // answered: the left inset gives way, and the margin goes.
+  it("is pinned to that edge, full height, rather than laid out where it is drawn", () => {
     expect(self()).toContain("position: fixed");
     expect(self()).toContain("inset: 0 0 0 auto");
     expect(self()).toContain("margin: 0");
-  });
-
-  it("runs the full height of the window, which an inset alone does not buy", () => {
-    // The popover is drawn `height: fit-content`, so top and bottom together are not
-    // enough — the height is said.
+    // The height is said: an inset alone does not undo a box the browser sizes to what is
+    // inside it, which is the one shape a terminal must not be.
     expect(self()).toMatch(/height: 100dvh|height: 100vh|height: auto/);
-  });
-
-  it("lies over the page instead of pushing it aside", () => {
-    // `position: fixed` takes it out of the flow, and nothing anywhere else in the look
-    // reserves room for it — the mockup's `body.docked { padding-right }` is not here,
-    // because the look is one sheet for both states and the dock lies over what it covers.
-    expect(LOOK.frame["body"]).not.toContain("padding-right");
-    expect(Object.keys(LOOK.frame).join(" ")).not.toContain("docked");
-    const width = /width: ([^;]*)/.exec(self())?.[1] as string;
-    for (const held of EVERY_DECLARATION) {
-      if (DOCK_DECLARATIONS.includes(held)) continue;
-      expect(held, "something outside the dock is making room for it").not.toContain(width);
-    }
   });
 
   it("takes about a third of the window, and never less than a readable line", () => {
@@ -206,18 +224,34 @@ describe("it sits down the right edge, full height, over the page", () => {
     expect(width, "the dock can be wider than the window").toContain("min(100vw,");
   });
 
-  it("stays shut when it is shut — the open shape is on the open state", () => {
-    // The browser hides a closed popover with `display: none`. An author `display` on the
-    // dock itself beats that whatever its specificity, and the dock would stand open on
-    // every page of the surface with no way to close it.
-    expect(self()).not.toMatch(/(^|;)\s*display:/);
-    expect(said(`#${DOCK}:popover-open`)).toContain("display: flex");
+  it("is served shut, and is opened by the class the root wears", () => {
+    // Shut is the state every document is served in: the class goes on from the script at
+    // the foot, and a panel drawn open would stand open for the length of every page load.
+    expect(self()).toContain("display: none");
+    const open = said(`html.${DOCKED} #${DOCK}`);
+    expect(open).toContain("display: flex");
+    // Nothing is left of the popover, whose own `:popover-open` was where this used to be.
+    expect(Object.keys(LOOK.frame).join(" ")).not.toContain("popover");
+  });
+
+  it("gives the body the width the dock is not taking, and a gutter beside it", () => {
+    // One width, said in two rules because a fixed panel and the room made for it are two
+    // decisions the browser will not make for us. Held to each other here, so neither can
+    // be changed alone: the page would slide under the dock or stop short of it.
+    const width = /width: ([^;]*)/.exec(self())?.[1] as string;
+    const gutter = /padding: \S+ (clamp\([^)]*\))/.exec(LOOK.frame["body"] as string)?.[1] as string;
+    expect(gutter, "the body keeps no gutter of its own to match").toBeTypeOf("string");
+    expect(said(ROOM)).toBe(`padding-right: calc(${width} + ${gutter})`);
+    // And only while it is open. One sheet carries both states, so the room is on the state
+    // and never on the body: a document nobody opened the dock on has the whole width.
+    expect(ROOM.startsWith(`html.${DOCKED} `)).toBe(true);
+    expect(LOOK.frame["body"]).not.toContain("padding-right");
   });
 });
 
 describe("what is inside it is stacked: close, output, command line", () => {
   it("stacks them down the panel in the order the dock draws them", () => {
-    const open = said(`#${DOCK}:popover-open`);
+    const open = said(`html.${DOCKED} #${DOCK}`);
     expect(open).toContain("flex-direction: column");
     const dock = drawn(BODY);
     expect(dock.indexOf("<button")).toBeLessThan(dock.indexOf("<pre"));
@@ -276,5 +310,89 @@ describe("it is drawn out of the signed tokens and out of nothing else", () => {
     for (const name of ["raised", "rule", "ink", "faint", "mono"]) {
       expect([...spent], name).toContain(name);
     }
+  });
+});
+
+describe("the class the root wears is the state, and the browser remembers it", () => {
+  it("is shut on a document nobody has opened it on", () => {
+    const { worn, root } = rooted();
+    const shown: boolean[] = [];
+    docking(root, storing(), (open) => void shown.push(open)).restore();
+    expect(worn.has(DOCKED)).toBe(false);
+    // The wiring is told all the same: shut is what stops the poll and says so on the
+    // button, and a restore that said nothing would leave both to guess.
+    expect(shown).toEqual([false]);
+  });
+
+  it("wears the class when a reader turns it open, and takes it off again", () => {
+    const { worn, root } = rooted();
+    const sidebar = docking(root, storing(), () => {});
+    sidebar.turn(true);
+    expect(worn.has(DOCKED)).toBe(true);
+    expect(sidebar.opened()).toBe(true);
+    sidebar.turn(false);
+    expect(worn.has(DOCKED)).toBe(false);
+    expect(sidebar.opened()).toBe(false);
+  });
+
+  it("reads open-or-shut off the root, so nothing holds a second copy of it", () => {
+    const { worn, root } = rooted();
+    const sidebar = docking(root, storing(), () => {});
+    worn.add(DOCKED);
+    expect(sidebar.opened()).toBe(true);
+  });
+
+  it("tells the wiring every turn, which is what attaches the pane and starts the poll", () => {
+    const shown: boolean[] = [];
+    const sidebar = docking(rooted().root, storing(), (open) => void shown.push(open));
+    sidebar.turn(true);
+    sidebar.turn(false);
+    sidebar.restore();
+    expect(shown).toEqual([true, false, false]);
+  });
+
+  /** The whole reason it is remembered rather than held in the page: this surface is eight
+   *  documents, and a reader who follows a link is served a new one. */
+  it("opens the next document as the reader left the last", () => {
+    const store = storing();
+    docking(rooted().root, store, () => {}).turn(true);
+    expect(store.held[REMEMBERED]).toBe("open");
+    const next = rooted();
+    docking(next.root, store, () => {}).restore();
+    expect(next.worn.has(DOCKED)).toBe(true);
+  });
+
+  it("keeps it shut on the next document when the reader shut it on this one", () => {
+    const store = storing();
+    const first = docking(rooted().root, store, () => {});
+    first.turn(true);
+    first.turn(false);
+    const next = rooted();
+    docking(next.root, store, () => {}).restore();
+    expect(next.worn.has(DOCKED)).toBe(false);
+  });
+
+  it("writes nothing while restoring, so only what a reader did is remembered", () => {
+    const store = storing();
+    docking(rooted().root, store, () => {}).restore();
+    expect(Object.keys(store.held)).toEqual([]);
+  });
+
+  it("remembers it under a name of this surface's own", () => {
+    // Not `docked`, which is a word any script on any origin might have taken: the store is
+    // the origin's and is shared with whatever else the operator has served from it.
+    expect(REMEMBERED).toContain("wecode");
+    expect(REMEMBERED).toContain(DOCK);
+  });
+
+  it("still turns in a browser that refuses a store", () => {
+    // Reaching for `localStorage` throws outright in a document that is not allowed one. A
+    // dock that forgets is a great deal better than a script that dies before it wires.
+    const { worn, root } = rooted();
+    const sidebar = docking(root, null, () => {});
+    sidebar.turn(true);
+    expect(worn.has(DOCKED)).toBe(true);
+    sidebar.restore();
+    expect(worn.has(DOCKED)).toBe(false);
   });
 });
