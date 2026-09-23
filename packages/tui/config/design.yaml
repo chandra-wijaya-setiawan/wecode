@@ -229,26 +229,37 @@ renderers:
         # The terminal dock, which the banner's last control opens. It is in every document
         # and belongs to no page, so it is the frame's — as the banner's row is.
         #
-        # Without these rows it was drawn by the browser alone: a popover with nothing said
-        # about it is a small box in the middle of the window, sized to its contents, which
-        # is the one shape a terminal must not be. The mockup puts it down the right edge,
-        # full height, and that is what this says — `position: fixed` so it lies over the
-        # page rather than pushing it, `inset: 0 0 0 auto` so it is pinned to that edge and
-        # not centred by the popover's own `margin: auto`, and `margin`, `padding` and
-        # `border` spelled out because each of them is something the browser would otherwise
-        # choose. `height` is said too: the popover is drawn `fit-content` tall, and an
-        # inset alone does not undo that.
+        # It is a sidebar: a column down the right edge, full height, with the page taking
+        # the width that is left. It was a popover, which is the browser's own top-layer
+        # box — drawn over the page rather than beside it, and shut by every link a reader
+        # follows, because the top layer belongs to the document and a navigation is a new
+        # one. So the open-or-shut state is a class the root wears, which a browser
+        # remembers across a navigation, and these three rows are what it means.
         #
-        # A third of the window, which is the mockup's proportion, and never narrower than
-        # a line of output worth reading — a terminal that wraps at forty columns tells the
-        # reader less than no terminal. On a window too narrow for even that, the floor
+        # `position: fixed` and `inset: 0 0 0 auto` pin it to that edge with no regard for
+        # where in the document it is drawn; `height` says the full window, which an inset
+        # alone does not buy on a box the browser would otherwise size to its contents; and
+        # `margin`, `padding` and `border` are spelled out because each is something the
+        # browser would otherwise choose.
+        #
+        # A third of the window, which is about the mockup's proportion, and never narrower
+        # than a line of output worth reading — a terminal that wraps at forty columns tells
+        # the reader less than no terminal. On a window too narrow for even that, the floor
         # gives way rather than hanging the dock off the side.
         #
-        # `display` is on `:popover-open` and not here: the browser hides a closed popover
-        # with `display: none`, and any author `display` in this rule would beat it and
-        # leave the dock open on every page for nobody.
-        "#terminal": "position: fixed; inset: 0 0 0 auto; width: min(100vw, max(33vw, 32rem)); height: 100dvh; margin: 0; padding: 0; border: 0; border-left: 1px solid var(--rule); background: var(--raised); color: var(--ink); overflow: hidden"
-        "#terminal:popover-open": "display: flex; flex-direction: column"
+        # `display: none` is the shut state, because shut is what every document is served
+        # in: the class is put on by the script at the foot, so a dock drawn open would
+        # stand open for the length of a page load on every page of the surface.
+        "#terminal": "position: fixed; inset: 0 0 0 auto; width: min(100vw, max(33vw, 32rem)); height: 100dvh; margin: 0; padding: 0; border: 0; border-left: 1px solid var(--rule); background: var(--raised); color: var(--ink); overflow: hidden; display: none"
+        "html.docked #terminal": "display: flex; flex-direction: column"
+        # …and the page gets the rest of the width. The dock is `position: fixed`, so it is
+        # out of the flow and nothing makes room for it on its own: the room is this row,
+        # which is the dock's width and the gutter the body already keeps on that side, so
+        # the page is neither under the panel nor flush against it. Two rows saying one
+        # width is two chances to drift, and `the-banner-opens-a-terminal.test.ts` holds
+        # them to each other — a token would be the other answer, but the look's tokens are
+        # the palette's and the type's and a width is neither.
+        "html.docked body": "padding-right: calc(min(100vw, max(33vw, 32rem)) + clamp(1rem, 4vw, 3rem))"
         # The way back out, at the top, where a reader looks for it. Quiet: it is the one
         # control on a panel whose content is the point.
         "#terminal button": "align-self: flex-end; flex: 0 0 auto; border: 0; background: none; padding: .55rem .9rem; color: var(--faint); font: inherit; font-family: var(--mono); font-size: .92em; cursor: pointer"
