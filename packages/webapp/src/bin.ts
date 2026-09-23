@@ -23,6 +23,7 @@ import {
   databaseOf,
   listWorkspaces,
   open,
+  sketches,
   tree,
   waitingApprovals,
 } from "@wecode/core";
@@ -85,6 +86,10 @@ const readings = {
   record: () => tree(db),
   board: () => board(db),
   approvals: () => waitingApprovals(db),
+  /** Every drawing made before there was work to hang it on, newest first. Its own reading
+   *  and not the record's: a sketch hangs under nothing, so `tree()`'s nodes carry none of
+   *  it — no id, no kind, no line saying what it is, and no path to the html. */
+  sketches: () => sketches(db),
 };
 
 /** The shell behind the dock, opened where this board's workspace is. The database's own

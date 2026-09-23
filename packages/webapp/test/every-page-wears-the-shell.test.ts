@@ -22,7 +22,7 @@
  *  is the documents.
  */
 import { readdirSync } from "node:fs";
-import type { Board, Node, Approval, Rollup } from "@wecode/core";
+import type { Board, Node, Approval, Rollup, Sketch } from "@wecode/core";
 import { describe, expect, it } from "vitest";
 import { answer } from "../src/server.js";
 import { discovered, pages, pathOf } from "../src/pages/discover.js";
@@ -77,9 +77,19 @@ const anApproval = (): readonly Approval[] => [
   },
 ];
 
+/** A sketch whose drawing is on no disk, which is what keeps this file off the filesystem:
+ *  the page says so in the frame, and the frame is still one of its own shapes. */
+const aSketch = (): readonly Sketch[] => [
+  {
+    id: 7, name: "where the dock sits", kind: "ui", says: "right edge against bottom drawer",
+    html: "/nowhere/where-the-dock-sits.html", story_id: null,
+    created_at: "2026-09-01T00:00:00.000Z", updated_at: "2026-09-01T00:00:00.000Z",
+  },
+];
+
 /** The readings `bin.ts` offers, answered out of hand-made work rather than a database:
  *  what is being proved is the frame around a page, not its arithmetic. */
-const readings = { record: aTree, board: aBoard, approvals: anApproval };
+const readings = { record: aTree, board: aBoard, approvals: anApproval, sketches: aSketch };
 
 const NAMES = discovered(readdirSync(new URL("../src/pages", import.meta.url)));
 

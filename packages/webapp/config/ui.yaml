@@ -1,4 +1,4 @@
-# What the tree page offers a reader, in words rather than in the page.
+# What a page of the web surface offers a reader, in words rather than in the page.
 #
 # `packages/webapp/src/pages/tree.ts` draws the tree; what the tree is made of is not its
 # to decide. How deep it goes is the design's — `shared.outline.levels` in
@@ -56,3 +56,49 @@ tree:
     more:
       id: tree.node.more
       says: more
+
+# What the sketches page offers a reader, which is the bar above the list and nothing else.
+# There is no new-sketch control to declare: a sketch is drawn by the orchestrator, because
+# drawing one means writing a file and an agent is the one who writes files.
+#
+# The two acts are here rather than in `packages/webapp/src/pages/sketches.ts` because each
+# of them is two decisions, and neither is a page's. The word a button carries is a decision
+# about the surface; what the button *types at the operator's own shell* is a decision about
+# their machine, and a command spelled in a page is a command nobody can read off a file.
+sketches:
+  # Nothing is sent. Both acts post a `keys` frame to the dock's far end, so the words land
+  # on the command line unsent and editable — the operator reads them, changes them and
+  # presses return, or does not. See `pages/sketches.ts`.
+  acts:
+    # Prose, because there is no verb that turns a drawing into work: what makes a story out
+    # of a sketch is whoever is at the dock, and what they need is what to do, which sketch,
+    # and where the drawing is. `%id%`, `%name%` and `%html%` are the record's own columns.
+    - id: sketches.act.story
+      name: story
+      says: Make a story from it
+      # The marked button: it is the one act that makes something.
+      kind: primary
+      lead: "make a story from "
+      row: 'sketch #%id% "%name%", drawn at %html%'
+      joins: "; and from "
+    # The cli's own verb, spelled the way the cli spells it — `wecode sketch drop <id>` —
+    # because taking a row out of the record is the cli's and never this surface's. One
+    # command per picked sketch, because that is what the verb takes; the row goes and the
+    # drawing stays, which is `core`'s `dropSketch` and not this page's choice.
+    - id: sketches.act.remove
+      name: remove
+      says: Remove
+      # The quiet button. The mock draws it in a red the signed palette does not hold, and a
+      # colour added here would be a colour nobody signed.
+      kind: plain
+      lead: ""
+      row: "wecode sketch drop %id%"
+      joins: "; "
+  # What the bar says of the ticks, which is what the acts will act on. The count is the
+  # browser's, because a tick is; the words are not.
+  picked:
+    id: sketches.picked
+    says: picked
+    none: nothing picked
+  # Why the bar has only two buttons, said on the bar rather than left to be wondered at.
+  hint: a sketch is drawn by the orchestrator, never by this page
