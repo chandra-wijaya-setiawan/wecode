@@ -3,11 +3,12 @@
  *
  *  Everything about the dock that runs in a page is here, and nothing about it is in the
  *  document. That is the whole shape of this file. `pages/shell.ts` draws the dock — an
- *  `<aside popover>` with a screen and a command line in it — and owns the far end and
- *  `dock()`, the pane. But a pane needs an emulator, and the emulator is a browser library:
- *  the module that renders HTML cannot import it, because node refuses its named export
- *  before a byte is served, which is exactly how this board once stopped starting. So the
- *  pane runs in a file a browser fetches, and this is the file that says what is in it.
+ *  `<aside>` down the side with a screen and a command line in it — and owns the far end,
+ *  `dock()` the pane, and `docking()` the open-or-shut state that the root's class is. But a
+ *  pane needs an emulator, and the emulator is a browser library: the module that renders
+ *  HTML cannot import it, because node refuses its named export before a byte is served,
+ *  which is exactly how this board once stopped starting. So the pane runs in a file a
+ *  browser fetches, and this is the file that says what is in it.
  *
  *  Four files are served and one line refers to them. The line is the `<script>` tag, and
  *  it is put into a served document here rather than in `document()` — the document is the
@@ -23,7 +24,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_ROWS } from "@wecode/painter/dist/pty.js";
-import { dock, DOCK, PARTS, SHELL_AT } from "../pages/shell.js";
+import { CONTROLS, dock, DOCKED, docking, PARTS, REMEMBERED, SHELL_AT } from "../pages/shell.js";
 import type { Handler, Page, Reply, Routes, Verb } from "../server.js";
 
 /** Where the dock's pane is served from. Four files, and none of them is a page — nothing
@@ -54,19 +55,27 @@ const SCRIPT = `<script type="module" src="${BROWSER.dock}"></script>`;
  *  runner can stand in for — the emulator, the document and `fetch` — and the four free
  *  names that function lives under, defined again here on the browser's side.
  *
- *  Nothing is attached until the dock is first opened. A popover is not displayed until
- *  then, and a terminal opened on a box with no size measures a screen of nothing; it is
- *  also how a board nobody opened the dock on never starts a shell. While it is open the
- *  pane asks the far end for what has been drawn since its cursor, and a frame going up asks
- *  again as soon as it lands, so an echo does not wait for the next beat. */
+ *  Nothing is attached until the dock is first opened. A sidebar the root's class is not on
+ *  is `display: none`, and a terminal opened on a box with no size measures a screen of
+ *  nothing; it is also how a board nobody opened the dock on never starts a shell. While it
+ *  is open the pane asks the far end for what has been drawn since its cursor, and a frame
+ *  going up asks again as soon as it lands, so an echo does not wait for the next beat.
+ *
+ *  The turning itself is `docking()`, which is `pages/shell.ts`'s as `dock()` is: what a
+ *  reader is served is the code that was proved. What is left here is the browser — the root
+ *  element, the store and the two clicks. */
 const dockScript = (): string =>
   `import { Terminal } from "${BROWSER.emulator}";
 import { attach, encode } from "${BROWSER.pane}";
 
-// The names the pane reaches for, on this side of the wire.
+// The names the pane and the sidebar reach for, on this side of the wire.
 const WINDOW = { rows: ${DEFAULT_ROWS} };
 const emulator = () => Terminal;
 const dock = ${String(dock)};
+const DOCKED = ${JSON.stringify(DOCKED)};
+const REMEMBERED = ${JSON.stringify(REMEMBERED)};
+const CONTROLS = ${JSON.stringify(CONTROLS)};
+const docking = ${String(docking)};
 
 const PARTS = ${JSON.stringify(PARTS)};
 const one = (selector) => {
@@ -111,8 +120,18 @@ const beat = async () => {
   }
 };
 
-one("#${DOCK}").addEventListener("toggle", (event) => {
-  if (event.newState !== "open") {
+// The store, or nothing at all: the property itself throws in a document that is not
+// allowed one, and that must not be what stops the dock from being wired.
+let store = null;
+try {
+  store = window.localStorage;
+} catch {
+  store = null;
+}
+
+const sidebar = docking(window.document.documentElement, store, (open) => {
+  one(CONTROLS.open).setAttribute("aria-expanded", String(open));
+  if (!open) {
     window.clearInterval(beating);
     beating = null;
     return;
@@ -127,6 +146,13 @@ one("#${DOCK}").addEventListener("toggle", (event) => {
   beating = window.setInterval(() => void beat(), 50);
   void beat();
 });
+
+one(CONTROLS.open).addEventListener("click", () => sidebar.turn(!sidebar.opened()));
+one(CONTROLS.shut).addEventListener("click", () => sidebar.turn(false));
+
+// Last, and not on a click: a reader who left the dock open meets it open on the next page
+// they follow to, which is the whole of why the state is remembered rather than a popover's.
+sidebar.restore();
 `;
 
 const JS = "text/javascript";
