@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -19,15 +20,13 @@ import { choreBrief } from "./foreman/prompt.js";
 import { Trees } from "./git.js";
 import type { History, Observation, TestFailure, WorkerAdapter, Work } from "./ports.js";
 
-/** The tables this module reads, and only the columns it asks for.
- *
- *  Kept in one object because `task`, `story`, `chore` and `worker` are all names this file
- *  already uses for other things: a bare const would be shadowed and the shadowing would
- *  typecheck. `typed-foreman.test.ts` holds every list below against `PRAGMA table_info`,
- *  so a column renamed out from under this module fails a test rather than a tick.
- *
- *  `objective_type` is declared as its union rather than as text, which is what makes a
- *  misspelt objective a typecheck failure at every place one is compared. */
+/** The tables this module reads, and only the columns it asks for. Kept in one object because
+ *  `task`, `story`, `chore` and `worker` are all names this file already uses for other
+ *  things: a bare const would be shadowed and the shadowing would typecheck.
+ *  `typed-foreman.test.ts` holds every list below against `PRAGMA table_info`, so a column
+ *  renamed out from under this module fails a test rather than a tick. `objective_type` is
+ *  declared as its union rather than as text, which is what makes a misspelt objective a
+ *  typecheck failure at every place one is compared. */
 type ObjectiveType = "task" | "acceptance_test" | "task_test" | "chore";
 
 interface AssignmentRow {
@@ -101,8 +100,7 @@ const tbl = {
 const OPEN_PHASES: readonly string[] = ["pending", "running", "waiting"];
 
 /** The worker kind that is a person. Nobody runs a person's assignment: there is no adapter
- *  registered under this kind and there never will be one, so the absence is the normal
- *  case rather than a misconfigured runner. */
+ *  registered under this kind and never will be, so the absence is normal, not misconfiguration. */
 const PERSON = "human";
 
 /** Where the operator writes them, relative to the repository root. The same file the
@@ -112,13 +110,6 @@ export const CONVENTIONS_CONFIG = join("packages", "core", "config", "project.ya
 /** The heading the conventions are handed over under, beside the lessons. */
 export const CONVENTIONS_HEADING = "How this repository is built:";
 
-/** The operator's conventions, read off the project config by hand.
- *
- *  A list of scalars is the whole grammar this needs, and reading it this way keeps the
- *  runner's dependency list where it is — the same bargain `ceiling.ts` struck with the
- *  same file. Everything indented under `conventions:` and starting `- ` is a sentence;
- *  the block ends at the first line that is neither, so a comment between keys or a key
- *  that follows cannot leak in. */
 /** The instruction with the conventions under it, so they arrive immediately above the
  *  lessons every adapter renders next. Nothing is added when there are none: a heading
  *  with no sentences under it is how the rest of the brief stops being read. */
@@ -127,6 +118,11 @@ export function withConventions(instruction: string, said: readonly string[]): s
   return [instruction, "", CONVENTIONS_HEADING, ...said.map((s) => `- ${s}`)].join("\n");
 }
 
+/** The operator's conventions, read off the project config by hand. A list of scalars is the
+ *  whole grammar this needs, and reading it this way keeps the runner's dependency list where
+ *  it is — the same bargain `ceiling.ts` struck with the same file. Everything indented under
+ *  `conventions:` and starting `- ` is a sentence; the block ends at the first line that is
+ *  neither, so a comment between keys or a key that follows cannot leak in. */
 export function readConventions(text: string): string[] {
   const lines = text.split("\n");
   const at = lines.findIndex((l) => l.trimEnd() === "conventions:");
@@ -168,9 +164,8 @@ export interface TickReport {
   readonly failed: readonly number[];
 }
 
-/** Takes an assignment and makes it real: starts the session, watches it, kills it,
- *  resumes it. It decides nothing about the work — only whether an attempt exists and how
- *  it is going. */
+/** Takes an assignment and makes it real: starts the session, watches it, kills it, resumes
+ *  it. It decides nothing about the work — only whether an attempt exists and how it goes. */
 export class Foreman {
   /** The record's verbs, one method per transition. The engine is behind it, but nothing
    *  here names a verb as a string: an assignment moved by a misspelt word is a tick that
@@ -199,10 +194,9 @@ export class Foreman {
 
     for (const row of this.open()) {
       const adapter = this.adapterFor(row);
-      // An approval is an assignment too, and it waits on a person rather than on a
-      // session. Left exactly as it was found — not started, not polled, not failed — so
-      // the question outlives the tick that walked past it and is still there when the
-      // person comes to answer it.
+      // An approval is an assignment too, and it waits on a person rather than on a session.
+      // Left exactly as it was found — not started, not polled, not failed — so the question
+      // outlives the tick that walked past it and is there when the person comes to answer.
       if (adapter === PERSON) continue;
       if (adapter === null) {
         this.record(row.id, { phase: "failed", session: null, spent: zero(), reason: "other" });
@@ -241,6 +235,10 @@ export class Foreman {
       }
 
       this.recordDenials(adapter, row);
+      // A clean exit that left nothing behind is a failure, and what it said comes with it.
+      if (seen.phase === "succeeded" && seen.commit === null && leftNothing(row)) {
+        seen = { phase: "failed", session: seen.session, spent: seen.spent, reason: "other", ...(seen.lesson === undefined ? {} : { lesson: seen.lesson }) };
+      }
 
       const moved = this.record(row.id, seen);
       if (seen.phase === "failed") failed.push(row.id);
@@ -253,22 +251,20 @@ export class Foreman {
   /** What the harness refused this attempt permission to write, carried to the record.
    *
    *  Every tick, not only at the end: the attempt may be killed, lost or timed out, and a
-   *  refusal read only on a clean finish is a refusal read on exactly the passes that did
-   *  not need it. Against the task, because the scope is the task's and so is the decision
-   *  to widen it — an objective that is not a task has no such record to keep.
-   *
-   *  Recorded, never acted on. Widening a scope is the operator's verb; this is only so the
-   *  board can say what was asked for instead of 'out of attempts'. */
+   *  refusal read only on a clean finish is one read on exactly the passes that did not need
+   *  it. Against the task, because the scope is the task's and so is the decision to widen
+   *  it — an objective that is not a task has no such record to keep. Recorded, never acted
+   *  on: widening a scope is the operator's verb, and this is only so the board can say what
+   *  was asked for instead of 'out of attempts'. */
   private recordDenials(adapter: WorkerAdapter, row: OpenRow): void {
     if (row.objective_type !== "task" || !hasWriteDenials(adapter)) return;
     const paths = adapter.takeRefusedWrites(row.id);
     if (paths.length > 0) recordScopeRefusal(this.db, row.objective_id, paths);
   }
 
-  /** A lost attempt that still has somewhere to go back to. The session id and the worktree
-   *  are the two halves of an attempt's continuity: with both, the work so far is still on
-   *  disk and the harness can be asked to reattach. With either missing there is nothing to
-   *  resume, and lost is the honest answer. */
+  /** A lost attempt that still has somewhere to go back to. The session id and the worktree are
+   *  the two halves of an attempt's continuity: with both, the work so far is still on disk and
+   *  the harness can be asked to reattach. With either missing, lost is the honest answer. */
   private async recover(adapter: WorkerAdapter, work: Work): Promise<Observation> {
     const lost = (): Observation => ({ phase: "failed", session: work.session, spent: zero(), reason: "lost" });
     if (work.session === null || work.session === "") return lost();
@@ -284,13 +280,12 @@ export class Foreman {
     return this.q.selectFrom(tbl.assignment).select(["phase"]).where("id", "=", id).get()?.phase ?? "";
   }
 
-  /** Every open assignment, oldest first. The phase filter and the order are applied in
-   *  memory: the dialect spells neither set membership nor an ordering, and the open rows
-   *  are bounded by `max_open` rather than by the size of the record.
-   *
-   *  Open, not runnable: an approval waiting on a person is open by exactly this definition
-   *  and is returned here like any other row. Who the row belongs to is a question about
-   *  its worker, so it is asked once, in `adapterFor`, and not a second filter here. */
+  /** Every open assignment, oldest first. The phase filter and the order are applied in memory:
+   *  the dialect spells neither set membership nor an ordering, and the open rows are bounded by
+   *  `max_open` rather than by the size of the record. Open, not runnable: an approval waiting
+   *  on a person is open by exactly this definition and is returned here like any other row.
+   *  Who the row belongs to is a question about its worker, so it is asked once, in
+   *  `adapterFor`, and not a second filter here. */
   private open(): OpenRow[] {
     const rows = this.q
       .selectFrom(tbl.assignment)
@@ -301,13 +296,12 @@ export class Foreman {
     return rows;
   }
 
-  /** The adapter for this assignment's worker, by the two reads the join was. A worker that
-   *  is not there is null, which is what the inner join did with the row.
-   *
-   *  A person is neither an adapter nor a missing one, so they are told apart here rather
-   *  than by the caller: the worker's kind is what says an assignment waits on a person, and
-   *  the assignment's own `kind` cannot — `approval` is also what a *running* agent calls
-   *  the question it asks through the foreman, and that one is the foreman's to carry. */
+  /** The adapter for this assignment's worker, by the two reads the join was. A worker that is
+   *  not there is null, which is what the inner join did with the row. A person is neither an
+   *  adapter nor a missing one, so they are told apart here rather than by the caller: the
+   *  worker's kind is what says an assignment waits on a person, and the assignment's own
+   *  `kind` cannot — `approval` is also what a *running* agent calls the question it asks
+   *  through the foreman, and that one is the foreman's to carry. */
   private adapterFor(row: OpenRow): WorkerAdapter | typeof PERSON | null {
     const a = this.q.selectFrom(tbl.assignment).select(["worker_id"]).where("id", "=", row.id).get();
     if (a === null) return null;
@@ -321,8 +315,7 @@ export class Foreman {
     return {
       id: row.id,
       // A chore is an objective like a task is, and the column has always been free text:
-      // `Work["objective_type"]` is core's list of the ones a *test* can hang off, which a
-      // chore deliberately does not.
+      // `Work["objective_type"]` is core's list of the ones a *test* can hang off, not a chore.
       objective_type: row.objective_type as Work["objective_type"],
       objective_id: row.objective_id,
       instruction: withConventions(await this.instructionFor(row), this.conventionsFor(row)),
@@ -375,11 +368,9 @@ export class Foreman {
   }
 
   /** The project an assignment belongs to, by the walk up from whichever objective it has.
-   *  Nothing below a project carries a project_id, so the walk is the only way to know — and
-   *  a chore names its project outright, which is why it never needed the walk.
-   *
-   *  A broken link is null and every caller treats it as "no project", which is what the
-   *  inner joins this replaced did with the row. */
+   *  Nothing below a project carries a project_id, so the walk is the only way to know — and a
+   *  chore names its project outright, which is why it never needed the walk. A broken link is
+   *  null and every caller treats it as "no project", as the inner joins this replaced did. */
   private projectOf(id: number): number | null {
     const a = this.q
       .selectFrom(tbl.assignment)
@@ -421,11 +412,9 @@ export class Foreman {
     return q.selectFrom(tbl.release).select(["project_id"]).where("id", "=", e.release_id).get()?.project_id ?? null;
   }
 
-  /** What the last attempt at this task left on the branch.
-   *
-   *  Null unless this is a retry: a first attempt must be told exactly what it is told
-   *  today. A retry is told what git already holds, because that is the only thing that
-   *  crosses between two sessions that share no memory. */
+  /** What the last attempt at this task left on the branch. Null unless this is a retry: a
+   *  first attempt must be told exactly what it is told today. A retry is told what git already
+   *  holds, because that is the only thing that crosses two sessions sharing no memory. */
   private historyFor(row: OpenRow): History | null {
     if (row.objective_type !== "task") return null;
     const attempts =
@@ -455,11 +444,8 @@ export class Foreman {
    *  with nothing to say is still worth naming: the statement is the requirement. */
   private failuresFor(task_id: number): TestFailure[] {
     return this.q
-      .selectFrom(tbl.taskTest)
-      .select(["id", "statement", "last_output"])
-      .where("parent_id", "=", task_id)
-      .where("state", "=", "failed")
-      .all()
+      .selectFrom(tbl.taskTest).select(["id", "statement", "last_output"])
+      .where("parent_id", "=", task_id).where("state", "=", "failed").all()
       .sort((a, b) => a.id - b.id)
       .map((r) => ({ statement: r.statement, line: lastLine(r.last_output) }));
   }
@@ -480,14 +466,12 @@ export class Foreman {
     );
   }
 
-  /** A chore's brief: what the work is for, and what its check is.
-   *
-   *  A task's instruction is its title, because the acceptance_test says what it is for. A
-   *  chore has no test, so the brief has to carry both — and it says the check in words the
-   *  worker can act on, rather than the one line the record stores it as.
-   *
-   *  The words themselves are `foreman/prompt.ts`'s: this looks the chore up and hands over
-   *  the facts, and what a worker reads is that module's to change. */
+  /** A chore's brief: what the work is for, and what its check is. A task's instruction is its
+   *  title, because the acceptance_test says what it is for; a chore has no test, so the brief
+   *  has to carry both — and it says the check in words the worker can act on, rather than the
+   *  one line the record stores it as. The words themselves are `foreman/prompt.ts`'s: this
+   *  looks the chore up and hands over the facts, and what a worker reads is that module's to
+   *  change. */
   private async briefFor(id: number): Promise<string> {
     const row = this.q.selectFrom(tbl.chore).where("id", "=", id).get();
     if (row === null) return "";
@@ -535,20 +519,15 @@ export class Foreman {
       this.recordLesson(id, seen.lesson);
     }
 
-    // A session can finish, or ask, inside the same call that started it. Neither is legal
-    // from pending, so the start is recorded first: the record must be able to say the
-    // attempt ran, even when it ran for one second.
+    // A session can finish, or ask, inside the same call that started it. Neither is legal from
+    // pending, so the start is recorded first: the record must be able to say the attempt ran.
     if (seen.phase !== "failed" && this.phaseOf(id) === "pending") {
       this.verbs.startAssignment(id, "foreman");
     }
 
     // Every branch below writes the same three columns, so they are written once here.
     const write = (sets: Setters<AssignmentRow>): void => {
-      this.q
-        .update(tbl.assignment)
-        .set({ ...sets, last_seen: at, spent, updated_at: at })
-        .where("id", "=", id)
-        .run();
+      this.q.update(tbl.assignment).set({ ...sets, last_seen: at, spent, updated_at: at }).where("id", "=", id).run();
     };
 
     if (seen.phase === "running") {
@@ -577,17 +556,20 @@ export class Foreman {
       return ok;
     }
 
-    write({ reason: seen.reason });
+    // The session is kept the way a finish keeps it, and it matters more here: failed with no
+    // session on the record is how a harness that never reached the model reads, and two of
+    // those in a row stop dispatch. Being named is the model having answered, whatever became
+    // of the attempt after.
+    write({ ...(seen.session === null ? {} : { session: seen.session }), reason: seen.reason });
     const out = this.verbs.failAssignment(id, "foreman").ok;
     if (out) this.countAttempt(id);
     return out;
   }
 
-  /** Every attempt counts, whatever phase it ended in.
-   *
-   *  A session can exit cleanly having proved nothing — the first live run did exactly
-   *  that — so counting only failures lets a task be retried forever. One attempt does not
-   *  fail a task; the retry limit does. Counting is the foreman's, deciding is not. */
+  /** Every attempt counts, whatever phase it ended in. A session can exit cleanly having proved
+   *  nothing — the first live run did exactly that — so counting only failures lets a task be
+   *  retried forever. One attempt does not fail a task; the retry limit does. Counting is the
+   *  foreman's, deciding is not. */
   private countAttempt(id: number): void {
     const a = this.q
       .selectFrom(tbl.assignment)
@@ -608,6 +590,24 @@ export class Foreman {
 }
 
 const zero = (): Budget => ({ tokens: 0, seconds: 0 });
+
+/** Did this attempt leave nothing at all: nothing in its tree to commit, and no commit of
+ *  its own? A session that read the brief and gave up exits 0 like one that did the work, and
+ *  recording that as a success leaves the record saying a task was worked that has nothing to
+ *  show for it. Asked of the tree because every harness reports `commit: null` — making the
+ *  commit is the runner's — and the refs are the other half: a tree is cut detached, so an
+ *  attempt that committed for itself left a HEAD no branch holds yet. A task's only, and only
+ *  where there is a tree to read: a judged test's attempt is a verdict and writes nothing by
+ *  design, and an attempt is failed on what was seen rather than on what could not be. */
+function leftNothing(row: OpenRow): boolean {
+  if (row.objective_type !== "task" || !existsSync(row.worktree)) return false;
+  const git = (...args: string[]): string => execFileSync("git", args, { cwd: row.worktree, encoding: "utf8" }).trim();
+  try {
+    return git("status", "--porcelain") === "" && git("for-each-ref", "--contains", "HEAD", "refs/heads") !== "";
+  } catch {
+    return false;
+  }
+}
 
 /** The last line that said anything. Runners end in blank lines and trailing newlines, and
  *  the sentence that matters is the one before them. */
