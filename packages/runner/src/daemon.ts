@@ -12,6 +12,7 @@ import {
   now,
   recordChoreRefusal,
   recordRefusal,
+  storyBranch,
   Verbs,
   type Budget,
   type ChoreKind,
@@ -31,6 +32,7 @@ import type { WorkerAdapter } from "./ports.js";
 import { Doctor, type Invariant } from "./doctor.js";
 import { Examiner, type Refused, type ScriptReport } from "./examiner.js";
 import { Trees } from "./git.js";
+import { diagnose, healTasks, type TaskHealReport } from "./healer.js";
 import { attemptLanding, isLanded, LAND_CHECK } from "./land-chore.js";
 import { proveRedAtBase, type RedAtBase } from "./tick/red-at-base.js";
 import { proveStories, type Proven } from "./tick/prove-stories.js";
@@ -41,15 +43,11 @@ import { settleEnded, type Settled } from "./tick/settle.js";
 
 const exec = promisify(execFile);
 
-/** The tables this module reads, and only the columns it asks for.
- *
- *  Kept in one object rather than as bare consts because `task`, `story`, `chore`, `worker`
- *  and `test` are all local names in here: a bare `story` const would be shadowed in half
- *  the methods that need it, and the shadowing would typecheck.
- *
- *  A narrow column list is the ask, not a second copy of the schema — `typed-daemon.test.ts`
- *  holds every list below against `PRAGMA table_info`, so a column renamed out from under
- *  this module fails a test rather than a tick. */
+/** The tables this module reads, and only the columns it asks for. One object rather than
+ *  bare consts because `task`, `story`, `chore`, `worker` and `test` are all local names in
+ *  here, and a bare `story` const shadowed in half the methods would typecheck. A narrow
+ *  column list is the ask, not a second copy of the schema — `typed-daemon.test.ts` holds
+ *  every list below against `PRAGMA table_info`. */
 interface TaskRow {
   id: number;
   slug: string;
@@ -174,6 +172,10 @@ export interface Tick {
   /** What the invariant set found this tick. Recorded as well as returned, so a view reads
    *  the table rather than running the pass again. Empty is the healthy answer. */
   readonly doctor: readonly Violation[];
+  /** docs/design/19, for the tasks that stopped: the ones a safe fix put back in the queue,
+   *  the ones now waiting on a repair this tick asked for, and the ones left for a person.
+   *  Said every tick, healed or not — a task nothing may do for is still a task stopped. */
+  readonly healed: TaskHealReport;
   /** Why nothing was dispatched this tick, or null on an ordinary one. See `apiErrorPause`. */
   readonly paused: string | null;
 }
@@ -211,12 +213,10 @@ export interface Drift {
   readonly why: string;
 }
 
-/** A story whose tree is missing what the base has, and why wecode could not fix it.
- *
- *  An acceptance test judged in such a tree is not failing, it is uninformed: acceptance
- *  test 166 went red in loadViews because the branch predated the services box that landed
- *  with story 152, and re-proving could never help. So a story that is behind is named and
- *  nothing under it is judged — a red verdict out of a stale tree costs a whole budget. */
+/** A story whose tree is missing what the base has, and why wecode could not fix it. An
+ *  acceptance test judged in such a tree is not failing, it is uninformed: test 166 went red
+ *  because the branch predated the services box story 152 landed. So a story that is behind
+ *  is named and nothing under it is judged — a red out of a stale tree costs a budget. */
 export interface Behind {
   readonly story: number;
   readonly why: string;
@@ -226,10 +226,9 @@ export interface Behind {
  *  repair that is.
  *
  *  Live proof, 15 Sep: chore 4, `refresh` on story 165, was running when acceptance_test 166
- *  was judged at 21:14 and went red on the same stale-tree loadViews error; the chore then
- *  finished, the branch gained the base, and the test passed at 21:17 untouched. So while
- *  that repair is open the story is not judged, and the operator reads "waiting on its
- *  refresh" instead of a failure that was never about the code. */
+ *  was judged at 21:14 and went red on a stale-tree error; the chore finished, the branch
+ *  gained the base, and the test passed at 21:17 untouched. So while that repair is open the
+ *  story is not judged, and the operator reads "waiting on its refresh". */
 export interface Waiting {
   readonly story: number;
   readonly why: string;
@@ -357,6 +356,9 @@ export class Runner {
     // Last, and after settle(): a story becomes delivered in settle(), and the condition
     // this reads is about a story that already is.
     const chores = await this.storyChoresPass(acceptance.behind);
+    // docs/design/19, after the enforcement above so a task that ran out of attempts on this
+    // tick is diagnosed on it — and before the chores, so a refresh it raises goes out now.
+    const healed = await this.healFailedTasks();
     // Raised first, then performed: a chore created on this tick is dispatched on it, and a
     // chore whose attempt has ended is judged before the tick says what is still owed.
     const performed = await this.performChores(paused);
@@ -376,6 +378,7 @@ export class Runner {
     return {
       paused,
       doctor,
+      healed,
       allocated,
       foreman,
       committed: settled.committed,
@@ -403,15 +406,12 @@ export class Runner {
    *  — failed, with no session id and no commit — is the model being unreachable, not the
    *  work being hard: the harness exits on an api error before there is a session to name.
    *  A third attempt into that is a crash loop billed by the minute, so nothing is handed
-   *  out until one gets through. Level-triggered like everything else here: the pause is
-   *  read off the record each tick, and the first attempt that reaches the model ends it.
-   *
-   *  It ends on its own too, `PAUSE_MS` after the attempt that caused it — otherwise the
-   *  only thing that could lift it is an attempt, and the pause stops attempts. One goes
-   *  out after the wait; failing the same way puts the pause back for another.
-   *
-   *  An attempt lost some other way before it started reads the same from the record, and
-   *  is counted the same. Two of those in a row is also worth stopping for. */
+   *  out until one gets through. Level-triggered: the pause is read off the record each
+   *  tick, and the first attempt that reaches the model ends it. It ends on its own too,
+   *  `PAUSE_MS` after the attempt that caused it — otherwise the only thing that could lift
+   *  it is an attempt, and the pause stops attempts. An attempt lost some other way before
+   *  it started reads the same from the record, and two of those is also worth stopping
+   *  for. */
   private apiErrorPause(): string | null {
     const ended = queries(this.db)
       .selectFrom(tbl.assignment).select(["id", "phase", "session", "commit_sha", "updated_at"]).all()
@@ -564,14 +564,11 @@ export class Runner {
 
   /** The free worker of this role that finished longest ago — least recently finished, not
    *  lowest id. Taking the lowest id kept the fleet's first worker in every tree and left the
-   *  rest cold, so a fleet was only ever as wide as its busiest member; picking by how long
-   *  ago a worker last ended spreads the work, and rotates through the roster on its own.
-   *
-   *  A worker that has never finished anything has waited longest of all, so it goes first.
-   *  Ids break the tie, which is what makes a fleet with no history behave as it used to.
-   *
-   *  The dialect spells no NOT EXISTS, no ORDER BY and no LIMIT, so the busy set and the
-   *  last-finished times are held here and the choice is made in TypeScript. */
+   *  rest cold, so a fleet was only ever as wide as its busiest member. A worker that has
+   *  never finished anything has waited longest of all, so it goes first, and ids break the
+   *  tie — which is what makes a fleet with no history behave as it used to. The dialect
+   *  spells no NOT EXISTS, no ORDER BY and no LIMIT, so the busy set and the last-finished
+   *  times are held here and the choice is made in TypeScript. */
   private freeWorker(role: string): number | null {
     const q = queries(this.db);
     const rows = q.selectFrom(tbl.assignment).select(["worker_id", "phase", "updated_at"]).all();
@@ -608,13 +605,10 @@ export class Runner {
 
   /** Every task that has used its attempts while its story is still open.
    *
-   *  Reported, never acted on: `retry` is an operator's verb, because the machine cannot
-   *  know whether a task failed three times for a reason a fourth attempt would fix. So
-   *  this is the doctor's read — one line per drift, naming the story that is waiting —
-   *  and `wecode task retry <id> --reason` is the only thing that clears it.
-   *
-   *  A dropped task is not here: abandoning one is a decision, and a decision is not
-   *  drift. */
+   *  The read, not the repair: one line per drift, naming the story that is waiting. What
+   *  a machine may safely do about it is `healFailedTasks` below, and that is a short list
+   *  — everything else is `wecode task retry <id> --reason`, an operator's verb. A dropped
+   *  task is not here: abandoning one is a decision, and a decision is not drift. */
   private exhaustedTasks(): Drift[] {
     // `attempts >= max_retry` compares two columns, which the dialect does not spell —
     // both are read and the comparison is made here.
@@ -639,10 +633,8 @@ export class Runner {
 
   /** A task that has used its attempts stops, and says so. Without this the allocator
    *  retries a broken task forever — a crash loop with the machine holding the stopwatch.
-   *
-   *  It only ever stops one. The runner has no path back the other way: nothing here
-   *  applies `retry`, because bringing an exhausted task back is a judgement about why it
-   *  failed, and the machine has not got one. */
+   *  It only ever stops one: the way back is `healFailedTasks`, which applies `retry` for
+   *  the two causes docs/design/19 lets a machine judge, and for nothing else. */
   private enforceRetryLimit(): number[] {
     const rows = queries(this.db)
       .selectFrom(tbl.task).select(["id", "attempts", "max_retry"]).where("state", "=", "ready").all()
@@ -692,14 +684,8 @@ export class Runner {
         red_at_base_reason: green ? "it passes at base, so it cannot fail" : null,
         updated_at: at,
       })
-      .where("id", "=", testId)
-      .run();
-    q.insertInto(tbl.scriptRun, {
-      entity: BASE_RUN,
-      test_id: testId,
-      fingerprint: `${base}|${artefact}`,
-      ran_at: at,
-    })
+      .where("id", "=", testId).run();
+    q.insertInto(tbl.scriptRun, { entity: BASE_RUN, test_id: testId, fingerprint: `${base}|${artefact}`, ran_at: at })
       .onConflict(["entity", "test_id"], {
         fingerprint: excluded<ScriptRunRow>("fingerprint"),
         ran_at: excluded<ScriptRunRow>("ran_at"),
@@ -752,6 +738,43 @@ export class Runner {
     return raiseStoryChores(this.choreHost(), behind);
   }
 
+  /** docs/design/19's healing half, on the tick's own timer: the tasks that stopped, what a
+   *  safe fix puts back in the queue, and what is left standing for a person.
+   *
+   *  `healer.ts` holds the judgement and every write it makes; what is the runner's is the
+   *  world that judgement is made against — which repository a failed task belongs to, what
+   *  its base branch is called, and whether its story tree has that base in it. A branch
+   *  that is not cut is not behind: nothing is owed a tree nobody made. One pass per
+   *  repository, because the base and the role ceiling are each a repository's own. */
+  private async healFailedTasks(): Promise<TaskHealReport> {
+    const byRepo = new Map<string, Map<number, string>>();
+    for (const row of queries(this.db).selectFrom(tbl.task).select(["id"]).where("state", "=", "failed").all()) {
+      const slugs = this.slugsFor(row.id);
+      if (slugs === null) continue;
+      const mine = byRepo.get(slugs.repo) ?? new Map<number, string>();
+      byRepo.set(slugs.repo, mine.set(row.id, storyBranch(slugs.story)));
+    }
+
+    const passes: TaskHealReport[] = [];
+    for (const [repo, branches] of byRepo) {
+      const base = await this.treesFor(repo).integrationBranch().catch(() => null);
+      const behind = new Map<string, boolean>();
+      for (const branch of new Set(branches.values())) {
+        const cut = base !== null && (await refresh.hasCommit(repo, branch));
+        behind.set(branch, base !== null && cut && !(await refresh.contains(repo, branch, base)));
+      }
+      const roles = this.rolesOf(repo);
+      const asked = { behind: (branch: string) => behind.get(branch) ?? false, ...(base === null ? {} : { base }) };
+      const found = diagnose(this.db, asked).filter((d) => branches.has(d.task));
+      passes.push(healTasks(this.db, found, { actor: "runner", roles: roles.ok ? roles.config : null }));
+    }
+    return {
+      repaired: passes.flatMap((p) => p.repaired),
+      waiting: passes.flatMap((p) => p.waiting),
+      left: passes.flatMap((p) => p.left),
+    };
+  }
+
   /** docs/design/18. The other half of a chore, in the same module: judge the attempt that
    *  has ended, then hand the next one out. */
   private performChores(paused: string | null = null): Promise<ChorePass> {
@@ -761,16 +784,11 @@ export class Runner {
   /** docs/design/14. A delivered story reaches the base branch without a person merging it.
    *
    *  Rung 1 of the three: the runner attempts the merge inline, and clean is the common case
-   *  that costs nothing — nothing on the board, nothing in the chore table, one line in the
-   *  tick saying the base moved and as what. `land` printed by hand in one checkout was the
-   *  only way a story reached master, so a story delivered on Friday sat there until somebody
-   *  remembered it.
-   *
-   *  When the attempt cannot be made, the chore is the record of it: raised on the refusal
-   *  rather than on the condition, because a chore raised for work wecode is about to do
-   *  itself is a row that is planned and done in the same tick and tells nobody anything.
-   *  What the operator needs on the board is the landing that did *not* happen, with the
-   *  reason and the attempts behind it.
+   *  that costs nothing — one line in the tick saying the base moved and as what. When the
+   *  attempt cannot be made, the chore is the record of it: raised on the refusal rather
+   *  than on the condition, because a chore raised for work wecode is about to do itself is
+   *  planned and done in the same tick and tells nobody anything. What the operator needs
+   *  on the board is the landing that did *not* happen, with the reason behind it.
    *
    *  Three conditions are silence rather than a landing, and each is a different fact: a
    *  story with no branch has nothing to land, a base that already contains the branch is
@@ -786,9 +804,7 @@ export class Runner {
       const owner = this.projectOf(row);
       if (owner === null) continue;
       const repo = this.opts.repoRoot ?? owner.repo;
-      const base = await this.treesFor(repo)
-        .integrationBranch()
-        .catch(() => null);
+      const base = await this.treesFor(repo).integrationBranch().catch(() => null);
       if (base === null) continue;
       const branch = `story/${row.slug}`;
       if (branch === base || !(await refresh.hasCommit(repo, branch))) continue;
@@ -824,12 +840,9 @@ export class Runner {
         // The ref moved in a tree of wecode's own, so the folder the operator works in is
         // still showing the pre-land files. Bringing it forward, or saying the command
         // that will, is part of the landing — not an extra nobody runs.
-        const notice =
-          wasAt === null
-            ? null
-            : await this.treesFor(repo)
-                .syncPrimaryCheckout(base, wasAt, attempt.sha)
-                .catch((err: unknown) => `${base} moved, and ${repo} could not be brought forward: ${String(err)}`);
+        const notice = wasAt === null ? null : await this.treesFor(repo)
+          .syncPrimaryCheckout(base, wasAt, attempt.sha)
+          .catch((err: unknown) => `${base} moved, and ${repo} could not be brought forward: ${String(err)}`);
         landed.push(notice === null ? { story: row.id, sha: attempt.sha } : { story: row.id, sha: attempt.sha, notice });
         // Proved, not reported: the chore is finished because the base contains the branch
         // when this asks the graph, never because the merge exited zero.
@@ -864,13 +877,11 @@ export class Runner {
    *  The invariant behind the unattended landing is that wecode performs the merges the gate
    *  permits — not that it merges whatever is called delivered. The gate's word is the
    *  acceptance tests: every one under the story passed, and there is at least one. A story
-   *  with none proves nothing, which is 19's own language for it, and landing it unattended
-   *  would put work in the base that nothing ever judged.
+   *  with none proves nothing, and landing it would put work in the base nothing judged.
    *
    *  `dropped` tests are left out rather than counted against it: an abandoned test is a
-   *  decision somebody made, and the criterion it hung off is the thing that has to be
-   *  satisfied some other way. A story where every test is dropped therefore has none that
-   *  passed, and does not land. */
+   *  decision somebody made, and the criterion it hung off has to be satisfied some other
+   *  way. A story where every test is dropped has none that passed, and does not land. */
   private gateHasPermitted(storyId: number): boolean {
     const under = this.criteriaOfStory(storyId);
     const tests = queries(this.db)
@@ -894,12 +905,11 @@ export class Runner {
 
   /** The role's scope, out of the file that declares it. Never a literal here: docs/design/18
    *  declares what `system` may write in config/roles.yaml, and a copy in this file is a
-   *  second definition that nothing checks against the first.
-   *
-   *  Read from the project's own config, not from a table: nothing fills `role`, so a
-   *  lookup there refused every chore in every workspace while the file said `write: **`.
-   *  The two refusals are kept apart because the operator's next move differs — a role
-   *  absent from the file is a line to add, an unreadable file is a file to fix. */
+   *  second definition that nothing checks against the first. Read from the project's own
+   *  config, not from a table: nothing fills `role`, so a lookup there refused every chore
+   *  in every workspace while the file said `write: **`. The two refusals are kept apart
+   *  because the operator's next move differs — a role absent from the file is a line to
+   *  add, an unreadable file is a file to fix. */
   private scopeOfRole(repo: string, role: string): { ok: true; scope: Scope } | { ok: false; why: string } {
     const loaded = this.rolesOf(repo);
     if (!loaded.ok) return loaded;
@@ -930,25 +940,15 @@ export class Runner {
    *
    *  A merge that conflicts is reported rather than swallowed, and remembered by the pair
    *  of tips it was attempted between: two branches that have not moved conflict the same
-   *  way every tick, so the merge is not run again until one of them does. The conflict is
-   *  still named on every tick it is true for — it is a claim about the world now, not a
-   *  memo about the tick it first appeared on. */
+   *  way every tick, so it is not run again until one of them does. It is still named on
+   *  every tick it is true for — a claim about the world now, not a memo. */
   private async landDoneTasks(): Promise<{ merged: number[]; conflicts: Conflict[] }> {
     const q = queries(this.db);
     const committed = new Set(
-      q
-        .selectFrom(tbl.assignment)
-        .select(["objective_id"])
-        .where("objective_type", "=", "task")
-        .where("commit_sha", "!=", null)
-        .all()
-        .map((a) => a.objective_id),
+      q.selectFrom(tbl.assignment).select(["objective_id"]).where("objective_type", "=", "task")
+        .where("commit_sha", "!=", null).all().map((a) => a.objective_id),
     );
-    const rows = q
-      .selectFrom(tbl.task)
-      .select(["id"])
-      .where("state", "=", "done")
-      .all()
+    const rows = q.selectFrom(tbl.task).select(["id"]).where("state", "=", "done").all()
       .filter((t) => committed.has(t.id));
 
     const merged: number[] = [];
