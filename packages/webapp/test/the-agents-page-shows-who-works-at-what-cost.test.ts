@@ -254,6 +254,7 @@ describe("the agents page answers at /agents through discovery", () => {
       record: () => [],
       board: () => withRunning(running(8, "task #12", "opus · 1m · 1k")),
       approvals: () => [],
+      sketches: () => [],
     });
     expect(Object.keys(routes)).toContain("/agents");
   });
