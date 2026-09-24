@@ -17,7 +17,9 @@ const real = (path: string): string => {
   }
 };
 
-export class GitError extends Error {}
+/** `made` is the commit an attempt had already made when the error stopped it, when there is
+ *  one: no branch was moved onto it, so only its tree's HEAD holds it. */
+export class GitError extends Error { made: string | null = null; }
 
 /** What a landing did. Field report: `land` printed "story/x landed" whether the base
  *  gained a commit or git said "Already up to date", so a story read unlanded on the next
@@ -163,8 +165,7 @@ export class Trees {
    *  anywhere, because the tags are the only record that outlives the branch. */
   async tagAttempt(branch: string, sha: string): Promise<string> {
     const existing = await this.attemptTags(branch);
-    const next =
-      existing.reduce((max, t) => Math.max(max, Number(t.slice(t.lastIndexOf("/") + 1)) || 0), 0) + 1;
+    const next = existing.reduce((max, t) => Math.max(max, Number(t.slice(t.lastIndexOf("/") + 1)) || 0), 0) + 1;
     const tag = `attempt/${branch.replace(/^task\//, "")}/${next}`;
     await git(this.repo, ["tag", tag, sha]);
     return tag;
@@ -223,6 +224,17 @@ export class Trees {
     }
   }
 
+  /** Move a branch onto a commit an attempt made, naming that commit when git refuses. The
+   *  update can be stopped after the commit exists — by a hook, or by a ref that moved — and
+   *  only the tree's HEAD holds it then: an error that did not name it loses the work. */
+  private async moveOnto(branch: string, sha: string, ...from: readonly string[]): Promise<void> {
+    await git(this.repo, ["update-ref", `refs/heads/${branch}`, sha, ...from]).catch((err: Error) => {
+      const stopped = new GitError(`${sha} is committed and ${branch} would not move: ${err.message}`);
+      stopped.made = sha;
+      throw stopped;
+    });
+  }
+
   /** The tree is cut `--detach`, so an attempt that commits for itself — a merge, a revert,
    *  a rebase, or just an agent that ran `git commit` — moves HEAD and leaves the branch
    *  where it was cut. Nothing else moves the ref, so that work becomes unreachable. Carried
@@ -237,7 +249,7 @@ export class Trees {
           `no fast-forward can express it`,
       );
     }
-    await git(this.repo, ["update-ref", `refs/heads/${branch}`, head, tip]);
+    await this.moveOnto(branch, head, tip);
     return head;
   }
 
@@ -291,7 +303,7 @@ export class Trees {
     const who = ["-c", "user.name=wecode", "-c", "user.email=wecode@localhost"];
     await git(path, [...who, "commit", "-q", "-m", message]);
     const sha = await git(path, ["rev-parse", "HEAD"]);
-    await git(this.repo, ["update-ref", `refs/heads/${branch}`, sha]);
+    await this.moveOnto(branch, sha);
     return sha;
   }
 
@@ -391,11 +403,7 @@ export class Trees {
   }
 
   /** True when the tree was kept. */
-  private async releaseIfClean(
-    path: string,
-    removed: string[],
-    left: { what: string; why: string }[],
-  ): Promise<boolean> {
+  private async releaseIfClean(path: string, removed: string[], left: { what: string; why: string }[]): Promise<boolean> {
     if (!(await this.isWorktree(path))) return false;
     if (await this.isDirty(path)) {
       left.push({ what: path, why: "uncommitted files nobody has seen" });
@@ -439,10 +447,8 @@ export class Trees {
     const trees = await this.checkouts();
     const baseTree = trees.find((c) => c.branch === base);
     if (baseTree === undefined) {
-      throw new GitError(
-        `land ${branch} refused in ${here}: no checkout has ${base} checked out, ` +
-          `so there is no tree the merge into ${base} could happen in`,
-      );
+      const why = `no checkout has ${base} checked out, so there is no tree the merge into ${base} could happen in`;
+      throw new GitError(`land ${branch} refused in ${here}: ${why}`);
     }
     if (here !== real(baseTree.path)) {
       const holds = trees.find((c) => real(c.path) === here)?.branch;
@@ -519,12 +525,7 @@ export class Trees {
    *  measured against the *old* tip rather than against HEAD: HEAD is already the landing
    *  commit, so a perfectly untouched tree reports the landed paths as deletions and every
    *  cleanliness test built on HEAD calls it dirty. */
-  private async primaryDrift(
-    path: string,
-    base: string,
-    before: string,
-    after: string,
-  ): Promise<PrimaryDrift> {
+  private async primaryDrift(path: string, base: string, before: string, after: string): Promise<PrimaryDrift> {
     const blank = { path, base, onBase: false, alreadyCurrent: false, wasTheOldTip: false, ownWork: [] };
     const held = (await this.checkouts()).find((c) => real(c.path) === real(path));
     if (held?.branch !== base) return blank;
@@ -601,8 +602,7 @@ export class Trees {
       const after = (await this.midMerge(tree))
         ? `the merge would not abort: ${tree} is left mid-merge and wants a person`
         : "no merge is left standing: the tree is as it was";
-      const where =
-        conflicted.length > 0 ? ` — conflicted in: ${conflicted.join(", ")}` : "";
+      const where = conflicted.length > 0 ? ` — conflicted in: ${conflicted.join(", ")}` : "";
       throw new GitError(`${what} failed: ${(err as Error).message}${where} — ${after}`);
     }
   }
