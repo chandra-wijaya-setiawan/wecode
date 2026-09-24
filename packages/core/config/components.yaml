@@ -191,7 +191,7 @@ components:
     package: webapp
     layer: client
     component: true
-    owns: what a browser is sent for the terminal in the dock — the script the pane runs in the page, the emulator and sheet it is unreadable without, and the one line in a served document that asks for them. It runs in the page and decides nothing the pages have not already drawn; the pane itself is the webapp's, handed over as its own source rather than written out twice
+    owns: all of the terminal in the dock bar the markup of it — the names the markup and the script agree on, the pane that opens an emulator on them, the open-or-shut state the root's class is, and the four files a browser is sent so that any of it runs, with the one line in a served document that asks for the first. It runs in the page and decides nothing the pages have not already drawn; the pane and the turning are handed to a browser as their own source rather than written out twice
     modules: [browser/dock]
 
   webapp review:
