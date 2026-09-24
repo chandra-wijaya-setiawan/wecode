@@ -43,20 +43,32 @@ tree:
       - id: tree.filter.open
         value: open
         says: open only
-        # The states a row is left out by: every terminal state of every level this tree
-        # draws — `released`, `delivered`, `met`, `accepted`, `done`, `dropped` — which is
-        # the union of the `terminal:` lists in `packages/core/config/machines.yaml` over
-        # the nine entities `shared.outline.levels` names. A state a machine will never
-        # move a row out of is a row nothing is owed on, and the four that were written
-        # here before left a met requirement and an accepted criterion standing under a
-        # story whose work was done.
+        # The states a row is left out by. Six of them the machines settle: every terminal
+        # state of every level this tree draws — `released`, `delivered`, `met`,
+        # `accepted`, `done`, `dropped` — which is the union of the `terminal:` lists in
+        # `packages/core/config/machines.yaml` over the nine entities
+        # `shared.outline.levels` names. A state a machine will never move a row out of is
+        # a row nothing is owed on, and the four that were written here before left a met
+        # requirement and an accepted criterion standing under a story whose work was done.
+        #
+        # The seventh is `passed`, and the machines cannot settle it. It is the state of a
+        # green `acceptance_test` or `task_test` — both of them levels this tree draws —
+        # and neither machine calls it terminal, nor may: each holds `invalidate`, from
+        # `passed` back to `ready`, because the artefact a test proves can move under it
+        # and a green that could never be re-proved after that is a green nobody should
+        # trust. So the machines answer "can this row still move", which of `passed` is
+        # yes, while the reader who picked open only asked "is anything owed on it", which
+        # is no. Two questions, and only the second is this page's; reading `terminal:` as
+        # an answer to it works for the other six by luck and fails here. Nobody is working
+        # a green test, so it is left out — and when its artefact does move, `invalidate`
+        # puts it back in `ready` and it returns to this reading on its own.
         #
         # Written out rather than read off the machines, because what a reader is offered
         # is this file's decision and not the interpreter's — and because it is a shorter
         # list than "terminal" on its own would be. `failed` is not here and must not be:
         # no machine of a drawn level calls it terminal, a failed row is work still owed,
         # and it is exactly what a reader who asked for the owed work needs to see.
-        excludes: [released, delivered, met, accepted, done, dropped]
+        excludes: [released, delivered, met, accepted, done, dropped, passed]
       - id: tree.filter.all
         value: all
         says: all
