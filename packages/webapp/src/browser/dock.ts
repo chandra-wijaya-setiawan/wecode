@@ -1,10 +1,10 @@
 /** The dock: all of the terminal down the side of every document bar the markup of it.
  *
- *  `pages/shell.ts` draws the dock — an `<aside>` with a way out and a screen in it, and
- *  nothing to type into but the screen itself — and owns the far end it is a pane on.
- *  Everything else about it is here: the names the
- *  markup and the script agree on, the pane itself, the open-or-shut state the root's class
- *  is, and the files a browser is sent so that any of it runs.
+ *  `pages/shell.ts` draws the dock — an `<aside>` with the ways out along its top and a screen
+ *  under them, and nothing to type into but the screen itself — and owns the far end it is a
+ *  pane on. Everything else about it is here: the names the markup and the script agree on,
+ *  the pane itself, the open-or-shut state the root's class is, and the files a browser is
+ *  sent so that any of it runs.
  *
  *  It is one file because all of it runs in a page. A pane needs an emulator, and the
  *  emulator is a browser library: the module that renders HTML cannot import it, because
@@ -15,8 +15,7 @@
  *  Four files are served and one line refers to them: the `<script>` tag, put into a served
  *  document here rather than in `document()`, because the document is the design's sentence
  *  and what the surface *wires* is the wiring's to say. A page's markup is untouched either
- *  way — the tag goes immediately before `</body>`, after everything a page or the shell
- *  drew.
+ *  way — the tag goes immediately before `</body>`, after everything a page or the shell drew.
  *
  *  What is served is not proved by being called: that a browser can fetch and parse it is a
  *  question for a board that is listening, and `the-terminal-runs-in-the-browser.test.ts`
@@ -42,46 +41,47 @@ const here = createRequire(fileURLToPath(import.meta.url));
 // ─── the names the markup and the script share ──────────────────────────────────────
 
 /** What the banner's last control opens, and what it is. The dock is one element of the
- *  document, not one per page, because there is one session behind it: two docks would be
- *  two places the same output could be read and two command lines disagreeing about which
- *  one the next word goes to. */
+ *  document, not one per page, because there is one session behind it: two docks would be two
+ *  places the same output could be read and two disagreeing about where the next word goes. */
 export const DOCK = "terminal";
 
-/** The class the root element wears while the dock is open, and where a browser remembers
- *  that it is.
- *
- *  It was a popover, which is the browser's own top-layer box: drawn over the page, unable
- *  to make room beside it, and — because the top layer belongs to the document — shut by
- *  every link a reader follows. A sidebar is the other thing: a column of the window, with
- *  the page taking the width that is left, which is one class answering both. And because
- *  this surface is eight documents rather than one, "open" has to survive a navigation, so
- *  it is remembered rather than held in a page that is about to be thrown away. */
+/** The class the root element wears while the dock is open, and where a browser remembers that
+ *  it is. It was a popover, which is the browser's own top-layer box: drawn over the page,
+ *  unable to make room beside it, and — because the top layer belongs to the document — shut
+ *  by every link a reader follows. A sidebar is the other thing, a column of the window with
+ *  the page taking the width that is left; and because this surface is eight documents rather
+ *  than one, "open" survives a navigation rather than living in a page about to be thrown. */
 export const DOCKED = "docked";
 export const REMEMBERED = `wecode.${DOCK}`;
 
-/** The two controls that turn it, under the `data-ui` names they are drawn with. One list,
- *  so the markup and the script that wires it cannot drift. */
+/** The controls of it, under the `data-ui` names they are drawn with. One list, so the markup
+ *  and the script that wires it cannot drift.
+ *
+ *  Two of them turn the dock and the third turns the session: shutting the dock leaves the
+ *  shell running behind the route, which is the whole point of a session that outlives the
+ *  page — and is also why a far end that has wedged cannot be got out of by closing and
+ *  opening again. `restart` is that way out, and it is the only one. */
 export const CONTROLS = {
   open: `[data-ui="shell.terminal"]`,
+  restart: `[data-ui="shell.dock.restart"]`,
   shut: `[data-ui="shell.dock.close"]`,
 } as const;
 
-/** Where the shell behind the dock answers. The dock's own name, because it is the dock's
- *  far end and not a page: it is not under `pages/`, it is not discovered, and `bin.ts`
- *  names it at the path it is polled on — the way the one other non-page route is named. */
+/** Where the shell behind the dock answers: the dock's own name, because it is the dock's far
+ *  end and not a page — not under `pages/`, not discovered, named by `bin.ts` at its path. */
 export const SHELL_AT = `/${DOCK}`;
 
 /** Which element of the dock is which part of the pane. One list, so the markup and the
  *  pane cannot drift, under the `data-ui` names the dock is already drawn with.
  *
- *  Two names and one element: the screen is also the keyboard. That is what makes the dock a
+ *  Two names and one element: the screen is also the keyboard, which is what makes the dock a
  *  terminal the reader clicks and types into rather than a box with a line under it. The
- *  emulator keeps its own focus target inside the screen, so a press anywhere in it bubbles
- *  out to where `attach` listens, which defaults-prevents it and sends the bytes up — Enter
- *  as CR, Ctrl-C as ETX, the arrows as the sequences that walk the far end's own history.
- *  There is no composer and no send, which `Parts` has as optional for exactly this: a
- *  `prompt` frame is still one the route takes — `browser/annotate.ts` sends a reviewer's
- *  round as one — but it is no longer something a reader of the dock types. */
+ *  emulator keeps its own focus target inside the screen, so a press anywhere in it bubbles out
+ *  to where `attach` listens, which defaults-prevents it and sends the bytes up — Enter as CR,
+ *  Ctrl-C as ETX, the arrows as the sequences that walk the far end's own history. There is no
+ *  composer and no send, which `Parts` has as optional for exactly this: the route still takes
+ *  a `prompt` frame — `browser/annotate.ts` sends a reviewer's round as one — but it is no
+ *  longer something a reader of the dock types. */
 export const PARTS = {
   screen: `[data-ui="shell.dock.output"]`,
   keyboard: `[data-ui="shell.dock.output"]`,
@@ -89,9 +89,9 @@ export const PARTS = {
 
 // ─── the dock's pane ────────────────────────────────────────────────────────────────
 
-/** Where the pane sends what it has, and where it takes the screen from. Both are the
- *  browser's `fetch` against `SHELL_AT` in the page, and both are a parameter here, so the
- *  pane can be driven against the route itself with no socket and no browser in the way. */
+/** Where the pane sends what it has, and where it takes the screen from. Both are the browser's
+ *  `fetch` against `SHELL_AT` in the page, and both are a parameter here, so the pane can be
+ *  driven against the route itself with no socket and no browser in the way. */
 export interface Wire {
   /** A frame going up. */
   readonly send: (frame: string) => Promise<unknown>;
@@ -104,6 +104,10 @@ export interface Docked {
   readonly terminal: Terminal;
   /** Take whatever the shell has drawn since the last pump, and say where the cursor is. */
   readonly pump: () => Promise<number>;
+  /** End the shell behind the pane and start another. The screen is cleared and the cursor
+   *  goes back to nought before the frame goes up, because what the far end draws next is a
+   *  new session's first byte and not the next of the old one's. */
+  readonly restart: () => Promise<void>;
   /** Fit the screen to the box it is drawn in and tell the far end, given the screen's
    *  rectangle, the box the emulator's grid currently fills, and the screen's computed
    *  style — a rectangle is not all room, and what the trim costs is the painter's to
@@ -112,24 +116,24 @@ export interface Docked {
 }
 
 /** The window a pane's own terminal opens with — the pty's own rows, so the pane holds the
- *  screen the far end was told it was drawing to and not a history of it — and the emulator
- *  that opens on it, required when wanted rather than imported, because the module graph a
- *  binary loads must not hold a browser library. */
+ *  screen the far end was told it was drawing to — and the emulator that opens on it, required
+ *  when wanted because the module graph a binary loads must not hold a browser library. */
 const WINDOW = { rows: DEFAULT_ROWS };
 const emulator = (): { new (window: { rows: number }): Terminal } =>
   (here("@xterm/xterm") as { Terminal: { new (window: { rows: number }): Terminal } }).Terminal;
 
 /** The dock's pane: an xterm.js terminal, attached to the shell behind the route.
  *
- *  `attach` is the painter's and is not reimplemented here. That is the whole point — the
- *  pane owns the bytes and nothing else, the far end owns the screen, a keystroke goes up
- *  unread and an escape sequence comes down whole. What this adds is the transport: one
- *  frame up per press, and a `pump` that carries the cursor so a chunk is drawn once.
+ *  `attach` is the painter's and is not reimplemented here. That is the whole point — the pane
+ *  owns the bytes and nothing else, the far end owns the screen, a keystroke goes up unread and
+ *  an escape sequence comes down whole. What this adds is the transport: one frame up per
+ *  press, a `pump` that carries the cursor so a chunk is drawn once, and the one act that is
+ *  about the session rather than in it, which is ending it and taking the cursor back with it.
  *
  *  This runs in a browser, where `dockScript` below ships its own source rather than a copy
  *  typed into a string. So it reaches for nothing but its parameters, `attach`, `encode`,
- *  `WINDOW` and `emulator` — the names that script defines again on the browser's side —
- *  and reads no global, which is also what lets a test drive it with no browser at all. */
+ *  `WINDOW` and `emulator` — the names that script defines again on the browser's side — and
+ *  reads no global, which is also what lets a test drive it with no browser at all. */
 export function dock(parts: Parts, wire: Wire, terminal: Terminal = new (emulator())(WINDOW)): Docked {
   const pane = attach(parts, terminal, (message) => void wire.send(encode(message)));
   let at = 0;
@@ -142,14 +146,19 @@ export function dock(parts: Parts, wire: Wire, terminal: Terminal = new (emulato
       at = drawn.at;
       return at;
     },
+    restart: async (): Promise<void> => {
+      at = 0;
+      pane.terminal.reset();
+      await wire.send(encode({ kind: "restart" }));
+    },
   };
 }
 
 // ─── opening it ─────────────────────────────────────────────────────────────────────
 
-/** As much of the root element, and of the browser's store, as the sidebar needs. Named
- *  shapes rather than the DOM's own types: a shape a statement can hand in is what lets the
- *  turning be proved with no browser at all. */
+/** As much of the root element, and of the browser's store, as the sidebar needs. Named shapes
+ *  rather than the DOM's own types: a shape a statement can hand in is what lets the turning be
+ *  proved with no browser at all. */
 export interface Rooted {
   readonly classList: { toggle(name: string, on: boolean): void; contains(name: string): boolean };
 }
@@ -168,12 +177,10 @@ export interface Sidebar {
   readonly opened: () => boolean;
 }
 
-/** The sidebar's one piece of state: a class on the root, a word in the store, and `shown`
- *  for what is neither — the pane, the focus and the poll, which are the wiring's.
- *
- *  `held` may be null, because reaching for `localStorage` throws outright in a document
- *  that is not allowed one, and a dock that forgets is better than a script that died
- *  before it wired anything.
+/** The sidebar's one piece of state: a class on the root, a word in the store, and `shown` for
+ *  what is neither — the pane, the focus and the poll, which are the wiring's. `held` may be
+ *  null, because reaching for `localStorage` throws outright in a document that is not allowed
+ *  one, and a dock that forgets is better than a script that died before it wired anything.
  *
  *  Shipped as its own source, like `dock()`, so it reaches for nothing but its parameters,
  *  `DOCKED` and `REMEMBERED`, and reads no global. */
@@ -194,9 +201,9 @@ export function docking(root: Rooted, held: Remembers | null, shown: (open: bool
 
 // ─── what a browser is sent ─────────────────────────────────────────────────────────
 
-/** Where the dock's pane is served from. Four files, and none of them is a page — nothing
- *  under `pages/` answers here — so they sit under the dock's own path, beside the far end
- *  the dock polls, which is `SHELL_AT` itself. */
+/** Where the dock's pane is served from. Four files, and none of them is a page — nothing under
+ *  `pages/` answers here — so they sit under the dock's own path, beside the far end the dock
+ *  polls, which is `SHELL_AT` itself. */
 const BROWSER = {
   /** The script the dock's pane is, and the few lines that start it. */
   dock: `${SHELL_AT}.js`,
@@ -209,24 +216,23 @@ const BROWSER = {
   look: `${SHELL_AT}.css`,
 } as const;
 
-/** The line that makes the dock a terminal rather than a box. A module, because the script
- *  it asks for imports two others — and deferred by being one, so it runs with the dock's
- *  markup parsed and `one()` below can find it. */
+/** The line that makes the dock a terminal rather than a box. A module, because the script it
+ *  asks for imports two others — and deferred by being one, so the markup is parsed first. */
 const SCRIPT = `<script type="module" src="${BROWSER.dock}"></script>`;
 
 /** The pane as a browser runs it.
  *
- *  `dock` and `docking` are handed over as their own source rather than written out a
- *  second time: they are what this package's own tests drive against the real route and the
- *  real markup, so what a reader is served is what was proved. Around them is only what no
- *  test runner can stand in for — the emulator, the document and `fetch` — and the free
- *  names they live under, defined again here on the browser's side.
+ *  `dock` and `docking` are handed over as their own source rather than written out a second
+ *  time: they are what this package's own tests drive against the real route and the real
+ *  markup, so what a reader is served is what was proved. Around them is only what no test
+ *  runner can stand in for — the emulator, the document and `fetch` — and the free names they
+ *  live under, defined again here on the browser's side.
  *
- *  Nothing is attached until the dock is first opened: a sidebar the root's class is not on
- *  is `display: none`, a terminal opened on a box with no size measures a screen of nothing,
- *  and a board nobody opened the dock on should start no shell. While it is open the pane
- *  asks the far end for what has been drawn since its cursor, and a frame going up asks
- *  again as soon as it lands, so an echo does not wait for the next beat. */
+ *  Nothing is attached until the dock is first opened: a sidebar the root's class is not on is
+ *  `display: none`, a terminal opened on a box with no size measures a screen of nothing, and a
+ *  board nobody opened the dock on should start no shell. While it is open the pane asks the far
+ *  end for what has been drawn since its cursor, and a frame going up — a keystroke, or the
+ *  restart — asks again as soon as it lands, so an echo does not wait for the next beat. */
 const dockScript = (): string =>
   `import { Terminal } from "${BROWSER.emulator}";
 import { attach, encode } from "${BROWSER.pane}";
@@ -247,8 +253,7 @@ const one = (selector) => {
   return found;
 };
 
-// The emulator's own sheet, brought by the emulator: the document's head is the design's
-// sentence and nothing else may add to it.
+// The emulator's own sheet, brought by the emulator: the head is the design's sentence.
 const sheet = window.document.createElement("link");
 sheet.rel = "stylesheet";
 sheet.href = "${BROWSER.look}";
@@ -263,22 +268,18 @@ const wire = {
   drawn: (from) => fetch("${SHELL_AT}?from=" + from).then((reply) => reply.json()),
 };
 
-let pane = null;
-let beating = null;
-let busy = false;
+let pane = null, beating = null, busy = false;
 
-// What the fit is arithmetic on. Only the measuring is here, because reading a rectangle
-// and a computed style off an element is a browser's act and nothing else in the fit is:
-// the pane takes the trim off the rectangle and divides what is left into cells, and both
-// halves of that are the painter's and are proved with no browser at all.
+// What the fit is arithmetic on. Only the measuring is here, because reading a rectangle and
+// a computed style off an element is a browser's act and nothing else in the fit is: the pane
+// takes the trim off the rectangle and divides what is left into cells, and both halves of
+// that are the painter's and are proved with no browser at all.
 //
 // The screen's rectangle is the border box, so the padding the design gives it and any rule
-// drawn round it go up as the style rather than being subtracted here — a pane fitted to
-// the whole rectangle composes a column whose edge is under the border.
-//
-// The grid's box is \`.xterm-screen\`, the element xterm draws the cells into — its rectangle
-// over the terminal's own cols and rows is one cell, which is how the screen is fitted
-// without asking xterm for a measurement it does not publish.
+// drawn round it go up as the style rather than being subtracted here. The grid's box is
+// \`.xterm-screen\`, the element xterm draws the cells into — its rectangle over the terminal's
+// own cols and rows is one cell, which is how the screen is fitted without asking xterm for a
+// measurement it does not publish.
 const boxOf = (element) => element.getBoundingClientRect();
 const trimOf = (element) => window.getComputedStyle(element);
 
@@ -299,9 +300,9 @@ const fit = () => {
   pane.fit(boxOf(screen), grid, trimOf(screen));
 };
 
-// One poll at a time: two in flight would both ask from the same cursor and the screen
-// would be drawn twice. A poll that throws is the board gone, so the beat stops rather than
-// filling the console every fiftieth of a second.
+// One poll at a time: two in flight would both ask from the same cursor and the screen would be
+// drawn twice. A poll that throws is the board gone, so the beat stops rather than filling the
+// console every fiftieth of a second.
 const beat = async () => {
   if (pane === null || busy) return;
   busy = true;
@@ -321,11 +322,7 @@ const beat = async () => {
 // The store, or nothing at all: the property itself throws in a document that is not
 // allowed one, and that must not be what stops the dock from being wired.
 let store = null;
-try {
-  store = window.localStorage;
-} catch {
-  store = null;
-}
+try { store = window.localStorage; } catch { store = null; }
 
 const sidebar = docking(window.document.documentElement, store, (open) => {
   one(CONTROLS.open).setAttribute("aria-expanded", String(open));
@@ -349,6 +346,10 @@ const sidebar = docking(window.document.documentElement, store, (open) => {
 
 one(CONTROLS.open).addEventListener("click", () => sidebar.turn(!sidebar.opened()));
 one(CONTROLS.shut).addEventListener("click", () => sidebar.turn(false));
+// The way out of a far end that has stopped answering, and nothing at all when there is no
+// pane yet: a dock nobody has opened has no shell to end, and the beat that follows the
+// frame up is what draws the new one's first prompt.
+one(CONTROLS.restart).addEventListener("click", () => void pane?.restart());
 
 // Last, and not on a click: a reader who left the dock open meets it open on the next page
 // they follow to, which is the whole of why the state is remembered rather than a popover's.
@@ -359,8 +360,7 @@ const JS = "text/javascript";
 const HTML = "text/html";
 const CLOSE = "</body>";
 
-/** A file handed over as it is, read when the route is wired the way the design and the
- *  sheet are: none of them changes under a running board. */
+/** A file read at wiring time, like the design and the sheet: none changes under a board. */
 const fileAt = (path: string, type: string): Reply => {
   const held = readFileSync(path, "utf8");
   return { status: 200, type: `${type}; charset=utf-8`, body: held };

@@ -40,11 +40,18 @@ import type { Terminal } from "@xterm/xterm";
  *  frames for a screen that is no longer there — wrapped lines, a status bar in the
  *  middle of the pane, a full-screen program redrawing at the wrong width. It goes up the
  *  same wire as the keys because it is the same session, and it is a message of its own
- *  because no sequence of keystrokes can say it. */
+ *  because no sequence of keystrokes can say it.
+ *
+ *  `restart` is about the session rather than in it, which is why no keystroke can say it
+ *  either. A far end wedges — a program that reads no keys, a shell that will not take an
+ *  interrupt — and every byte the pane can send goes to the thing that has stopped reading
+ *  them. It carries nothing, because there is nothing to say: the session ends and another
+ *  opens in its place, and what comes back down is the new one's first frame. */
 export type ToSession =
   | { readonly kind: "keys"; readonly data: string }
   | { readonly kind: "prompt"; readonly text: string }
-  | { readonly kind: "resize"; readonly cols: number; readonly rows: number };
+  | { readonly kind: "resize"; readonly cols: number; readonly rows: number }
+  | { readonly kind: "restart" };
 
 /** Down: what the session has for the pane. Output is a chunk of the pty's bytes, escapes
  *  and all — the screen interprets them, because that is what a terminal is. */
@@ -74,6 +81,9 @@ export function decode(frame: string): ToSession | FromSession | null {
   if (m["kind"] === "resize" && whole(m["cols"]) && whole(m["rows"])) {
     return { kind: "resize", cols: m["cols"] as number, rows: m["rows"] as number };
   }
+  // Nothing but the word: a restart that carried a field would be a restart something could
+  // get wrong, and there is nothing about ending a session to get right.
+  if (m["kind"] === "restart") return { kind: "restart" };
   if (m["kind"] === "output" && typeof m["chunk"] === "string") return { kind: "output", chunk: m["chunk"] };
   if (m["kind"] === "exit" && typeof m["code"] === "number") return { kind: "exit", code: m["code"] };
   return null;
