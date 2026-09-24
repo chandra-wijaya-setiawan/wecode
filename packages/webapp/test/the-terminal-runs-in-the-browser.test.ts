@@ -1,22 +1,22 @@
 /** The dock is a terminal, and not an empty box.
  *
  *  There are three things a reader needs before the dock they open is a shell: a document that
- *  asks for the pane's script, a script at the path it asked for, and a session behind the
- *  route that script polls. Every one of them had passed before and none of them was true
- *  together — `dock()` was proved by calling it, twice over, while the document carried no
- *  script at all and nothing a browser fetched could ever have run it.
+ *  asks for the pane's script, a script at the path it asked for, and a session behind the route
+ *  that script polls. Every one of them had passed before and none of them was true together —
+ *  `dock()` was proved by calling it, twice over, while the document carried no script at all
+ *  and nothing a browser fetched could ever have run it.
  *
  *  So nothing here is imported out of `src/` and no function of this package is called. The
  *  statements below spawn the built binary the way the operator runs it, on a port the system
  *  picks, and then ask it — over HTTP, as a browser would — for those things in the order a
  *  browser meets them: the `<script>` at the foot of the document, once and on every page; the
- *  path it names answering 200 as javascript with the pane, which imports the painter's half
- *  and the emulator at paths this board also answers on; the dock it draws being a sidebar —
- *  an aside and no popover — whose sheet and whose script name one class on the root between
- *  them and whose two controls are drawn and wired as the one row they are; and the route that
- *  script polls opening a pty session, proved by typing into it, reading back what the shell
- *  printed, and restarting it, which no stand-in can fake. Then the board is stopped, because
- *  a test that leaves a login shell running behind it has not finished. */
+ *  path it names answering 200 as javascript with the pane, which imports the painter's half and
+ *  the emulator at paths this board also answers on; the dock it draws being a sidebar — an
+ *  aside and no popover — whose sheet and whose script name one class on the root between them
+ *  and whose two controls are drawn and wired as the one row they are; and the route that script
+ *  polls opening a pty session, proved by typing into it, reading back what the shell printed,
+ *  and restarting it, which no stand-in can fake. Then the board is stopped, because a test that
+ *  leaves a login shell running behind it has not finished. */
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { dirname, join } from "node:path";
@@ -26,24 +26,21 @@ import { open } from "@wecode/core";
 import { seed } from "../../core/test/helpers.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
-/** What `wecode-webapp` is: the built file, so that a source which compiles and a binary
- *  which serves a terminal are not allowed to be two different things. */
+/** What `wecode-webapp` is: the built file, so that a source which compiles and a binary which
+ *  serves a terminal are not allowed to be two different things. */
 const BIN = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
 
-/** How long a board gets to listen, and how long a shell gets to draw. Generous, because a cold
- *  pty on a loaded machine is not a defect; finite, because a dock that never draws must fail as
- *  itself rather than as the runner's own timeout with nothing said. */
+/** How long a board gets to listen and a shell to draw. Generous, because a cold pty on a loaded
+ *  machine is not a defect; finite, because a dock that never draws must fail as itself. */
 const PATIENCE = 20_000;
 
-/** A board under this file's hand. The process is the unit here — nothing is imported out of
- *  it, and every claim below is a request to it. */
+/** A board under this file's hand: the process is the unit, and every claim is a request to it. */
 interface Board { readonly at: string; readonly stop: () => Promise<Ended> }
 type Ended = { code: number | null; signal: string | null };
 
 const running: Board[] = [];
 
-/** A workspace with one of everything, made once: the board fetched below is drawing real rows,
- *  so a document that is a whole document is a document of the surface. */
+/** A workspace with one of everything, made once: the board below is drawing real rows. */
 let db = "";
 
 beforeAll(() => {
@@ -57,9 +54,8 @@ afterEach(async () => {
 });
 
 /** The binary, spawned and waited for the way a person waits for it: by reading the line it
- *  prints once the socket is listening. Port 0, so the port is one the operating system says is
- *  free — a fixed port would collide with the board the person running these tests very likely
- *  has open on 4321 — and a home of its own, so a board spawned here cannot read theirs. */
+ *  prints once the socket is listening. Port 0, because a fixed port would collide with the
+ *  board on 4321 a person likely has open; and a home of its own, so it cannot read theirs. */
 async function boot(): Promise<Board> {
   const child = spawn(process.execPath, [BIN, "--db", db, "--port", "0"], {
     cwd: dirname(db),
@@ -111,9 +107,8 @@ async function documentOf(board: Board, at: string): Promise<string> {
   return body;
 }
 
-/** The script tag a document carries, whole, and the path it names. Read out of the served
- *  document rather than written down here, because the thing in question is the link: a tag
- *  pointing at a path this board does not answer on is the empty box with extra steps. */
+/** The script tag a document carries, whole, and the path it names — read out of the served
+ *  document, because a tag naming a path this board does not answer is the empty box. */
 function asks(body: string): { readonly tag: string; readonly src: string } {
   const found = /<script [^>]*src="([^"]+)"[^>]*>/.exec(body);
   expect(found, "the document asks for no script").not.toBeNull();
@@ -134,19 +129,15 @@ async function drawn(board: Board, from: number): Promise<Drawn> {
   return said;
 }
 
-/** Everything the session has drawn from the start, as the text inside its frames. The frames
- *  are the painter's wire — `{"kind":"output","chunk":"…"}` — and they are read here the way
- *  the pane's own `receive` reads them, out of JSON, rather than by importing the decoder: what
- *  is being asked is whether a browser holding nothing but this wire could see the shell, and a
- *  browser has no imports from this package either. */
+/** Everything the session has drawn from the start, as the text inside its frames: the painter's
+ *  wire — `{"kind":"output","chunk":"…"}` — read out of JSON rather than by importing the
+ *  decoder, because a browser holding nothing but this wire must be able to see the shell. */
 const said = (frames: readonly string[]): string =>
   frames.map((frame) => JSON.parse(frame) as { kind: string; chunk?: string })
     .filter((message) => message.kind === "output").map((message) => message.chunk ?? "").join("");
 
-/** The session, polled from the start until the shell has drawn what is waited for. A pty is a
- *  process: the first poll after the route opens one is very often empty, because the shell has
- *  not reached its own prompt yet, and a statement that read once and gave up would be a
- *  statement about scheduling. */
+/** The session, polled from the start until the shell has drawn what is waited for: a pty is a
+ *  process, the first poll is often empty, and reading once would state only a scheduling. */
 async function until(board: Board, wanted: string): Promise<string> {
   const deadline = Date.now() + PATIENCE;
   let held = "";
@@ -164,8 +155,8 @@ describe("the board asks a browser for the dock's script", () => {
     const board = await boot();
     const body = await documentOf(board, "/");
     const { tag } = asks(body);
-    // A module, because the pane's script imports the emulator and the painter's half; and it
-    // is last in the document, after the dock's own markup, so what it reaches for is parsed.
+    // A module, because the pane's script imports the emulator and the painter's half, and last
+    // in the document, after the dock's own markup, so what it reaches for is parsed.
     expect(tag).toContain(`type="module"`);
     expect([...body.matchAll(/<script/g)], "one script, not one per page's worth").toHaveLength(1);
     expect(body.indexOf("<script")).toBeGreaterThan(body.indexOf(`id="terminal"`));
@@ -174,9 +165,8 @@ describe("the board asks a browser for the dock's script", () => {
 
   it("carries it on every page, because there is one dock and one session", async () => {
     const board = await boot();
-    // The dock is in the document of every page, so the line that makes it a terminal is too:
-    // a reader who opened the tasks page and pressed `terminal` is owed the same shell as one
-    // who opened the board.
+    // The dock is in the document of every page, so the line that makes it a terminal is too: a
+    // reader who opened the tasks page is owed the same shell as one who opened the board.
     const home = asks(await documentOf(board, "/"));
     for (const at of ["/tasks", "/agents", "/tree"]) expect(asks(await documentOf(board, at)).src, at).toBe(home.src);
   });
@@ -191,8 +181,7 @@ describe("the script the document asks for is served", () => {
     expect(reply.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
     const script = await reply.text();
     expect(script.length, `${src} is empty`).toBeGreaterThan(0);
-    // It is the pane and not a placeholder: it opens a terminal on the dock's own elements
-    // and it polls the session's route.
+    // It is the pane and not a placeholder: a terminal on the dock's own elements, polling.
     expect(script).toContain(`data-ui=\\"shell.dock.output\\"`);
     expect(script).toContain("/terminal?from=");
     // And the screen is the keyboard — two names, one element — which is what makes the black
@@ -204,16 +193,27 @@ describe("the script the document asks for is served", () => {
     // screen's rectangle, the box xterm's grid fills, and the screen's own trim, each beat.
     for (const held of [".xterm-screen", "getComputedStyle", "grid, trimOf("]) expect(script, held).toContain(held);
     expect(script).toMatch(/fit\(\);\n\s*await pane\.pump\(\)/);
-    // And what it imports is served by this same board, at the paths it names. A script that
-    // parses and then fails on its first import is a dock that stays an empty box — and a
-    // browser reports that in a console nothing here can read.
+    // And what it imports is served by this same board, at the paths it names: a script that
+    // fails on its first import is a dock that stays an empty box, in a console nobody reads.
     const imports = [...script.matchAll(/^import .* from "([^"]+)";$/gm)].map(([, at]) => at);
     expect(imports.length, "the pane imports nothing").toBeGreaterThan(0);
+    const served = new Map<string, string>();
     for (const at of imports) {
       expect(at.startsWith("/"), `${at} is not a path a browser can ask for`).toBe(true);
       const held = await got(board, at);
       expect([held.status, held.headers.get("content-type")?.includes("text/javascript")], at).toEqual([200, true]);
+      served.set(at as string, await held.text());
     }
+    // And in the half that does the typing — the painter's, as this board serves it — the keys
+    // are the emulator's own: `onData`, one door for a press, a paste, a composed character and
+    // the terminal's own answer to a question the far end asked. The keydown listener that used
+    // to translate a press carried only the first of those, and gave the arrows bytes no
+    // full-screen program reads; what the page names a keyboard is now named for the focus.
+    const half = served.get("/terminal.pane.js");
+    expect(half, "the script does not import /terminal.pane.js").toBeDefined();
+    expect(half).toContain(`terminal.onData((data) => send({ kind: "keys", data }))`);
+    expect(half, "the pane still reads presses itself").not.toContain(`addEventListener("keydown"`);
+    expect(half).toContain(`addEventListener("focus"`);
   });
 });
 

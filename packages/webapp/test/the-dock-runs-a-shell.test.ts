@@ -145,11 +145,13 @@ function paneOn(wire: Wire, terminal?: Terminal) {
     ...docked,
     screen,
     keyboard,
-    /** A real keypress at the screen — or, given `at`, somewhere inside it, which is where
-     *  the emulator's own focus target is — and whether the browser was kept out of it. */
-    press: (key: string, held: Partial<KeyboardEventInit> = {}, at: EventTarget = keyboard) => {
-      const event = new KeyboardEvent("keydown", { key, cancelable: true, bubbles: true, ...held });
-      at.dispatchEvent(event);
+    /** A real press, made where a reader makes one — inside the emulator's own focus target,
+     *  which is the only place a press is ever seen — and carrying a `keyCode`, because a key
+     *  is a code to xterm.js rather than a name. Returns whether the browser was kept out. */
+    press: (key: string, code: number, held: Partial<KeyboardEventInit> = {}): boolean => {
+      const made = { key, keyCode: code, cancelable: true, bubbles: true, ...held };
+      const event = new KeyboardEvent("keydown", made);
+      (docked.terminal.textarea as HTMLTextAreaElement).dispatchEvent(event);
       return event.defaultPrevented;
     },
   };
@@ -259,15 +261,15 @@ describe("what the designer types reaches the shell", () => {
     const end = farEnd();
     const pane = paneOn(wireTo(end), new Terminal({ rows: 8, cols: 40 }));
     await pane.pump();
-    expect(pane.press("a")).toBe(true);
-    expect(pane.press("ArrowUp")).toBe(true);
-    expect(pane.press("c", { ctrlKey: true })).toBe(true);
-    expect(pane.press("Enter")).toBe(true);
+    expect(pane.press("a", 65)).toBe(true);
+    expect(pane.press("ArrowUp", 38)).toBe(true);
+    expect(pane.press("c", 67, { ctrlKey: true })).toBe(true);
+    expect(pane.press("Enter", 13)).toBe(true);
     await Promise.resolve();
     // The escape sequences, not the key names: the pane does not know what a key means.
     expect(end.held().heard).toEqual(["a", "\x1b[A", "\x03", "\r"]);
     // A press that makes no bytes is the browser's own business.
-    expect(pane.press("Shift")).toBe(false);
+    expect(pane.press("Shift", 16)).toBe(false);
     end.close();
   });
 
@@ -276,16 +278,29 @@ describe("what the designer types reaches the shell", () => {
     const pane = paneOn(wireTo(end), new Terminal({ rows: 8, cols: 40 }));
     await pane.pump();
     // The reader never presses the `<pre>` itself: xterm.js puts its own hidden textarea in
-    // the screen and that is what holds the focus. So the press is made there, and what is
-    // being stated is that it bubbles out to the element `attach` listens on. A pane that
-    // listened on the textarea instead would pass the test above and take nothing a reader
-    // actually typed.
+    // the screen and that is what holds the focus, so that is the only element a press is ever
+    // made on. The dock hangs no listener there or anywhere else — it takes the bytes off
+    // `terminal.onData` — so what is stated here is that the emulator's focus target is inside
+    // the element the dock drew: the reader who clicks the dock's screen types into the keys.
     const focused = pane.terminal.textarea;
     if (focused === undefined) throw new Error("the emulator opened without a focus target");
     expect(pane.screen.contains(focused)).toBe(true);
-    expect(pane.press("x", {}, focused)).toBe(true);
+    expect(pane.press("x", 88)).toBe(true);
     await Promise.resolve();
     expect(end.held().heard).toEqual(["x"]);
+    end.close();
+  });
+
+  it("carries a paste, which no keydown listener could ever have seen", async () => {
+    const end = farEnd();
+    const pane = paneOn(wireTo(end), new Terminal({ rows: 8, cols: 40 }));
+    await pane.pump();
+    // The statement this work rests on, made end to end against the real route. A paste is no
+    // keydown at all, so the listener the dock used to hang would have sent nothing; `onData`
+    // is the emulator saying what happened, and a paste is one of the things that happen.
+    pane.terminal.paste("one\ntwo");
+    await Promise.resolve();
+    expect(end.held().heard).toEqual(["one\rtwo"]);
     end.close();
   });
 
@@ -297,7 +312,8 @@ describe("what the designer types reaches the shell", () => {
     // That is the gain, not a loss of one: the far end's own line editor sees the typing, so
     // the backspace is a backspace at the shell rather than a character deleted in a box the
     // shell never saw.
-    for (const key of ["l", "s", "Backspace", "s", "Enter"]) expect(pane.press(key)).toBe(true);
+    const typed = [["l", 76], ["s", 83], ["Backspace", 8], ["s", 83], ["Enter", 13]] as const;
+    for (const [key, code] of typed) expect(pane.press(key, code)).toBe(true);
     await Promise.resolve();
     expect(end.held().heard).toEqual(["l", "s", "\x7f", "s", "\r"]);
     // And the other door is not merely unused, it is unwired. `PARTS` names no composer and
