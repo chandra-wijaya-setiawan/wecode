@@ -15,6 +15,16 @@
  *  a transcript of what was written to it: a screen that only kept the text would pass a
  *  test about text and still lose the colour, the cursor and the clear.
  *
+ *  The parts the dock hands in are two names over one element. There used to be a line along
+ *  the foot of the dock — a form, a label and a text input — and the statements here were
+ *  written against it: they pressed keys at the box and submitted whole lines through the
+ *  door beside it. The box is gone, so they are written against the screen instead. That is
+ *  not a smaller version of the same thing: a whole line was all the box could ever say,
+ *  where the screen takes a keystroke at a time, which is what a Ctrl-C, an arrow back
+ *  through the history and a half-typed word are made of. The `prompt` frame the box used to
+ *  make is still a frame the route takes — `browser/annotate.ts` sends a reviewer's round as
+ *  one — so that is stated here too, on the route, where it still lives.
+ *
  *  Nothing here spawns a shell. Which shell runs is `loginShell`'s one decision and the
  *  painter's `Session` is what runs it; a stand-in for `Shelled` is what lets the route's
  *  own decisions — one shell, a cursor that draws a chunk once, a farewell said once, a key
@@ -26,7 +36,6 @@ import { DEFAULT_ROWS } from "@wecode/painter/dist/pty.js";
 import { encode } from "@wecode/painter/dist/client/terminal.js";
 import type { Page, Verb } from "../src/server.js";
 import {
-  DOCK,
   dock,
   document as documentOf,
   loginShell,
@@ -46,6 +55,11 @@ class Pretend implements Shelled {
   running = true;
   exit: number | null = null;
   readonly heard: string[] = [];
+  /** Kept apart from `heard`, because the two doors are different sentences: keystrokes are
+   *  bytes the far end reads itself, a prompt is a whole text someone composed. A dock with
+   *  no box makes only the first, and a statement that lumped them together could not say
+   *  so. */
+  readonly prompted: string[] = [];
   readonly opened: { command: string; cwd: string };
   closed = 0;
 
@@ -58,7 +72,7 @@ class Pretend implements Shelled {
   }
 
   prompt(text: string): void {
-    this.heard.push(`${text}\r`);
+    this.prompted.push(text);
   }
 
   close(): Promise<number> {
@@ -109,7 +123,12 @@ function farEnd(where = "/a/workspace") {
 
 /** The dock as the document draws it, with the pane attached to `wire`. The parts are
  *  queried out of the real markup by the real `PARTS` selectors: a pane wired to elements a
- *  test invented would prove nothing about the dock a reader is served. */
+ *  test invented would prove nothing about the dock a reader is served.
+ *
+ *  Every name in `PARTS` is queried, and `one` refuses anything but exactly one match, so
+ *  this helper is itself the statement that the dock draws each part it names once. It hands
+ *  `dock()` those elements and nothing more — no composer and no send, because the markup has
+ *  neither, and inventing them here would wire a door the reader has not got. */
 function paneOn(wire: Wire, terminal?: Terminal) {
   const host = globalThis.document.createElement("div");
   host.innerHTML = documentOf("<p>a page</p>");
@@ -119,21 +138,20 @@ function paneOn(wire: Wire, terminal?: Terminal) {
     return found[0] as Element;
   };
   const screen = one(PARTS.screen) as HTMLElement;
-  const keyboard = one(PARTS.keyboard) as HTMLInputElement;
-  const send = one(PARTS.send);
-  const parts = { screen, keyboard, composer: keyboard, send };
+  const keyboard = one(PARTS.keyboard) as HTMLElement;
+  const parts = { screen, keyboard };
   const docked = terminal === undefined ? dock(parts, wire) : dock(parts, wire, terminal);
   return {
     ...docked,
     screen,
-    line: keyboard,
-    /** A real keypress on the real line, and whether the browser was kept out of it. */
-    press: (key: string, held: Partial<KeyboardEventInit> = {}): boolean => {
-      const event = new KeyboardEvent("keydown", { key, cancelable: true, ...held });
-      keyboard.dispatchEvent(event);
+    keyboard,
+    /** A real keypress at the screen — or, given `at`, somewhere inside it, which is where
+     *  the emulator's own focus target is — and whether the browser was kept out of it. */
+    press: (key: string, held: Partial<KeyboardEventInit> = {}, at: EventTarget = keyboard) => {
+      const event = new KeyboardEvent("keydown", { key, cancelable: true, bubbles: true, ...held });
+      at.dispatchEvent(event);
       return event.defaultPrevented;
     },
-    submit: (): void => void send.dispatchEvent(new Event("submit", { cancelable: true })),
   };
 }
 
@@ -170,13 +188,19 @@ describe("the pane is the painter's terminal, on the dock's own markup", () => {
     end.close();
   });
 
-  it("names four parts, each one element of the dock", () => {
+  it("names two parts and they are one element: the screen is the keyboard", () => {
     // `paneOn` refuses anything but exactly one match per selector, so reaching here is the
-    // statement; this says which four, so a rename in the markup cannot quietly drop one.
+    // statement that each is drawn once; this says which two, so a rename in the markup
+    // cannot quietly drop one, and that they are the same selector — the thing that makes the
+    // dock a terminal the reader clicks and types into rather than a box with a line under it.
     const end = farEnd();
-    paneOn(wireTo(end));
-    expect(Object.keys(PARTS).sort()).toEqual(["composer", "keyboard", "screen", "send"]);
-    expect(PARTS.keyboard).toBe(`#${DOCK}-line`);
+    const pane = paneOn(wireTo(end), new Terminal({ rows: 8, cols: 40 }));
+    expect(Object.keys(PARTS).sort()).toEqual(["keyboard", "screen"]);
+    expect(PARTS.keyboard).toBe(PARTS.screen);
+    // And one element in the document, not two that happen to match: the element the keys are
+    // listened for on is the element the emulator was opened into.
+    expect(pane.keyboard).toBe(pane.screen);
+    expect(pane.terminal.element?.parentElement).toBe(pane.keyboard);
     end.close();
   });
 });
@@ -247,15 +271,45 @@ describe("what the designer types reaches the shell", () => {
     end.close();
   });
 
-  it("sends a composed line whole and empties the box", async () => {
+  it("hears a press made inside the screen, where the emulator keeps the focus", async () => {
     const end = farEnd();
     const pane = paneOn(wireTo(end), new Terminal({ rows: 8, cols: 40 }));
     await pane.pump();
-    pane.line.value = "ls -l";
-    pane.submit();
+    // The reader never presses the `<pre>` itself: xterm.js puts its own hidden textarea in
+    // the screen and that is what holds the focus. So the press is made there, and what is
+    // being stated is that it bubbles out to the element `attach` listens on. A pane that
+    // listened on the textarea instead would pass the test above and take nothing a reader
+    // actually typed.
+    const focused = pane.terminal.textarea;
+    if (focused === undefined) throw new Error("the emulator opened without a focus target");
+    expect(pane.screen.contains(focused)).toBe(true);
+    expect(pane.press("x", {}, focused)).toBe(true);
     await Promise.resolve();
-    expect(end.held().heard).toEqual(["ls -l\r"]);
-    expect(pane.line.value).toBe("");
+    expect(end.held().heard).toEqual(["x"]);
+    end.close();
+  });
+
+  it("sends a line a key at a time, because there is no box to compose one in", async () => {
+    const end = farEnd();
+    const pane = paneOn(wireTo(end), new Terminal({ rows: 8, cols: 40 }));
+    await pane.pump();
+    // What used to be one `prompt` frame carrying "ls -l" whole is now six frames of bytes.
+    // That is the gain, not a loss of one: the far end's own line editor sees the typing, so
+    // the backspace is a backspace at the shell rather than a character deleted in a box the
+    // shell never saw.
+    for (const key of ["l", "s", "Backspace", "s", "Enter"]) expect(pane.press(key)).toBe(true);
+    await Promise.resolve();
+    expect(end.held().heard).toEqual(["l", "s", "\x7f", "s", "\r"]);
+    // And the other door is not merely unused, it is unwired. `PARTS` names no composer and
+    // no send, so `attach` hung no listener for one, and nothing the dock does makes a
+    // `prompt` — including a submit raised at the screen, which is what the form that used to
+    // be under it would have raised.
+    expect(Object.keys(PARTS)).not.toContain("composer");
+    expect(Object.keys(PARTS)).not.toContain("send");
+    pane.screen.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    pane.screen.dispatchEvent(new Event("click", { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+    expect(end.held().prompted).toEqual([]);
     end.close();
   });
 });
@@ -303,6 +357,19 @@ describe("the shell behind the dock", () => {
     end.held().leaves(1);
     expect(end.send(encode({ kind: "keys", data: "x" })).status).toBe(409);
     expect(end.held().heard).toEqual(["x"]);
+    end.close();
+  });
+
+  it("still takes a prompt frame, though no reader of the dock types one", () => {
+    // The box that used to make these is gone, but the frame is not the box's: it is the
+    // wire's, and `browser/annotate.ts` sends a reviewer's whole round up as one. So the
+    // route must keep taking it — and must keep it apart from keystrokes, because a prompt is
+    // a text someone composed and keys are bytes the far end reads itself.
+    const end = farEnd();
+    end.drawn(0);
+    expect(end.send(encode({ kind: "prompt", text: "review the tree page" })).status).toBe(200);
+    expect(end.held().prompted).toEqual(["review the tree page"]);
+    expect(end.held().heard).toEqual([]);
     end.close();
   });
 
