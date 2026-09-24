@@ -310,11 +310,16 @@ describe("open only leaves out every terminal state, and nothing else", () => {
     // Narrowed to nothing says so, rather than that the record is empty — and keeps the form,
     // which is the one control a reader must have in order to undo it.
     const none = treeSection([node("project", 6, { state: "dropped" })], at());
-    expect([none.includes("nothing in the record matches this filter"),
-      none.includes("nothing in the record yet")]).toEqual([true, false]);
-    expect(drawn(none, "tree.filter.open")).toContain(` selected`);
-    expect(submits(none, "all")).toBe("/tree?show=all");
-    expect(treeSection([], at())).toContain("nothing in the record yet");
+    expect([none.includes("nothing in the record matches this filter"), none.includes("nothing in the record yet")]).toEqual([true, false]);
+    expect([drawn(none, "tree.filter.open").includes(" selected"), submits(none, "all"),
+      treeSection([], at()).includes("nothing in the record yet")]).toEqual([true, "/tree?show=all", true]);
+    // The headline of this change: a requirement in `met` no longer keeps a `delivered` story
+    // standing. `met` was not one of the four states written here before, so the requirement read
+    // as work still owed, and the story it hangs under was kept in order to place it.
+    const settled = [node("story", 20, { state: "delivered", children: [node("requirement", 21, { state: "met" })] })];
+    const four = "        excludes: [released, delivered, done, dropped]";
+    expect([ids(narrowed(settled, at())), ids(narrowed(settled, at(), loadUi(ui(EXCLUDES, four))))])
+      .toEqual([[], [20, 21]]);
   });
 });
 
@@ -329,20 +334,16 @@ describe("a long record is cut to the declared budget", () => {
     // A word longer than the whole width is broken rather than left to run on.
     expect(linesOf("z".repeat(columns * 2), columns)).toHaveLength(2);
     const [said, rest] = spent(long, budget, columns);
-    expect(linesOf(said, columns)).toHaveLength(budget);
-    expect([said.startsWith("line 1 "), said.includes("line 4")]).toEqual([true, false]);
-    expect([rest.includes("line 4"), rest.includes("line 5")]).toEqual([true, true]);
+    expect([linesOf(said, columns).length, said.startsWith("line 1 "), said.includes("line 4"),
+      rest.includes("line 4"), rest.includes("line 5")]).toEqual([budget, true, false, true, true]);
     const row = rowOf(body, "requirement", 5);
-    expect(row).toContain(`<span class="label">line 1 `);
-    expect(row.slice(0, row.indexOf("<details"))).not.toContain("line 4");
-    expect(row).toContain(`<details class="more" data-ui="tree.node.more">`);
-    expect(row).toContain(`<summary>more</summary><span class="rest">`);
-    expect(row.slice(row.indexOf(`class="rest"`))).toContain("line 5");
+    expect([row.includes(`<span class="label">line 1 `), row.includes(`<details class="more" data-ui="tree.node.more">`),
+      row.includes(`<summary>more</summary><span class="rest">`), row.slice(0, row.indexOf("<details")).includes("line 4"),
+      row.slice(row.indexOf(`class="rest"`)).includes("line 5")]).toEqual([true, true, true, false, true]);
     // A fold over nothing is a control that does nothing, so a short record gets none.
     const short = treeBranches([node("requirement", 5, { label: "it holds" })]);
-    expect([short.includes(`<span class="label">it holds</span>`), short.includes("tree.node.more")])
-      .toEqual([true, false]);
-    expect(spent("it holds", budget, columns)).toEqual(["it holds", ""]);
+    expect([short.includes(`<span class="label">it holds</span>`), short.includes("tree.node.more"),
+      spent("it holds", budget, columns)]).toEqual([true, false, ["it holds", ""]]);
     // The fold sits after the row and never inside a summary: a disclosure nested in one is a
     // disclosure the reader cannot press without pressing the other. It arrives shut, unhandled.
     const parent = treeBranches([node("story", 4, { label: long, children: [node("task", 8)] })]);
@@ -381,8 +382,7 @@ describe("the page is served in the shell, and the surface routes it", () => {
     expect([arrived.includes(`<li id="project-11"`), submits(arrived, "all")]).toEqual([false, "/tree?show=all"]);
     const widened = await (await fetch(`${addressOf(server)}${submits(arrived, "all")}`)).text();
     expect([widened === body, submits(widened, "open")]).toEqual([true, "/tree?show=open"]);
-    expect(await (await fetch(`${addressOf(server)}${submits(widened, "open")}`)).text())
-      .not.toContain(`<li id="project-11"`);
+    expect(await (await fetch(`${addressOf(server)}${submits(widened, "open")}`)).text()).not.toContain(`<li id="project-11"`);
     // Work moves without anybody reloading, so the record is read again on every request.
     nodes = [];
     expect(await (await fetch(`${addressOf(server)}/tree`)).text()).toContain("nothing in the record yet");
