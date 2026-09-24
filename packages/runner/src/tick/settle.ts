@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import { queries } from "@wecode/core/dist/db.js";
-import type { Trees } from "../git.js";
+import { GitError, type Trees } from "../git.js";
 import type { Refused, ScriptReport } from "../examiner.js";
 // The table descriptors stay in `daemon.ts`, where `typed-daemon.test.ts` holds their column
 // lists against the schema. Importing them back is a cycle on purpose: one definition of the
@@ -18,6 +18,9 @@ const byId = (a: { id: number }, b: { id: number }): number => a.id - b.id;
 export interface Settled {
   readonly committed: number[];
   readonly scripts: ScriptReport;
+  /** The attempts something stopped, in git's own words. An ordinary tick leaves it empty;
+   *  anything in it is an attempt whose tree is still standing and still owed a settling. */
+  readonly stopped: readonly { readonly id: number; readonly why: string }[];
 }
 
 /** What this phase needs of the runner, and nothing more. The walk up the ERD to a task's
@@ -44,6 +47,7 @@ export async function settleEnded(host: SettleHost): Promise<Settled> {
   const failed: number[] = [];
   const skipped: number[] = [];
   const refused: Refused[] = [];
+  const stopped: { id: number; why: string }[] = [];
 
   for (const row of rows) {
     if (!existsSync(row.worktree)) continue;
@@ -67,11 +71,21 @@ export async function settleEnded(host: SettleHost): Promise<Settled> {
         committed.push(row.id);
       }
       await trees.release(row.worktree);
-    } catch {
-      // leave the tree standing rather than lose work nobody has seen
+    } catch (err) {
+      // The tree is left standing rather than lose work nobody has seen — and what stopped
+      // it is said rather than dropped. Swallowed, this was silence twice over: the tick
+      // reported an attempt it had never settled, and the retry read a null `commit_sha`
+      // and was told the last attempt left no commit on the branch.
+      //
+      // A commit the attempt made before the failure is named by the error, and it is
+      // recorded here even though nothing moved the branch onto it: the tree's HEAD is the
+      // only thing holding that commit, and the record is what says where to look for it.
+      const made = err instanceof GitError ? err.made : null;
+      if (made !== null) queries(host.db).update(tbl.assignment).set({ commit_sha: made }).where("id", "=", row.id).run();
+      stopped.push({ id: row.id, why: err instanceof Error ? err.message : String(err) });
     }
   }
-  return { committed, scripts: { passed, failed, skipped, refused } };
+  return { committed, scripts: { passed, failed, skipped, refused }, stopped };
 }
 
 /** Give back the retry the foreman counted, when the attempt committed nothing — once per
