@@ -32,10 +32,19 @@ import type { Terminal } from "@xterm/xterm";
 /** Up: what the pane has for the session. `keys` is raw — bytes the keyboard made.
  *  `prompt` is a whole message the designer composed and sent, which the far side
  *  submits; they are different messages because they are different acts, and a pane that
- *  sent a prompt as keystrokes could not tell a half-typed line from a sent one. */
+ *  sent a prompt as keystrokes could not tell a half-typed line from a sent one.
+ *
+ *  `resize` is neither: it is not something the designer said, it is the window they are
+ *  reading in. A pty is opened at a size and keeps drawing at that size until it is told
+ *  another one, so a pane whose box changed and said nothing has a far end composing
+ *  frames for a screen that is no longer there — wrapped lines, a status bar in the
+ *  middle of the pane, a full-screen program redrawing at the wrong width. It goes up the
+ *  same wire as the keys because it is the same session, and it is a message of its own
+ *  because no sequence of keystrokes can say it. */
 export type ToSession =
   | { readonly kind: "keys"; readonly data: string }
-  | { readonly kind: "prompt"; readonly text: string };
+  | { readonly kind: "prompt"; readonly text: string }
+  | { readonly kind: "resize"; readonly cols: number; readonly rows: number };
 
 /** Down: what the session has for the pane. Output is a chunk of the pty's bytes, escapes
  *  and all — the screen interprets them, because that is what a terminal is. */
@@ -44,6 +53,10 @@ export type FromSession =
   | { readonly kind: "exit"; readonly code: number };
 
 export const encode = (message: ToSession | FromSession): string => JSON.stringify(message);
+
+/** A count of cells off the wire. Whole and at least one, because a pty resized to nought
+ *  columns is a pty nothing can draw on, and a fraction of a column is not a thing. */
+const whole = (v: unknown): boolean => typeof v === "number" && Number.isInteger(v) && v >= 1;
 
 /** A frame off the wire, or null if it is not one. Null rather than a throw: a socket can
  *  be handed anything, and a pane that dies on one bad frame is a pane that dies. */
@@ -58,6 +71,9 @@ export function decode(frame: string): ToSession | FromSession | null {
   const m = read as Record<string, unknown>;
   if (m["kind"] === "keys" && typeof m["data"] === "string") return { kind: "keys", data: m["data"] };
   if (m["kind"] === "prompt" && typeof m["text"] === "string") return { kind: "prompt", text: m["text"] };
+  if (m["kind"] === "resize" && whole(m["cols"]) && whole(m["rows"])) {
+    return { kind: "resize", cols: m["cols"] as number, rows: m["rows"] as number };
+  }
   if (m["kind"] === "output" && typeof m["chunk"] === "string") return { kind: "output", chunk: m["chunk"] };
   if (m["kind"] === "exit" && typeof m["code"] === "number") return { kind: "exit", code: m["code"] };
   return null;
@@ -124,6 +140,95 @@ export function keyOf(event: Key): string {
  *  pane asks for whatever xterm.js says it can open on, and the page gives it that. */
 export type Mount = Parameters<Terminal["open"]>[0];
 
+// ─── fitting the screen to the box it is in ─────────────────────────────────────────
+
+/** A box, in pixels. */
+export interface Box {
+  readonly width: number;
+  readonly height: number;
+}
+
+/** A screen, in cells. */
+export interface Size {
+  readonly cols: number;
+  readonly rows: number;
+}
+
+/** As much of a computed style as a box is measured from: the sides of an element that are
+ *  not room. Strings, because that is what a browser hands back, and every one optional
+ *  because this is a shape a `CSSStyleDeclaration` happens to have and not one anybody
+ *  builds. */
+export interface Edges {
+  readonly paddingTop?: string;
+  readonly paddingRight?: string;
+  readonly paddingBottom?: string;
+  readonly paddingLeft?: string;
+  readonly borderTopWidth?: string;
+  readonly borderRightWidth?: string;
+  readonly borderBottomWidth?: string;
+  readonly borderLeftWidth?: string;
+}
+
+/** A length off a computed style, or nought. Nought and not a refusal: a browser answers
+ *  `"0px"` for a side with nothing on it, `"medium"` for a border width nobody gave a
+ *  length, and nothing at all for a property it does not know — and a measurement that
+ *  threw on any of those is a pane that never fits. */
+const length = (said: string | undefined): number => Number.parseFloat(said ?? "") || 0;
+
+/** The part of an element's rectangle a cell may be drawn in.
+ *
+ *  A rectangle is the border box: everything the browser painted, which includes the
+ *  padding the design asked for around the screen and any rule drawn round it. Neither is
+ *  somewhere the emulator may put a cell. A pane fitted to the whole rectangle is told it
+ *  is wider than it is, so the far end composes a column whose right-hand edge is under the
+ *  border — a frame drawn to the edge of a screen the reader cannot see the edge of.
+ *
+ *  Never below nought, because a box smaller than its own trim is a pane so narrow there is
+ *  nothing in it, and `fits` has an answer for that already. */
+export function roomIn(rect: Box, edges: Edges): Box {
+  const spent = (near: string | undefined, far: string | undefined): number =>
+    length(near) + length(far);
+  return {
+    width: Math.max(
+      0,
+      rect.width - spent(edges.paddingLeft, edges.paddingRight) - spent(edges.borderLeftWidth, edges.borderRightWidth),
+    ),
+    height: Math.max(
+      0,
+      rect.height - spent(edges.paddingTop, edges.paddingBottom) - spent(edges.borderTopWidth, edges.borderBottomWidth),
+    ),
+  };
+}
+
+/** What the pane's box holds, in the cells the emulator is drawing now — or null when
+ *  there is nothing to apply.
+ *
+ *  Pixels in, cells out, and nothing else: no element, no emulator and no browser. The
+ *  cell is not measured, it is divided out of what is already on the screen — the grid
+ *  xterm has drawn is `now.cols` by `now.rows` cells and takes `grid` pixels, so one cell
+ *  is `grid.width / now.cols` across. That is the whole trick, and it is why this needs
+ *  none of xterm's internals to ask the question the fit addon asks: the emulator has
+ *  already told us how big a cell is by drawing some.
+ *
+ *  Null has three causes and they are one answer — there is no resize to make:
+ *    - nothing is drawn yet, so a cell has no size and the division is a guess. A pane
+ *      fitted before its first frame would resize to whatever zero divided by zero is.
+ *    - the box will not hold a single cell, which is a dock the reader has shut or a
+ *      window dragged to nothing. A pty told it is nought columns wide is a pty every
+ *      program on it draws garbage into.
+ *    - it already fits, which is the common case: the fit runs on every window resize,
+ *      and a frame up the wire per pixel of drag is a frame the far end redraws for. */
+export function fits(pane: Box, grid: Box, now: Size): Size | null {
+  const width = grid.width / now.cols;
+  const height = grid.height / now.rows;
+  if (!(width > 0) || !(height > 0)) return null;
+  const cols = Math.floor(pane.width / width);
+  const rows = Math.floor(pane.height / height);
+  if (!(cols >= 1) || !(rows >= 1)) return null;
+  if (cols === now.cols && rows === now.rows) return null;
+  return { cols, rows };
+}
+
 // ─── the pane ───────────────────────────────────────────────────────────────────────
 
 /** As much of an element as the pane listens to. */
@@ -138,10 +243,18 @@ export interface Parts {
   readonly screen: Mount;
   /** What has the keyboard focus while the designer is driving the session. */
   readonly keyboard: Listens;
-  /** The box a prompt is composed in. */
-  readonly composer: { value: string };
-  /** What sending it looks like — the form, or the button. */
-  readonly send: Listens;
+  /** The box a prompt is composed in, and what sending it looks like — the form, or the
+   *  button. Both optional, and only useful together: a pane that has no composer has no
+   *  send either, and one without the other is a door with nothing behind it.
+   *
+   *  Optional because the composer is no longer what a pane is. It was there when the
+   *  screen was a transcript and a whole line was the only thing that could be said; now
+   *  the screen is a terminal, the keyboard reaches the far end a keystroke at a time, and
+   *  a second box to type into is a second place the next word might go — the reader types
+   *  a line into it, presses enter at the screen, and neither of them has their sentence.
+   *  So a pane may simply be a screen, and `pane()` below is one. */
+  readonly composer?: { value: string };
+  readonly send?: Listens;
 }
 
 /** Where the pane sends what it has. */
@@ -152,6 +265,12 @@ export interface Attached {
   readonly receive: (frame: string) => void;
   /** The xterm.js terminal behind the pane, for anything that wants to read or size it. */
   readonly terminal: Terminal;
+  /** Fit the screen to the box it is drawn in, and tell the session. Hands back the size
+   *  it settled on, or null when there was no resize to make. The two boxes are the
+   *  caller's to measure, because measuring an element is the page's business and the
+   *  arithmetic is not — and `trim` is the screen's computed style, handed over for the
+   *  same reason: a browser reads it, `roomIn` above says what it costs. */
+  readonly fit: (pane: Box, grid: Box, trim?: Edges) => Size | null;
 }
 
 /** Wire the parts to a session.
@@ -162,9 +281,12 @@ export interface Attached {
  *  that makes none is left to the browser, which is how Cmd-C still copies and Tab out of
  *  an unfocused pane still moves focus.
  *
- *  The composer is the other door. What is typed there is not keystrokes: it is a prompt,
- *  and it reaches the session only when it is sent, at which point the box is emptied so
- *  that a sent prompt cannot be sent twice. */
+ *  The composer is the other door, and a page need not have one. What is typed there is not
+ *  keystrokes: it is a prompt, and it reaches the session only when it is sent, at which
+ *  point the box is emptied so that a sent prompt cannot be sent twice. A page that hands in
+ *  neither is a page whose only way in is the keyboard, and nothing is wired for the door it
+ *  does not have — a listener on an element that is not there is the shape of a pane that
+ *  quietly does nothing. */
 export function attach(parts: Parts, terminal: Terminal, send: Send): Attached {
   terminal.open(parts.screen);
 
@@ -175,21 +297,41 @@ export function attach(parts: Parts, terminal: Terminal, send: Send): Attached {
     send({ kind: "keys", data });
   }) as (event: never) => void);
 
-  const sendPrompt = ((event?: { preventDefault?: () => void }) => {
-    event?.preventDefault?.();
-    const text = parts.composer.value;
-    if (text.trim() === "") return;
-    parts.composer.value = "";
-    send({ kind: "prompt", text });
-  }) as (event: never) => void;
+  const { composer, send: sends } = parts;
+  if (composer !== undefined && sends !== undefined) {
+    const sendPrompt = ((event?: { preventDefault?: () => void }) => {
+      event?.preventDefault?.();
+      const text = composer.value;
+      if (text.trim() === "") return;
+      composer.value = "";
+      send({ kind: "prompt", text });
+    }) as (event: never) => void;
 
-  // Both, because `send` may be the form or the button inside it, and a button inside a
-  // form raises only the form's submit.
-  parts.send.addEventListener("submit", sendPrompt);
-  parts.send.addEventListener("click", sendPrompt);
+    // Both, because `send` may be the form or the button inside it, and a button inside a
+    // form raises only the form's submit.
+    sends.addEventListener("submit", sendPrompt);
+    sends.addEventListener("click", sendPrompt);
+  }
 
   return {
     terminal,
+    /** Both ends, in one act, in this order: the emulator is resized first so the screen
+     *  the reader is looking at is the right shape before the far end starts drawing to
+     *  it, and the frame goes up second so what arrives next is drawn at the size that is
+     *  already there. Told the other way round, every fit costs one frame of garbage.
+     *
+     *  The trim comes off before anything is divided, because what a caller measured is a
+     *  rectangle and a rectangle is not all room. Absent, nothing comes off — a pane whose
+     *  screen the design gives no padding and no border has a box that is already the
+     *  whole of it, and saying so is not something a page should have to. */
+    fit(pane: Box, grid: Box, trim?: Edges): Size | null {
+      const room = trim === undefined ? pane : roomIn(pane, trim);
+      const size = fits(room, grid, { cols: terminal.cols, rows: terminal.rows });
+      if (size === null) return null;
+      terminal.resize(size.cols, size.rows);
+      send({ kind: "resize", cols: size.cols, rows: size.rows });
+      return size;
+    },
     receive(frame: string): void {
       const message = decode(frame);
       if (message === null) return;
@@ -211,18 +353,24 @@ export function attach(parts: Parts, terminal: Terminal, send: Send): Attached {
 export const IDS = {
   pane: "session",
   screen: "session-screen",
-  composer: "session-prompt",
-  send: "session-send",
 } as const;
 
-/** The right pane's markup: a screen, and a box to send a prompt from. A `<div>` for the
- *  screen because xterm.js builds its own element inside whatever it is given — a `<pre>`
- *  would only sit between the terminal and its text — and it is focusable because the
- *  designer types into it. */
+/** The right pane's markup: a screen, and nothing else in it.
+ *
+ *  A `<div>` for the screen because xterm.js builds its own element inside whatever it is
+ *  given — a `<pre>` would only sit between the terminal and its text — and it is focusable
+ *  because the designer types into it.
+ *
+ *  Nothing else, because the pane is the session and the session is the whole of it. The
+ *  composer that used to sit under the screen was a box the designer typed a line into and
+ *  pressed a button to send, which is what a transcript needs and what a terminal is
+ *  instead of: the screen takes the keys itself, one at a time, and the far end's own shell
+ *  is what a line is composed in. Two boxes were two answers to where the next word goes,
+ *  and the one below could only ever say a whole line — no Ctrl-C, no arrow through the
+ *  history, nothing half-typed. With it gone the screen has the pane's whole box, which is
+ *  what `fit` above is for: the emulator's grid is however many cells the pane holds, and
+ *  the far end is told. */
 export const pane = (): string =>
   `<section id="${IDS.pane}" class="pane pane-right">` +
   `<div id="${IDS.screen}" class="screen" tabindex="0" aria-label="the designer's session"></div>` +
-  `<form id="${IDS.composer}-form" class="composer">` +
-  `<textarea id="${IDS.composer}" rows="2" aria-label="a prompt to send"></textarea>` +
-  `<button id="${IDS.send}" type="submit">send</button>` +
-  `</form></section>`;
+  `</section>`;

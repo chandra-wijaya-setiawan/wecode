@@ -4,23 +4,22 @@
  *  it a sidebar rather than a popover: the design says where it sits and what room the page
  *  gives it, and `docking()` turns it.
  *
- *  A popover is the browser's own top-layer box. It is drawn over the page and cannot make
- *  room beside it, and — because the top layer belongs to the document — every link a reader
- *  follows shuts it, which on a surface of eight documents is a terminal that closes itself
- *  whenever the reader looks at anything. So the state is a class the root element wears,
- *  remembered across a navigation, and one sheet answers both the panel and the room.
+ *  A popover is the browser's own top-layer box: drawn over the page, unable to make room
+ *  beside it, and shut by every link a reader follows, because the top layer belongs to the
+ *  document. On a surface of eight documents that is a terminal which closes itself whenever
+ *  the reader looks at anything. So the state is a class the root element wears, remembered
+ *  across a navigation, and one sheet answers both the panel and the room.
  *
  *  What fills the dock is `the-dock-runs-a-shell.test.ts`'s, so the output is asserted empty
  *  rather than asserted about, and the form is asserted to exist rather than to go
  *  anywhere. */
 import { describe, expect, it } from "vitest";
-import { CONTROLS, DOCK, DOCKED, docking, document, loadLook, REMEMBERED, stylesheet } from "../src/pages/shell.js";
-import type { Remembers, Rules } from "../src/pages/shell.js";
+import { CONTROLS, DOCK, DOCKED, docking, REMEMBERED } from "../src/browser/dock.js";
+import { document, loadLook, stylesheet, type Remembers } from "../src/pages/shell.js";
 
 const BODY = document(`<section class="board"><h2>a page</h2></section>`);
 const LOOK = loadLook();
 const SHEET = stylesheet();
-
 /** The banner's row of ways in, tags and all. */
 const nav = (body: string): string =>
   body.slice(body.indexOf("<nav>"), body.indexOf("</nav>") + "</nav>".length);
@@ -28,12 +27,6 @@ const nav = (body: string): string =>
 /** The dock as it is drawn, tag for tag. */
 const drawn = (body: string): string =>
   body.slice(body.indexOf(`id="${DOCK}"`), body.indexOf("</aside>"));
-
-/** Every declaration in a block, wherever it sits — a query holds rules of its own. */
-const declarations = (rules: Rules): readonly string[] =>
-  Object.values(rules).flatMap((held) =>
-    typeof held === "string" ? [held] : declarations(held as Rules),
-  );
 
 /** The rule that makes room for the dock, which is the one rule about it that is not keyed
  *  to its id: the panel is out of the flow, so the width it takes is the document's to give
@@ -45,8 +38,8 @@ const DOCK_RULES = Object.entries(LOOK.frame).filter(
   ([selector]) => selector.includes(`#${DOCK}`) || selector === ROOM,
 ) as readonly (readonly [string, string])[];
 
-/** One of them, by selector. Asked for by name so a missing rule fails as itself rather
- *  than as an undefined further down. */
+/** One of them, by selector, so a missing rule fails as itself rather than as an undefined
+ *  further down. */
 function said(selector: string): string {
   const held = LOOK.frame[selector];
   expect(typeof held, `the frame declares no ${selector}`).toBe("string");
@@ -55,9 +48,9 @@ function said(selector: string): string {
 
 const DOCK_DECLARATIONS = DOCK_RULES.map(([, held]) => held);
 
-/** A root element and a browser's store, as much of each as the sidebar reaches for. The
- *  classes worn and the words held are readable, because what is asserted below is what the
- *  turning left on the document and what it left for the next one. */
+/** A root element and a browser's store, as much of each as the sidebar reaches for, with
+ *  the classes worn and the words held readable: what is asserted below is what a turning
+ *  left on the document and what it left for the next one. */
 function rooted(): { readonly worn: Set<string>; readonly root: Parameters<typeof docking>[0] } {
   const worn = new Set<string>();
   const classList = {
@@ -77,14 +70,10 @@ function storing(): Remembers & { readonly held: Record<string, string> } {
 }
 
 describe("the banner ends in a terminal button", () => {
-  it("carries one button, named for what it is", () => {
+  it("carries one button, named for what it is, after every way in rather than among them", () => {
     expect([...BODY.matchAll(/data-ui="shell\.terminal"/g)]).toHaveLength(1);
     expect(nav(BODY)).toContain(`data-ui="shell.terminal"`);
-  });
-
-  it("puts it after every way in, not among them", () => {
-    const row = nav(BODY);
-    expect(row.lastIndexOf("<a ")).toBeLessThan(row.indexOf("<button"));
+    expect(nav(BODY).lastIndexOf("<a ")).toBeLessThan(nav(BODY).indexOf("<button"));
   });
 
   it("says what it turns, and whether it is open, rather than targeting a popover", () => {
@@ -95,10 +84,9 @@ describe("the banner ends in a terminal button", () => {
     expect(BODY, "the popover is what a navigation shuts").not.toContain("popover");
   });
 
-  /** What is still true after approval 1561 is that no element carries a handler of its
-   *  own: the markup is the shell's and the wiring is `browser/dock.ts`'s, one place, over
-   *  every page there is. What is no longer true is that the document carries no script —
-   *  the operator's mockup draws a terminal, and the pane behind the dock is script. */
+  /** Still true after approval 1561: no element carries a handler of its own, because the
+   *  markup is the shell's and the wiring is `browser/dock.ts`'s. No longer true: that the
+   *  document carries no script — the pane behind the dock is script. */
   it("opens the dock from the served script and not from a handler in the markup", () => {
     expect(BODY).not.toContain("onclick");
   });
@@ -111,9 +99,8 @@ describe("the banner ends in a terminal button", () => {
     }
   });
 
-  /** And the frame lets a page's own script through, which is the retirement itself: the
-   *  shell writes `contents` as it is given them, so markup a page means to serve arrives
-   *  in the document rather than being dropped or escaped on the way. */
+  /** And the frame lets a page's own script through: the shell writes `contents` as given,
+   *  so markup a page means to serve arrives rather than being dropped or escaped. */
   it("carries a page's script into the document rather than refusing it", () => {
     const served = document(`<script type="module" src="/dock.js"></script>`);
     expect(served).toContain(`<script type="module" src="/dock.js"></script>`);
@@ -195,8 +182,8 @@ describe("the design says where the dock sits", () => {
 });
 
 describe("it sits down the right edge, full height, as a column of the window", () => {
-  /** The dock's own rule, asked for when a statement needs it rather than when the file is
-   *  read — a missing rule is one red statement here and not a file that will not load. */
+  /** Asked for when a statement needs it, so a missing rule is one red statement here
+   *  rather than a file that will not load. */
   const self = (): string => said(`#${DOCK}`);
 
   it("is pinned to that edge, full height, rather than laid out where it is drawn", () => {
@@ -262,18 +249,33 @@ describe("what is inside it is stacked: close, output, command line", () => {
     expect(said(`#${DOCK} button`)).toContain("flex: 0 0 auto");
   });
 
-  it("fills the middle with the output, in the mono face, scrolling on its own", () => {
+  /** The middle is the screen, and the screen is an emulator's box rather than a
+   *  transcript's. A transcript is text the browser lays out — it wraps where the panel
+   *  ends, it scrolls itself, it is read in the document's leading. A terminal lays itself
+   *  out: the pane measures this rectangle, divides it into cells and tells the far end how
+   *  many, and what is inside is the emulator's own viewport, scrollback and grid. So a
+   *  declaration about the text in it is the document answering, differently, a question
+   *  the emulator has already answered. */
+  it("gives the middle to the screen as a box, and says nothing about what is drawn in it", () => {
     const output = said(`#${DOCK} pre`);
-    // The one child that grows: everything between the close and the command line is the
-    // session's, which is the whole point of the panel.
+    // The one child that grows: what is between the close and the command line is the
+    // session's, which is the panel's whole point.
     expect(output).toContain("flex: 1 1 auto");
     expect(output).toContain("var(--mono)");
-    expect(output).toContain("overflow: auto");
-    // A flex child will not scroll while its floor is its content's height.
+    // A flex child will not shrink below its content while its floor is that content.
     expect(output).toContain("min-height: 0");
-    // The record's own line breaks are what the session said, and a long line wraps rather
-    // than dragging the panel sideways.
-    expect(output).toContain("white-space: pre-wrap");
+    // What the grid does not cover is the panel's ground and not somewhere to scroll to.
+    expect(output).toContain("overflow: hidden");
+    const wrong = ["overflow: auto", "white-space", "overflow-wrap", "line-height"];
+    for (const gone of wrong) expect(output, gone).not.toContain(gone);
+  });
+
+  it("rules the screen off from outside it, because the fit divides its rectangle", () => {
+    // A border is a pixel of the measured rectangle no cell may be drawn in. The pane takes
+    // it off — `roomIn` — but the surer answer is not to draw one across the screen at all.
+    expect(said(`#${DOCK} pre`)).not.toContain("border");
+    expect(said(`#${DOCK} button`)).toContain("border-bottom: 1px solid var(--rule)");
+    expect(said(`#${DOCK} form`)).toContain("border-top: 1px solid var(--rule)");
   });
 
   it("keeps the command line along the foot, always in view", () => {
@@ -351,8 +353,8 @@ describe("the class the root wears is the state, and the browser remembers it", 
     expect(shown).toEqual([true, false, false]);
   });
 
-  /** The whole reason it is remembered rather than held in the page: this surface is eight
-   *  documents, and a reader who follows a link is served a new one. */
+  /** Why it is remembered rather than held in the page: a reader who follows a link on this
+   *  surface of eight documents is served a new one. */
   it("opens the next document as the reader left the last", () => {
     const store = storing();
     docking(rooted().root, store, () => {}).turn(true);
