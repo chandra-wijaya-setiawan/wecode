@@ -8,8 +8,9 @@
  *  record's own text — each read back out of an edited copy of the file that declares it, what is
  *  drawn named by the `data-ui` it carries, because an assertion on a class proves only that two
  *  files were written the same afternoon. What open only leaves out is checked against the machines
- *  that decide what terminal means. And the fourth is that the filter needs no browser: the form is
- *  read off the page, submitted the way a `get` form is, and the address it names fetched. */
+ *  that decide what terminal means, and `passed` — which they will not settle — against the
+ *  `invalidate` that is why. And the fourth is that the filter needs no browser: the form is read
+ *  off the page, submitted the way a `get` form is, and the address it names fetched. */
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -47,7 +48,7 @@ const DECLARED = loadUi();
 const PROOF = ["requirement", "acceptance_criteria", "acceptance_test", "task_test"];
 const SHOWS = "      shows: [project, release, epic, story, task]";
 const FOLDS = `        folds: [${PROOF.join(", ")}]`;
-const EXCLUDES = "        excludes: [released, delivered, met, accepted, done, dropped]";
+const EXCLUDES = "        excludes: [released, delivered, met, accepted, done, dropped, passed]";
 const NONE: Rollup = { done: 0, open: 0, failed: 0 };
 /** The machines the record is kept by, which is where "terminal" is decided. What this tree draws
  *  is what it shows and folds; `assignment` is neither, so its terminals are not this page's. */
@@ -100,9 +101,7 @@ function submits(body: string, picked: string): string {
 }
 
 const servers: Server[] = [];
-afterEach(async () => {
-  for (const s of servers.splice(0)) await new Promise((done) => s.close(done));
-});
+afterEach(async () => { for (const s of servers.splice(0)) await new Promise((done) => s.close(done)); });
 
 describe("how deep the tree goes is the design's", () => {
   // `folds` overrides `omits` here; and a design that declares no levels refuses.
@@ -119,10 +118,8 @@ describe("how deep the tree goes is the design's", () => {
     const body = treeBranches([WHOLE], fewer);
     for (const g of ["requirement-5", "acceptance_test-7"]) expect(body, g).not.toContain(`id="${g}"`);
     expect(body.slice(body.indexOf(`<li id="story-4" `))).toContain(`<ul><li id="acceptance_criteria-6" `);
-    for (const [from, missing] of [[SHOWS, /no shows/], [FOLDS, /no web\.folds/]] as const) {
-      expect(() => loadLevels(design(from, "")), from).toThrow(TreeDesignError);
-      expect(() => loadLevels(design(from, "")), from).toThrow(missing);
-    }
+    for (const [from, miss] of [[SHOWS, /no shows/], [FOLDS, /no web\.folds/]] as const)
+      for (const t of [TreeDesignError, miss]) expect(() => loadLevels(design(from, "")), from).toThrow(t);
   });
 });
 
@@ -139,20 +136,15 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
     expect([...body.matchAll(/<li id="/g)]).toHaveLength(9);
     // Nothing is lifted past a proof level: the task hangs under the test that accepts it.
     expect(body.slice(body.indexOf(`<li id="acceptance_test-7" `))).toContain(`<ul><li id="task-8" `);
-    for (const tag of ["ul", "li", "details", "summary"]) {
-      const shut = [...body.matchAll(new RegExp(`</${tag}>`, "g"))].length;
-      expect([...body.matchAll(new RegExp(`<${tag}[ >]`, "g"))], tag).toHaveLength(shut);
-    }
+    for (const t of ["ul", "li", "details", "summary"]) expect([...body.matchAll(new RegExp(`<${t}[ >]`, "g"))].length,
+      t).toBe([...body.matchAll(new RegExp(`</${t}>`, "g"))].length);
     // The work arrives open and the proof does not, so the page lands at story level.
     expect([[...body.matchAll(/<details open>/g)].length, [...body.matchAll(/<details>/g)].length])
       .toEqual([3, 5]);
-    for (const [e, id] of [["project", 1], ["release", 2], ["epic", 3]] as const) {
-      expect(rowOf(body, e, id), e).toContain(`<details open><summary>`);
-    }
     // Each proof row is a disclosure of its own, so the reader opens one level at a time.
-    for (const [e, id] of [["requirement", 5], ["acceptance_criteria", 6]] as const) {
-      expect(rowOf(body, e, id), e).toContain(`<details><summary>`);
-    }
+    for (const [e, id, d] of [["project", 1, " open"], ["release", 2, " open"], ["epic", 3, " open"],
+      ["requirement", 5, ""], ["acceptance_criteria", 6, ""]] as const)
+      expect(rowOf(body, e, id), e).toContain(`<details${d}><summary>`);
     expect(rowOf(body, "task_test", 9)).not.toMatch(/<(details|summary)/);
     for (const v of ["onclick", "aria-expanded"]) expect(body, v).not.toContain(v);
     const open = `<li id="story-4" data-ui="tree.node">`;
@@ -179,8 +171,7 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
       .toEqual([1, 1, 1]);
     expect(treeBranches([])).toBe(`<p class="empty">nothing in the record yet</p>`);
     const odd = treeBranches([node("story", 4, { label: `a <script> & "quotes"` })]);
-    expect(odd).not.toContain("<script>");
-    expect(rowOf(odd, "story", 4)).toContain("a &lt;script&gt; &amp; &quot;quotes&quot;");
+    expect([odd.includes("<script>"), rowOf(odd, "story", 4).includes("a &lt;script&gt; &amp; &quot;quotes&quot;")]).toEqual([false, true]);
   });
 });
 
@@ -188,19 +179,28 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
  *  holding any of them as a literal is a page nobody can restate without an edit. */
 describe("what the reader is offered is the declaration's", () => {
   const { filter, text } = DECLARED;
-  // Open only is stated against the machines: every state one will not move a drawn row out of.
-  it("reads the filter's word, parameter, default, submit, answers, budget and every terminal", () => {
+  // Open only is stated against the machines where they answer — every state one will not move a
+  // drawn row out of — and over them at the one state they cannot settle, which is `passed`.
+  it("reads the word, parameter, default, submit, answers, budget, every terminal and passed", () => {
     expect([filter.says, filter.param, filter.default]).toEqual(["filter:", "show", "open"]);
     expect([filter.submitId, filter.submit]).toEqual(["tree.filter.submit", "narrow"]);
     expect(filter.options.map((o) => [o.id, o.value, o.says]))
       .toEqual([["tree.filter.open", "open", "open only"], ["tree.filter.all", "all", "all"]]);
     expect([filter.options[1]?.excludes, text.budget, text.more, text.moreId])
       .toEqual([[], 3, "more", "tree.node.more"]);
-    expect([...(filter.options[0]?.excludes ?? [])].sort()).toEqual(TERMINAL);
+    expect([...(filter.options[0]?.excludes ?? [])].sort()).toEqual([...TERMINAL, "passed"].sort());
     expect(TERMINAL).toEqual(["accepted", "delivered", "done", "dropped", "met", "released"]);
     // Two are a story's own proof, which the four states written here before this let stand.
-    for (const e of ["requirement", "acceptance_criteria"] as const) {
+    for (const e of ["requirement", "acceptance_criteria"] as const)
       for (const s of MACHINES[e].terminal) expect(filter.options[0]?.excludes, e).toContain(s);
+    // And `passed` is the one the machines cannot settle for this page: it is a state of both
+    // test levels the tree draws, terminal on neither — each holds an `invalidate` back out of
+    // it — so it is left out for being nothing owed, never for being a row that cannot move.
+    for (const e of ["acceptance_test", "task_test"] as const) {
+      expect([DRAWN.includes(e), MACHINES[e].states.includes("passed"), MACHINES[e].terminal], e)
+        .toEqual([true, true, ["dropped"]]);
+      expect(MACHINES[e].transitions.filter((t) => t.from.includes("passed")).map((t) => [t.verb, t.to]), e)
+        .toEqual([["invalidate", "ready"]]);
     }
     // `failed` is not one — no drawn machine calls it terminal, and it is work still owed.
     expect(MACHINES.task.states).toContain("failed");
@@ -213,10 +213,7 @@ describe("what the reader is offered is the declaration's", () => {
       ["    budget: 3", "", /tree\.text\.budget is no count/],
       [EXCLUDES, "", /excludes\b.*names no states/],
       ["      - id: tree.filter.open", "      - id:", /options\[0\]\.id says nothing/],
-    ] as const) {
-      expect(() => loadUi(ui(from, to)), from).toThrow(TreeUiError);
-      expect(() => loadUi(ui(from, to)), from).toThrow(said);
-    }
+    ] as const) for (const t of [TreeUiError, said]) expect(() => loadUi(ui(from, to)), from).toThrow(t);
   });
 });
 
@@ -248,18 +245,14 @@ describe("the filter is one select in a form, and not a row of chips", () => {
     expect(drawn(body, "tree.filter")).toBe(` class="filter" method="get" action="/tree" data-ui="tree.filter"`);
     expect(body).toContain(`<label>${filter.says}<select name="${filter.param}">`);
     expect(body).toContain(`</select></label>`);
-    expect(formOf(body))
-      .toContain(`<button type="submit" data-ui="${filter.submitId}">${filter.submit}</button></form>`);
+    expect(formOf(body)).toContain(`<button type="submit" data-ui="${filter.submitId}">${filter.submit}</button></form>`);
     // One form, its submit last, after the select it sends.
     expect([[...body.matchAll(/<form/g)].length, body.indexOf("<button") > body.indexOf("<select")])
       .toEqual([1, true]);
     // Nothing here is a browser's to run: no script, no handler, no link dressed as a control.
-    for (const v of ["<script", "onchange", "onclick", "onsubmit", "data-href", "javascript:"]) {
-      expect(body, v).not.toContain(v);
-    }
+    for (const v of ["<script", "onchange", "onclick", "onsubmit", "data-href", "javascript:"]) expect(body, v).not.toContain(v);
     // And the page's own path, not a literal: the form goes back where the reader already is.
-    expect(treeSection([WHOLE], new URL("http://localhost/elsewhere?show=all")))
-      .toContain(`action="/elsewhere"`);
+    expect(treeSection([WHOLE], new URL("http://localhost/elsewhere?show=all"))).toContain(`action="/elsewhere"`);
   });
   /** A `get` submission replaces the whole query with the form's own fields, so everything else
    *  the reader arrived with rides along as hidden ones or is silently thrown away. */
@@ -272,8 +265,7 @@ describe("the filter is one select in a form, and not a row of chips", () => {
     expect([kept.indexOf("<input") < kept.indexOf("<label>"), body.includes("<input")]).toEqual([true, false]);
     // A person's own words reach a field as words: a value is an attribute, not markup.
     const odd = treeSection([WHOLE], at(`?q=${encodeURIComponent(`a "quote" & <tag>`)}`));
-    expect([odd.includes(`name="q" value="a &quot;quote&quot; &amp; &lt;tag&gt;"`), odd.includes("<tag>")])
-      .toEqual([true, false]);
+    expect([odd.includes(`name="q" value="a &quot;quote&quot; &amp; &lt;tag&gt;"`), odd.includes("<tag>")]).toEqual([true, false]);
     expect([submits(body, "all"), submits(other, "open")])
       .toEqual(["/tree?show=all", "/tree?show=open"]);
     expect([submits(treeSection([WHOLE], at("?task=8")), "all"), submits(kept, "open")])
@@ -284,7 +276,7 @@ describe("the filter is one select in a form, and not a row of chips", () => {
   });
 });
 
-describe("open only leaves out every terminal state, and nothing else", () => {
+describe("open only leaves out every terminal state and every passed test, and nothing else", () => {
   const criteria = [node("acceptance_criteria", 12, { state: "accepted" })];
   const proven = node("requirement", 9, { state: "in_progress", children: criteria });
   const record = [
@@ -302,24 +294,36 @@ describe("open only leaves out every terminal state, and nothing else", () => {
     expect(ids(narrowed(record, at("?show=all")))).toEqual([1, 2, 3, 7, 9, 12, 10, 4, 5, 6]);
     // A left-out row is kept when a kept row hangs under it: a row nobody could place, else.
     const kid = node("story", 2, { state: "in_progress" });
-    expect(ids(narrowed([node("project", 11, { state: "released", children: [kid] })], at())))
-      .toEqual([11, 2]);
+    expect(ids(narrowed([node("project", 11, { state: "released", children: [kid] })], at()))).toEqual([11, 2]);
     // The states are the file's: take one out of the list and the rows in it come back.
-    expect(ids(narrowed(record, at(), loadUi(ui(EXCLUDES, "        excludes: [dropped]")))))
-      .toEqual([1, 2, 3, 7, 9, 12, 10, 4, 5]);
+    expect(ids(narrowed(record, at(), loadUi(ui(EXCLUDES, "        excludes: [dropped]"))))).toEqual([1, 2, 3, 7, 9, 12, 10, 4, 5]);
     // Narrowed to nothing says so, rather than that the record is empty — and keeps the form,
     // which is the one control a reader must have in order to undo it.
     const none = treeSection([node("project", 6, { state: "dropped" })], at());
     expect([none.includes("nothing in the record matches this filter"), none.includes("nothing in the record yet")]).toEqual([true, false]);
     expect([drawn(none, "tree.filter.open").includes(" selected"), submits(none, "all"),
       treeSection([], at()).includes("nothing in the record yet")]).toEqual([true, "/tree?show=all", true]);
-    // The headline of this change: a requirement in `met` no longer keeps a `delivered` story
+    // The headline of the change before this: a requirement in `met` no longer keeps a `delivered`
     // standing. `met` was not one of the four states written here before, so the requirement read
     // as work still owed, and the story it hangs under was kept in order to place it.
     const settled = [node("story", 20, { state: "delivered", children: [node("requirement", 21, { state: "met" })] })];
     const four = "        excludes: [released, delivered, done, dropped]";
-    expect([ids(narrowed(settled, at())), ids(narrowed(settled, at(), loadUi(ui(EXCLUDES, four))))])
-      .toEqual([[], [20, 21]]);
+    expect([ids(narrowed(settled, at())), ids(narrowed(settled, at(), loadUi(ui(EXCLUDES, four))))]).toEqual([[], [20, 21]]);
+  });
+  /** The one state in the list the machines do not settle: a green test is nothing owed, but no
+   *  machine may call `passed` terminal — each test holds `invalidate`, `passed` back to `ready`, for
+   *  when the artefact it proves moves under it. So the row is left out by this file's own decision. */
+  it("leaves out a passed test, which no machine of a drawn level calls terminal", () => {
+    const six = `        excludes: [${TERMINAL.join(", ")}]`;
+    // Two greens and one red under a story still being worked: only the red is work still owed.
+    const mixed = [node("story", 30, { state: "in_progress", children: [
+      node("acceptance_test", 31, { state: "passed" }), node("task_test", 32, { state: "passed" }),
+      node("task_test", 33, { state: "failed" })] })];
+    expect([ids(narrowed(mixed, at())), ids(narrowed(mixed, at(), loadUi(ui(EXCLUDES, six))))]).toEqual([[30, 33], [30, 31, 32, 33]]);
+    // And the headline: a delivered story whose only proof is green no longer stands. Under the six
+    // terminal states the `passed` test read as work owed, and the story was kept to place it.
+    const green = [node("story", 40, { state: "delivered", children: [node("acceptance_test", 41, { state: "passed" })] })];
+    expect([ids(narrowed(green, at())), ids(narrowed(green, at(), loadUi(ui(EXCLUDES, six))))]).toEqual([[], [40, 41]]);
   });
 });
 
@@ -351,10 +355,8 @@ describe("a long record is cut to the declared budget", () => {
     expect(parent.slice(parent.indexOf("<summary>"), parent.indexOf("</summary>"))).not.toContain("<details");
     for (const v of [`<details class="more" open`, "onclick"]) expect(parent, v).not.toContain(v);
     // And the budget is the file's, not this page's: restate it and the cut moves with it.
-    const cut = rowOf(treeBranches([node("requirement", 5, { label: long })], undefined,
-      loadUi(ui("    budget: 3", "    budget: 1"))), "requirement", 5);
-    expect(cut.slice(0, cut.indexOf("<details"))).not.toContain("line 2");
-    expect(cut.slice(cut.indexOf(`class="rest"`))).toContain("line 2");
+    const cut = rowOf(treeBranches([node("requirement", 5, { label: long })], undefined, loadUi(ui("    budget: 3", "    budget: 1"))), "requirement", 5);
+    expect([cut.slice(0, cut.indexOf("<details")).includes("line 2"), cut.slice(cut.indexOf(`class="rest"`)).includes("line 2")]).toEqual([false, true]);
   });
 });
 
@@ -366,16 +368,14 @@ describe("the page is served in the shell, and the surface routes it", () => {
    *  that arrives is read, its submit is submitted, and the address it names is fetched. */
   it("answers /tree in the shell, narrowed by the query and by pressing its own submit", async () => {
     let nodes: readonly Node[] = [node("project", 11, { label: "wemail", state: "dropped" }), WHOLE];
-    const server = await serve({ "/tree": treeAt(() => nodes) });
-    servers.push(server);
+    const server = await serve({ "/tree": treeAt(() => nodes) }); servers.push(server);
     const res = await fetch(`${addressOf(server)}/tree?show=all`);
     expect([res.status, res.headers.get("content-type")]).toEqual([200, "text/html; charset=utf-8"]);
     const body = await res.text();
     expect([body.startsWith("<!doctype html>"), body.includes("<title>wecode</title>")]).toEqual([true, true]);
     // Its tree is inside the shell's one element, narrowed by the answer the query named.
     expect(body.slice(body.indexOf("<main>"), body.indexOf("</main>"))).toContain(`<li id="task-8" `);
-    expect([body.includes(`<li id="project-11" data-ui="tree.node">`),
-      body === treePage(nodes, at("?show=all")).body]).toEqual([true, true]);
+    expect([body.includes(`<li id="project-11" data-ui="tree.node">`), body === treePage(nodes, at("?show=all")).body]).toEqual([true, true]);
     // The arriving page is narrowed; its own submit, pressed with the other answer picked, is
     // the address that widens it — and the widened page's form narrows it back again.
     const arrived = await (await fetch(`${addressOf(server)}/tree`)).text();
