@@ -10,33 +10,58 @@
 # Every `id` here is a `data-ui` name the page carries into its markup, so the drawing and
 # the declaration are checkable against each other by name rather than by eye.
 tree:
-  # The filter, which is one dropdown and not a row of chips. The row asked the reader six
+  # The filter, which is one select and not a row of chips. The row asked the reader six
   # questions — owed work, which project, under way, stopped — to arrive at one reading,
   # and the reading is binary: the work still owed, or the whole record. So it is one
-  # question with two answers, and the answer it arrives holding is the first.
+  # question with two answers, and the answer it arrives holding is the first. A select is
+  # what a browser already draws for one question with a closed list of answers: it says
+  # which answer is held without being opened, it is reached by keyboard and by touch
+  # without this surface deciding how, and it cannot grow a third answer by accident.
   #
   # The choice travels in the query string, which is what makes a narrowed tree a link a
   # person can send, bookmark and reload. The default is the answer nobody asked for, so it
   # is the absent parameter: `/tree` and `/tree?show=open` are the same page.
+  #
+  # A select does not go anywhere on its own, and the thing that would make it — a handler
+  # on its change — is script, which this page has none of and will not grow for a reading.
+  # So the select sits in a `method=get` form that ends in a control the reader presses,
+  # and pressing it is what puts the answer on the query. That is the whole of the
+  # mechanism: it works in a browser with script turned off, and the address it arrives at
+  # is the same address the reader could have typed.
   filter:
     id: tree.filter
     says: "filter:"
     param: show
     default: open
+    # The control that sends the answer. A verb rather than "go" or "ok", because what it
+    # does is narrow a reading — and a form with no submit is a form a keyboard can reach
+    # and never send.
+    submit:
+      id: tree.filter.submit
+      says: narrow
     options:
       - id: tree.filter.open
         value: open
         says: open only
-        # The states a row is left out by. Written out here rather than read off the
-        # machines' own idea of terminal: `failed` is terminal too, and a failed row is
-        # exactly what a reader who asked for the work still owed needs to see. "Finished"
-        # and "not owed" are two lists, and this is the second one.
-        excludes: [released, done, delivered, dropped]
+        # The states a row is left out by: every terminal state of every level this tree
+        # draws — `released`, `delivered`, `met`, `accepted`, `done`, `dropped` — which is
+        # the union of the `terminal:` lists in `packages/core/config/machines.yaml` over
+        # the nine entities `shared.outline.levels` names. A state a machine will never
+        # move a row out of is a row nothing is owed on, and the four that were written
+        # here before left a met requirement and an accepted criterion standing under a
+        # story whose work was done.
+        #
+        # Written out rather than read off the machines, because what a reader is offered
+        # is this file's decision and not the interpreter's — and because it is a shorter
+        # list than "terminal" on its own would be. `failed` is not here and must not be:
+        # no machine of a drawn level calls it terminal, a failed row is work still owed,
+        # and it is exactly what a reader who asked for the owed work needs to see.
+        excludes: [released, delivered, met, accepted, done, dropped]
       - id: tree.filter.all
         value: all
         says: all
-        # All of it. A dropdown with an option that narrows nothing is how a reader gets
-        # the rest of the record back without having to know what the query string is.
+        # All of it. A select with an answer that narrows nothing is how a reader gets the
+        # rest of the record back without having to know what the query string is.
         excludes: []
   # A record's own text, which the record wrote and which no length was ever agreed for. A
   # requirement's statement runs to a paragraph; drawn whole, one of them is taller than

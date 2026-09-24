@@ -23,7 +23,7 @@
  *  disclosure is the mildest of them, and it changes nothing in wecode, only what this
  *  reader is looking at.
  *
- *  What the reader is offered around the tree — the one dropdown that narrows it, the states
+ *  What the reader is offered around the tree — the one select that narrows it, the states
  *  it narrows by, and how much of a record's own text a row spends before the rest goes
  *  behind a fold — is `packages/webapp/config/ui.yaml`'s. A word or a number written here
  *  instead would be a decision about the surface that nobody can read off a file.
@@ -71,9 +71,8 @@ const mapOf = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 
 const namesOf = (v: unknown, what: string, path: string): readonly string[] => {
-  if (!Array.isArray(v) || v.some((e) => typeof e !== "string") || v.length === 0) {
-    throw new TreeDesignError(`${path}: outline.levels declares no ${what}`);
-  }
+  const said = Array.isArray(v) && v.length > 0 && v.every((e) => typeof e === "string");
+  if (!said) throw new TreeDesignError(`${path}: outline.levels declares no ${what}`);
   return v as readonly string[];
 };
 
@@ -100,13 +99,16 @@ export interface Option {
   readonly excludes: readonly string[];
 }
 
-/** The filter, which is one dropdown: the word above it, the query parameter the choice
- *  travels in, which answer is the arriving one, and the answers themselves. */
+/** The filter, which is one select: the word beside it, the query parameter the choice
+ *  travels in, which answer is the arriving one, the answers themselves, and the word on the
+ *  control that sends the chosen one — a select goes nowhere until something submits it. */
 export interface Filter {
   readonly id: string;
   readonly says: string;
   readonly param: string;
   readonly default: string;
+  readonly submit: string;
+  readonly submitId: string;
   readonly options: readonly Option[];
 }
 
@@ -131,18 +133,16 @@ const wordOf = (v: unknown, at: string, path: string): string => {
 };
 
 const countOf = (v: unknown, at: string, path: string): number => {
-  if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
-    throw new TreeUiError(`${path}: ${at} is no count`);
-  }
-  return v;
+  const said = typeof v === "number" && Number.isInteger(v) && v >= 1;
+  if (!said) throw new TreeUiError(`${path}: ${at} is no count`);
+  return v as number;
 };
 
 /** A list of state names. Empty is an answer here — the option that narrows nothing says so
  *  with an empty list — but a missing list is not. */
 const statesOf = (v: unknown, at: string, path: string): readonly string[] => {
-  if (!Array.isArray(v) || v.some((e) => typeof e !== "string")) {
-    throw new TreeUiError(`${path}: ${at} names no states`);
-  }
+  const said = Array.isArray(v) && v.every((e) => typeof e === "string");
+  if (!said) throw new TreeUiError(`${path}: ${at} names no states`);
   return v as readonly string[];
 };
 
@@ -169,12 +169,15 @@ export function loadUi(path: string = UI): Ui {
   }
   const text = mapOf(tree["text"]);
   const more = mapOf(text["more"]);
+  const submit = mapOf(filter["submit"]);
   return {
     filter: {
       id: wordOf(filter["id"], "tree.filter.id", path),
       says: wordOf(filter["says"], "tree.filter.says", path),
       param: wordOf(filter["param"], "tree.filter.param", path),
       default: wordOf(filter["default"], "tree.filter.default", path),
+      submit: wordOf(submit["says"], "tree.filter.submit.says", path),
+      submitId: wordOf(submit["id"], "tree.filter.submit.id", path),
       options: said.map((o, n) => optionOf(o, n, path)),
     },
     text: {
@@ -215,10 +218,8 @@ const SAYS_SECTION = "Tree";
 /** How much hangs under a row, in the three buckets the rollup counts. A bucket at nothing
  *  is not written as a zero — a row says what is under it, not what is not. */
 function rollup(counts: Rollup): string {
-  const said = (["done", "open", "failed"] as const)
-    .filter((b) => counts[b] > 0)
-    .map((b) => `${counts[b]} ${b}`);
-  return said.length === 0 ? "" : said.join(", ");
+  const buckets = ["done", "open", "failed"] as const;
+  return buckets.filter((b) => counts[b] > 0).map((b) => `${counts[b]} ${b}`).join(", ");
 }
 
 /** A record's own text in lines: the text's own newlines, and a line wider than a row is
@@ -244,8 +245,8 @@ export function linesOf(text: string, columns: number): readonly string[] {
  *  that does nothing. */
 export function spent(text: string, budget: number, columns: number): readonly [string, string] {
   const lines = linesOf(text, columns);
-  if (lines.length <= budget) return [text, ""];
-  return [lines.slice(0, budget).join(" "), lines.slice(budget).join(" ")];
+  return lines.length <= budget ? [text, ""]
+    : [lines.slice(0, budget).join(" "), lines.slice(budget).join(" ")];
 }
 
 /** One row, as a sentence, with the record's text already cut to what the row spends on it.
@@ -286,12 +287,9 @@ export function shown(nodes: readonly Node[], levels: Levels = loadLevels()): re
  *  reader cannot press without pressing the other. */
 function branch(node: Node, levels: Levels, text: Text): string {
   const [said, rest] = spent(node.label, text.budget, text.columns);
-  const more =
-    rest === ""
-      ? ""
-      : `<details class="more" data-ui="${text.moreId}">` +
-        `<summary>${escape(text.more)}</summary>` +
-        `<span class="rest">${escape(rest)}</span></details>`;
+  const more = rest === "" ? "" :
+    `<details class="more" data-ui="${text.moreId}"><summary>${escape(text.more)}</summary>` +
+    `<span class="rest">${escape(rest)}</span></details>`;
   const open = `<li id="${escape(node.entity)}-${node.id}" data-ui="${NODE}">`;
   if (node.children.length === 0) return `${open}${row(node, said)}${more}</li>`;
   const proof = (n: Node): boolean => levels.folds.includes(n.entity);
@@ -319,17 +317,6 @@ export function chosen(url: URL, filter: Filter): Option {
   return (by(url.searchParams.get(filter.param)) ?? by(filter.default) ?? filter.options[0]) as Option;
 }
 
-/** Where an answer sends the reader: the query it is on now, with the filter's parameter
- *  set to this answer — or dropped, when the answer is the arriving one, because an absent
- *  parameter is what the default looks like. Everything else in the query survives. */
-export function optionHref(url: URL, filter: Filter, option: Option): string {
-  const query = new URLSearchParams(url.searchParams);
-  if (option.value === filter.default) query.delete(filter.param);
-  else query.set(filter.param, option.value);
-  const said = query.toString();
-  return said === "" ? "?" : `?${said}`;
-}
-
 /** The record as the query asks for it. The chosen answer leaves out every row whose state
  *  it excludes — and keeps a row it would have left out when a kept row hangs under it,
  *  because a row shown without the rows it hangs under is a row nobody can place. */
@@ -344,23 +331,44 @@ export function narrowed(nodes: readonly Node[], url: URL, ui: Ui = loadUi()): r
   return nodes.map(kept).filter((n): n is Node => n !== null);
 }
 
-/** The filter: the word the declaration gives it, and one dropdown holding its answers. The
- *  summary is the answer the reader is holding, so the page says what it is narrowed to
- *  without being opened; the answers are links and never forms — every verb that changes
- *  wecode is the cli's, and narrowing a reading changes nothing. */
+/** Everything else the reader arrived with, kept across a submission. A `get` form replaces
+ *  the whole query with its own fields, so a parameter nobody wrote a field for is a
+ *  parameter narrowing the tree silently threw away. The filter's own is left out: the
+ *  select is the field for that one. */
+const carried = (url: URL, filter: Filter): string =>
+  [...url.searchParams]
+    .filter(([name]) => name !== filter.param)
+    .map(([n, v]) => `<input type="hidden" name="${escape(n)}" value="${escape(v)}">`)
+    .join("");
+
+/** The filter: the word the declaration gives it, one select holding its answers, and the
+ *  control that sends the one picked.
+ *
+ *  It is a `method="get"` form, which is the whole mechanism. A select does not navigate on
+ *  its own, and what would make it — a handler on its change — is script; this page has
+ *  none, so the reader presses the submit and the browser puts the answer on the query
+ *  itself. Nothing here needs JavaScript to work, and what the form arrives at is an address
+ *  the reader could have typed: narrowing stays a reading a person can send and bookmark.
+ *
+ *  A `get` form is still a reading and not a verb. Every verb that changes wecode is the
+ *  cli's; this one changes the query string and nothing else — which is why `action` is the
+ *  page's own path and the rest of the query rides along as hidden fields rather than being
+ *  thrown away, a `get` submission replacing the whole query with its own.
+ *
+ *  The label wraps the select, so the word is what the control is named by rather than a
+ *  sentence that happens to sit beside it, and the held answer is `selected`: the page says
+ *  what it is narrowed to without being opened. */
 function filterRow(url: URL, filter: Filter): string {
   const on = chosen(url, filter);
   const drawn = filter.options
-    .map(
-      (o) =>
-        `<li><a class="tag${o === on ? " on" : ""}" data-ui="${o.id}"` +
-        ` href="${escape(optionHref(url, filter, o))}">${escape(o.says)}</a></li>`,
-    )
+    .map((o) => `<option value="${escape(o.value)}" data-ui="${o.id}"` +
+      `${o === on ? " selected" : ""}>${escape(o.says)}</option>`)
     .join("");
   return (
-    `<div class="filter" data-ui="${filter.id}">${escape(filter.says)}` +
-    `<details class="pick"><summary>${escape(on.says)}</summary>` +
-    `<ul>${drawn}</ul></details></div>`
+    `<form class="filter" method="get" action="${escape(url.pathname)}" data-ui="${filter.id}">` +
+    `${carried(url, filter)}<label>${escape(filter.says)}` +
+    `<select name="${escape(filter.param)}">${drawn}</select></label>` +
+    `<button type="submit" data-ui="${filter.submitId}">${escape(filter.submit)}</button></form>`
   );
 }
 
@@ -369,10 +377,9 @@ function filterRow(url: URL, filter: Filter): string {
 export function treeSection(nodes: readonly Node[], url: URL, levels?: Levels, ui?: Ui): string {
   const said = ui ?? loadUi();
   const roots = narrowed(nodes, url, said);
-  const body =
-    roots.length === 0 && nodes.length > 0
-      ? `<p class="empty">${NOTHING_MATCHES}</p>`
-      : treeBranches(roots, levels, said);
+  const narrowedToNothing = roots.length === 0 && nodes.length > 0;
+  const body = narrowedToNothing ? `<p class="empty">${NOTHING_MATCHES}</p>`
+    : treeBranches(roots, levels, said);
   return (
     `<section class="tree" data-ui="${SECTION}"><h2>${SAYS_SECTION}</h2>` +
     `${filterRow(url, said.filter)}${body}</section>`
