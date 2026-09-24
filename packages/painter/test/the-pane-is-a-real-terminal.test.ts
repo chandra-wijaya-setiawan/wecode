@@ -11,8 +11,10 @@ const settled = (terminal: Terminal): Promise<void> =>
   new Promise((resolve) => terminal.write("", resolve));
 
 /** A pane over a real emulator. `door` is whether the page hands in a composer and a way of
- *  sending it: `pane()` draws neither any more, and the webapp's dock still draws both, so
- *  both shapes are the shape of a page that exists. */
+ *  sending it. No page in this repository draws one any more — `pane()` stopped, and the
+ *  webapp's dock has now stopped too — but the door stays in `attach` because a page may
+ *  draw one and because `prompt` is still a frame the wire carries. Both shapes are kept
+ *  under test so the optional half cannot rot unnoticed. */
 function wired(door = true) {
   const handlers = new Map<string, ((event: never) => void)[]>();
   const on = (type: string, handler: (event: never) => void): void =>
@@ -134,8 +136,8 @@ describe("the unchanged wire and controls", () => {
  *
  *  So `pane()` draws a screen and nothing else, and the screen has the pane's whole box —
  *  which is what the fit below then has something to divide. The door is not deleted from
- *  the wire or from `attach`, because a page may still draw one and the webapp's dock does;
- *  it is a part a page hands in, and a pane handed neither wires neither. */
+ *  the wire or from `attach`: it is a part a page hands in, `annotate.ts` still sends a
+ *  reviewer's round as a `prompt` frame, and a pane handed neither wires neither. */
 describe("the composer is cut from the pane", () => {
   it("draws a screen and nothing else", () => {
     const markup = pane();
@@ -170,6 +172,51 @@ describe("the composer is cut from the pane", () => {
       rows: 12,
     });
     expect(page.sent).toEqual([{ kind: "resize", cols: 80, rows: 12 }]);
+  });
+});
+
+/** And with the composer gone, the screen is the keyboard.
+ *
+ *  That is the shape the webapp's dock now hands in: `PARTS.screen` and `PARTS.keyboard` are
+ *  one selector, so `attach` opens the emulator on an element and listens for keys on that
+ *  same element. It is what makes a terminal a thing you click and type into — there is no
+ *  line below it to put the cursor in, which is what the operator asked for twice.
+ *
+ *  Both statements use a real element and a real `KeyboardEvent`, because the question is
+ *  about where a press lands in a document rather than about `keyOf`, which is proved above.
+ *  The second is the one that matters: xterm builds its own focus target inside whatever it
+ *  is opened on, and that — not the element the page named — is what has the focus once the
+ *  reader clicks. A press there is only the session's because it bubbles. */
+describe("the screen can be the keyboard", () => {
+  /** One element, opened on and listened to, as the dock hands it in. */
+  function typed() {
+    const screen = document.createElement("div");
+    document.body.append(screen);
+    const sent: ToSession[] = [];
+    attach({ screen, keyboard: screen }, new Terminal(), (message) => sent.push(message));
+    return { screen, sent };
+  }
+
+  it("takes a press on the element the emulator was opened on", () => {
+    const { screen, sent } = typed();
+    const event = new KeyboardEvent("keydown", { key: "c", ctrlKey: true, cancelable: true });
+    screen.dispatchEvent(event);
+    // The control code, and the browser kept out of it: Ctrl-C reaches the shell rather than
+    // copying, which is the whole difference between a terminal and a box of text.
+    expect(sent).toEqual([{ kind: "keys", data: "\x03" }]);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("takes a press made inside the emulator's own focus target, which bubbles out to it", () => {
+    const { screen, sent } = typed();
+    const inner = screen.querySelector("textarea");
+    expect(inner, "the emulator built no focus target inside the screen").not.toBeNull();
+    (inner as HTMLTextAreaElement).dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }),
+    );
+    // The escape sequence that walks the far end's history — from a press the page's own
+    // element never received directly.
+    expect(sent).toEqual([{ kind: "keys", data: "\x1b[A" }]);
   });
 });
 

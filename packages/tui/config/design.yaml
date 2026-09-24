@@ -288,16 +288,17 @@ renderers:
         # a flex child may actually shrink, the padding the design wants around the cells,
         # and `overflow: hidden` because anything the grid does not cover is the panel's
         # ground and not somewhere to scroll to. The rules that used to be drawn across it
-        # are on the chrome above and below now, because the pane's box is what the fit
-        # divides into cells — a border is two pixels of the reader's screen that the
-        # emulator is told it has and does not.
+        # are on the chrome above now, because the pane's box is what the fit divides into
+        # cells — a border is two pixels of the reader's screen that the emulator is told it
+        # has and does not.
+        #
+        # And it reaches the foot, because there is nothing under it any more. There was a
+        # line along the bottom the next word was typed on — a form, a label and a text input
+        # — and the four rules that drew it are gone with the markup. A terminal is typed
+        # into at the screen: the reader clicks the black box and the keys go up from there,
+        # so a second box below it was a second answer to where the next word went. The room
+        # it took is the screen's now, which is more cells for the far end to draw in.
         "#terminal pre": "flex: 1 1 auto; min-height: 0; min-width: 0; margin: 0; padding: .9rem; overflow: hidden; color: var(--ink); font-family: var(--mono); font-size: .92em"
-        # The line the next word is typed on, along the foot and always in view, ruled off
-        # from the screen above it.
-        "#terminal form": "flex: 0 0 auto; display: flex; gap: .5rem; align-items: baseline; border-top: 1px solid var(--rule); padding: .6rem .9rem; min-width: 0"
-        "#terminal form label": "color: var(--faint); font-family: var(--mono)"
-        "#terminal form input": "flex: 1 1 auto; min-width: 0; background: var(--page); border: 1px solid var(--rule); border-radius: 3px; padding: .25rem .5rem; color: var(--ink); font-family: var(--mono); font-size: .92em"
-        "#terminal form input:focus": "outline: none; border-color: var(--mark)"
       # One block per page, in the order the sheet writes them.
       pages:
         board:

@@ -100,19 +100,13 @@ async function boot(): Promise<Board> {
     const timer = setTimeout(() => {
       reject(new Error(`the board never listened in ${PATIENCE}ms\n${out}${err}`));
     }, PATIENCE);
-    const settle = (act: () => void): void => {
-      clearTimeout(timer);
-      act();
-    };
+    const settle = (act: () => void): void => void (clearTimeout(timer), act());
     child.stdout.on("data", () => {
       const said = /http:\/\/\S+/.exec(out);
       if (said !== null) settle(() => resolve(said[0]));
     });
-    child.on("exit", (code) => {
-      settle(() =>
-        reject(new Error(`the board left with ${String(code)} before it listened\n${err}${out}`)),
-      );
-    });
+    child.on("exit", (code) =>
+      settle(() => reject(new Error(`the board left with ${String(code)} before it listened\n${err}${out}`))));
   });
   return { ...board, at };
 }
@@ -193,9 +187,8 @@ describe("the board asks a browser for the dock's script", () => {
     const board = await boot();
     const body = await documentOf(board, "/");
     const { tag } = asks(body);
-    // A module, because the pane's script imports the emulator and the painter's half; and
-    // it is the last thing in the document, after the dock's own markup, so the elements it
-    // reaches for are parsed by the time it runs.
+    // A module, because the pane's script imports the emulator and the painter's half; and it
+    // is last in the document, after the dock's own markup, so what it reaches for is parsed.
     expect(tag).toContain(`type="module"`);
     expect([...body.matchAll(/<script/g)], "one script, not one per page's worth").toHaveLength(1);
     expect(body.indexOf("<script")).toBeGreaterThan(body.indexOf(`id="terminal"`));
@@ -232,6 +225,11 @@ describe("the script the document asks for is served", () => {
     // and it polls the session's route.
     expect(script).toContain(`data-ui=\\"shell.dock.output\\"`);
     expect(script).toContain("/terminal?from=");
+    // And the screen is the keyboard — two names, one element — which is what makes the black
+    // box the thing a reader clicks and types into rather than a box with a line under it.
+    const parts = JSON.parse((/const PARTS = (\{.*\});/.exec(script) as RegExpExecArray)[1] as string) as Record<string, string>;
+    expect(Object.keys(parts).sort()).toEqual(["keyboard", "screen"]);
+    expect(parts["keyboard"]).toBe(parts["screen"]);
     // It also measures, which is what makes the pane a window rather than a fixed grid: the
     // screen's rectangle, the box xterm's grid fills, and the screen's own trim, each beat.
     for (const held of [".xterm-screen", "getComputedStyle", "grid, trimOf("]) expect(script, held).toContain(held);
@@ -273,15 +271,17 @@ describe("the dock a browser is served is a sidebar", () => {
       // reader who followed a link would be served a page with the terminal shut behind
       // them, which is the one thing a session they are watching must not do.
       expect(body, at).not.toContain("popover");
+      // …and nothing to type into but the screen: the line along the foot is gone.
+      const dock = body.slice(body.indexOf(`<aside id="terminal"`), body.indexOf("</aside>"));
+      for (const g of ["<form", "<input", "<label"]) expect(dock, `${at} still draws ${g}`).not.toContain(g);
     }
   });
 
   it("serves a sheet that opens it on a class the root wears, and makes room beside it", async () => {
     const board = await boot();
     const sheet = sheetOf(await documentOf(board, "/"));
-    // Shut is what every document is served in, so the panel is `display: none` until the
-    // class goes on — a page load with the terminal standing open is a page load that
-    // flashes one on every page of the surface.
+    // Shut is what every document is served in, so the panel is `display: none` until the class
+    // goes on — a document served open would flash a terminal on every page of the surface.
     expect(ruled(sheet, "#terminal")).toContain("display: none");
     const shape = /\nhtml\.([a-z-]+) #terminal \{/.exec(sheet);
     expect(shape, "the sheet opens the dock on no class at all").not.toBeNull();

@@ -1,7 +1,8 @@
 /** The dock: all of the terminal down the side of every document bar the markup of it.
  *
- *  `pages/shell.ts` draws the dock — an `<aside>` with a screen and a command line in it —
- *  and owns the far end it is a pane on. Everything else about it is here: the names the
+ *  `pages/shell.ts` draws the dock — an `<aside>` with a way out and a screen in it, and
+ *  nothing to type into but the screen itself — and owns the far end it is a pane on.
+ *  Everything else about it is here: the names the
  *  markup and the script agree on, the pane itself, the open-or-shut state the root's class
  *  is, and the files a browser is sent so that any of it runs.
  *
@@ -73,15 +74,17 @@ export const SHELL_AT = `/${DOCK}`;
 /** Which element of the dock is which part of the pane. One list, so the markup and the
  *  pane cannot drift, under the `data-ui` names the dock is already drawn with.
  *
- *  The line is both the keyboard and the composer: it is where the designer's keys are, and
- *  `attach` defaults-prevents every press that makes bytes, so Enter goes down the wire as
- *  CR instead of submitting the form. The form is wired all the same — a submit that does
- *  arrive carries a whole line, which must not be dropped. */
+ *  Two names and one element: the screen is also the keyboard. That is what makes the dock a
+ *  terminal the reader clicks and types into rather than a box with a line under it. The
+ *  emulator keeps its own focus target inside the screen, so a press anywhere in it bubbles
+ *  out to where `attach` listens, which defaults-prevents it and sends the bytes up — Enter
+ *  as CR, Ctrl-C as ETX, the arrows as the sequences that walk the far end's own history.
+ *  There is no composer and no send, which `Parts` has as optional for exactly this: a
+ *  `prompt` frame is still one the route takes — `browser/annotate.ts` sends a reviewer's
+ *  round as one — but it is no longer something a reader of the dock types. */
 export const PARTS = {
   screen: `[data-ui="shell.dock.output"]`,
-  keyboard: `#${DOCK}-line`,
-  composer: `#${DOCK}-line`,
-  send: `[data-ui="shell.dock.command"]`,
+  keyboard: `[data-ui="shell.dock.output"]`,
 } as const;
 
 // ─── the dock's pane ────────────────────────────────────────────────────────────────
@@ -337,7 +340,9 @@ const sidebar = docking(window.document.documentElement, store, (open) => {
     );
     pane = dock(parts, wire);
   }
-  one(PARTS.keyboard).focus();
+  // The emulator and not the element around it: xterm's own focus target is the one that
+  // shows a cursor, and a press there bubbles out to the screen, where \`attach\` listens.
+  pane.terminal.focus();
   beating = window.setInterval(() => void beat(), 50);
   void beat();
 });

@@ -10,9 +10,8 @@
  *  the reader looks at anything. So the state is a class the root element wears, remembered
  *  across a navigation, and one sheet answers both the panel and the room.
  *
- *  What fills the dock is `the-dock-runs-a-shell.test.ts`'s, so the output is asserted empty
- *  rather than asserted about, and the form is asserted to exist rather than to go
- *  anywhere. */
+ *  What fills the dock is `the-dock-runs-a-shell.test.ts`'s, so the screen is asserted empty
+ *  rather than asserted about. */
 import { describe, expect, it } from "vitest";
 import { CONTROLS, DOCK, DOCKED, docking, REMEMBERED } from "../src/browser/dock.js";
 import { document, loadLook, stylesheet, type Remembers } from "../src/pages/shell.js";
@@ -121,12 +120,13 @@ describe("the dock is in the document", () => {
     expect(drawn(BODY)).toContain(`data-ui="shell.dock.close"`);
   });
 
-  it("holds the session's output and a command line, both empty", () => {
+  it("holds the session's screen, empty, and nothing at all to type into", () => {
     const dock = drawn(BODY);
-    expect(dock).toContain(`<pre data-ui="shell.dock.output"></pre>`);
-    expect(dock).toContain(`data-ui="shell.dock.command"`);
-    expect(dock).toMatch(/<input [^>]*type="text"/);
-    expect(dock).not.toMatch(/<input [^>]*value=/);
+    expect(dock).toMatch(/<pre data-ui="shell\.dock\.output"[^>]*><\/pre>/);
+    // The reader clicks the black screen and types there, so it takes the focus itself.
+    expect(dock).toMatch(/<pre [^>]*tabindex="0"/);
+    for (const gone of ["<form", "<label", "<input", "shell.dock.command"])
+      expect(dock, `the dock still draws ${gone}`).not.toContain(gone);
   });
 
   it("is the same dock on every page, because there is one session", () => {
@@ -236,13 +236,14 @@ describe("it sits down the right edge, full height, as a column of the window", 
   });
 });
 
-describe("what is inside it is stacked: close, output, command line", () => {
+describe("what is inside it is stacked: the way out, then the screen", () => {
   it("stacks them down the panel in the order the dock draws them", () => {
     const open = said(`html.${DOCKED} #${DOCK}`);
     expect(open).toContain("flex-direction: column");
     const dock = drawn(BODY);
     expect(dock.indexOf("<button")).toBeLessThan(dock.indexOf("<pre"));
-    expect(dock.indexOf("<pre")).toBeLessThan(dock.indexOf("<form"));
+    // The screen is the last of them, because nothing is drawn under it any more.
+    expect(dock.trimEnd().endsWith("</pre>"), dock).toBe(true);
   });
 
   it("gives the close control the top and lets it take no more than it needs", () => {
@@ -275,14 +276,13 @@ describe("what is inside it is stacked: close, output, command line", () => {
     // it off — `roomIn` — but the surer answer is not to draw one across the screen at all.
     expect(said(`#${DOCK} pre`)).not.toContain("border");
     expect(said(`#${DOCK} button`)).toContain("border-bottom: 1px solid var(--rule)");
-    expect(said(`#${DOCK} form`)).toContain("border-top: 1px solid var(--rule)");
   });
 
-  it("keeps the command line along the foot, always in view", () => {
-    const form = said(`#${DOCK} form`);
-    expect(form).toContain("flex: 0 0 auto");
-    expect(form).toContain("display: flex");
-    expect(said(`#${DOCK} form input`)).toContain("flex: 1 1 auto");
+  it("gives the screen the foot too, because there is no line under it any more", () => {
+    // Gone with the markup: a rule left behind would style what the dock never draws.
+    for (const gone of ["form", "label", "input"])
+      expect(Object.keys(LOOK.frame).filter((s) => s.includes(`#${DOCK} `) && s.includes(gone)), gone).toEqual([]);
+    expect(said(`#${DOCK} pre`)).toContain("flex: 1 1 auto");
   });
 });
 
