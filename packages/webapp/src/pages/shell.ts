@@ -117,17 +117,25 @@ const terminalButton = (): string =>
   `<button type="button" aria-controls="${DOCK}" aria-expanded="false" ` +
   `data-ui="shell.terminal">terminal</button>`;
 
-/** The dock down the side: what the shell has said, and the line the next word is typed
- *  on. Both drawn empty, because what fills them is the far end — the shell behind
- *  `SHELL_AT`, which `dock()` attaches this markup to, naming its elements in `PARTS`. */
+/** The dock down the side: the way out, and the screen. Drawn empty, because what fills it
+ *  is the far end — the shell behind `SHELL_AT`, which `dock()` attaches this markup to,
+ *  naming its elements in `PARTS`.
+ *
+ *  The screen and nothing under it. There used to be a line along the foot — a form, a
+ *  label and a text input — and it was the wrong shape twice over. It was a second place the
+ *  next word might go: the reader typed into the box, pressed enter at the black screen, and
+ *  neither of them had their sentence. And it could only ever say a whole line, so there was
+ *  no Ctrl-C, no arrow back through the history and nothing half-typed. The screen is a
+ *  terminal now and a terminal takes its own keys, so it is what the reader clicks and types
+ *  into: `tabindex` is what lets it hold the focus, and `PARTS.keyboard` over in
+ *  `browser/dock.ts` is the same element, so `attach()` listens where the keys are made.
+ *
+ *  It also gives the screen the dock's whole box, which is what the fit divides into cells. */
 const dockOf = (): string =>
   `<aside id="${DOCK}" data-ui="shell.dock">` +
   `<button type="button" data-ui="shell.dock.close">close</button>` +
-  `<pre data-ui="shell.dock.output"></pre>` +
-  `<form data-ui="shell.dock.command">` +
-  `<label for="${DOCK}-line">&gt;</label>` +
-  `<input id="${DOCK}-line" name="line" type="text" autocomplete="off">` +
-  `</form></aside>`;
+  `<pre data-ui="shell.dock.output" tabindex="0" aria-label="the workspace's shell"></pre>` +
+  `</aside>`;
 
 /** The banner as markup: the word, and under it one row of ways in, in the declared order,
  *  ending in the control that opens the dock. */
