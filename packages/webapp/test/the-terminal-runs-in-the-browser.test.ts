@@ -119,6 +119,9 @@ async function boot(): Promise<Board> {
 
 const got = async (board: Board, at: string): Promise<Response> => fetch(`${board.at}${at}`);
 
+/** A frame going up, as the pane sends one: the painter's wire, by POST, to the route. */
+const sent = async (board: Board, frame: unknown): Promise<Response> => fetch(`${board.at}/terminal`, { method: "POST", body: JSON.stringify(frame) });
+
 /** A whole document, and not a fragment or an error page dressed as one. */
 async function documentOf(board: Board, at: string): Promise<string> {
   const reply = await got(board, at);
@@ -229,6 +232,10 @@ describe("the script the document asks for is served", () => {
     // and it polls the session's route.
     expect(script).toContain(`data-ui=\\"shell.dock.output\\"`);
     expect(script).toContain("/terminal?from=");
+    // It also measures, which is what makes the pane a window rather than a fixed grid: the
+    // screen's rectangle, the box xterm's grid fills, and the screen's own trim, each beat.
+    for (const held of [".xterm-screen", "getComputedStyle", "grid, trimOf("]) expect(script, held).toContain(held);
+    expect(script).toMatch(/fit\(\);\n\s*await pane\.pump\(\)/);
     // And what it imports is served by this same board, at the paths it names. A script
     // that parses and then fails on its first import is a dock that stays an empty box —
     // and a browser reports that in a console nothing here can read.
@@ -345,12 +352,7 @@ describe("the route the script polls opens a session", () => {
   it("takes what is typed at it, and draws what the shell printed", async () => {
     const board = await boot();
     await until(board, dirname(db));
-    // A frame going up, as the pane sends one: the painter's wire, by POST, to the same
-    // path. What comes back says where the cursor now is.
-    const posted = await fetch(`${board.at}/terminal`, {
-      method: "POST",
-      body: JSON.stringify({ kind: "prompt", text: "printf a-real-shell" }),
-    });
+    const posted = await sent(board, { kind: "prompt", text: "printf a-real-shell" });
     expect(posted.status, await posted.text()).toBe(200);
     // And the shell ran it. Not the echo of the line — the output of the command, which
     // only a program on the far end of a pty can have written.
@@ -362,6 +364,26 @@ describe("the route the script polls opens a session", () => {
     const board = await boot();
     const posted = await fetch(`${board.at}/terminal`, { method: "POST", body: "not a frame" });
     expect(posted.status).toBe(400);
+    // A count of cells is whole and at least one, so these are not frames either: a pty
+    // asked for nought columns is one every program on it draws garbage into.
+    for (const bad of [{ cols: 0, rows: 24 }, { cols: 80.5, rows: 24 }, { cols: "80", rows: "24" }])
+      expect((await sent(board, { kind: "resize", ...bad })).status, JSON.stringify(bad)).toBe(400);
+  });
+
+  /** The one hop nothing above it can fake. A pty keeps composing frames for the size it
+   *  was opened at until it is told another, so the arithmetic, the frame and the route are
+   *  worth nothing without a `TIOCSWINSZ` on a real descriptor at the end of them — and
+   *  `stty size` is the far end reading it back, rows then columns, in the shell's words. */
+  it("carries a resize frame through to the pty, under the program reading it", async () => {
+    const board = await boot();
+    await until(board, dirname(db));
+    await sent(board, { kind: "prompt", text: "stty size" });
+    await until(board, "30 100"); // the size `painter/src/pty.ts` opens one at
+    expect((await sent(board, { kind: "resize", cols: 123, rows: 37 })).status).toBe(200);
+    await sent(board, { kind: "prompt", text: "stty size" });
+    const screen = await until(board, "37 123");
+    // Both answers on one screen, in order: resized underneath the program, not restarted.
+    expect(screen.indexOf("30 100")).toBeLessThan(screen.indexOf("37 123"));
   });
 });
 
