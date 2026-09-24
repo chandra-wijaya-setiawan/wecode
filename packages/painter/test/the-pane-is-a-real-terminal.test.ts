@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import pkg from "../package.json";
 import { Terminal } from "@xterm/xterm";
-import { attach, decode, encode, fits, IDS, keyOf, pane, roomIn } from "../src/client/terminal.js";
+import { attach, decode, encode, fits, IDS, pane, roomIn } from "../src/client/terminal.js";
 import type { ToSession } from "../src/client/terminal.js";
 
 const settled = (terminal: Terminal): Promise<void> =>
@@ -12,29 +12,37 @@ const settled = (terminal: Terminal): Promise<void> =>
 
 /** A pane over a real emulator. `door` is whether the page hands in a composer and a way of
  *  sending it. No page in this repository draws one any more — `pane()` stopped, and the
- *  webapp's dock has now stopped too — but the door stays in `attach` because a page may
- *  draw one and because `prompt` is still a frame the wire carries. Both shapes are kept
- *  under test so the optional half cannot rot unnoticed. */
+ *  webapp's dock has now stopped too — but the door stays in `attach` because a page may draw
+ *  one and because `prompt` is still a frame the wire carries, so both shapes are kept under
+ *  test. The screen goes into the document, because the emulator builds its own focus target
+ *  inside it and that is where a press is made; `listens` is every listener `attach` hung on a
+ *  part the page named, so a statement can say what is *not* there. */
 function wired(door = true) {
-  const handlers = new Map<string, ((event: never) => void)[]>();
+  const listens = new Map<string, ((event: never) => void)[]>();
   const on = (type: string, handler: (event: never) => void): void =>
-    void handlers.set(type, [...(handlers.get(type) ?? []), handler]);
+    void listens.set(type, [...(listens.get(type) ?? []), handler]);
   const fire = (type: string, event: object): void => {
-    for (const handler of handlers.get(type) ?? []) (handler as (event: object) => void)(event);
+    for (const handler of listens.get(type) ?? []) (handler as (event: object) => void)(event);
   };
   const screen = document.createElement("div");
+  document.body.append(screen);
   const composer = { value: "" };
   const sent: ToSession[] = [];
   const terminal = new Terminal();
   const keyboard = { addEventListener: on };
-  const attached = attach(
-    door ? { screen, keyboard, composer, send: { addEventListener: on } } : { screen, keyboard },
-    terminal,
-    (message) => sent.push(message),
-  );
+  const parts = door ? { screen, keyboard, composer, send: { addEventListener: on } } : { screen, keyboard };
+  const attached = attach(parts, terminal, (message) => sent.push(message));
   return {
-    screen, composer, sent, terminal, ...attached,
-    press: (event: object) => fire("keydown", event),
+    screen, composer, sent, terminal, listens, ...attached,
+    /** A real press, made where a reader makes one — inside the emulator's own focus target —
+     *  and carrying a `keyCode`, because a key is a code to xterm.js rather than a name. */
+    press: (key: string, code: number, held: Partial<KeyboardEventInit> = {}): boolean => {
+      const made = { key, keyCode: code, bubbles: true, cancelable: true, ...held };
+      const event = new KeyboardEvent("keydown", made);
+      (terminal.textarea as HTMLTextAreaElement).dispatchEvent(event);
+      return event.defaultPrevented;
+    },
+    focused: () => fire("focus", {}),
     click: () => fire("click", {}),
   };
 }
@@ -108,12 +116,16 @@ describe("the unchanged wire and controls", () => {
 
   it("sends keys unread and keeps the browser out of them", () => {
     const page = wired();
-    let prevented = 0;
-    page.press({ key: "a", preventDefault: () => (prevented += 1) });
-    page.press({ key: "Enter", preventDefault: () => (prevented += 1) });
-    expect(page.sent).toEqual([{ kind: "keys", data: "a" }, { kind: "keys", data: "\r" }]);
-    expect(prevented).toBe(2);
-    expect(keyOf({ key: "ArrowUp" })).toBe("\x1b[A");
+    expect(page.press("a", 65)).toBe(true);
+    expect(page.press("Enter", 13)).toBe(true);
+    expect(page.press("c", 67, { ctrlKey: true })).toBe(true);
+    expect(page.press("ArrowUp", 38)).toBe(true);
+    // The bytes, not the names: CR for Enter, ETX for Ctrl-C, the sequence a program reads to
+    // walk its history. The pane knows none of that and does not have to.
+    expect(page.sent.map((m) => (m as { data: string }).data)).toEqual(["a", "\r", "\x03", "\x1b[A"]);
+    // A press that makes no bytes makes no frame, and is the browser's own business.
+    expect(page.press("Shift", 16)).toBe(false);
+    expect(page.sent).toHaveLength(4);
   });
 
   it("keeps the prompt door for a page that draws one", () => {
@@ -127,17 +139,15 @@ describe("the unchanged wire and controls", () => {
 
 /** The composer is cut from the pane.
  *
- *  It was a box under the screen: the designer typed a line into it and pressed a button,
- *  and the line went up as a prompt. That is what a transcript needs, and the screen is not
- *  a transcript any more — it is a terminal, and the keyboard reaches the far end one
- *  keystroke at a time, through the shell's own line editor, with history and Ctrl-C and a
- *  cursor. Two boxes were two answers to where the next word goes, and the lower one could
- *  say nothing but a whole line.
- *
- *  So `pane()` draws a screen and nothing else, and the screen has the pane's whole box —
- *  which is what the fit below then has something to divide. The door is not deleted from
- *  the wire or from `attach`: it is a part a page hands in, `annotate.ts` still sends a
- *  reviewer's round as a `prompt` frame, and a pane handed neither wires neither. */
+ *  It was a box under the screen: the designer typed a line into it and pressed a button, and
+ *  the line went up as a prompt. That is what a transcript needs, and the screen is not a
+ *  transcript any more — it is a terminal, and the keyboard reaches the far end one keystroke
+ *  at a time, through the shell's own line editor, with history and Ctrl-C and a cursor. Two
+ *  boxes were two answers to where the next word goes, and the lower one could say nothing but
+ *  a whole line. So `pane()` draws a screen and nothing else, and the screen has the pane's
+ *  whole box — which is what the fit below then has something to divide. The door is not
+ *  deleted from the wire or from `attach`: it is a part a page hands in, `annotate.ts` still
+ *  sends a reviewer's round as a `prompt` frame, and a pane handed neither wires neither. */
 describe("the composer is cut from the pane", () => {
   it("draws a screen and nothing else", () => {
     const markup = pane();
@@ -153,7 +163,7 @@ describe("the composer is cut from the pane", () => {
 
   it("wires nothing for a door the page did not draw, and still takes every key", () => {
     const page = wired(false);
-    page.press({ key: "x" });
+    page.press("x", 88);
     expect(page.sent).toEqual([{ kind: "keys", data: "x" }]);
     // A click, which is what a composer's own button raises. It must reach nothing: a pane
     // with no composer has no box to read and no empty prompt to send, and a listener on an
@@ -167,74 +177,83 @@ describe("the composer is cut from the pane", () => {
     page.terminal.resize(24, 6);
     // The grid as drawn — 24 × 6 cells in 240 × 120 pixels — and the pane's whole box, which
     // is now the screen's whole box because there is nothing under it taking a strip.
-    expect(page.fit({ width: 800, height: 240 }, { width: 240, height: 120 })).toEqual({
-      cols: 80,
-      rows: 12,
-    });
+    const box = { width: 240, height: 120 };
+    expect(page.fit({ width: 800, height: 240 }, box)).toEqual({ cols: 80, rows: 12 });
     expect(page.sent).toEqual([{ kind: "resize", cols: 80, rows: 12 }]);
   });
 });
 
-/** And with the composer gone, the screen is the keyboard.
+/** The keys are the emulator's, and this file keeps no table of its own.
  *
- *  That is the shape the webapp's dock now hands in: `PARTS.screen` and `PARTS.keyboard` are
- *  one selector, so `attach` opens the emulator on an element and listens for keys on that
- *  same element. It is what makes a terminal a thing you click and type into — there is no
- *  line below it to put the cursor in, which is what the operator asked for twice.
- *
- *  Both statements use a real element and a real `KeyboardEvent`, because the question is
- *  about where a press lands in a document rather than about `keyOf`, which is proved above.
- *  The second is the one that matters: xterm builds its own focus target inside whatever it
- *  is opened on, and that — not the element the page named — is what has the focus once the
- *  reader clicks. A press there is only the session's because it bubbles. */
-describe("the screen can be the keyboard", () => {
-  /** One element, opened on and listened to, as the dock hands it in. */
-  function typed() {
-    const screen = document.createElement("div");
-    document.body.append(screen);
-    const sent: ToSession[] = [];
-    attach({ screen, keyboard: screen }, new Terminal(), (message) => sent.push(message));
-    return { screen, sent };
-  }
-
-  it("takes a press on the element the emulator was opened on", () => {
-    const { screen, sent } = typed();
-    const event = new KeyboardEvent("keydown", { key: "c", ctrlKey: true, cancelable: true });
-    screen.dispatchEvent(event);
-    // The control code, and the browser kept out of it: Ctrl-C reaches the shell rather than
-    // copying, which is the whole difference between a terminal and a box of text.
-    expect(sent).toEqual([{ kind: "keys", data: "\x03" }]);
-    expect(event.defaultPrevented).toBe(true);
+ *  It used to: a listener on the element the page named read each `keydown` and translated it
+ *  — Enter to CR, the arrows to `\x1b[A`, Ctrl-A..Z to the control codes. Everything above
+ *  passes against such a table, because everything above is one press of one key at a time,
+ *  which is the smallest part of what a designer does at a terminal. The rest of it is below,
+ *  and no table can answer any of it: two of the three are a function of the mode the far end
+ *  put the terminal in rather than of the press, and neither of the others is a press at all.
+ *  So the pane takes `terminal.onData` — the emulator saying what just happened, in bytes. */
+describe("the keys are the emulator's own", () => {
+  it("hangs no keydown listener on anything the page hands in", () => {
+    // The old door, shut: a pane listening here as well would send every press twice.
+    expect([...wired().listens.keys()]).not.toContain("keydown");
   });
 
-  it("takes a press made inside the emulator's own focus target, which bubbles out to it", () => {
-    const { screen, sent } = typed();
-    const inner = screen.querySelector("textarea");
-    expect(inner, "the emulator built no focus target inside the screen").not.toBeNull();
-    (inner as HTMLTextAreaElement).dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }),
-    );
-    // The escape sequence that walks the far end's history — from a press the page's own
-    // element never received directly.
-    expect(sent).toEqual([{ kind: "keys", data: "\x1b[A" }]);
+  it("gives the arrows whichever mode the far end has put the terminal in", async () => {
+    const page = wired();
+    expect(page.press("ArrowUp", 38)).toBe(true);
+    // `\x1b[?1h` is DECCKM, which every full-screen program sets: from here the same key is
+    // `\x1bOA`, and a pane with a table of its own would send the other one forever.
+    page.receive(encode({ kind: "output", chunk: "\x1b[?1h" }));
+    await settled(page.terminal);
+    expect(page.press("ArrowUp", 38)).toBe(true);
+    expect(page.sent).toEqual([{ kind: "keys", data: "\x1b[A" }, { kind: "keys", data: "\x1bOA" }]);
+  });
+
+  it("carries a paste, which is no keypress at all, and brackets it when asked to", async () => {
+    const page = wired();
+    // Every newline a CR, as a keyboard makes them, and no press anywhere in it.
+    page.terminal.paste("one\ntwo");
+    page.receive(encode({ kind: "output", chunk: "\x1b[?2004h" }));
+    await settled(page.terminal);
+    // …and then wrapped, which is how a far end tells a pasted newline from a pressed one.
+    page.terminal.paste("one\ntwo");
+    const wrapped = "\x1b[200~one\rtwo\x1b[201~";
+    expect(page.sent).toEqual([{ kind: "keys", data: "one\rtwo" }, { kind: "keys", data: wrapped }]);
+  });
+
+  it("carries the terminal's own answer to a question the far end asked", async () => {
+    const page = wired();
+    // `\x1b[5n` is a device status report: a terminal answers it, and a pane that only ever
+    // sent keys left the far end waiting for a reply no keyboard can make.
+    page.receive(encode({ kind: "output", chunk: "\x1b[5n" }));
+    await settled(page.terminal);
+    expect(page.sent).toEqual([{ kind: "keys", data: "\x1b[0n" }]);
+  });
+
+  /** And what a page names a keyboard is now the focus and nothing else: the screen it draws is
+   *  focusable in its own right — a `tabindex`, in `pane()` and in the dock — so a reader can
+   *  land on the element *around* the emulator, where nothing types. */
+  it("hands the focus on to the thing that types when the page's screen takes it", () => {
+    const page = wired();
+    page.focused(); // nothing happens at all if `attach` wired no listener to fire
+    expect(document.activeElement).toBe(page.terminal.textarea);
   });
 });
 
 /** The emulator is fitted to the box it is drawn in, and the size goes up the wire.
  *
- *  A pty is opened at a size and keeps composing frames for that size until it is told
- *  another one. So a pane whose box is not the pty's size is not a smaller view of the
- *  session — it is a different screen: lines wrap where the far end did not wrap them, a
- *  status bar lands in the middle of the pane, and a full-screen program redraws at a
- *  width nothing is showing. Two things have to happen and they are one act: the emulator
- *  takes the new grid, and the far end is told.
+ *  A pty is opened at a size and keeps composing frames for that size until it is told another
+ *  one. So a pane whose box is not the pty's size is not a smaller view of the session — it is
+ *  a different screen: lines wrap where the far end did not wrap them, a status bar lands in
+ *  the middle of the pane, and a full-screen program redraws at a width nothing is showing.
+ *  Two things have to happen and they are one act: the emulator takes the new grid, and the
+ *  far end is told.
  *
- *  The arithmetic is stated on pixels rather than on elements. A fit that could only be
- *  checked by laying out a document in a browser is a fit nothing checks — so `fits` takes
- *  the pane's box, the box the emulator's grid currently fills, and the grid it currently
- *  is, and hands back cells. One cell is the grid's box over the grid's cells, which is
- *  how this asks xterm how big a cell is without asking xterm anything: the emulator has
- *  already said, by drawing some. */
+ *  The arithmetic is stated on pixels rather than on elements. A fit that could only be checked
+ *  by laying out a document in a browser is a fit nothing checks — so `fits` takes the pane's
+ *  box, the box the emulator's grid currently fills, and the grid it currently is, and hands
+ *  back cells. One cell is the grid's box over the grid's cells, which is how this asks xterm
+ *  how big a cell is without asking xterm anything: it has already said, by drawing some. */
 describe("the fit", () => {
   const grid = { width: 400, height: 160 }; // 40 × 8 cells, so a cell is 10 × 20
   const now = { cols: 40, rows: 8 };
@@ -274,16 +293,14 @@ describe("the fit", () => {
 
 /** What the pane's box is, before `fits` divides it.
  *
- *  A browser measures an element as a rectangle, and a rectangle is the border box: it is
- *  everything that was painted, padding and rule included. Neither is room — the emulator
- *  may not put a cell under the border the design drew round the screen, nor in the gap it
- *  asked for inside it — so a pane fitted to the rectangle is told it is bigger than it is,
- *  and the far end composes a frame whose last column the reader cannot see the edge of.
- *
- *  It is here rather than in the page that measures, for the reason `fits` is: an element
- *  is the browser's, the subtraction is not, and arithmetic that can only be checked by
- *  laying out a document is arithmetic nothing checks. What the page hands in is a
- *  rectangle and a computed style, which is what it already has. */
+ *  A browser measures an element as a rectangle, and a rectangle is the border box: everything
+ *  that was painted, padding and rule included. Neither is room — the emulator may not put a
+ *  cell under the border the design drew round the screen, nor in the gap it asked for inside
+ *  it — so a pane fitted to the rectangle is told it is bigger than it is, and the far end
+ *  composes a frame whose last column the reader cannot see the edge of. It is here rather
+ *  than in the page that measures, for the reason `fits` is: an element is the browser's, the
+ *  subtraction is not, and arithmetic that can only be checked by laying out a document is
+ *  arithmetic nothing checks. What a page hands in is a rectangle and a computed style. */
 describe("the room in a rectangle", () => {
   const rect = { width: 800, height: 240 };
   const px = (n: number): string => `${n}px`;
@@ -332,8 +349,8 @@ describe("the fit reaches the emulator and the far end together", () => {
     const page = wired();
     page.terminal.resize(24, 6);
     expect(page.fit({ width: 800, height: 240 }, grid)).toEqual({ cols: 80, rows: 12 });
-    // The emulator first: the screen the reader is looking at is the right shape before
-    // the far end starts composing frames for it.
+    // The emulator first: the screen the reader is looking at is the right shape before the
+    // far end starts composing frames for it.
     expect([page.terminal.cols, page.terminal.rows]).toEqual([80, 12]);
     expect(page.sent).toEqual([{ kind: "resize", cols: 80, rows: 12 }]);
   });
@@ -345,14 +362,8 @@ describe("the fit reaches the emulator and the far end together", () => {
     // 800 − 2×14 − 2×1 is 770, and 240 − 2×9 − 2×1 is 220, which is 77 × 11 cells and not
     // 80 × 12. Those three columns are what the pane used to claim it had and did not.
     const trim = {
-      paddingLeft: "14px",
-      paddingRight: "14px",
-      paddingTop: "9px",
-      paddingBottom: "9px",
-      borderTopWidth: "1px",
-      borderBottomWidth: "1px",
-      borderLeftWidth: "1px",
-      borderRightWidth: "1px",
+      paddingLeft: "14px", paddingRight: "14px", paddingTop: "9px", paddingBottom: "9px",
+      borderTopWidth: "1px", borderBottomWidth: "1px", borderLeftWidth: "1px", borderRightWidth: "1px",
     };
     expect(page.fit({ width: 800, height: 240 }, grid, trim)).toEqual({ cols: 77, rows: 11 });
     expect([page.terminal.cols, page.terminal.rows]).toEqual([77, 11]);
@@ -362,8 +373,8 @@ describe("the fit reaches the emulator and the far end together", () => {
   it("sends nothing when there is nothing to fit", () => {
     const page = wired();
     page.terminal.resize(24, 6);
-    // Already the size it should be, and a grid nothing has drawn into: both are `fits`
-    // answering null, and a null must not reach the wire as a frame.
+    // Already the size it is, and a grid nothing has drawn into: both are `fits` answering
+    // null, and a null must not reach the wire as a frame.
     expect(page.fit({ width: 240, height: 120 }, grid)).toBeNull();
     expect(page.fit({ width: 800, height: 240 }, { width: 0, height: 0 })).toBeNull();
     expect(page.sent).toEqual([]);

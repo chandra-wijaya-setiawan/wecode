@@ -9,15 +9,15 @@
  *
  *  Three things live here, and they are separate on purpose:
  *    - the wire, which is the only thing the two halves have to agree on;
- *    - `keyOf` and the screen, which are the terminal — `keyOf` for the keys going up,
- *      and xterm.js for everything coming down, pinned to an exact version in
+ *    - the screen, which is the terminal: xterm.js, pinned to an exact version in
  *      package.json because a terminal emulator is not a thing to float on whoever
  *      installs next. The screen is xterm.js and not a re-implementation of one: this
  *      pane once kept a hand-written screen that deleted every escape sequence before
  *      writing, which kept the text and lost the terminal — no colour, no cursor
  *      addressing, no clear, no alternate screen, and a TUI drawn in frames it could
  *      not erase. Interpreting the bytes is the terminal's own job, and the bytes reach
- *      it exactly as they left the far end.
+ *      it exactly as they left the far end. Both directions are its own: what comes down
+ *      is written to it unread, and what goes up is what it said in `onData`.
  *    - `attach`, which wires those to whatever the page actually put on the screen.
  *
  *  Nothing in this file touches a global. It is a browser module, but every DOM thing it
@@ -29,7 +29,9 @@ import type { Terminal } from "@xterm/xterm";
 
 // ─── the wire ───────────────────────────────────────────────────────────────────────
 
-/** Up: what the pane has for the session. `keys` is raw — bytes the keyboard made.
+/** Up: what the pane has for the session. `keys` is raw — the bytes the emulator made of
+ *  what the designer did, which is a press, a paste, a composed character, or the terminal's
+ *  own answer to a question the far end asked it.
  *  `prompt` is a whole message the designer composed and sent, which the far side
  *  submits; they are different messages because they are different acts, and a pane that
  *  sent a prompt as keystrokes could not tell a half-typed line from a sent one.
@@ -91,57 +93,28 @@ export function decode(frame: string): ToSession | FromSession | null {
 
 // ─── keystrokes ─────────────────────────────────────────────────────────────────────
 
-/** As much of a `KeyboardEvent` as a terminal cares about. */
-export interface Key {
-  readonly key: string;
-  readonly ctrlKey?: boolean;
-  readonly altKey?: boolean;
-  readonly metaKey?: boolean;
-}
-
-/** The named keys, and the bytes a terminal sends for them. The arrows are the escape
- *  sequences a program reads to move a cursor; Enter is CR because that is what the key
- *  makes, and Backspace is DEL because that is what a terminal has sent since the vt100.
- *  Getting these wrong is not cosmetic — it is the difference between a session the
- *  designer can drive and one where the arrow keys print letters. */
-const NAMED: Readonly<Record<string, string>> = {
-  Enter: "\r",
-  Tab: "\t",
-  Backspace: "\x7f",
-  Delete: "\x1b[3~",
-  Escape: "\x1b",
-  ArrowUp: "\x1b[A",
-  ArrowDown: "\x1b[B",
-  ArrowRight: "\x1b[C",
-  ArrowLeft: "\x1b[D",
-  Home: "\x1b[H",
-  End: "\x1b[F",
-  PageUp: "\x1b[5~",
-  PageDown: "\x1b[6~",
-};
-
-/** The bytes a keypress sends, or "" for a press that sends nothing.
+/** There is no key table here, and that is the change this file is about.
  *
- *  Empty rather than the key's name for the modifiers and the function keys: a lone Shift
- *  press has no bytes, and a pane that sent the string "Shift" would type the word. Meta
- *  is left alone too, because that is the browser's own chord — the designer expects
- *  Cmd-C to copy out of the pane, not to reach the session. */
-export function keyOf(event: Key): string {
-  if (event.metaKey) return "";
-  const { key } = event;
-  if (event.ctrlKey) {
-    // Ctrl-A..Ctrl-Z are the control codes 1..26; this is how Ctrl-C reaches the session.
-    const upper = key.toUpperCase();
-    if (upper.length === 1 && upper >= "A" && upper <= "Z") {
-      return String.fromCharCode(upper.charCodeAt(0) - 64);
-    }
-    return "";
-  }
-  const named = NAMED[key];
-  if (named !== undefined) return event.altKey ? `\x1b${named}` : named;
-  if ([...key].length !== 1) return "";
-  return event.altKey ? `\x1b${key}` : key;
-}
+ *  There used to be one: a listener on the page's own element read each `keydown` and
+ *  translated it — Enter to CR, the arrows to `\x1b[A` and friends, Ctrl-A..Z to the
+ *  control codes. It was a second, poorer copy of something the emulator already does, and
+ *  a copy that cannot be made right. Four things it got wrong, every one of them a thing
+ *  the designer does:
+ *    - the arrows under DECCKM. A program that asks for application cursor keys — vim,
+ *      readline in some modes, every full-screen thing — is answered `\x1bOA`, not
+ *      `\x1b[A`. Only the emulator knows which mode it is in, because only the emulator
+ *      read the escape sequence that set it.
+ *    - a paste. It arrives as no keydown at all, so nothing went up, and under bracketed
+ *      paste it must go up wrapped in `\x1b[200~`/`\x1b[201~` so the far end can tell a
+ *      pasted newline from a pressed one.
+ *    - a composed character. An IME makes its letter on `compositionend`, and the keydowns
+ *      before it are the composition rather than what was typed.
+ *    - the terminal's own answers. A far end that asks "what are you?" or "where is your
+ *      cursor?" is owed a reply, and no key was pressed to make one.
+ *
+ *  `attach` below takes `terminal.onData` instead, which is the emulator saying what just
+ *  happened in bytes. All four come up that one door, and the pane stays what it is meant
+ *  to be: the thing that carries bytes and knows nothing about them. */
 
 // ─── the screen ─────────────────────────────────────────────────────────────────────
 
@@ -251,7 +224,12 @@ export interface Listens {
 export interface Parts {
   /** Where xterm.js opens — the screen the far end draws on, owned by the far end. */
   readonly screen: Mount;
-  /** What has the keyboard focus while the designer is driving the session. */
+  /** What the page lets a reader put the focus on, which is not where the typing happens:
+   *  the emulator builds its own focus target inside the screen, and that is the element
+   *  the bytes come out of. A page whose screen is focusable in its own right — a `tabindex`
+   *  on it, which is how a reader tabs to a terminal — can be focused with the emulator
+   *  beside it holding nothing, and then every press goes nowhere. So this is handed the
+   *  focus on, once, to the thing that types. It is the screen itself in every page here. */
   readonly keyboard: Listens;
   /** The box a prompt is composed in, and what sending it looks like — the form, or the
    *  button. Both optional, and only useful together: a pane that has no composer has no
@@ -285,11 +263,12 @@ export interface Attached {
 
 /** Wire the parts to a session.
  *
- *  Keystrokes go up one press at a time and unread — the pane does not know what a key
- *  means and must not, because the meaning is the far end's. A press that makes bytes is
- *  also a press the browser must not act on itself, so it is defaulted-prevented; a press
- *  that makes none is left to the browser, which is how Cmd-C still copies and Tab out of
- *  an unfocused pane still moves focus.
+ *  What goes up is what the emulator said, unread — the pane does not know what a key means
+ *  and must not, because the meaning is the far end's. `onData` is one door for all of it: a
+ *  press, a paste, a composed character, and the terminal's own answer to a question the far
+ *  end asked. The emulator has already decided what the browser may do with the press that
+ *  made it — it defaults-prevents the ones it took and leaves the rest, which is how Cmd-C
+ *  still copies out of the pane — so there is nothing for this file to decide either.
  *
  *  The composer is the other door, and a page need not have one. What is typed there is not
  *  keystrokes: it is a prompt, and it reaches the session only when it is sent, at which
@@ -300,12 +279,12 @@ export interface Attached {
 export function attach(parts: Parts, terminal: Terminal, send: Send): Attached {
   terminal.open(parts.screen);
 
-  parts.keyboard.addEventListener("keydown", ((event: Key & { preventDefault?: () => void }) => {
-    const data = keyOf(event);
-    if (data === "") return;
-    event.preventDefault?.();
-    send({ kind: "keys", data });
-  }) as (event: never) => void);
+  terminal.onData((data: string) => send({ kind: "keys", data }));
+
+  // …and the focus handed on, so that the emulator is what a reader is typing into. The
+  // screen is focusable in its own right and is the element a page names, so it is the one
+  // a tab-stop lands on; the emulator's target is inside it and is the one that types.
+  parts.keyboard.addEventListener("focus", (() => terminal.focus()) as (event: never) => void);
 
   const { composer, send: sends } = parts;
   if (composer !== undefined && sends !== undefined) {
