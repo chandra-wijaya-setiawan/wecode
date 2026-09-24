@@ -7,6 +7,8 @@ import {
   recordChoreRefusal,
 } from "@wecode/core";
 import { queries } from "@wecode/core/dist/db.js";
+// The landing's own question, asked here for the mirror case: a branch the base already has.
+import { isLanded } from "../land-chore.js";
 import type { Trees } from "../git.js";
 // The table descriptors and the shape the proving pass reports stay in `daemon.ts`, where
 // `typed-daemon.test.ts` holds their column lists against the schema. Importing them back is
@@ -152,8 +154,18 @@ async function followRefresh(host: StoryChoresHost, story: { id: number; slug: s
     }
     return [];
   }
-  // Still behind, and this story is not being proved in. The chore stands as it is.
-  if (story.state !== "in_progress") return [];
+  // Still behind, and this story is not being proved in. The chore stands as it is — with
+  // one exception, the mirror of the one the lander already makes. A story no longer in
+  // progress, whose branch the base already contains, will never be built on again and
+  // never merged again, so bringing the base into it is work about a branch nobody will
+  // read. Chores 51 and 89 sat `failed` for days refusing to refresh two stories master
+  // had contained the whole time.
+  if (story.state !== "in_progress") {
+    if (chore !== null && chore.state !== "running" && (await isLanded(repo, base, branch))) {
+      closeChore(host.db, chore.id, `${base} already contains ${branch}`, "runner");
+    }
+    return [];
+  }
   const why = behind.find((b) => b.story === story.id)?.why ?? `${branch} does not contain ${base}`;
   const raised = ensureChore(host.db, {
     project_id: story.project,
