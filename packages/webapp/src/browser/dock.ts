@@ -76,12 +76,13 @@ export const SHELL_AT = `/${DOCK}`;
  *
  *  Two names and one element: the screen is also the keyboard, which is what makes the dock a
  *  terminal the reader clicks and types into rather than a box with a line under it. The
- *  emulator keeps its own focus target inside the screen, so a press anywhere in it bubbles out
- *  to where `attach` listens, which defaults-prevents it and sends the bytes up — Enter as CR,
- *  Ctrl-C as ETX, the arrows as the sequences that walk the far end's own history. There is no
- *  composer and no send, which `Parts` has as optional for exactly this: the route still takes
- *  a `prompt` frame — `browser/annotate.ts` sends a reviewer's round as one — but it is no
- *  longer something a reader of the dock types. */
+ *  emulator keeps its own focus target inside the screen and every byte comes out of that —
+ *  the arrows in whichever mode the far end has put it in, a paste whole and bracketed, a
+ *  composed character once — so the pane reads the keys off `terminal.onData`, and the only
+ *  thing the dock names a keyboard for is to hand the focus on to it when the reader tabs to
+ *  the screen. There is no composer and no send, which `Parts` has as optional for exactly
+ *  this: the route still takes a `prompt` frame — `browser/annotate.ts` sends a reviewer's
+ *  round as one — but it is no longer something a reader of the dock types. */
 export const PARTS = {
   screen: `[data-ui="shell.dock.output"]`,
   keyboard: `[data-ui="shell.dock.output"]`,
@@ -207,7 +208,7 @@ export function docking(root: Rooted, held: Remembers | null, shown: (open: bool
 const BROWSER = {
   /** The script the dock's pane is, and the few lines that start it. */
   dock: `${SHELL_AT}.js`,
-  /** The painter's browser half — the wire, `keyOf` and `attach` — served as the file it
+  /** The painter's browser half — the wire, the fit and `attach` — served as the file it
    *  already is, so both halves of one terminal are one file. */
   pane: `${SHELL_AT}.pane.js`,
   /** xterm.js at the version this package pins, as its own ES module. */
@@ -332,13 +333,11 @@ const sidebar = docking(window.document.documentElement, store, (open) => {
     return;
   }
   if (pane === null) {
-    const parts = Object.fromEntries(
-      Object.entries(PARTS).map(([part, selector]) => [part, one(selector)]),
-    );
+    const parts = Object.fromEntries(Object.entries(PARTS).map(([p, at]) => [p, one(at)]));
     pane = dock(parts, wire);
   }
   // The emulator and not the element around it: xterm's own focus target is the one that
-  // shows a cursor, and a press there bubbles out to the screen, where \`attach\` listens.
+  // shows a cursor, and the one every byte the dock sends up comes out of.
   pane.terminal.focus();
   beating = window.setInterval(() => void beat(), 50);
   void beat();
