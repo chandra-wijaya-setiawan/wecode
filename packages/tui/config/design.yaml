@@ -265,10 +265,19 @@ renderers:
         # them to each other — a token would be the other answer, but the look's tokens are
         # the palette's and the type's and a width is neither.
         "html.docked body": "padding-right: calc(min(100vw, max(33vw, 32rem)) + clamp(1rem, 4vw, 3rem))"
-        # The way back out, at the top, where a reader looks for it. Quiet: it is the one
-        # control on a panel whose content is the point. It is stretched across the panel so
-        # that the rule along its foot is the whole width of one — the line that used to be
-        # the screen's own top border, moved onto the chrome, for the reason below.
+        # The ways out, at the top, where a reader looks for them: restart, and then close at
+        # the edge where close has always been. They are one row across the panel rather than
+        # two rows down it, because they are the same kind of thing — the chrome of a panel
+        # whose content is the point — and because the rule along their feet is the whole
+        # width of the panel that way, which is the line that used to be the screen's own top
+        # border, moved onto the chrome for the reason below.
+        #
+        # The direct child only: the emulator builds a tree of its own inside the screen, and
+        # a rule about every `div` under this panel would be a rule about the terminal's guts.
+        "#terminal > div": "display: flex; align-items: stretch"
+        # The first of the two takes the slack, so the pair sits together at the right edge
+        # and the rule under them runs the whole width rather than the width of two words.
+        "#terminal > div > button:first-child": "flex: 1 1 auto"
         "#terminal button": "align-self: stretch; text-align: right; flex: 0 0 auto; border: 0; border-bottom: 1px solid var(--rule); background: none; padding: .55rem .9rem; color: var(--faint); font: inherit; font-family: var(--mono); font-size: .92em; cursor: pointer"
         "#terminal button:hover": "color: var(--ink)"
         # The screen fills everything between the two, and it is a terminal's box rather than
