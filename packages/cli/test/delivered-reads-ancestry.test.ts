@@ -152,6 +152,41 @@ describe("wecode delivered reads landedness from ancestry", () => {
     expect(answer()[0]?.sha).toBe("deadbeefcafe");
   });
 
+  it("asks each project's own repository, so --all does not judge one repo by another", () => {
+    branchLandedInto("password-reset");
+
+    // A second project, in a repository of its own, with a story landed in that one. Asked
+    // from here, its branch does not resolve at all: the ancestry question has to be put to
+    // the repo the project is, or every other project's work reads unlanded.
+    const other = tmp("wecode-delivered-other-");
+    const run = (...args: string[]): string => execFileSync("git", args, { cwd: other, encoding: "utf8" }).trim();
+    run("init", "-q", "-b", "main");
+    run("config", "user.name", "t");
+    run("config", "user.email", "t@localhost");
+    writeFileSync(join(other, "README.md"), "the other base\n");
+    run("add", "-A");
+    run("commit", "-q", "-m", "seed");
+    run("checkout", "-q", "-b", "story/billing-retries");
+    writeFileSync(join(other, "work.txt"), "work\n");
+    run("add", "-A");
+    run("commit", "-q", "-m", "build billing-retries");
+    run("checkout", "-q", "main");
+    run("merge", "-q", "--no-ff", "-m", "land story/billing-retries", "story/billing-retries");
+
+    const make = new Maker(db);
+    const project = make.project(make.workspace("other", other), "billing", other);
+    const story = make.story(make.epic(make.release(project, "1.0.0"), "payments"), "billing retries");
+    db.prepare("UPDATE story SET state = 'delivered' WHERE id = ?").run(story);
+
+    out.length = 0;
+    expect(delivered(["--all", "--json"])).toBe(0);
+    const all = JSON.parse(said()) as { slug: string; landed: boolean }[];
+    expect(all.map((s) => [s.slug, s.landed]).sort()).toEqual([
+      ["billing-retries", true],
+      ["password-reset", true],
+    ]);
+  });
+
   it("outranks an open chore: a branch the base has is landed, not behind it", () => {
     branchLandedInto("password-reset");
     db.prepare(

@@ -13,10 +13,8 @@
  *  take it too and two copies of it would be two things that must agree. */
 import { parseArgs } from "node:util";
 // Renamed on the way in: `board` here is the verb, and core's `board` is the query it reads.
-// `delivered` is renamed for the same reason — this file re-exports the cli's own below.
 import {
   board as boardOf,
-  delivered as deliveredOf,
   leaseAgeMs,
   leaseIsStale,
   readLease,
@@ -32,6 +30,9 @@ import { projectOf } from "./entity.js";
 import type { See } from "./run-and-see.js";
 export { doctor } from "../doctor.js";
 export { delivered } from "../delivered.js";
+// The landing reading `wecode delivered` prints, so the standup counts the same stories it
+// does. Core's own `delivered()` reads the marker table, which no story merge ever writes.
+import { deliveredOnTheBase } from "../delivered.js";
 export { explore } from "../explore.js";
 export { design } from "../ui.js";
 
@@ -282,9 +283,9 @@ export function standup(at: See): number {
     ready: b.queued,
     failed: b.failed,
     // Delivered is the record's word and landed is the repository's, and they disagree for
-    // a day at a time. `delivered()` is the one read that knows both, so the group is built
-    // from it rather than from the board's `delivered` panel, which knows only the state.
-    unlanded: deliveredOf(db, chosen)
+    // a day at a time. The base branch settles it: a story whose branch master already
+    // contains has landed, whatever the marker table does or does not hold.
+    unlanded: deliveredOnTheBase(db, chosen)
       .filter((s) => !s.landed)
       .map((s) => ({
         id: s.id,
