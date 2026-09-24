@@ -211,7 +211,7 @@ renderers:
       roots:
         board: ["section.board"]
         decisions: ["article"]
-        tree: ["ul.tree"]
+        tree: ["section.tree", "ul.tree"]
         tasks: ["section.tasks", "div.inbox", "ul.inbox", "section.detail"]
         projects: ["main > h2", "ul.strip", "ul.cards"]
         agents: ["section.agents"]
@@ -342,6 +342,26 @@ renderers:
           "article form.answer button:hover": "background: var(--ink); border-color: var(--ink)"
           "article p.how": "margin: .6rem 0 0; color: var(--faint); font-family: var(--serif)"
         tree:
+          # The page's own name and the one control over it, above the tree. The heading is
+          # an h2 for the reason the tasks page's is: the h1 is the shell's banner.
+          "section.tree": "display: grid; gap: .9rem"
+          "section.tree > h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; letter-spacing: -.01em; margin: 0; color: var(--ink)"
+          # One question and the control that sends it, ruled off from the tree the way the
+          # tasks page rules its strip off. The word is the label, set small and quiet the
+          # way every other word that names a control on this surface is; the answer is the
+          # select, and the select is the browser's own, borrowing only the frame and the
+          # face the rest of the page is read in. Nothing here draws an arrow or a box of
+          # its own: a select a surface redraws is a select that stops behaving like one on
+          # somebody's machine.
+          "section.tree form.filter": "display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding: .55rem 0"
+          "section.tree form.filter label": "display: flex; gap: .5rem; align-items: baseline; color: var(--faint); font-size: .75rem; text-transform: uppercase; letter-spacing: var(--tracking)"
+          "section.tree form.filter select": "border: 1px solid var(--rule); border-radius: 3px; background: var(--raised); padding: .1rem .4rem; color: var(--ink); font-family: var(--mono); font-size: .92rem; text-transform: none; letter-spacing: normal; cursor: pointer"
+          "section.tree form.filter select:focus": "outline: none; border-color: var(--mark)"
+          # The submit, which is what makes the select work with no script at all. Quiet
+          # rather than marked: pressing it changes a reading and never the record, so it
+          # does not carry the weight the decisions page's send does.
+          "section.tree form.filter button": "border: 1px solid var(--rule); border-radius: 3px; background: var(--raised); padding: .15rem .7rem; color: var(--mark); font: inherit; font-size: .92rem; cursor: pointer"
+          "section.tree form.filter button:hover": "border-color: var(--mark); color: var(--ink)"
           "ul.tree": "list-style: none; margin: 0; padding: 0"
           "ul.tree ul": "list-style: none; margin: 0; padding-left: 1.25rem; border-left: 1px solid var(--rule)"
           "ul.tree li": "padding: .1rem 0; min-width: 0; overflow-wrap: anywhere"
