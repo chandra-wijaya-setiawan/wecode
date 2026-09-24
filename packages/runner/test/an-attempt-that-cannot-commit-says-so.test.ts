@@ -25,6 +25,7 @@ let outside: string;
 let db: DatabaseSync;
 let make: Maker;
 let trees: Trees;
+let acceptance: number;
 let task: number;
 let slug: string;
 let worker: number;
@@ -43,6 +44,9 @@ const refuse = (ref: string): void => {
   chmodSync(hook, 0o755);
 };
 
+const slugOf = (id: number): string =>
+  (db.prepare("SELECT slug FROM task WHERE id = ?").get(id) as { slug: string }).slug;
+
 beforeEach(() => {
   repo = tmp("wecode-cannot-commit-");
   outside = tmp("wecode-cannot-commit-outside-");
@@ -58,9 +62,9 @@ beforeEach(() => {
   const project = make.project(make.workspace("acme", repo), "storefront", repo);
   const story = make.story(make.epic(make.release(project, "1.0.0"), "recovery"), "password reset");
   const criteria = make.criteria(make.requirement(story, "one change per link"), "emailed in 60s");
-  const at = make.acceptanceTest(criteria, "mail arrives", "script", "test -f mail.ts");
-  task = make.task(at, "send the mail", { role: "engineer" });
-  slug = (db.prepare("SELECT slug FROM task WHERE id = ?").get(task) as { slug: string }).slug;
+  acceptance = make.acceptanceTest(criteria, "mail arrives", "script", "test -f mail.ts");
+  task = make.task(acceptance, "send the mail", { role: "engineer" });
+  slug = slugOf(task);
   // A retry already spent, so a refund would be visible: the rule declines to go below zero.
   db.prepare("UPDATE task SET attempts = 1 WHERE id = ?").run(task);
   worker = make.worker("claude-1", "engineer", "agent");
@@ -69,14 +73,14 @@ beforeEach(() => {
 
 /** An attempt that has ended with a file in its tree and nothing committed yet — what the
  *  settling pass is handed on the tick after an agent stops. */
-const anAttempt = async (): Promise<{ id: number; branch: string; path: string }> => {
-  const branch = await trees.taskBranch("s", slug);
+const anAttempt = async (forTask: number = task): Promise<{ id: number; branch: string; path: string }> => {
+  const branch = await trees.taskBranch("s", slugOf(forTask));
   const path = join(outside, `wt-${n++}`);
   await trees.cut(branch, path);
   writeFileSync(join(path, "mail.ts"), "the work\n");
   const id = make.assignment({
     objective_type: "task",
-    objective_id: task,
+    objective_id: forTask,
     worker_id: worker,
     scope: { write: ["mail.ts"], tools: [] },
     budget: { tokens: 1000, seconds: 60 },
@@ -93,7 +97,7 @@ const clean: ScriptReport = { passed: [], failed: [], skipped: [] };
 const settle = (runTaskTests: () => Promise<ScriptReport> = async () => clean): Promise<Settled> =>
   settleEnded({
     db,
-    slugsFor: () => ({ task: slug, story: "s", repo }),
+    slugsFor: (taskId) => ({ task: slugOf(taskId), story: "s", repo }),
     treesFor: () => trees,
     runTaskTests,
   });
@@ -223,6 +227,30 @@ describe("the pass that settles an attempt", () => {
     expect(settled.stopped).toEqual([{ id, why: "the tree would not build" }]);
     expect(shaOf(id)).toBeNull();
     expect(existsSync(path)).toBe(true);
+  });
+
+  it("settles the attempts either side of the one it could not", async () => {
+    const before = await anAttempt(make.task(acceptance, "send the receipt", { role: "engineer" }));
+    const stuck = await anAttempt();
+    const after = await anAttempt(make.task(acceptance, "send the reminder", { role: "engineer" }));
+    refuse(`refs/heads/${stuck.branch}`);
+
+    const settled = await settle();
+
+    // A tick settles the attempts that ended, not the ones up to the first that would not
+    // settle. Stopping there is the same silence in a second shape: the attempts after it
+    // are reported by a tick that never touched them, and their trees are left standing
+    // with work nobody has committed — which is what the next brief reads as no commit.
+    expect(settled.stopped.map((s) => s.id)).toEqual([stuck.id]);
+    // Sorted rather than in the order the rows came back: which attempt a tick reaches
+    // first is the table's business, and the claim here is that neither was skipped.
+    expect([...settled.committed].sort()).toEqual([before.id, after.id]);
+    expect(shaOf(before.id)).toBe(git(repo, "rev-parse", before.branch));
+    expect(shaOf(after.id)).toBe(git(repo, "rev-parse", after.branch));
+    expect(existsSync(before.path)).toBe(false);
+    expect(existsSync(after.path)).toBe(false);
+    // And the one that could not is still the one left standing.
+    expect(existsSync(stuck.path)).toBe(true);
   });
 
   it("settles the attempt nothing stopped exactly as it always did", async () => {
