@@ -528,11 +528,26 @@ renderers:
           # A sketch that earned a story, which is the one thing the column is read for.
           "section.sketches .state.signed": "color: var(--good)"
           "section.sketches .when": "color: var(--faint); font-family: var(--mono); font-size: .88em"
-          "section.sketches .row-acts a": "margin-left: .7rem; color: var(--faint); text-decoration: none; font-size: .9em"
+          # The first of the two ways in, at the end of the row: the acts `ui.yaml` declares
+          # under `sketches.row`, which say what they say and go where they go there. A row
+          # of them, so what separates two acts is one gap said once rather than a margin
+          # each act carries — the grid already rules the column off from the one before it,
+          # and a row offering a single act spends nothing on spacing it. Quiet until it is
+          # pointed at, because a list of thirty rows with thirty loud links in it is a list
+          # nobody reads down.
+          "section.sketches .row-acts": "display: flex; gap: .7rem"
+          "section.sketches .row-acts a": "color: var(--faint); text-decoration: none; font-size: .9em"
           "section.sketches .row-acts a:hover": "color: var(--mark); text-decoration: underline"
           # …and the one that is open: the list gives way to it, so the drawing has the whole
           # width, with the way back above it where a reader looks for it.
           "section.sketches .open": "display: grid; gap: .5rem; border-top: 2px solid var(--rule); padding-top: .6rem"
+          # The other way in, and the second thing `ui.yaml` declares under this page: the
+          # switch the opened header wears, on its own line above the name. The line's own
+          # spacing is the design's and not the browser's — the box above is a grid that
+          # rules its rows apart, and a paragraph that kept the margin a browser gives a
+          # paragraph would space itself twice. Every other line of the open view already
+          # says so; this one did not, and said it in the browser's words instead.
+          "section.sketches .open p.back": "margin: 0"
           "section.sketches .open p.back a": "color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .9em"
           "section.sketches .open p.back a:hover": "color: var(--mark); text-decoration: underline"
           "section.sketches .open h3": "margin: 0; font-family: var(--serif); font-size: 1.25rem; font-weight: 500; overflow-wrap: anywhere"

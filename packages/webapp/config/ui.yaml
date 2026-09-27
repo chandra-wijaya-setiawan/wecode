@@ -139,3 +139,39 @@ sketches:
     none: nothing picked
   # Why the bar has only two buttons, said on the bar rather than left to be wondered at.
   hint: a sketch is drawn by the orchestrator, never by this page
+  # The two ways in, which are this page's own navigation and not the bar's: out of the list
+  # in to one drawing, and out of that drawing back in to the list. Both were markup — an
+  # `open` and an `← every sketch` written into a template in `pages/sketches.ts` — and a
+  # word spelled in a page is a word nobody can read off a file. They are the same two
+  # decisions every other word here is: what the reader is offered, and what it says.
+  #
+  # Neither goes anywhere but this page, so both are declared as the query they put on it
+  # and never as a path. Which of the two readings `/sketches` is showing is the query's
+  # answer — `?open=112` is the drawing and nothing is the list — so a way in that spelled a
+  # path of its own would be a second answer to where a drawing is, and a board served from
+  # somewhere else would follow it off its own surface. `%id%` is the record's own column,
+  # as the bar's clauses spell it.
+  row:
+    # What a row offers at its end, in the order a reader meets them. One act, because there
+    # is one place a row goes: the drawing it names. The mock draws a second on a sketch that
+    # earned a story — `story`, beside `open` — and it is not declared here, because where
+    # that one lands is a decision nobody can read off a file: no page of this surface
+    # answers for a story, and the nearest thing to one, a node of the tree, sits behind a
+    # filter whose own default leaves a signed story out. A word aimed at a target nobody
+    # chose is worse than the number the state column already says.
+    acts:
+      - id: sketches.row.open
+        says: open
+        goes: "?open=%id%"
+  # The one that is open, which is this page with a sketch chosen.
+  open:
+    # The switch the opened header wears: the list gave way to the drawing, and this is what
+    # gives it back. `?` and not `/sketches`, so the link the page builds and the link a
+    # person could have typed are the same link. An arrow and two words rather than "back",
+    # because what a reader is going back to is the thing worth naming — and it is a switch
+    # between the page's two readings rather than a browser's history, which would take a
+    # reader who arrived on `?open=112` somewhere else entirely.
+    back:
+      id: sketches.open.back
+      says: "← every sketch"
+      goes: "?"
