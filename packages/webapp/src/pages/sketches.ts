@@ -1,5 +1,5 @@
-/** Everything drawn before it was work, as a list — and the one a reader opened, at full
- *  width, in a frame.
+/** Everything drawn before it was work, as a list — and the way into the one a reader
+ *  opened.
  *
  *  A sketch is a record of a drawing: `core`'s `sketch` table holds the name, the kind, the
  *  line it says of itself, the story it became if it became one, and the path of the html.
@@ -9,7 +9,9 @@
  *  So this page is a list you scan and then one drawing you look at, and which of the two it
  *  is, is in the target: `/sketches` is the list and `/sketches?open=112` is the drawing, the
  *  way `/tasks?task=8` picks a task. A selection held in a script would be a selection
- *  nobody can link to, bookmark or reload into.
+ *  nobody can link to, bookmark or reload into. The drawing itself, the two ways of looking
+ *  at one, and the route the second of them is served from are `../drawing.ts`'s: a list is
+ *  what this file is, and what a frame may reach is not a list's decision.
  *
  *  There is no new-sketch control, and that is a decision and not an omission: a sketch is
  *  drawn by the orchestrator, because drawing one means writing a file and an agent is the
@@ -21,10 +23,6 @@
  *  route — `keys`, not `prompt`, because the far end submits a `prompt` for you and the
  *  whole point here is that nothing is sent on a person's behalf.
  *
- *  The frame does not yet reload itself when the drawing changes under it. That wants the
- *  poll the dock already has, which is `shell.ts`'s and `dock.ts`'s; story 651 holds it and
- *  a follow-up carries it. Until then a reader reloads the page.
- *
  *  Every element carries the `data-ui` name `config/ui.yaml` declares it under, so the drawn
  *  surface and the declaration can be held against one another by name rather than by eye. */
 import { readFileSync } from "node:fs";
@@ -32,17 +30,21 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import type { Sketch } from "@wecode/core";
 import { encode } from "@wecode/painter/dist/client/terminal.js";
+import {
+  linkTo, modeOf, openedSketch, opened, PARAM, stale, stateOf, storied, touched, VIEW, waysIn,
+} from "../drawing.js";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
 import { CONTROLS, document, DOCKED, shelled, SHELL_AT } from "./shell.js";
 
+/** What a reader opens a sketch with, offered here as well because it is this page's
+ *  vocabulary and a caller of the page should not have to know which half of it holds
+ *  which word. */
+export { opened, PARAM, stateOf, touched };
+
 /** The reading this page is served from. Not the record: a sketch hangs under nothing and
  *  is in no tree, so `tree()`'s nodes carry none of it. */
 export const READS = "sketches";
-
-/** Which sketch the reader opened, as the target spells it. One name, so a link built by
- *  the page and a link typed by a person are the same link. */
-export const PARAM = "open";
 
 export class SketchesUiError extends Error {}
 
@@ -126,58 +128,6 @@ export function loadUi(path: string = UI): Ui {
  *  and a page that came back blank reads as a page that failed. */
 const NOTHING_DRAWN = "nothing drawn yet — a sketch is drawn by the orchestrator";
 
-/** What the open view says when the target names a sketch the record has not got. A reader
- *  who followed a stale link is told so, rather than shown the first drawing. */
-const nothingAt = (id: number): string => `no sketch #${id} in the record`;
-
-/** What the frame says when the row is there and the file is not. The row goes and the
- *  drawing stays, says `dropSketch`; the other way round happens too — a drawing somebody
- *  moved or deleted by hand — and the reader is owed the path rather than an empty box. */
-const noDrawing = (at: string): string => `no drawing on this machine at ${at}`;
-
-/** The state column: whether this is still only a sketch, or the story it became.
- *
- *  The mock spells the story's own state beside its number — `story #491 · signed`. The
- *  record carries `story_id` and nothing else about it, and a state guessed here would be a
- *  state nobody can check, so the number is all that is said. Saying more wants a reading
- *  that carries the story with the sketch, which is `bin.ts`'s and not this file's. */
-export const stateOf = (s: Sketch): string =>
-  s.story_id === null ? "sketch" : `story #${s.story_id}`;
-
-/** A sketch that earned a story is marked: most of them stay sketches, and the ones that
- *  did not are what a reader is looking down the column for. */
-const storied = (s: Sketch): boolean => s.story_id !== null;
-
-const MINUTE = 60_000;
-const HOUR = 60 * MINUTE;
-const DAY = 24 * HOUR;
-
-/** When a sketch was last touched, in the mock's own words. Relative, because a sketch is a
- *  thought in progress and what a reader wants is how stale the thought is, not a timestamp
- *  to subtract in their head. `now` is a parameter so the words can be proved. */
-export function touched(at: string, now: number = Date.now()): string {
-  const ago = now - Date.parse(at);
-  if (!Number.isFinite(ago)) return "at no time the record can read";
-  if (ago < MINUTE) return "just now";
-  if (ago < HOUR) return `${Math.floor(ago / MINUTE)} min ago`;
-  if (ago < 2 * HOUR) return "an hour ago";
-  if (ago < DAY) return `${Math.floor(ago / HOUR)} hours ago`;
-  if (ago < 2 * DAY) return "yesterday";
-  return `${Math.floor(ago / DAY)} days ago`;
-}
-
-/** Which sketch the reader opened: the one the target names, and nothing when it names
- *  none. Nothing rather than the first, because the list is the page and one drawing is the
- *  reader having asked for it. A number is a target that named a sketch the record has not
- *  got, which is a thing to say rather than a thing to fall back from. */
-export function opened(all: readonly Sketch[], url: URL): Sketch | number | null {
-  const said = url.searchParams.get(PARAM);
-  if (said === null) return null;
-  const id = Number(said);
-  if (!Number.isInteger(id)) return null;
-  return all.find((s) => s.id === id) ?? id;
-}
-
 // ─── what the dock is typed ─────────────────────────────────────────────────────────
 
 /** One act's clause for one sketch, the record's own columns filled in. */
@@ -223,18 +173,23 @@ const wordsOf = (acts: readonly Act[], s: Sketch): string =>
 /** One sketch: a row and not a card, because this is a list you scan. The tick leads
  *  because it is what the bar acts on; the name carries what the sketch says of itself
  *  under it, cut to two lines by the look rather than here, so the row keeps the record's
- *  own words and a long line costs the list no height. */
+ *  own words and a long line costs the list no height.
+ *
+ *  It ends in both ways in rather than in one `open`, because there are two things a reader
+ *  does with a drawing and the row is where they choose: a word that meant "whichever of the
+ *  two the page decides" would be a choice taken off them. The name goes on leading to the
+ *  cheaper of the two, which is looking at it. */
 function row(s: Sketch, acts: readonly Act[], now: number): string {
   return (
     `<li id="sketch-${s.id}" data-ui="${ITEM}" data-words="${wordsOf(acts, s)}">` +
     `<input type="checkbox" value="${s.id}" aria-label="pick #${s.id}">` +
     `<span class="id">#${s.id}</span>` +
-    `<span class="name"><a href="?${PARAM}=${s.id}">${escape(s.name)}</a>` +
+    `<span class="name"><a href="${linkTo(s.id, VIEW)}">${escape(s.name)}</a>` +
     `<span class="says">${escape(s.says)}</span></span>` +
     `<span class="kind">${escape(s.kind)}</span>` +
     `<span class="state${storied(s) ? " signed" : ""}">${escape(stateOf(s))}</span>` +
     `<span class="when">${escape(touched(s.updated_at, now))}</span>` +
-    `<span class="row-acts"><a href="?${PARAM}=${s.id}">open</a></span></li>`
+    `${waysIn(s.id)}</li>`
   );
 }
 
@@ -313,69 +268,20 @@ function listing(all: readonly Sketch[], ui: Ui, now: number): string {
   );
 }
 
-// ─── the one that is open ───────────────────────────────────────────────────────────
-
-/** The drawing, read off the disk the record points at. `html` is an absolute path — the
- *  cli writes it under the workspace's own home — so nothing here guesses where anybody is
- *  standing, and a path the record does not hold is never read. */
-const drawingAt = (at: string): string | null => {
-  try {
-    return readFileSync(at, "utf8");
-  } catch {
-    return null;
-  }
-};
-
-/** The drawing at full width, in a frame.
- *
- *  `srcdoc` rather than a route of its own: the document is handed over whole, so the board
- *  serves no second path that answers with a file off the operator's disk, and the dock's
- *  own script — which is added to every html reply this surface makes — is not injected
- *  into somebody's sketch. Sandboxed without `allow-same-origin`, so a drawing's own script
- *  runs (a sketch of a surface is often a working one) in an origin of its own and cannot
- *  reach the board around it. */
-const frame = (s: Sketch): string => {
-  const drawn = drawingAt(s.html);
-  if (drawn === null) {
-    return `<p class="gone" data-ui="sketches.open.drawing">${escape(noDrawing(s.html))}</p>`;
-  }
-  return (
-    `<iframe class="drawing" data-ui="sketches.open.drawing" sandbox="allow-scripts" ` +
-    `title="${escape(s.name)}" srcdoc="${escape(drawn)}"></iframe>`
-  );
-};
-
-/** The one sketch, and the way back to the list above it. */
-function drawing(s: Sketch, now: number): string {
-  return (
-    `<div class="open" id="open-${s.id}" data-ui="sketches.open">` +
-    `<p class="back"><a href="?" data-ui="sketches.open.back">← every sketch</a></p>` +
-    `<h3><span class="id">#${s.id}</span>${escape(s.name)}</h3>` +
-    `<p class="says">${escape(s.says)}</p>` +
-    `<p class="meta"><span class="kind">${escape(s.kind)}</span>` +
-    `<span class="state${storied(s) ? " signed" : ""}">${escape(stateOf(s))}</span>` +
-    `<span class="when">${escape(touched(s.updated_at, now))}</span>` +
-    `<span class="mono">${escape(s.html)}</span></p>` +
-    frame(s) +
-    `</div>`
-  );
-}
-
-/** The way back with nothing to go back from: a target that named a sketch the record has
- *  not got still gets the link, because it is the one thing a reader wants next. */
-const stale = (id: number): string =>
-  `<div class="open" data-ui="sketches.open">` +
-  `<p class="back"><a href="?" data-ui="sketches.open.back">← every sketch</a></p>` +
-  `<p class="empty">${escape(nothingAt(id))}</p></div>`;
-
 // ─── the page ───────────────────────────────────────────────────────────────────────
 
 /** What the page says: its name, the line under it, and then either the list or the one
- *  drawing. The frame around it is the shell's. */
+ *  drawing. The frame around it is the shell's, and the drawing inside it is
+ *  `../drawing.ts`'s — including which of its two frames this reader asked for, which is in
+ *  the target beside the sketch's own id. */
 export function sketchesList(all: readonly Sketch[], url: URL, ui = loadUi(), now = Date.now()): string {
   const one = opened(all, url);
   const body =
-    one === null ? listing(all, ui, now) : typeof one === "number" ? stale(one) : drawing(one, now);
+    one === null
+      ? listing(all, ui, now)
+      : typeof one === "number"
+        ? stale(one)
+        : openedSketch(one, modeOf(url), now);
   return (
     `<section class="${SECTION}" data-ui="${SECTION}"><h2>Sketches</h2>` +
     `<p class="q">Anything drawn before it is work. Yours alone until one earns a story.</p>` +

@@ -28,7 +28,9 @@ import {
   waitingApprovals,
 } from "@wecode/core";
 import { answerAt } from "./answer.js";
+import { review } from "./browser/annotate.js";
 import { browser, docked } from "./browser/dock.js";
+import { DRAWN_AT, drawingsAt } from "./drawing.js";
 import { pages } from "./pages/discover.js";
 import { SHELL_AT, shellAt } from "./pages/shell.js";
 import { addressOf, serve } from "./server.js";
@@ -108,11 +110,21 @@ const shell = shellAt(() => dirname(dbPath));
  *  the first of them, in every document the pages hand back. That line is not in
  *  `document()` — a document is `renderers.webapp.shell`'s sentence and a page is a fragment
  *  of one, so what the wiring adds is added here, to the replies, and the pages and the
- *  shell go on saying exactly what they said. */
+ *  shell go on saying exactly what they said.
+ *
+ *  The sketch a reader is editing is served from `DRAWN_AT`, and it is mounted *outside*
+ *  `docked()` on purpose: what answers there is the bytes an agent wrote, and a document
+ *  this board has added its own script to is no longer the drawing. It is same-origin
+ *  because that is the only way the review loop can read the frame it is annotating, and
+ *  that loop is `review()` — the painter's own pick-and-queue machine, at the four paths a
+ *  browser resolves it at. The two are mounted together because neither is worth anything
+ *  alone: a frame nothing can reach into, or a notes machine with nothing to annotate. */
 const routes = {
   ...docked(await pages(readings)),
   "/answer": answerAt(() => db, operator),
   [SHELL_AT]: shell.route,
+  [DRAWN_AT]: drawingsAt(readings.sketches),
+  ...review(),
   ...browser(),
 };
 

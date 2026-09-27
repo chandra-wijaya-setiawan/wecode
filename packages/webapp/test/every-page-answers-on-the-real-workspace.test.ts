@@ -192,8 +192,13 @@ describe.skipIf(LIVE.length === 0)("every page, against the operator's own works
       const counted = db.prepare("select count(*) as n from sketch").get() as { n: number };
       expect(drawn.length, `${path} holds ${String(counted.n)} sketches`).toBe(counted.n);
 
+      // The id is read to the quote that ends it, and nothing is assumed about what follows.
+      // This pattern demanded the tag close right after the id, and a row has carried a
+      // `data-ui` — and now a `data-words` — since the page landed, so the scrape came back
+      // empty against a record holding drawings and this test was passing on the shape of its
+      // own regex. What is asserted is still the claim: the same ids, in the same order.
       const body = answer(await surfaceOf(path), "GET", "/sketches").body;
-      const ids = [...body.matchAll(/<li id="sketch-(\d+)">/g)].map((m) => m[1] as string);
+      const ids = [...body.matchAll(/<li id="sketch-(\d+)"/g)].map((m) => m[1] as string);
       expect(ids, path).toEqual(drawn.map((s) => String(s.id)));
       for (const s of drawn) expect(body, path).toContain(`#${s.id}`);
     }
