@@ -1,400 +1,399 @@
 // @vitest-environment happy-dom
-/** The overlay is drawn over the drawing, and a round of notes reaches the shell the dock
- *  is already holding.
+/** The overlay is drawn over the drawing.
  *
- *  The criterion, end to end, with nothing stood in for between its two ends: the machine is
- *  the painter's own `Overlay`, the drawing is a real document the browser adapter mounts
- *  itself into, the host is this package's `sending`, and the far end is the dock's own
- *  `shellAt` route reached through the surface's `answer`. Two things are stood in for, and
- *  they are the two a statement may not have — a pty, which cannot be spawned per claim, and
- *  the answers only a browser has: a rectangle, a viewport and a drag.
+ *  The criterion says four things and this file says four things. The overlay is drawn over the
+ *  drawing. A click on an element opens a card. A queued note becomes a pill. Sending the round
+ *  posts exactly one prompt frame to the dock's route, carrying per note the CSS path, the tag
+ *  and the words that were showing — and a send that does not land keeps the reviewer's words.
  *
- *  Four sentences, in the criterion's own order. A click on an element opens a card. A queued
- *  note becomes a pill. Sending the round posts exactly one prompt frame to the dock's route,
- *  carrying per note the CSS path, the tag and the words that were showing. And a send that
- *  does not land keeps the reviewer's words.
+ *  Every one of them is said against the thing that ships. The machine is the painter's own
+ *  `Overlay`, the drawing is a real document, the card is read out of whatever the chrome was
+ *  drawn into, the host is this surface's `sending`, and the far end is the dock's own
+ *  `shellAt` route reached through `answer` — so "posts exactly one prompt frame to the dock's
+ *  route" is counted at that route and nowhere nearer. Two things are stood in for, and they
+ *  are the two a statement may not have: a pty, which cannot be spawned per claim, and the
+ *  answers only a browser holds — a rectangle and a viewport. The reviewer's acts are the
+ *  reviewer's: a click dispatched at a node of the drawing, words typed into the field that
+ *  click opened, and a press on the button that says Send.
  *
- *  Wherever the machine has an opinion the adapter is read through `view()` — the heading
- *  against `view().card.heading`, the mark by `view().highlightClass`, the pills against
- *  `view().pills` — because a statement that writes those strings out for itself goes on
- *  passing while the two halves quietly disagree about what is on screen. */
-import { afterEach, describe, expect, it } from "vitest";
+ *  The drawing half is loaded rather than imported, so that its absence is a statement failing
+ *  on a named expectation instead of a suite that could not be collected at all: "could not
+ *  start" and "the reviewer cannot review" are different reports. */
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Overlay } from "@wecode/painter/dist/client/overlay.js";
-import { CLASS } from "@wecode/painter/dist/client/overlay.css.js";
-import { decode } from "@wecode/painter/dist/client/terminal.js";
-import type { TextSelection } from "@wecode/painter/dist/client/pick.js";
-import { LANDED, NOTES_AT, noteOf, sending } from "../src/browser/annotate.js";
+import { CHROME_ATTRIBUTE, CLASS } from "@wecode/painter/dist/client/overlay.css.js";
+import { decode, encode } from "@wecode/painter/dist/client/terminal.js";
+import { NOTES_AT, sending, type Posts } from "../src/browser/annotate.js";
 import { SHELL_AT, shellAt, type Opens, type Shelled } from "../src/pages/shell.js";
-import { answer, type Routes } from "../src/server.js";
-import { LABEL, mount, targetOf } from "../src/browser/overlay-dom.js";
-import type { Chrome, Doc, El } from "../src/browser/overlay-dom.js";
+import { answer, type Page, type Routes, type Verb } from "../src/server.js";
+import type { Doc } from "../src/browser/overlay-dom.js";
 
-/** What is being reviewed. A selector with nothing to hold it is ambiguous across two
- *  sketches, so a round says which drawing its selectors are inside. */
-const ABOUT = "sketch 491";
+/** The drawing half, reached for when a statement needs it. */
+let drawn: typeof import("../src/browser/overlay-dom.js");
+const loaded = async (): Promise<void> => {
+  drawn ??= await vi.importActual<typeof drawn>("../src/browser/overlay-dom.js");
+};
 
-/** How much room there is, and the rectangle every measured node is given. Measuring is the
- *  browser's act, so both are this file's to choose and the adapter takes what it is told. */
-const VIEWPORT = { width: 1000, height: 800 };
-const RECT = { top: 100, left: 40, width: 220, height: 24 };
+/** A thing the criterion needs on screen that is not there: said, rather than read past. */
+const raise = (why: string): never => {
+  throw new Error(why);
+};
 
-/** The drawing under review: two paragraphs, so a selector has siblings to count, and a live
- *  control, so a click the machine must refuse has somewhere to land. */
+/** What is being reviewed. A selector with nothing to hold it is ambiguous the moment there
+ *  are two sketches, so a round says which drawing its paths are inside. */
+const ABOUT = "sketch 512";
+
+/** The drawing under review: something with an id to hang a path off, two paragraphs so a
+ *  path has same-tag siblings to tell apart, and a live control so a click the machine must
+ *  refuse has somewhere to land. */
 const DRAWING =
-  `<main id="sketch"><h1>the board</h1><p>eight tasks</p>` +
-  `<p>two blocked</p><button type="button">run</button></main>`;
+  `<main id="sketch"><h1>the ledger</h1><p>seven tasks</p>` +
+  `<p>three blocked</p><button type="button">run it</button></main>`;
 
-// ─── the far end, which is the dock's ───────────────────────────────────────────────
+/** The two paths the round is expected to carry, and the words showing at each. */
+const HEADING_AT = "main#sketch > h1";
+const SECOND_AT = "main#sketch > p:nth-of-type(2)";
 
-/** A shell that hears what is typed at it and that can be told to leave — which is how a
- *  send that does not land is arranged. The painter's `Session` is one of these. */
+/** How much room there is, and the rectangle every node of the drawing is measured at.
+ *  Measuring is a browser's act, so both are handed in and the adapter takes what it is told. */
+const VIEWPORT = { width: 1000, height: 800 };
+const RECT = { top: 120, left: 40, width: 240, height: 28 };
+
+// ─── the far end, which is the dock's own ───────────────────────────────────────────
+
+/** A shell that hears what is typed at it and that can be told to leave — which is how a send
+ *  that does not land is arranged, without asking any code here to invent a refusal. The
+ *  painter's `Session` is one of these. Keys and prompts are kept apart because they are
+ *  different acts, and a round arriving as keys would sit half-typed in the agent's composer
+ *  looking sent. */
 class Pretend implements Shelled {
   output = "";
   running = true;
   exit: number | null = null;
-  /** Kept apart, because the two doors are different sentences: keys are bytes the far end
-   *  reads itself, a prompt is a whole thing a person finished writing and the session
-   *  guarantees the submit for — a round sent as keys would look sent and not be. */
-  readonly heard: string[] = [];
-  readonly prompted: string[] = [];
-  keys(input: string): void { this.heard.push(input); }
-  prompt(text: string): void { this.prompted.push(text); }
+  readonly typed: string[] = [];
+  readonly prompts: string[] = [];
+  keys(input: string): void { this.typed.push(input); }
+  prompt(text: string): void { this.prompts.push(text); }
   close(): Promise<number> { this.running = false; return Promise.resolve(0); }
   leaves(code: number): void { this.running = false; this.exit = code; }
 }
 
-/** The dock's own route over a stand-in shell: a poll, which is what opens it, and a post,
- *  which is the one way in. Every frame below goes through `answer` and the route's own
- *  decisions — a round refused by a shell that has left is refused by that code and not by
- *  this file agreeing to say 409. */
+/** The dock's route over a stand-in shell, with a tally of every frame that reached it. The
+ *  tally is at the route rather than at the caller: "posts exactly one prompt frame to the
+ *  dock's route" is a claim about what arrived there. */
 function farEnd() {
   const shells: Pretend[] = [];
-  const { route, close } = shellAt(() => "/a/workspace", (() => {
-    const shell = new Pretend();
-    shells.push(shell);
-    return shell;
-  }) as Opens);
-  const routes: Routes = { [NOTES_AT]: route };
-  const posted: string[] = [];
+  const opens = ((): Shelled => shells[shells.push(new Pretend()) - 1] as Pretend) as Opens;
+  const { route, close } = shellAt(() => "/a/workspace", opens);
+  const served = route as { get: Page; post: Verb };
+  const frames: string[] = [];
+  const routes: Routes = {
+    [NOTES_AT]: { get: served.get, post: (url, body) => (frames.push(body), served.post(url, body)) },
+  };
   return {
-    posted,
-    held: (): Pretend => {
-      const last = shells.at(-1);
-      if (last === undefined) throw new Error("no shell has been opened");
-      return last;
-    },
-    open: (): void => void answer(routes, "GET", `${NOTES_AT}?from=0`),
-    post: async (frame: string): Promise<{ status: number }> =>
-      (posted.push(frame), answer(routes, "POST", NOTES_AT, frame)),
+    frames,
     close,
+    /** The shell the route holds now: the newest, since a restart puts one in place of one
+     *  that left. */
+    shell: (): Pretend => shells.at(-1) ?? raise("no shell has been opened"),
+    /** What the dock does on opening: the poll that opens the shell behind the route. */
+    attach: (): void => void answer(routes, "GET", `${NOTES_AT}?from=0`),
+    /** A shell in place of one that left, by the route's own door rather than by reaching
+     *  past it — which is how a round refused once can be offered again. */
+    restart: (): void => void answer(routes, "POST", NOTES_AT, encode({ kind: "restart" })),
+    post: (async (frame) => answer(routes, "POST", NOTES_AT, frame)) as Posts,
   };
 }
 
-// ─── a drawing with the overlay drawn over it ───────────────────────────────────────
+// ─── a drawing, with the overlay drawn over it ──────────────────────────────────────
 
 const opened: Array<() => void> = [];
 afterEach(() => {
   for (const shut of opened.splice(0)) shut();
 });
 
-/** A page holding the drawing, the machine, the adapter and the far end — the whole of the
- *  criterion, wired the way it ships. `drag` is the reviewer's selection, which only a
- *  browser has; `left` counts the machine telling the surface the reviewer has gone; `slow`
- *  holds a round in flight, which is the one state a round has that nothing else can reach. */
-function open() {
+/** The whole of the criterion, wired as it ships: the drawing on the page, the machine over
+ *  it, the adapter drawing what the machine says, and the dock's far end at the other end. */
+async function open() {
+  await loaded();
   document.head.innerHTML = "";
   document.body.innerHTML = DRAWING;
   const end = farEnd();
-  end.open();
-  const state = { drag: null as TextSelection | null, left: 0, slow: false };
-  let hold: ((reply: { readonly status: number }) => void) | null = null;
-  const post = async (frame: string): Promise<{ readonly status: number }> => {
-    if (!state.slow) return end.post(frame);
-    end.posted.push(frame);
-    return new Promise<{ readonly status: number }>((done) => (hold = done));
-  };
-  const overlay = new Overlay(sending(post, ABOUT, () => void (state.left += 1)));
-  const chrome: Chrome = mount(overlay, document as unknown as Doc, {
-    // A selector the page still matches is measured; one it does not is a node that has gone.
+  end.attach();
+  let left = 0;
+  const overlay = new Overlay(sending(end.post, ABOUT, () => void (left += 1)));
+  const chrome = drawn.mount(overlay, document as unknown as Doc, {
+    // A path the drawing still matches is measured; one it does not is a node that has gone.
     boxOf: (selector) => (selector !== "" && document.querySelector(selector) ? RECT : null),
     viewport: () => VIEWPORT,
-    selection: () => state.drag,
+    selection: () => null,
   });
   opened.push(() => (chrome.release(), end.close()));
-  return { overlay, chrome, end, state, answered: (status: number) => hold?.({ status }) };
+  return { overlay, chrome, end, ended: (): number => left };
 }
 
-type Open = ReturnType<typeof open>;
+type Open = Awaited<ReturnType<typeof open>>;
 
-// ─── reading the chrome, and acting on it ───────────────────────────────────────────
+// ─── reading what is on screen, and acting on it ────────────────────────────────────
 
-const look = (held: Open) => (held.chrome.host as unknown as Element).shadowRoot as ShadowRoot;
+/** Where the chrome was drawn. Through the host's shadow root when there is one, because
+ *  whether the overlay hides inside one is its own decision and not this criterion's. */
+const chromeOf = (held: Open): Element => held.chrome.host as unknown as Element;
+const look = (held: Open): ParentNode => chromeOf(held).shadowRoot ?? chromeOf(held);
 const one = (held: Open, selector: string): Element | null => look(held).querySelector(selector);
 const all = (held: Open, selector: string): Element[] => [...look(held).querySelectorAll(selector)];
 
-const control = (held: Open, label: string): HTMLButtonElement => {
-  const found = all(held, "button").find((button) => button.textContent === label);
-  if (!found) throw new Error(`the overlay draws no ${label}`);
-  return found as HTMLButtonElement;
-};
+const control = (held: Open, label: string): HTMLButtonElement =>
+  (all(held, "button").find((button) => button.textContent === label) ??
+    raise(`the overlay draws no ${label}`)) as HTMLButtonElement;
 const press = (held: Open, label: string): void => control(held, label).click();
 
-const field = (held: Open) => one(held, `.${CLASS.field}`) as HTMLTextAreaElement;
-const reply = (held: Open): HTMLInputElement => one(held, `.${CLASS.reply}`) as HTMLInputElement;
+const card = (held: Open): Element | null => one(held, `.${CLASS.card}`);
+const field = (held: Open): HTMLTextAreaElement =>
+  (one(held, `.${CLASS.field}`) ?? raise("the open card has no field to write in")) as
+    HTMLTextAreaElement;
+const pills = (held: Open): string[] =>
+  all(held, `.${CLASS.pillText}`).map((pill) => pill.textContent ?? "");
 
-const pills = (held: Open): (string | null)[] =>
-  all(held, `.${CLASS.pillText}`).map((pill) => pill.textContent);
+const node = (selector: string, nth = 0): Element =>
+  [...document.querySelectorAll(selector)][nth] ?? raise(`the drawing has no ${selector}[${nth}]`);
 
-const node = (selector: string, nth = 0): Element => {
-  const found = [...document.querySelectorAll(selector)][nth];
-  if (!found) throw new Error(`the drawing has no ${selector}[${nth}]`);
-  return found;
-};
-
-/** A click as a browser makes one, handed back so a statement can ask whether it was taken. */
+/** A click as a browser makes one, handed back so a statement can ask whether the overlay
+ *  took it or left it to the drawing. */
 const clickOn = (on: Element): MouseEvent => {
   const event = new window.MouseEvent("click", { bubbles: true, cancelable: true });
   return on.dispatchEvent(event), event;
 };
 
-const key = (on: Element, name: string, hold: { ctrl?: boolean; shift?: boolean } = {}): void => {
-  const how = { bubbles: true, cancelable: true, ctrlKey: !!hold.ctrl, shiftKey: !!hold.shift };
-  on.dispatchEvent(new window.KeyboardEvent("keydown", { key: name, ...how }));
-};
-
 const settle = (): Promise<void> => new Promise((done) => setTimeout(done, 0));
 
-/** Point at a node of the drawing the way a reviewer does: by clicking it, while picking. */
-const clickPick = (held: Open, selector: string, nth = 0): void =>
-  void (held.overlay.setPicking(true), clickOn(node(selector, nth)));
+/** Point at something in the drawing the way a reviewer does: while reviewing, by clicking it. */
+const pointAt = (held: Open, selector: string, nth = 0): MouseEvent =>
+  (held.overlay.setPicking(true), clickOn(node(selector, nth)));
 
+/** Say something about it and queue it, by the button that says so. */
 const note = (held: Open, selector: string, said: string, nth = 0): void => {
-  clickPick(held, selector, nth);
+  pointAt(held, selector, nth);
   field(held).value = said;
-  press(held, LABEL.queue);
+  press(held, drawn.LABEL.queue);
+};
+
+/** The two notes every sentence about a round is said against. */
+const twoNotes = (held: Open): void => {
+  note(held, "h1", "the heading is too quiet");
+  note(held, "p", "say which three", 1);
 };
 
 // ─── the overlay is drawn over the drawing ──────────────────────────────────────────
 
 describe("the overlay is drawn over the drawing", () => {
-  it("is on the page the drawing is on, and is the strip until the reviewer points", () => {
-    const held = open();
-    expect(document.body.contains(held.chrome.host as unknown as Element)).toBe(true);
-    // The drawing itself is untouched: an overlay that rewrote the page would be reviewing
-    // something other than what the reviewer was shown.
-    expect(document.querySelector("main#sketch")?.innerHTML).toBe(
-      new DOMParser().parseFromString(DRAWING, "text/html").querySelector("main")?.innerHTML,
+  it("is on the drawing's own page, over it rather than in it", async () => {
+    const held = await open();
+    expect(document.body.contains(chromeOf(held))).toBe(true);
+    // Over it: the chrome is not a node of the drawing, and the drawing is what it was
+    // served as. An overlay that rewrote the page would be reviewing something else.
+    expect(node("main#sketch").contains(chromeOf(held))).toBe(false);
+    expect(document.body.innerHTML).toContain(DRAWING);
+    expect(node("main#sketch").innerHTML).toBe(
+      `<h1>the ledger</h1><p>seven tasks</p><p>three blocked</p>` +
+        `<button type="button">run it</button>`,
     );
+  });
+
+  it("is the strip and nothing else until the reviewer says something", async () => {
+    const held = await open();
     expect(one(held, `.${CLASS.strip}`)).not.toBeNull();
-    expect(one(held, `.${CLASS.card}`)).toBeNull();
+    expect(card(held)).toBeNull();
     expect(pills(held)).toEqual([]);
+  });
+
+  it("is marked as its own, so the reviewer can never annotate the overlay", async () => {
+    const held = await open();
+    expect(chromeOf(held).getAttribute(CHROME_ATTRIBUTE)).not.toBeNull();
+    held.overlay.setPicking(true);
+    expect(clickOn(chromeOf(held)).defaultPrevented).toBe(false);
+    expect(held.overlay.open).toBeNull();
+    expect(card(held)).toBeNull();
   });
 });
 
+// ─── a click on an element opens a card ─────────────────────────────────────────────
+
 describe("a click on an element", () => {
-  it("opens a card saying what the view says, marked over the node it points at", () => {
-    const held = open();
-    clickPick(held, "h1");
+  it("opens a card about the node clicked, and marks that node", async () => {
+    const held = await open();
+    pointAt(held, "h1");
     const view = held.overlay.view();
-    expect(view.card?.selector).toBe("main#sketch > h1");
-    expect(one(held, `.${CLASS.card}`)).not.toBeNull();
+    expect(card(held)).not.toBeNull();
+    // The card is about the thing hit: it names the tag the reviewer actually reached, and
+    // points at the path the agent will be given.
+    expect(view.card?.selector).toBe(HEADING_AT);
+    expect(one(held, `.${CLASS.heading}`)?.textContent).toContain("<h1>");
     expect(one(held, `.${CLASS.heading}`)?.textContent).toBe(view.card?.heading);
-    expect(field(held).getAttribute("placeholder")).toBe(view.card?.placeholder);
-    // The mark wears the class the machine publishes, over the rectangle the browser gave.
-    expect(one(held, `.${view.highlightClass}`)?.getAttribute("style")).toBe(
-      `top:${RECT.top}px;left:${RECT.left}px;width:${RECT.width}px;height:${RECT.height}px`,
-    );
+    // And the node is marked, wearing the class the machine publishes rather than one this
+    // adapter chose, over the rectangle the browser measured.
+    const mark = one(held, `.${view.highlightClass}`)?.getAttribute("style");
+    expect(mark).toContain(`top:${RECT.top}px;left:${RECT.left}px`);
   });
 
-  it("is swallowed, so a reviewer aiming at a link does not navigate away from the drawing", () => {
-    const held = open();
+  it("opens one card at a time, about whatever was clicked last", async () => {
+    const held = await open();
+    pointAt(held, "h1");
+    pointAt(held, "p", 1);
+    expect(all(held, `.${CLASS.card}`)).toHaveLength(1);
+    expect(held.overlay.view().card?.selector).toBe(SECOND_AT);
+    // The card on screen is about the second node and not still about the first: a card left
+    // saying <h1> over a paragraph is a reviewer writing a note against the wrong thing.
+    expect(one(held, `.${CLASS.heading}`)?.textContent).toBe(held.overlay.view().card?.heading);
+  });
+
+  it("is swallowed, so a reviewer aiming at the drawing stays on it", async () => {
+    const held = await open();
     const heard: string[] = [];
     node("h1").addEventListener("click", () => heard.push("the drawing"));
-    held.overlay.setPicking(true);
-    expect(clickOn(node("h1")).defaultPrevented).toBe(true);
+    expect(pointAt(held, "h1").defaultPrevented).toBe(true);
     expect(heard).toEqual([]);
   });
 
-  it("is left to the drawing by everything the machine refuses", () => {
-    const held = open();
+  it("is left to the drawing when no card opens", async () => {
+    const held = await open();
     const heard: string[] = [];
     for (const at of ["h1", "button"]) node(at).addEventListener("click", () => heard.push(at));
-    // Picking is off: the overlay is not in the way of a page nobody is reviewing.
+    // Nobody is reviewing, and then a live control: the overlay is not in the way of a page
+    // being read, and a reviewer who aimed at a button wanted the button.
     expect(clickOn(node("h1")).defaultPrevented).toBe(false);
     held.overlay.setPicking(true);
-    // A live control — a reviewer aiming at a button wanted the button.
     expect(clickOn(node("button")).defaultPrevented).toBe(false);
-    // And no card is ever opened about a card.
-    expect(clickOn(held.chrome.host as unknown as Element).defaultPrevented).toBe(false);
-    expect(held.overlay.open).toBeNull();
-    expect(one(held, `.${CLASS.card}`)).toBeNull();
+    expect(card(held)).toBeNull();
     expect(heard).toEqual(["h1", "button"]);
-  });
-
-  it("is offered as the words dragged over before the node under them", () => {
-    const held = open();
-    held.overlay.setPicking(true);
-    const ancestor = targetOf(node("p") as unknown as El);
-    held.state.drag = { ancestor, text: "eight tasks", collapsed: false };
-    clickOn(node("p"));
-    expect(held.overlay.open?.kind).toBe("text");
-    expect(one(held, `.${CLASS.heading}`)?.textContent).toBe(held.overlay.view().card?.heading);
   });
 });
 
 // ─── a queued note becomes a pill ───────────────────────────────────────────────────
 
 describe("a queued note", () => {
-  it("becomes a pill, one per note, saying what the view says it says", () => {
-    const held = open();
-    note(held, "p", "too quiet", 0);
-    note(held, "p", "say how many", 1);
-    expect(pills(held)).toEqual(held.overlay.view().pills);
+  it("becomes a pill, one per note, saying where it points and what was said", async () => {
+    const held = await open();
+    twoNotes(held);
     expect(all(held, `.${CLASS.pill}`)).toHaveLength(2);
-    // And the card is gone: the note has been said, and a card left open over it would
-    // invite the reviewer to say it a second time.
-    expect(one(held, `.${CLASS.card}`)).toBeNull();
+    expect(pills(held)[0]).toContain(HEADING_AT);
+    expect(pills(held)[0]).toContain("the heading is too quiet");
+    expect(pills(held)[1]).toContain(SECOND_AT);
+    expect(pills(held)[1]).toContain("say which three");
+    // What the machine says is on screen is what is on screen.
+    expect(pills(held)).toEqual([...held.overlay.view().pills]);
   });
 
-  it("is queued by the Queue button and by Enter, and abandoned by Escape", () => {
-    const held = open();
-    clickPick(held, "h1");
-    field(held).value = "too quiet";
-    key(field(held), "Enter", { shift: true });
+  it("takes the card with it, so the same thing is not said twice over", async () => {
+    const held = await open();
+    note(held, "h1", "the heading is too quiet");
+    expect(card(held)).toBeNull();
+    expect(held.overlay.queued().map((item) => item.prompt)).toEqual(["the heading is too quiet"]);
+  });
+
+  it("is only a note that was said: an empty card queues nothing and draws no pill", async () => {
+    const held = await open();
+    pointAt(held, "h1");
+    press(held, drawn.LABEL.queue);
+    expect(pills(held)).toEqual([]);
     expect(held.overlay.queued()).toHaveLength(0);
-    key(field(held), "Enter");
-    expect(held.overlay.queued().map((item) => item.prompt)).toEqual(["too quiet"]);
-    clickPick(held, "p");
-    field(held).value = "never mind";
-    key(field(held), "Escape");
-    expect(held.overlay.queued()).toHaveLength(1);
-    expect(all(held, `.${CLASS.pill}`)).toHaveLength(1);
-  });
-
-  it("is taken back by its own ×, which is the only way a queue shrinks", () => {
-    const held = open();
-    note(held, "p", "too quiet", 0);
-    note(held, "p", "say how many", 1);
-    (all(held, `.${CLASS.pillClose}`)[0] as HTMLElement).click();
-    expect(held.overlay.queued().map((item) => item.prompt)).toEqual(["say how many"]);
-    expect(pills(held)).toEqual(held.overlay.view().pills);
   });
 });
 
 // ─── sending the round ──────────────────────────────────────────────────────────────
 
 describe("sending the round", () => {
-  it("goes to the dock's own far end and not to a route of its own", () => {
+  it("goes to the dock's route and not to a second way into the shell", () => {
     expect(NOTES_AT).toBe(SHELL_AT);
   });
 
-  it("posts exactly one prompt frame, however many notes the reviewer queued", async () => {
-    const held = open();
-    note(held, "h1", "the heading is too quiet");
-    note(held, "p", "say how many", 1);
-    press(held, LABEL.send);
+  it("posts exactly one prompt frame, however many notes were queued", async () => {
+    const held = await open();
+    twoNotes(held);
+    press(held, drawn.LABEL.send);
     await settle();
-    // One frame for the round, not one per note: a round is a whole thing a person
-    // finished writing, and six frames are six half-rounds the agent answers separately.
-    expect(held.end.posted).toHaveLength(1);
-    const frame = decode(held.end.posted[0] as string);
-    expect(frame?.kind).toBe("prompt");
-    // A prompt and not keys, which is what guarantees the submit at the far end.
-    expect(held.end.held().heard).toEqual([]);
-    expect(held.end.held().prompted).toHaveLength(1);
+    // One frame for the round, not one per note: two frames are two half-rounds an agent
+    // answers separately, having been told neither is the whole of what was said.
+    expect(held.end.frames).toHaveLength(1);
+    expect(held.end.frames.filter((frame) => decode(frame)?.kind === "prompt")).toHaveLength(1);
+    // As a prompt and not as keystrokes, which is what guarantees the submit at the far end.
+    expect(held.end.shell().prompts).toHaveLength(1);
+    expect(held.end.shell().typed).toEqual([]);
   });
 
   it("carries, per note, the css path, the tag and the words that were showing", async () => {
-    const held = open();
-    note(held, "h1", "the heading is too quiet");
-    note(held, "p", "say how many", 1);
-    const round = held.overlay.queued();
-    press(held, LABEL.send);
+    const held = await open();
+    twoNotes(held);
+    press(held, drawn.LABEL.send);
     await settle();
-    const [line] = held.end.held().prompted;
-    // All three parts of each pick travel, because the agent never sees the drawing: the
+    const [round] = held.end.shell().prompts;
+    // All three parts of every pick travel, because the agent never sees the drawing: the
     // path finds the node in the source, the tag is what it turned out to be, and the words
-    // are how a person recognises it. A note saying only "too quiet" is unactionable.
-    expect(line).toContain("main#sketch > h1");
-    expect(line).toContain("<h1>");
-    expect(line).toContain(`showing "the board"`);
-    expect(line).toContain("the heading is too quiet");
-    expect(line).toContain("main#sketch > p:nth-of-type(2)");
-    expect(line).toContain("<p>");
-    expect(line).toContain(`showing "two blocked"`);
-    expect(line).toContain("say how many");
-    // In the order the reviewer worked in, and as the one line this surface already makes.
-    expect(line?.indexOf("too quiet")).toBeLessThan(line?.indexOf("say how many") ?? -1);
-    expect(line).toBe(noteOf(round, ABOUT));
+    // are how a person recognises it there. A note saying only "too quiet" is unactionable.
+    expect(round).toContain(HEADING_AT);
+    expect(round).toContain("<h1>");
+    expect(round).toContain(`showing "the ledger"`);
+    expect(round).toContain("the heading is too quiet");
+    expect(round).toContain(SECOND_AT);
+    expect(round).toContain("<p>");
+    expect(round).toContain(`showing "three blocked"`);
+    expect(round).toContain("say which three");
+    // In the order the reviewer worked in, so an agent answering the second can say so.
+    expect(round?.indexOf("too quiet")).toBeLessThan(round?.indexOf("say which three") ?? -1);
   });
 
-  it("clears the queue it landed, and says so on the strip", async () => {
-    const held = open();
-    note(held, "h1", "too quiet");
-    press(held, LABEL.send);
+  it("empties the queue it landed, so the round is not offered a second time", async () => {
+    const held = await open();
+    twoNotes(held);
+    press(held, drawn.LABEL.send);
     await settle();
-    expect(held.end.held().prompted).toHaveLength(1);
-    expect(all(held, `.${CLASS.pill}`)).toHaveLength(0);
-    expect(control(held, LABEL.send).disabled).toBe(true);
-  });
-
-  it("is sent and ended in one act, and takes an unqueued draft with it", async () => {
-    const held = open();
-    note(held, "h1", "too quiet");
-    reply(held).value = "and that will do";
-    reply(held).dispatchEvent(new window.Event("input"));
-    press(held, LABEL.sendAndEnd);
-    await settle();
-    const [line] = held.end.held().prompted;
-    expect(line).toContain("2 notes, and the last");
-    expect(line).toContain("and that will do");
-    expect(held.overlay.ended).toBe(true);
-    expect(held.state.left).toBe(1);
-    expect(reply(held).disabled).toBe(true);
+    expect(pills(held)).toEqual([]);
+    expect(held.overlay.queued()).toHaveLength(0);
+    expect(control(held, drawn.LABEL.send).disabled).toBe(true);
   });
 });
 
 // ─── a send that does not land ──────────────────────────────────────────────────────
 
 describe("a send that does not land", () => {
-  it("keeps the reviewer's words on screen, and offers the round again", async () => {
-    const held = open();
-    note(held, "h1", "the heading is too quiet");
-    note(held, "p", "say how many", 1);
-    // The shell has left. The route answers 409 and `sending` reads that as "did not land".
-    held.end.held().leaves(1);
-    press(held, LABEL.send);
+  it("keeps the reviewer's words on screen and offers the round again", async () => {
+    const held = await open();
+    twoNotes(held);
+    // The shell has left. The route answers 409 of its own accord and the host reads that
+    // as a round that did not land.
+    held.end.shell().leaves(1);
+    press(held, drawn.LABEL.send);
     await settle();
-    expect(held.end.posted).toHaveLength(1);
-    expect((await held.end.post(held.end.posted[0] as string)).status).not.toBe(LANDED);
-    // Both notes are back on screen, said in the machine's own words rather than in a second
-    // set this file made up, and still readable as what the reviewer actually wrote.
-    expect(pills(held)).toEqual(held.overlay.view().pills);
-    expect(pills(held).join(" ")).toContain("the heading is too quiet");
-    expect(pills(held).join(" ")).toContain("say how many");
-    expect(held.overlay.queued().map((item) => item.prompt)).toEqual([
-      "the heading is too quiet",
-      "say how many",
-    ]);
-    expect(control(held, LABEL.send).disabled).toBe(false);
+    expect(held.end.frames).toHaveLength(1);
+    expect(held.end.shell().prompts).toEqual([]);
+    // Both notes are still on screen, still readable as what the reviewer actually wrote,
+    // still in the order they wrote them, and the send is offered again.
+    expect(all(held, `.${CLASS.pill}`)).toHaveLength(2);
+    expect(pills(held)[0]).toContain("the heading is too quiet");
+    expect(pills(held)[1]).toContain("say which three");
+    const said = ["the heading is too quiet", "say which three"];
+    expect(held.overlay.queued().map((item) => item.prompt)).toEqual(said);
     expect(held.overlay.ended).toBe(false);
+    expect(held.ended()).toBe(0);
+    expect(control(held, drawn.LABEL.send).disabled).toBe(false);
   });
 
-  it("has nothing further to send while the round is still in flight", async () => {
-    const held = open();
-    held.state.slow = true;
-    note(held, "h1", "too quiet");
-    press(held, LABEL.send);
-    // Gone up and not yet answered: the queue is the far end's for now, and a second Send
-    // would be the same notes twice.
-    expect(held.end.posted).toHaveLength(1);
-    expect(control(held, LABEL.send).disabled).toBe(true);
-    // 400 for a frame the far end could not read: another way not to land, and the words
-    // come back the same way.
-    held.answered(400);
+  it("costs the reviewer nothing: the same round goes once there is a shell again", async () => {
+    const held = await open();
+    twoNotes(held);
+    held.end.shell().leaves(1);
+    press(held, drawn.LABEL.send);
     await settle();
-    expect(pills(held)).toEqual(held.overlay.view().pills);
-    expect(held.overlay.queued().map((item) => item.prompt)).toEqual(["too quiet"]);
-    expect(control(held, LABEL.send).disabled).toBe(false);
+    held.end.restart();
+    press(held, drawn.LABEL.send);
+    await settle();
+    // Whole, on the second try, with nothing of the first left out.
+    const [round] = held.end.shell().prompts;
+    expect(held.end.shell().prompts).toHaveLength(1);
+    expect(round).toContain(HEADING_AT);
+    expect(round).toContain("the heading is too quiet");
+    expect(round).toContain(SECOND_AT);
+    expect(round).toContain("say which three");
+    expect(pills(held)).toEqual([]);
   });
 });
