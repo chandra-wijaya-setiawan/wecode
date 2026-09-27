@@ -144,7 +144,7 @@ describe("every document wears it", () => {
   });
 
   it("writes one link per declared page, in the declared order", () => {
-    const links = [...body.matchAll(/<a href="([^"]*)">([^<]*)<\/a>/g)].map((m) => [m[1], m[2]]);
+    const links = [...body.matchAll(/<a href="([^"]*)"[^>]*>([^<]*)<\/a>/g)].map((m) => [m[1], m[2]]);
     expect(links).toEqual(ORDER.map((tab) => [tab.at, tab.says]));
   });
 

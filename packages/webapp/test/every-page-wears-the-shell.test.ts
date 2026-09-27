@@ -191,7 +191,12 @@ describe("every page comes out in the declared shell", () => {
     expect(body).toContain(`</${SHELL.body}>`);
     const inside = body.slice(body.indexOf(`<${SHELL.body}>`), body.indexOf(`</${SHELL.body}>`));
     expect(inside).toContain(`<h1>${SHELL.banner}</h1>`);
-    for (const tab of loadBanner()) expect(inside).toContain(`<a href="${tab.at}">${tab.says}</a>`);
+    // Read to the quote that ends the target, not to the ">": the tab the reader is on
+    // carries aria-current, and the claim here is that every name is offered, not that a
+    // link has no attributes.
+    for (const tab of loadBanner()) {
+      expect(inside).toMatch(new RegExp(`<a href="${tab.at.replace(/[/]/g, "\\/")}"[^>]*>${tab.says}</a>`));
+    }
   });
 
   it.each(SERVED)("dresses %s in the declared sheet, and in one", (_name, body) => {

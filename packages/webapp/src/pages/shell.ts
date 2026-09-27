@@ -139,13 +139,22 @@ const dockOf = (): string =>
   `<pre data-ui="shell.dock.output" tabindex="0" aria-label="the workspace's shell"></pre>` +
   `</aside>`;
 
-/** The banner as markup: the word, and under it one row of ways in, in the declared order,
- *  ending in the control that opens the dock. */
+/** The banner as markup: the word, then one row of ways in, in the declared order, ending in
+ *  the control that opens the dock.
+ *
+ *  Both sit in one `<header>` so the word and the row share a line. They were stacked, and the
+ *  word alone took a whole band of the window on every page — a banner is a place to come back
+ *  from, not a title card, and the height it was spending belonged to the work below it.
+ *
+ *  Which of the names the reader is under is not marked here yet: a page can answer at more
+ *  than one path — `projects.ts` exports two — so a tab matched on the target alone lights the
+ *  wrong name at the alias. Marking it wants the page's own name threaded from `discover.ts`,
+ *  which mounts it and is the only thing that knows it. */
 const bannerOf = (banner: string, tabs: readonly Tab[]): string =>
-  `<h1>${banner}</h1><nav>` +
+  `<header><h1>${banner}</h1><nav>` +
   tabs.map((tab) => `<a href="${tab.at}">${tab.says}</a>`).join("") +
   terminalButton() +
-  `</nav>`;
+  `</nav></header>`;
 
 /** The look `renderers.webapp` declares: the tokens every rule spends, the shape each page
  *  is allowed to name, and the rules themselves — the frame's, then one block per page. */

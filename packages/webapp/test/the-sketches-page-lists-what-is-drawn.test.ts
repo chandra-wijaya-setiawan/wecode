@@ -392,7 +392,8 @@ describe("it answers on a real workspace, out of the binary that ships", () => {
       const body = await (await fetch(`${(at as RegExpExecArray)[0]}/sketches`)).text();
       expect(body).toContain("where the dock sits");
       expect(body).toContain("right edge");
-      expect(body).toContain(`<a href="/sketches">Sketches</a>`);
+      // Served at /sketches, so its own name in the row is the one wearing the marker.
+      expect(body).toMatch(/<a href="\/sketches"[^>]*>Sketches<\/a>/);
     } finally {
       child.kill("SIGTERM");
     }

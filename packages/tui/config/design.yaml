@@ -227,7 +227,12 @@ renderers:
         # The banner's way in to every page: one row of names under the word, ruled off
         # from the page the way the mockup rules it off. It is the frame's and not any
         # page's, because it is the same row in every document.
-        nav: "display: flex; flex-wrap: wrap; gap: 0 1.5rem; margin: -1rem 0 0; border-bottom: 1px solid var(--rule)"
+        # The word and the row share a line. Stacked, the word alone took a band of every
+        # window — a banner is somewhere to come back from, not a title card, and that
+        # height belongs to the work under it. The rule is the header's, so the row keeps
+        # its own wrapping when the window is narrow.
+        header: "display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 1.75rem; border-bottom: 1px solid var(--rule)"
+        nav: "display: flex; flex-wrap: wrap; gap: 0 1.5rem; margin: 0; flex: 1"
         "nav a": "color: var(--faint); text-decoration: none; font-weight: 600; padding: .5rem 0; border-bottom: 2px solid transparent; margin-bottom: -1px"
         "nav a:hover": "color: var(--ink); border-bottom-color: var(--mark)"
         "p.empty": "margin: 0; color: var(--faint)"
