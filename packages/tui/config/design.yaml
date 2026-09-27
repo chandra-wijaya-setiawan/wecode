@@ -360,7 +360,12 @@ renderers:
           # The page's own name and the one control over it, above the tree. The heading is
           # an h2 for the reason the tasks page's is: the h1 is the shell's banner.
           "section.tree": "display: grid; gap: .9rem"
-          "section.tree > h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; letter-spacing: -.01em; margin: 0; color: var(--ink)"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.tree > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
           # One question and the control that sends it, ruled off from the tree the way the
           # tasks page rules its strip off. The word is the label, set small and quiet the
           # way every other word that names a control on this surface is; the answer is the
@@ -387,7 +392,12 @@ renderers:
           # The page's own name and its filter, above the two columns. The heading is an h2
           # for the reason the projects page's is: the h1 is the shell's banner.
           "section.tasks": "display: grid; gap: .9rem"
-          "section.tasks > h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; letter-spacing: -.01em; margin: 0; color: var(--ink)"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.tasks > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
           # One row of chips, ruled off from the list the way the mockup rules a strip off.
           "section.tasks .filter": "display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: baseline; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding: .55rem 0"
           "section.tasks .filter .says": "color: var(--faint); font-size: .75rem; text-transform: uppercase; letter-spacing: var(--tracking)"
@@ -426,7 +436,12 @@ renderers:
         projects:
           # The page's own heading is an h2 directly in the document's one element: the h1 is
           # the shell's banner, and this page is the long form of one box of the board.
-          "main > h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; letter-spacing: -.01em; margin: 0; color: var(--ink)"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "main > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
           "ul.strip": "list-style: none; margin: 0; display: flex; flex-wrap: wrap; gap: .75rem 2.5rem; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding: .9rem 0"
           "ul.strip li": "display: flex; gap: .4rem; align-items: baseline"
           "ul.strip .mark": "color: var(--mark)"
@@ -450,6 +465,12 @@ renderers:
           # page's card, because it is the same thing — a thing with a name, a state and a
           # list — and a second shape for it would be a second surface.
           "section.agents ul.agents": "list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr))"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.agents > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
           "section.agents ul.agents > li.worker": "background: var(--raised); border: 1px solid var(--rule); border-radius: 4px; padding: .8rem 1.25rem; display: grid; grid-template-columns: 1fr auto auto; gap: .2rem .75rem; align-items: baseline; min-width: 0"
           "section.agents ul.agents > li.worker > span.name": "font-family: var(--serif); font-size: 1.1rem; font-weight: 500; overflow-wrap: anywhere"
           "section.agents ul.agents > li.worker > span.seats": "color: var(--faint)"
@@ -465,6 +486,18 @@ renderers:
           # colour, so the page reads as *these are moving, these are not* at a glance.
           "section.cooking": "border-top: 2px solid var(--rule); padding-top: .6rem"
           "section.cooking h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; letter-spacing: -.01em; margin: 0 0 .4rem; display: flex; gap: .5rem; align-items: baseline"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.cooking[data-ui] > h2 + p.empty": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.cooking[data-ui] > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
           "section.cooking h2 .mark": "color: var(--mark)"
           "section.cooking h2 .count": "margin-left: auto; color: var(--faint); font-family: var(--mono); font-size: .8em"
           "section.cooking.moving h2 .mark": "color: var(--good)"
@@ -495,8 +528,18 @@ renderers:
           # row and not a card, because the question a reader arrives with is "which of these
           # did I draw", which is answered by reading down a column.
           "section.sketches": "display: grid; gap: .9rem"
-          "section.sketches > h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; letter-spacing: -.01em; margin: 0; color: var(--ink)"
-          "section.sketches > p.q": "margin: 0; color: var(--faint); font-family: var(--serif)"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.sketches > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.sketches > p.q": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
           # The bar, ruled off above the list the way the mockup rules a strip off. The count
           # of what is ticked pushes the buttons to the right, so the two acts sit together.
           "section.sketches .bar": "display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; border-top: 2px solid var(--rule); padding-top: .6rem"
