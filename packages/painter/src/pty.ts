@@ -51,6 +51,14 @@ export const DEFAULT_ROWS = 30;
  *  end in raw mode can tell the difference. */
 export const ENTER = "\r";
 
+/** How long after a prompt's text its Enter follows, in milliseconds.
+ *
+ *  Long enough that a full-screen program has finished reading the text and gone back to
+ *  waiting, short enough that nobody watching sees a pause. There is no right number here
+ *  to derive — what is being defeated is a heuristic about timing, so this is a timing
+ *  answer to it. */
+export const SUBMIT_AFTER = 150;
+
 /** One chunk of what the session drew. Bytes as the pty produced them, escape sequences
  *  and all: interpreting them is the screen's job, and a pane that is handed pre-stripped
  *  text cannot draw colour, cursor moves or a redraw. */
@@ -142,16 +150,51 @@ export class Session {
    *  far end is a program reading a terminal, not a service with an API. The one thing
    *  this does that `keys` does not is guarantee the submit: a prompt is a thing the
    *  designer has finished writing, and a prompt that arrives without its Enter sits in the
-   *  far end's composer looking sent.
+   *  far end's composer looking sent. The Enter follows the text rather than riding along
+   *  with it — see `SUBMIT_AFTER` — because arriving together is how it stopped counting.
    *
    *  Newlines inside the text are the hazard. A prompt written in a textarea carries them,
    *  and each one would submit early, turning one prompt into several half-prompts. So
    *  they are not passed through: the text is sent as its lines, and only the end of the
    *  whole prompt is an Enter. What a far end does with the fragments is its business; what
    *  this guarantees is that it sees one submit, at the end. */
+  /** Prompts waiting their turn. Each link writes one prompt's text, waits out the gap and
+   *  writes its Enter, so two prompts can never interleave. Never rejects: a link that finds
+   *  the session gone resolves and lets the next one look for itself. */
+  #submitting: Promise<void> = Promise.resolve();
+
   prompt(text: string): void {
     if (!this.running) throw new SessionError("the session has left");
-    this.pty.write(text.replaceAll("\r\n", "\n").replaceAll("\n", " ") + ENTER);
+    const said = text.replaceAll("\r\n", "\n").replaceAll("\n", " ");
+    // The Enter goes in a write of its own, a beat later. Written with the text it is one
+    // burst on the same stdin, and a full-screen program reading a terminal takes a burst
+    // ending in a newline for pasted content rather than for a person pressing a key — so
+    // the text landed in the composer of the agent this was sent to and sat there looking
+    // sent, which is the exact failure the Enter exists to prevent. A gap is what tells the
+    // two apart, because it is the only thing that does: there is no flag on stdin saying
+    // "a person typed this".
+    //
+    // Which makes a prompt two writes with a hole in the middle, and a second prompt
+    // arriving in that hole would put its text in before the first one's Enter — two
+    // comments merged into one line, in neither order. So they queue: a prompt's text and
+    // its Enter are one turn on this chain, and the next prompt waits for it. The queue is
+    // the reason the gap is safe, not an optimisation.
+    this.#submitting = this.#submitting.then(
+      () =>
+        new Promise<void>((done) => {
+          // The session can leave while a prompt is waiting its turn, and writing to a pty
+          // that has gone is a throw nobody is positioned to catch.
+          if (!this.running) return done();
+          this.pty.write(said);
+          const submit = setTimeout(() => {
+            if (this.running) this.pty.write(ENTER);
+            done();
+          }, SUBMIT_AFTER);
+          // Not a reason for the process to stay up: a board shutting down inside the gap
+          // should shut down, and an unsubmitted prompt is the lesser loss.
+          submit.unref?.();
+        }),
+    );
   }
 
   /** Close it however it got here, and hand back the exit code. Safe to call twice. */
