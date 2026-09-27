@@ -164,16 +164,17 @@ export const drawingsAt = (all: () => readonly Sketch[]): Page =>
 
 /** What turns a served drawing into one a person can annotate.
  *
- *  One tag, and only `overlay.js` is named: it imports `pick.js`, `queue.js` and
- *  `overlay.css.js` by the relative specifiers it was compiled with, so a document asking for
- *  one file is a browser fetching four. Naming all four here would be this file keeping a
- *  second copy of the painter's own import graph, to be got wrong the day one of them moves.
+ *  One tag, and it is `boot.js` rather than `overlay.js`: `overlay.js` is a state machine that
+ *  starts nothing, so a document that asked for it loaded a class nobody constructed and a
+ *  reviewer got no overlay at all. `boot.js` is the line that builds one, mounts the adapter
+ *  over this document and turns picking on. Everything else it needs it imports itself, so
+ *  this file keeps no copy of that import graph to get wrong the day one of them moves.
  *
  *  Appended rather than woven in: a drawing is an agent's own document and this route does not
  *  parse it. A module script at the end runs after the document is there to be picked in, which
  *  is the whole requirement — and a sketch with no `</body>` to insert before is still a sketch
  *  a reviewer should be able to mark up. */
-const ARMED = `<script type="module" src="${REVIEW.overlay}"></script>`;
+const ARMED = `<script type="module" src="${REVIEW.boot}"></script>`;
 
 // ─── the two frames ─────────────────────────────────────────────────────────────────
 

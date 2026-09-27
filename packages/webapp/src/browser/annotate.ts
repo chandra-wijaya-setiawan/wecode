@@ -27,7 +27,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { encode } from "@wecode/painter/dist/client/terminal.js";
 import type { OverlayHost } from "@wecode/painter/dist/client/overlay.js";
-import type { QueuedPrompt } from "@wecode/painter/dist/client/queue.js";
+import { noteOf } from "./round.js";
 import { SHELL_AT } from "../pages/shell.js";
 import type { Reply, Routes } from "../server.js";
 
@@ -53,6 +53,12 @@ export const REVIEW = {
   pick: `${REVIEW_AT}/pick.js`,
   queue: `${REVIEW_AT}/queue.js`,
   look: `${REVIEW_AT}/overlay.css.js`,
+  /** The adapter: the half that draws `view()` into a page and turns clicks back into calls. */
+  adapter: `${REVIEW_AT}/overlay-dom.js`,
+  /** What a round of notes is worded as, on the reviewer's side of the wire. */
+  round: `${REVIEW_AT}/round.js`,
+  /** The line that starts all of it. Without this the rest is a class nobody constructs. */
+  boot: `${REVIEW_AT}/boot.js`,
 } as const;
 
 const JS = "text/javascript";
@@ -77,9 +83,76 @@ export const review = (): Routes => {
     [REVIEW.pick]: fileAt("pick"),
     [REVIEW.queue]: fileAt("queue"),
     [REVIEW.look]: fileAt("overlay.css"),
+    [REVIEW.adapter]: ours("overlay-dom"),
+    [REVIEW.round]: ours("round"),
+    [REVIEW.boot]: { status: 200, type: `${JS}; charset=utf-8`, body: bootScript() },
   };
   return Object.fromEntries(Object.entries(held).map(([at, reply]) => [at, () => reply]));
 };
+
+
+/** One of this surface's own browser modules, compiled.
+ *
+ *  `tsc` leaves the specifiers it was given, so the built file asks for
+ *  `@wecode/painter/dist/client/overlay.css.js` — which a bundler would resolve and a browser
+ *  cannot. It is rewritten to the path this surface already serves that same file on, so the
+ *  browser gets one copy of it and not two. */
+const ours = (module: string): Reply => ({
+  status: 200,
+  type: `${JS}; charset=utf-8`,
+  body: readFileSync(fileURLToPath(new URL(`../../dist/browser/${module}.js`, import.meta.url)), "utf8")
+    .replace(/"@wecode\/painter\/dist\/client\/overlay\.css\.js"/g, `"${REVIEW.look}"`)
+    .replace(/"@wecode\/painter\/dist\/client\/([\w.-]+)\.js"/g, `"${REVIEW_AT}/$1.js"`),
+});
+
+/** The line that turns four served files into a working review loop.
+ *
+ *  Every other file here is a module the painter or this package already compiled; this is the
+ *  only one written as text, because it is the only one whose job is to *start* things. It is
+ *  the counterpart of `dock.ts`'s own script, and it is here rather than in the page for the
+ *  same reason: what a reviewer's browser runs against a drawing is this surface's decision,
+ *  not a decision of whichever agent wrote the drawing.
+ *
+ *  A frame is `JSON.stringify` — the painter's `encode` is exactly that — so the browser half
+ *  needs none of the painter's wire code to speak to the dock's own route. */
+const bootScript = (): string => `
+import { Overlay } from "${REVIEW.overlay}";
+import { mount, selectionOf } from "${REVIEW.adapter}";
+import { noteOf } from "${REVIEW.round}";
+
+const about = document.title || "this drawing";
+const host = {
+  deliver: async (prompts, end) => {
+    const body = JSON.stringify({ kind: "prompt", text: noteOf(prompts, about, end) });
+    try {
+      const reply = await fetch(${JSON.stringify(NOTES_AT)}, { method: "POST", body });
+      return reply.status === ${LANDED};
+    } catch {
+      return false;
+    }
+  },
+  end: () => undefined,
+};
+
+const overlay = new Overlay(host);
+const chrome = mount(overlay, document, {
+  boxOf: (selector) => {
+    const node = document.querySelector(selector);
+    if (node === null) return null;
+    const box = node.getBoundingClientRect();
+    return { top: box.top, left: box.left, width: box.width, height: box.height };
+  },
+  viewport: () => ({ width: window.innerWidth, height: window.innerHeight }),
+  // Converted, not handed over raw: a DOM Selection is not the TextSelection the machine
+  // reads, and selectionOf is the one place that knows the difference.
+  selection: () => selectionOf(window.getSelection()),
+});
+
+// Picking starts on, because a drawing served at the annotating route is a drawing somebody
+// opened to annotate. Arriving with it off would make the first click a navigation.
+overlay.setPicking(true);
+chrome.draw();
+`;
 
 // ─── a round, as words typed at a shell ─────────────────────────────────────────────
 
@@ -90,50 +163,7 @@ export const review = (): Routes => {
  *  one would submit early and turn one round into several half-rounds. Flattening here as
  *  well is not that guard repeated: it is what makes `noteOf` one line *by construction*, so
  *  the thing a test reads and the thing the shell receives are the same string. */
-const flat = (said: string): string => said.replace(/\s+/g, " ").trim();
-
-/** The words, quoted — or nothing at all, for a node that had none. Quoted by the encoder
- *  rather than by hand, so a reviewer who picked a node containing a quotation mark does not
- *  hand the agent a sentence it has to guess the end of. */
-const quoted = (text: string): string => (text === "" ? "" : ` ${JSON.stringify(text)}`);
-
-/** The words that were showing inside a node, which is how a person recognises it. */
-const showing = (text: string): string => (text === "" ? "" : ` showing${quoted(text)}`);
-
-/** One note, as the agent reads it.
- *
- *  All three parts of the pick travel, because all three are what `pick.ts` made them for:
- *  the CSS path is how the agent finds the node again, the tag is what it turned out to be,
- *  and the words are how a person recognises it in the source. A note that said only "this is
- *  too quiet" is a note nobody can act on.
- *
- *  A message belongs to the page rather than to any node — the reply strip makes those — so
- *  it carries no selector and does not pretend to. */
-export function lineOf(item: QueuedPrompt): string {
-  const { kind, selector, tag, text } = item.pick;
-  const said = flat(item.prompt);
-  if (kind === "message") return `about the page — ${said}`;
-  // A stretch of prose is the exact words to change, so it is quoted and nothing else: the
-  // tag a text pick carries is the word "text", and `<text>` is not an element of any page.
-  const what = kind === "text" ? `the words${quoted(text)}` : `<${tag}>${showing(text)}`;
-  return `at ${selector} (${what}) — ${said}`;
-}
-
-/** A round of notes as one line of input.
- *
- *  Numbered and in the order they were queued, because that is the order the reviewer worked
- *  in and an agent answering six notes needs to be able to say which one it is answering.
- *  `about` is what was being reviewed — the notes are all selectors within it, and a selector
- *  with nothing to hold it is ambiguous the moment there are two sketches.
- *
- *  `end` is Lavish's "Send & End": the round goes as it would have anyway, and the agent is
- *  told in the same breath that nothing further is coming, rather than being left waiting for
- *  a reviewer who has gone. */
-export function noteOf(prompts: readonly QueuedPrompt[], about: string, end = false): string {
-  const many = prompts.length === 1 ? "1 note" : `${prompts.length} notes`;
-  const notes = prompts.map((item, at) => `(${at + 1}) ${lineOf(item)}`).join(" ");
-  return `review of ${flat(about)} — ${many}${end ? ", and the last" : ""}: ${notes}`;
-}
+export { lineOf, noteOf } from "./round.js";
 
 // ─── the host ───────────────────────────────────────────────────────────────────────
 
