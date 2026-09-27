@@ -236,6 +236,27 @@ renderers:
         "nav a": "color: var(--faint); text-decoration: none; font-weight: 600; padding: .5rem 0; border-bottom: 2px solid transparent; margin-bottom: -1px"
         "nav a:hover": "color: var(--ink); border-bottom-color: var(--mark)"
         "p.empty": "margin: 0; color: var(--faint)"
+        # While a drawing is open the surface gets out of its way. A sketch is a mockup or
+        # a reading — it is drawn to be looked at whole — and it was being shown through a
+        # letterbox: a frame inside a column inside a padded body, scrolling in a box that
+        # scrolled in a page. Two bars for one document, and never wide enough to read as
+        # the thing it draws. The banner, the page title and its standfirst are all in the
+        # list you came from; what is not in the list is the drawing.
+        #
+        # The frame's and not the sketches page's: `body` and `header` belong to no page,
+        # and a page block may only name shapes its own roots declare.
+        #
+        # `:has()` rather than a class the page sets — which document this is is already
+        # in the markup, and a second way of saying so is a second thing to keep true.
+        "body:has([data-ui=\"sketches.open\"]) header": "display: none"
+        "body:has([data-ui=\"sketches.open\"]) section.sketches > h2": "display: none"
+        "body:has([data-ui=\"sketches.open\"]) section.sketches > p.q": "display: none"
+        "body:has([data-ui=\"sketches.open\"])": "padding: 0"
+        # …except the dock's own column, which still has to be kept clear — but only the
+        # column. The gutter `html.docked body` adds beside it is the frame being tidy
+        # around a page of rows, and a drawing is not rows: it goes to the dock's edge.
+        "html.docked body:has([data-ui=\"sketches.open\"])": "padding-right: min(100vw, max(33vw, 32rem))"
+        "body:has([data-ui=\"sketches.open\"]) main": "max-width: none; margin: 0; gap: 0"
         # The terminal dock, which the banner's last control opens. It is in every document
         # and belongs to no page, so it is the frame's — as the banner's row is.
         #
@@ -595,22 +616,51 @@ renderers:
           "section.sketches .row-acts a:hover": "color: var(--mark); text-decoration: underline"
           # …and the one that is open: the list gives way to it, so the drawing has the whole
           # width, with the way back above it where a reader looks for it.
-          "section.sketches .open": "display: grid; gap: .5rem; border-top: 2px solid var(--rule); padding-top: .6rem"
+          # An opened sketch is the page, not a panel on one. A drawing is a mockup or a
+          # reading and it was being shown through a letterbox: a frame of its own height
+          # inside a column inside a padded body, so it scrolled in a box that scrolled in a
+          # page — two bars for one document, and the mockup never wide enough to read as the
+          # thing it is drawing. So while one is open the surface gets out of the way. The
+          # banner, the title, the line it says of itself and its meta row are all in the list
+          # you came from; what is not there is the drawing.
+          #
+          # `:has()` rather than a class the page sets, because which document this is is
+          # already in the markup — `sketches.open` is only ever in it when one is open — and a
+          # second way of saying so is a second thing to keep true.
+          #
+          # padding-right is deliberately not touched: `html.docked body` keeps the dock's own
+          # column clear, and zeroing it here would put the drawing under the terminal.
+          "section.sketches .open": "display: block; gap: 0; border-top: 0; padding-top: 0"
           # The other way in, and the second thing `ui.yaml` declares under this page: the
           # switch the opened header wears, on its own line above the name. The line's own
           # spacing is the design's and not the browser's — the box above is a grid that
           # rules its rows apart, and a paragraph that kept the margin a browser gives a
           # paragraph would space itself twice. Every other line of the open view already
           # says so; this one did not, and said it in the browser's words instead.
-          "section.sketches .open p.back": "margin: 0"
-          "section.sketches .open p.back a": "color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .9em"
-          "section.sketches .open p.back a:hover": "color: var(--mark); text-decoration: underline"
+          # Everything the list already says, said again above the drawing. Gone while one is
+          # open — and gone by display rather than by not being written, so the words stay in
+          # the document for anything reading it rather than looking at it.
+          # Floated over the drawing rather than sitting above it: it holds the view/edit
+          # switch, so it has to stay reachable, but it must cost no height. Quiet until
+          # pointed at — it lies on somebody else's mockup.
+          "section.sketches .open .opened-head": "display: flex; align-items: center; gap: .6rem; position: fixed; top: .6rem; right: .6rem; z-index: 5; margin: 0; padding: .25rem .5rem; border: 1px solid var(--rule); border-radius: 999px; background: var(--raised); opacity: .55"
+          "section.sketches .open .opened-head:hover": "opacity: 1"
+          "section.sketches .open .opened-head h3": "display: none"
+          "section.sketches .open p.says": "display: none"
+          "section.sketches .open p.meta": "display: none"
+          # The body's own gutter, which is the frame's and right for a page of rows. A drawing
+          # is not rows. Top, left and bottom go; the right stays, because that is the dock's.
+          # The way back, floated over the drawing so it costs no height. Quiet until pointed
+          # at: it sits on somebody's mockup and must not be read as part of it.
+          "section.sketches .open p.back a": "display: inline-block; padding: .3rem .7rem; border-radius: 999px; border: 1px solid var(--rule); background: var(--raised); color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .8em; opacity: .55"
+          "section.sketches .open p.back": "position: fixed; top: .6rem; left: .6rem; z-index: 5; margin: 0; display: flex; align-items: center; gap: .5rem"
+          "section.sketches .open p.back .row-acts": "display: flex; gap: .5rem"
+          "section.sketches .open p.back a:hover": "opacity: 1; color: var(--mark); border-color: var(--mark); text-decoration: none"
           # The second of the two ways into a sketch, and the one an opened sketch wears: the
           # switch `ui.yaml` declares under `sketches.open.modes`. The header is the line it
           # sits on, so the header is a row — the name reads from the left and the switch is
           # pushed to the far end of it, where a control that changes the whole view belongs
           # and where it is out of the way of a name long enough to wrap.
-          "section.sketches .open .opened-head": "display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; min-width: 0"
           # One box in two halves, ruled down the middle, so the pair reads as a single switch
           # with a side held rather than as two links that happen to sit beside each other.
           # Set in the mono and in capitals, which is what this surface already does to a word
@@ -626,15 +676,14 @@ renderers:
           # offering to become what it already is. The fill is the mark and the word on it is
           # the surface's own paper — no colour here the palette does not already hold.
           "section.sketches .open .modes a[aria-current]": "background: var(--mark); color: var(--page)"
-          "section.sketches .open h3": "margin: 0; font-family: var(--serif); font-size: 1.25rem; font-weight: 500; overflow-wrap: anywhere"
+          # In the list you came from, and in the drawing itself.
+          "section.sketches .open h3": "display: none"
           "section.sketches .open h3 .id": "margin-right: .6rem; font-size: .8em"
-          "section.sketches .open p.says": "margin: 0; color: var(--faint); font-family: var(--serif); overflow-wrap: anywhere"
-          "section.sketches .open p.meta": "display: flex; flex-wrap: wrap; gap: 1.2rem; margin: 0; min-width: 0"
           "section.sketches .open p.meta .mono": "color: var(--faint); font-family: var(--mono); font-size: .88em; overflow-wrap: anywhere"
           # The drawing itself, in a frame and at the width of the page. Tall, because a
           # sketch of a surface is a surface: a box the height of a thumbnail shows a reader
           # the top of it and asks them to guess the rest.
-          "section.sketches .open iframe.drawing": "width: 100%; height: 80vh; border: 1px solid var(--rule); border-radius: 4px; background: var(--raised)"
+          "section.sketches .open iframe.drawing": "display: block; width: 100%; height: 100vh; border: 0; border-radius: 0; background: var(--raised)"
           # A row whose file is not on this machine. The record holds the path and the
           # directory holds the picture, and the two can part company.
           "section.sketches .open p.gone": "margin: 0; padding: 2rem; border: 1px dashed var(--rule); border-radius: 4px; color: var(--faint); font-family: var(--mono); font-size: .9em; text-align: center; overflow-wrap: anywhere"
