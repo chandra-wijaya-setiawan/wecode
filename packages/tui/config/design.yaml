@@ -528,15 +528,22 @@ renderers:
           # A sketch that earned a story, which is the one thing the column is read for.
           "section.sketches .state.signed": "color: var(--good)"
           "section.sketches .when": "color: var(--faint); font-family: var(--mono); font-size: .88em"
-          # The first of the two ways in, at the end of the row: the acts `ui.yaml` declares
-          # under `sketches.row`, which say what they say and go where they go there. A row
-          # of them, so what separates two acts is one gap said once rather than a margin
-          # each act carries — the grid already rules the column off from the one before it,
-          # and a row offering a single act spends nothing on spacing it. Quiet until it is
-          # pointed at, because a list of thirty rows with thirty loud links in it is a list
-          # nobody reads down.
-          "section.sketches .row-acts": "display: flex; gap: .7rem"
+          # The first of the two ways into a sketch, at the end of the row: the acts `ui.yaml`
+          # declares under `sketches.row`, which say what they say and go where they go
+          # there. Two of them — `view` and `edit` — so what separates them is one gap said
+          # once on the row of them rather than a margin each act carries, and the dot
+          # between is the look's own and not a character the page spells. The column never
+          # wraps: two short words that broke across two lines would make one row taller than
+          # the rest of the list for no reason a reader could see.
+          #
+          # Both stay quiet until they are pointed at, and neither is louder than the other.
+          # The signed sketch draws `edit` in the mark and in bold, which is a proposal
+          # calling out the word it is adding; on the page itself they are peers on every
+          # row, and a list of thirty rows with thirty bold links down it is a list nobody
+          # reads down.
+          "section.sketches .row-acts": "display: flex; gap: .4rem; align-items: baseline; white-space: nowrap"
           "section.sketches .row-acts a": "color: var(--faint); text-decoration: none; font-size: .9em"
+          "section.sketches .row-acts a + a::before": 'content: "·"; margin-right: .4rem; color: var(--rule)'
           "section.sketches .row-acts a:hover": "color: var(--mark); text-decoration: underline"
           # …and the one that is open: the list gives way to it, so the drawing has the whole
           # width, with the way back above it where a reader looks for it.
@@ -550,6 +557,27 @@ renderers:
           "section.sketches .open p.back": "margin: 0"
           "section.sketches .open p.back a": "color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .9em"
           "section.sketches .open p.back a:hover": "color: var(--mark); text-decoration: underline"
+          # The second of the two ways into a sketch, and the one an opened sketch wears: the
+          # switch `ui.yaml` declares under `sketches.open.modes`. The header is the line it
+          # sits on, so the header is a row — the name reads from the left and the switch is
+          # pushed to the far end of it, where a control that changes the whole view belongs
+          # and where it is out of the way of a name long enough to wrap.
+          "section.sketches .open .opened-head": "display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; min-width: 0"
+          # One box in two halves, ruled down the middle, so the pair reads as a single switch
+          # with a side held rather than as two links that happen to sit beside each other.
+          # Set in the mono and in capitals, which is what this surface already does to a word
+          # that labels a thing instead of being read as prose.
+          "section.sketches .open .modes": "display: inline-flex; margin-left: auto; border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; background: var(--raised)"
+          "section.sketches .open .modes a": "padding: .25rem .7rem; color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .76rem; text-transform: uppercase; letter-spacing: var(--tracking)"
+          "section.sketches .open .modes a + a": "border-left: 1px solid var(--rule)"
+          "section.sketches .open .modes a:hover": "color: var(--mark)"
+          # The reading being shown, which the page marks `aria-current="page"`. Filled rather
+          # than merely coloured: the question the switch answers is which of the two you are
+          # in, and a reader should get that from the shape before they read the word. It
+          # comes last, so the side being shown keeps its fill under a pointer instead of
+          # offering to become what it already is. The fill is the mark and the word on it is
+          # the surface's own paper — no colour here the palette does not already hold.
+          "section.sketches .open .modes a[aria-current]": "background: var(--mark); color: var(--page)"
           "section.sketches .open h3": "margin: 0; font-family: var(--serif); font-size: 1.25rem; font-weight: 500; overflow-wrap: anywhere"
           "section.sketches .open h3 .id": "margin-right: .6rem; font-size: .8em"
           "section.sketches .open p.says": "margin: 0; color: var(--faint); font-family: var(--serif); overflow-wrap: anywhere"
