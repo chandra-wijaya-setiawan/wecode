@@ -192,6 +192,26 @@ renderers:
         faint: "#6b7178"
         mark: "#2f6f77"
         good: "#3d6b4f"
+        # One hue a lane, the way a commit graph gives one colour a branch, and one hue a
+        # state. Both sets are sketch #7's — "the tree you can read" — whose `:root` holds the
+        # seven above at the same values and these ten beside them. The lane says where a row
+        # sits and the state says how it is going, which are different questions, so they are
+        # different colours: a node spends the state set while the line it hangs off spends
+        # the lane set.
+        #
+        # Named by the hue and not by the record's state, because thirteen states share six
+        # hues — every finished state is one green — and the mapping from one to the other is
+        # the frame's `:root`, in one place, rather than six colours written out thirteen times.
+        lane-story: "#2f6f77"
+        lane-req: "#8a5a2b"
+        lane-crit: "#5a5a8c"
+        lane-task: "#6b7178"
+        hue-done: "#1ee65c"
+        hue-doing: "#f5b301"
+        hue-ready: "#14c8b8"
+        hue-planned: "#1a73e8"
+        hue-failed: "#dc2626"
+        hue-dropped: "#8d8a80"
       # Three faces, as the mockup is set: a serif for what is read, a sans for the surface
       # itself, and a mono for what must line up — an id, a code, a count.
       #
@@ -258,19 +278,17 @@ renderers:
         "nav button::before": "content: '\u2039'; color: var(--mark)"
         "html.docked nav button::before": "content: '\u203a'"
         "p.empty": "margin: 0; color: var(--faint)"
-        # What state a row is in, as a colour, named once for every renderer that draws a
-        # node. Tokens and not colours: the palette is the signed mockup's seven and a
-        # colour added to it is a colour nobody signed.
+        # What state a row is in, as a colour: the one place the record's thirteen states are
+        # mapped onto the six hues sketch #7 signed. Every renderer that draws a node reads
+        # `--st-<state>` and never a colour, so a hue is changed in the palette above and
+        # nowhere else.
         #
-        # Ready is the green one — answered 28 Sep: green means this is ready to be worked,
-        # because that is the row a reader is scanning for. What is moving takes the mark.
-        # Everything settled goes quiet, because it is hidden by default and a colour on it
-        # would compete with the thing that needs somebody.
-        #
-        # `failed` has no red to take: the mockup signed no red. It takes full-strength ink,
-        # which reads as emphasis rather than as alarm, and that is the honest best until a
-        # red is signed into the palette.
-        ":root": "--st-ready: var(--good); --st-in_progress: var(--mark); --st-running: var(--mark); --st-failed: var(--ink); --st-planned: var(--faint); --st-on_hold: var(--faint); --st-done: var(--faint); --st-passed: var(--faint); --st-met: var(--faint); --st-accepted: var(--faint); --st-delivered: var(--faint); --st-released: var(--faint); --st-dropped: var(--faint)"
+        # Six hues and thirteen states, because the question a reader is asking is not which
+        # state a row is in but whether anything is owed on it. So every finished state — done,
+        # passed, met, accepted, delivered, released — is one green; `in_progress` and `running`
+        # are one amber; `planned` and `on_hold` are one blue. Ready keeps its own, because that
+        # is the row somebody is scanning for, and failed keeps the red.
+        ":root": "--st-ready: var(--hue-ready); --st-in_progress: var(--hue-doing); --st-running: var(--hue-doing); --st-failed: var(--hue-failed); --st-planned: var(--hue-planned); --st-on_hold: var(--hue-planned); --st-done: var(--hue-done); --st-passed: var(--hue-done); --st-met: var(--hue-done); --st-accepted: var(--hue-done); --st-delivered: var(--hue-done); --st-released: var(--hue-done); --st-dropped: var(--hue-dropped)"
         # While a drawing is open the surface gets out of its way. A sketch is a mockup or
         # a reading — it is drawn to be looked at whole — and it was being shown through a
         # letterbox: a frame inside a column inside a padded body, scrolling in a box that
@@ -477,12 +495,13 @@ renderers:
           "ul.tree > li > .row, ul.tree > li > details > summary.row": "background: color-mix(in srgb, var(--mark) 7%, transparent)"
           "ul.tree > li > .row:hover, ul.tree > li > details > summary.row:hover": "background: color-mix(in srgb, var(--mark) 13%, transparent)"
           "ul.tree .row > svg": "display: block; overflow: visible; justify-self: start"
-          # One hue a lane, the way a commit graph gives one colour a branch. The spine the
-          # stories sit on is the mark; everything inside a story is quieter than the story,
-          # because the lane is only there to say where a row hangs from.
-          "ul.tree .row .lane": "stroke: var(--rule)"
-          "ul.tree .row .lane[data-lane=\"0\"]": "stroke: var(--mark)"
-          "ul.tree .row .lane[data-lane=\"1\"]": "stroke: var(--faint)"
+          # One hue a lane, the way a commit graph gives one colour a branch — the four sketch
+          # #7 signed, in the order the rungs come. A fifth lane would be a rung this tree does
+          # not draw, so it takes the last of them rather than a colour nobody signed.
+          "ul.tree .row .lane": "stroke: var(--lane-task)"
+          "ul.tree .row .lane[data-lane=\"0\"]": "stroke: var(--lane-story)"
+          "ul.tree .row .lane[data-lane=\"1\"]": "stroke: var(--lane-req)"
+          "ul.tree .row .lane[data-lane=\"2\"]": "stroke: var(--lane-crit)"
           # A shut branch's lane leads to rows that are in the document but not on the
           # screen, so it reads as a pipe going nowhere. The rows are real and the lane is
           # truthful, so the markup keeps it and the sheet hides it until the branch opens.
@@ -496,7 +515,7 @@ renderers:
           # The state in words, as a chip at the right-hand edge, wearing the hue the row's
           # own node wears on the rail — one set of colours for both, so a reader never has
           # to learn two. `--hue` is the row's, written in by the page; see `tree.ts`.
-          "ul.tree .row .state": "font-family: var(--mono); font-size: .68rem; padding: 0 .38rem; border-radius: 2px; border: 1px solid color-mix(in srgb, var(--hue, currentColor) 40%, transparent); background: color-mix(in srgb, var(--hue, currentColor) 8%, var(--raised)); color: var(--hue, currentColor)"
+          "ul.tree .row .state": "font-family: var(--mono); font-size: .68rem; padding: 0 .38rem; border-radius: 2px; border: 1px solid color-mix(in srgb, var(--hue, currentColor) 32%, transparent); background: color-mix(in srgb, var(--hue, currentColor) 13%, var(--raised)); color: color-mix(in srgb, var(--hue, currentColor) 62%, var(--ink))"
         tasks:
           # The page's own name and its filter, above the two columns. The heading is an h2
           # for the reason the projects page's is: the h1 is the shell's banner.

@@ -18,7 +18,9 @@
  *  look is declared once, scoped per page, and spent by name. This one asks only whether the
  *  values are the signed ones.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { loadLook, type Rules, stylesheet } from "../src/pages/shell.js";
@@ -26,16 +28,38 @@ import { loadLook, type Rules, stylesheet } from "../src/pages/shell.js";
 const LOOK = loadLook();
 const SHEET = stylesheet();
 
-/** The mockup's `:root`, transcribed. The name on the left is what the colour is for on this
- *  surface; the name in the comment is what the mockup calls it. */
+/** The mockups' `:root`, transcribed. The name on the left is what the colour is for on this
+ *  surface; the name in the comment is what the mockup calls it.
+ *
+ *  Two signed mockups, and they agree. The shell's — `webapp-design.html` — signed the seven
+ *  the surface is drawn in. Sketch #7, "the tree you can read", signed those same seven at the
+ *  same values and ten more beside them: one hue a lane, the way a commit graph gives one
+ *  colour a branch, and one hue a state. Those ten were drawn and approved and then not built,
+ *  so the tree spent the seven on questions they cannot answer — `failed` took plain ink,
+ *  because the seven hold no red, and `dropped` took the rule, which on the raised background
+ *  is a word nobody can read. They are the tree's own hues and the tree's sketch is where they
+ *  were signed, so that is where they are read from. */
 const SIGNED_PALETTE: Readonly<Record<string, string>> = {
-  page: "#f8f7f3", // --bg
-  raised: "#fdfcfa", // --panel
-  rule: "#e5e2d9", // --line
+  page: "#f8f7f3", // --bg / --page
+  raised: "#fdfcfa", // --panel / --raised
+  rule: "#e5e2d9", // --line / --rule
   ink: "#1f2328", // --ink
-  faint: "#6b7178", // --dim
-  mark: "#2f6f77", // --cyan
-  good: "#3d6b4f", // --green
+  faint: "#6b7178", // --dim / --faint
+  mark: "#2f6f77", // --cyan / --mark
+  good: "#3d6b4f", // --green / --good
+  // Sketch #7's, and its names for them. The states are named by the hue rather than by the
+  // record's state, because thirteen states share these six; `design.yaml`'s frame `:root` is
+  // the one place that mapping is written.
+  "lane-story": "#2f6f77", // --lane-story
+  "lane-req": "#8a5a2b", // --lane-req
+  "lane-crit": "#5a5a8c", // --lane-crit
+  "lane-task": "#6b7178", // --lane-task
+  "hue-done": "#1ee65c", // --st-done
+  "hue-doing": "#f5b301", // --st-doing
+  "hue-ready": "#14c8b8", // --st-ready
+  "hue-planned": "#1a73e8", // --st-planned
+  "hue-failed": "#dc2626", // --st-failed
+  "hue-dropped": "#8d8a80", // --st-dropped
 };
 
 /** The mockup's three faces, first name and fallbacks both. A stack is signed whole: the
@@ -46,8 +70,8 @@ const SIGNED_TYPE: Readonly<Record<string, string>> = {
   mono: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
 };
 
-/** The mockup, if this machine has it. It is written beside the checkout it was drawn for,
- *  which is the parent of this worktree when the work is done in one. */
+/** The shell's mockup, if this machine has it. It is written beside the checkout it was drawn
+ *  for, which is the parent of this worktree when the work is done in one. */
 const MOCKUP = [
   "../../../.lavish/webapp-design.html",
   // …and a worktree of it sits two levels down, under `.wecode/worktrees`.
@@ -56,6 +80,15 @@ const MOCKUP = [
 ]
   .map((at) => fileURLToPath(new URL(at, import.meta.url)))
   .find((at) => existsSync(at));
+
+/** Sketch #7, which is where the lane and state hues were signed. A sketch is written into the
+ *  workspace it was drawn in, which is the operator's own directory and not this repository's —
+ *  so it is looked for under every workspace this machine has rather than at one path. */
+const SKETCH = existsSync(join(homedir(), ".wecode/workspaces"))
+  ? readdirSync(join(homedir(), ".wecode/workspaces"))
+      .map((w) => join(homedir(), ".wecode/workspaces", w, "sketches/the-tree-you-can-read-2.html"))
+      .find((at) => existsSync(at))
+  : undefined;
 
 /** Every declaration in the look, wherever it sits. */
 const declarations = (rules: Rules): readonly string[] =>
@@ -132,10 +165,16 @@ describe("the type is the mockup's three faces", () => {
   });
 });
 
-describe("the mockup itself agrees, where the machine has it", () => {
+/** The `:root` of a mockup on this machine, so the transcription above is held to the artifact
+ *  rather than taken on trust. */
+const rootOf = (at: string): string => {
+  const text = readFileSync(at, "utf8");
+  return text.slice(text.indexOf(":root{"), text.indexOf("}", text.indexOf(":root{")));
+};
+
+describe("the mockups themselves agree, where the machine has them", () => {
   it.skipIf(!MOCKUP)("declares the same colours and the same stacks as the artifact", () => {
-    const root = readFileSync(MOCKUP as string, "utf8");
-    const said = root.slice(root.indexOf(":root{"), root.indexOf("}", root.indexOf(":root{")));
+    const said = rootOf(MOCKUP as string);
     for (const [mockup, here] of [
       ["--bg", "page"], ["--panel", "raised"], ["--line", "rule"], ["--ink", "ink"],
       ["--dim", "faint"], ["--cyan", "mark"], ["--green", "good"],
@@ -145,5 +184,19 @@ describe("the mockup itself agrees, where the machine has it", () => {
     for (const [mockup, here] of [["--serif", "serif"], ["--sans", "sans"], ["--mono", "mono"]] as const) {
       expect(said, mockup).toContain(`${mockup}:${(LOOK.type[here] as string).replace(/, /g, ",")}`);
     }
+  });
+
+  // Sketch #7 is where the lanes and the states were signed, and it holds the shell's seven
+  // too — at the same values, which is what makes the two one look rather than two.
+  it.skipIf(!SKETCH)("declares the lanes and the states sketch #7 drew, and the same seven", () => {
+    const said = rootOf(SKETCH as string);
+    for (const [drawn, here] of [
+      ["--lane-story", "lane-story"], ["--lane-req", "lane-req"], ["--lane-crit", "lane-crit"],
+      ["--lane-task", "lane-task"], ["--st-done", "hue-done"], ["--st-doing", "hue-doing"],
+      ["--st-ready", "hue-ready"], ["--st-planned", "hue-planned"], ["--st-failed", "hue-failed"],
+      ["--st-dropped", "hue-dropped"],
+      ["--page", "page"], ["--raised", "raised"], ["--rule", "rule"], ["--ink", "ink"],
+      ["--faint", "faint"], ["--mark", "mark"], ["--good", "good"],
+    ] as const) expect(said, drawn).toContain(`${drawn}:${LOOK.palette[here]}`);
   });
 });
