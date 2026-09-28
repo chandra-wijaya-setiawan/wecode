@@ -1,42 +1,37 @@
 /** The record as a tree: the levels of work, and under each story the proof it was done.
  *
- *  The cockpit's outline and this page answer the same question — where a row sits in the
- *  work — so they are drawn from the same design. `shared.outline` in
- *  `packages/tui/config/design.yaml` says which levels a tree shows, which it folds and
- *  what a row of it says; none of that is decided here, and a second opinion about how deep
- *  a tree goes is two trees.
+ *  The cockpit's outline and this page answer the same question — where a row sits in the work
+ *  — so they are drawn from the same design. `shared.outline` in
+ *  `packages/tui/config/design.yaml` says which levels a tree shows, which it folds and what a
+ *  row of it says; a second opinion about how deep a tree goes is two trees.
  *
- *  The ledger is nine levels deep. Five are work and four — a requirement, its criteria,
- *  the tests that accept it and the tests a task is proven by — are the proof that a story
- *  was done rather than work being done. Drawn as rows they outnumber the work, which is
- *  why the terminal's outline sends them to a record's own page: a box twenty rows tall
- *  cannot spend twelve of them on one story's paperwork. A page in a browser can, because a
- *  row inside a fold costs the reader nothing once they shut it. So `levels.web` in the
- *  design names the four as levels this tree shows, and the proof of a story is under the
- *  story that it proves.
+ *  The ledger is nine levels deep. Five are work and four — a requirement, its criteria, the
+ *  tests that accept it and the tests a task is proven by — are the proof a story was done
+ *  rather than work being done. Drawn as rows they outnumber the work, which is why the
+ *  terminal's outline sends them to a record's own page: a box twenty rows tall cannot spend
+ *  twelve of them on one story's paperwork. A page in a browser can, so `levels.web` names the
+ *  four as levels this tree shows, and a story's proof is under the story it proves.
  *
- *  A parent is a disclosure, the way a comment thread's is: the reader shuts a branch they
- *  are not reading and opens it again later, and the browser keeps the marker and the
- *  keyboard for us. Which branches arrive shut is `levels.web.folds`, and it names none, so
- *  the page lands at the task — the row somebody is at. A leaf gets no disclosure, because
- *  there is nothing to disclose. Approval 1561 settled that this surface may carry controls;
- *  a disclosure is the mildest of them, and it changes nothing in wecode, only what this
- *  reader is looking at.
+ *  A parent is a disclosure, the way a comment thread's is: the reader shuts a branch they are
+ *  not reading and opens it again later, and the browser keeps the marker and the keyboard for
+ *  us. Which branches arrive shut is `levels.web.folds`, and it names none, so the page lands
+ *  at the task — the row somebody is at. A leaf gets none, having nothing to disclose. Approval
+ *  1561 settled that this surface may carry controls, and a disclosure is the mildest of them.
  *
- *  What the reader is offered around the tree — the one select that narrows it, the states it
+ *  What the reader is offered around the tree — the two selects that narrow it, the states one
  *  narrows by and what a row calls each level — is `packages/webapp/config/ui.yaml`'s. A word
- *  written here instead would be a decision about the surface nobody can read off a file.
+ *  written here would be a decision about the surface nobody can read off a file. The project
+ *  half of it is `picker.ts`'s; see the note there about why it is not in this file.
  *
  *  The nodes arrive as nodes, not as a database, for the reason the board's do: where a
  *  workspace is, is `bin.ts`'s.
  *
- *  How deep a row sits is drawn the way a commit graph draws it: the first column of every
- *  row is the swimlanes beside it, as one `<svg>` `rail.ts` makes. The line leaves a parent's node going
- *  right, turns down, and becomes the lane its children are threaded on, so a child is a node
- *  on a line rather than a stub off a phantom vertical. That file draws one row at a time and
- *  keeps no memory between rows, so where a row sits is this walk's to say: its depth, which
- *  ancestors' lanes still have a row to come, whether it is the last row on its own lane,
- *  whether anything above feeds that lane, and whether anything hangs under it.
+ *  How deep a row sits is drawn the way a commit graph draws it: the first column of every row
+ *  is the swimlanes beside it, as one `<svg>` `rail.ts` makes. The line leaves a parent's node
+ *  going right, turns down, and becomes the lane its children are threaded on, so a child is a
+ *  node on a line rather than a stub off a phantom vertical. That file keeps no memory between
+ *  rows, so where a row sits is this walk's to say: its depth, which ancestors' lanes still
+ *  have a row to come, whether it is the last on its own lane, and what hangs under it.
  *
  *  What is left of that rule — how the rail and the row sit beside each other — is, like
  *  every other rule of this surface, the shell's: one stylesheet, selected on the markup this
@@ -47,6 +42,7 @@ import { fileURLToPath } from "node:url";
 import type { Node } from "@wecode/core";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
+import { narrowedToProject, pickerOf, pickerRow, slugsOf, type Picker } from "../picker.js";
 import { rail } from "../rail.js";
 import { documentAt, shelled } from "./shell.js";
 
@@ -133,6 +129,8 @@ export interface Ui {
   /** What a row calls each level, by the record's own name for it. A level this map does not
    *  name is drawn by that name itself — see the note in `ui.yaml`. */
   readonly kinds: Readonly<Record<string, string>>;
+  /** Which project the reader is standing in. See `picker.ts`. */
+  readonly project: Picker;
 }
 
 const wordOf = (v: unknown, at: string, path: string): string => {
@@ -184,6 +182,7 @@ export function loadUi(path: string = UI): Ui {
       options: said.map((o, n) => optionOf(o, n, path)),
     },
     kinds: kinds as Readonly<Record<string, string>>,
+    project: pickerOf(tree, path),
   };
 }
 
@@ -219,20 +218,16 @@ const SAYS_SECTION = "Tree";
  *  the state it is in. Everything in it is a person's own words, so nothing reaches the
  *  document without coming through `escape`.
  *
- *  The rail is the row's first column rather than the `<li>`'s first child. Outside the row
- *  it had to be paid for twice — once as the drawing's own width, once as a negative margin
- *  pulling the children back out from under it — and the two never quite cancelled, so no
- *  two rows' text began at the same place. As a column of the same grid every row declares,
- *  depth is drawn by the rail and by nothing else, and every row's words start on one line
- *  down the page. It is `aria-hidden`, so it adds nothing to the name of the control it now
- *  sits inside.
+ *  The rail is the row's first column rather than the `<li>`'s first child. Outside the row it
+ *  was paid for twice — as the drawing's own width, and as a negative margin pulling the
+ *  children back out from under it — and the two never quite cancelled, so no two rows' text
+ *  began at the same place. As a column of the grid every row declares, depth is drawn by the
+ *  rail and by nothing else. It is `aria-hidden`, so it adds nothing to the control's name.
  *
- *  The row ends at the state, and the trailing column is that state alone. What used to
- *  trail it was the rollup — how many done, open and failed hang under the row — and it was
- *  a second answer to a question the tree already answers by being a tree: the rows it
- *  counted are the rows underneath, and a reader who wants them opens the branch. It was
- *  also the widest thing after the state and a number nobody can follow anywhere, so a
- *  reader scanning the column that says how a row is going read past it every time.
+ *  The row ends at the state, and the trailing column is that state alone. What used to trail
+ *  it was the rollup — how many done, open and failed hang under the row — a second answer to
+ *  a question the tree already answers by being a tree, the widest thing after the state, and
+ *  a number nobody can follow anywhere, so it was read past on every row.
  *
  *  The state carries its own hue in, as one custom property the sheet spends. Which hue a
  *  state wears is the look's — see `hueOf` — and a rule per state in the sheet would be
@@ -360,38 +355,40 @@ export function narrowed(nodes: readonly Node[], url: URL, ui: Ui = loadUi()): r
  *  the whole query with its own fields, so a parameter nobody wrote a field for is a
  *  parameter narrowing the tree silently threw away. The filter's own is left out: the
  *  select is the field for that one. */
-const carried = (url: URL, filter: Filter): string =>
+const carried = (url: URL, sends: readonly string[]): string =>
   [...url.searchParams]
-    .filter(([name]) => name !== filter.param)
+    .filter(([name]) => !sends.includes(name))
     .map(([n, v]) => `<input type="hidden" name="${escape(n)}" value="${escape(v)}">`)
     .join("");
 
 /** The filter: the word the declaration gives it, one select holding its answers, and the
  *  control that sends the one picked.
  *
- *  It is a `method="get"` form, which is the whole mechanism. A select does not navigate on
- *  its own, and what would make it — a handler on its change — is script; this page has
- *  none, so the reader presses the submit and the browser puts the answer on the query
- *  itself. Nothing here needs JavaScript to work, and what the form arrives at is an address
- *  the reader could have typed: narrowing stays a reading a person can send and bookmark.
+ *  It is a `method="get"` form, which is the whole mechanism. A select does not navigate on its
+ *  own, and what would make it — a handler on its change — is script; this page has none, so
+ *  the reader presses the submit and the browser puts the answer on the query. Nothing here
+ *  needs JavaScript, and what the form arrives at is an address the reader could have typed.
  *
- *  A `get` form is still a reading and not a verb. Every verb that changes wecode is the
- *  cli's; this one changes the query string and nothing else — which is why `action` is the
- *  page's own path and the rest of the query rides along as hidden fields rather than being
- *  thrown away, a `get` submission replacing the whole query with its own.
+ *  A `get` form is still a reading and not a verb. It changes the query string and nothing
+ *  else, which is why `action` is the page's own path and the rest of the query rides along as
+ *  hidden fields — a `get` submission replaces the whole query with its own.
  *
- *  The label wraps the select, so the word is what the control is named by rather than a
- *  sentence that happens to sit beside it, and the held answer is `selected`: the page says
- *  what it is narrowed to without being opened. */
-function filterRow(url: URL, filter: Filter): string {
+ *  Two selects and one form, because the two narrowings are one reading. The label wraps each
+ *  select, so the word is what the control is named by; the held answer is `selected`, so the
+ *  page says what it is narrowed to without being opened. */
+function filterRow(url: URL, ui: Ui, slugs: readonly string[]): string {
+  const { filter } = ui;
   const on = chosen(url, filter);
   const drawn = filter.options
     .map((o) => `<option value="${escape(o.value)}" data-ui="${o.id}"` +
       `${o === on ? " selected" : ""}>${escape(o.says)}</option>`)
     .join("");
+  // Which project before which states, the way the sketch draws the bar: where a reader is
+  // standing is chosen before what they want to see of it.
   return (
     `<form class="filter" method="get" action="${escape(url.pathname)}" data-ui="${filter.id}">` +
-    `${carried(url, filter)}<label>${escape(filter.says)}` +
+    `${carried(url, [filter.param, ui.project.param])}${pickerRow(url, ui.project, slugs)}` +
+    `<label>${escape(filter.says)}` +
     `<select name="${escape(filter.param)}">${drawn}</select></label>` +
     `<button type="submit" data-ui="${filter.submitId}">${escape(filter.submit)}</button></form>`
   );
@@ -401,13 +398,16 @@ function filterRow(url: URL, filter: Filter): string {
  *  whatever the query left of the record. */
 export function treeSection(nodes: readonly Node[], url: URL, levels?: Levels, ui?: Ui): string {
   const said = ui ?? loadUi();
-  const roots = narrowed(nodes, url, said);
+  // The projects are the whole record's and never the narrowed record's: a control that offers
+  // only the project a reader is already in is the door shutting behind them.
+  const slugs = slugsOf(nodes);
+  const roots = narrowed(narrowedToProject(nodes, url, said.project, slugs), url, said);
   const narrowedToNothing = roots.length === 0 && nodes.length > 0;
   const body = narrowedToNothing ? `<p class="empty">${NOTHING_MATCHES}</p>`
     : treeBranches(roots, levels, said);
   return (
     `<section class="tree" data-ui="${SECTION}"><h2>${SAYS_SECTION}</h2>` +
-    `${filterRow(url, said.filter)}${body}</section>`
+    `${filterRow(url, said, slugs)}${body}</section>`
   );
 }
 

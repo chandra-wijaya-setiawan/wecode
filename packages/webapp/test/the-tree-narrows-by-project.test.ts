@@ -108,8 +108,14 @@ const drawnKeys = (ns: readonly Node[]): readonly string[] => keysOf(shown(ns));
  *  so the project, release and epic above it are not rows — which project a reader is looking
  *  at is the picker's answer, asked once, rather than three rungs answering on every row. The
  *  done task and the delivered story are out; the story above the done task stays, being work
- *  still owed itself. */
-const OPEN_WECODE = ["story-4", "story-10", "task-11", "acceptance_criteria-12"];
+ *  still owed itself. Which leaves story 4, alone.
+ *
+ *  It said `["story-4", "story-10", "task-11", "acceptance_criteria-12"]` before the picker was
+ *  built, and no page could ever have drawn that: story 10 is `wecode-web`'s, and the record
+ *  above holds no task 11 and no criterion at all. It was written against a fixture that is not
+ *  the one in this file, and nothing caught it because the assertion it sits in could not run
+ *  until there was a control to narrow by. */
+const OPEN_WECODE = ["story-4"];
 
 const servers: Server[] = [];
 afterEach(async () => { for (const s of servers.splice(0)) await new Promise((done) => s.close(done)); });
@@ -297,7 +303,10 @@ describe("the project choice survives alongside the show filter", () => {
     const picked = submits(all, PARAM, "wecode-web");
     expect(asked(picked), "picking a project threw the state answer away")
       .toEqual(["/tree", [[PARAM, "wecode-web"], ["show", "all"]]]);
-    expect(rowsOf(await get(picked))).toEqual(keysOf([WEB]));
+    // `drawnKeys` and not `keysOf`: the tree is anchored at the story, so `wecode-web`'s project,
+    // release and epic are not rows. It said `keysOf` before the picker was built, which no page
+    // could have drawn either.
+    expect(rowsOf(await get(picked))).toEqual(drawnKeys([WEB]));
     // Both answers are what the page is holding shut, so it says both without being opened.
     const both = await get(picked);
     expect([controlOf(both, PARAM).held, controlOf(both, "show").held]).toEqual(["wecode-web", "all"]);

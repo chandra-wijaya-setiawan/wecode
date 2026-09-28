@@ -1,16 +1,16 @@
-/** The tree page: the record as nested lists, every level of it, the proof folded shut.
+/** The tree page: the record as nested lists, every level of it, arriving open at the task.
  *
  *  The nodes are hand-made, for the reason the board's rows are: what is held here is the page,
  *  and that the tree is the record's shape is `@wecode/core`'s `tree()`, tested where it lives.
  *
  *  Four things beyond the tree, none written out here. The depth is the design's; the filter's
- *  words, default and excluded states are `config/ui.yaml`'s, as is what a row spends on a
- *  record's own text — each read back out of an edited copy of the file that declares it, what is
- *  drawn named by the `data-ui` it carries, because an assertion on a class proves only that two
- *  files were written the same afternoon. What open only leaves out is checked against the machines
- *  that decide what terminal means, and `passed` — which they will not settle — against the
- *  `invalidate` that is why. And the fourth is that the filter needs no browser: the form is read
- *  off the page, submitted the way a `get` form is, and the address it names fetched. */
+ *  words, default and excluded states are `config/ui.yaml`'s, as is what a row calls each level —
+ *  each read back out of an edited copy of the file that declares it, what is drawn named by the
+ *  `data-ui` it carries, because an assertion on a class proves only that two files were written
+ *  the same afternoon. What open only leaves out is checked against the machines that decide what
+ *  terminal means, and `passed` — which they will not settle — against the `invalidate` that is
+ *  why. And the filter needs no browser: the form is read off the page, submitted the way a `get`
+ *  form is, and the address it names fetched. */
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -97,10 +97,11 @@ const plain = (s: string): string => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">
 const formOf = (body: string): string =>
   body.slice(body.indexOf("<form"), body.indexOf("</form>") + "</form>".length);
 const one = (form: string, re: RegExp): string => plain(re.exec(form)?.[1] as string);
-/** Where a browser lands on submitting the page's own form with this answer picked and nothing
- *  else touched: the action, then the successful controls — the hidden fields, in the order they
- *  are written, and the select's name against the option chosen. No script is consulted, because
- *  a `get` form has none; this is the whole mechanism. */
+/** Where a browser lands on submitting the page's own form with this answer picked: the action,
+ *  the hidden fields in the order written, then every select — `show` at the option chosen and
+ *  the rest as the page holds them. No script is consulted, a `get` form having none. The form
+ *  holds two selects and a browser sends both, which is how the project a reader is standing in
+ *  survives their asking for the finished work. */
 function submits(body: string, picked: string): string {
   const form = formOf(body);
   expect(form, "the filter is not a get form").toContain(`method="get"`);
@@ -108,7 +109,11 @@ function submits(body: string, picked: string): string {
   const query = new URLSearchParams(fields.map(([, n, v]) => [plain(n as string), plain(v as string)]));
   expect([...form.matchAll(/<option value="([^"]*)"/g)].map((m) => plain(m[1] as string)),
     `no answer of the filter says ${picked}`).toContain(picked);
-  query.set(one(form, /<select name="([^"]*)"/), picked);
+  for (const m of form.matchAll(/<select name="([^"]*)">([\s\S]*?)<\/select>/g)) {
+    const name = plain(m[1] as string);
+    const held = /<option value="([^"]*)"[^>]* selected>/.exec(m[2] as string);
+    query.set(name, name === "show" ? picked : plain(held?.[1] ?? ""));
+  }
   return `${one(form, /action="([^"]*)"/)}?${query}`;
 }
 
@@ -124,7 +129,6 @@ describe("how deep the tree goes is the design's", () => {
     // five — `shared.outline.levels` is untouched, and the tui's own test holds it to them.
     expect(LEVELS.shows).toEqual(["story", "acceptance_criteria", "acceptance_test", "task"]);
     expect(LEVELS.omits).toEqual(["project", "release", "epic", "requirement", "task_test"]);
-    // Nothing folds, which is what lands the page at the task. An empty list is an answer.
     expect(LEVELS.folds).toEqual([]);
     const moved = loadLevels(design(SHOWS, "        shows: [epic, story, task]"));
     expect(moved.shows).toEqual(["epic", "story", "task"]);
@@ -195,16 +199,14 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
       `<span class="id">#4</span><span class="label" title="ship the tree page">ship the tree page</span>` +
       `<span style="--hue:var(--st-planned, currentColor)" class="state">planned</span>`);
     expect([...rowOf(said, "story", 4).matchAll(/<span [^>]*class="([a-z]+)"/g)].map((m) => m[1])).toEqual(["kind", "id", "label", "state"]);
-    // The rail opens the row, inside it, so every row's columns are the one grid.
     expect([said.includes(`<div class="row"><svg`), said.includes(" · ")]).toEqual([true, false]);
-    // A row with plenty under it counts none of it, leaf or parent: the tree already says what is
-    // underneath, and a reader who wants those rows opens the branch instead of reading a number.
     const counted = { rollup: { done: 3, open: 1, failed: 2 } };
     const [full, over] = [treeBranches([node("story", 3, counted)]), treeBranches([node("story", 3, { ...counted, children: [node("story", 4)] })])];
     for (const g of ["rollup", "3 done", "1 open", "2 failed", "done"]) for (const b of [full, over]) expect(b, g).not.toContain(g);
     expect([rowOf(full, "story", 3).endsWith(`class="state">planned</span></div>`), rowOf(over, "story", 3).endsWith(`class="state">planned</span></summary>`)]).toEqual([true, true]);
     expect(rowOf(treeBranches([node("task", 8)]), "task", 8).endsWith(`class="state">planned</span></div>`)).toBe(true);
-    // Sibling roots are separate trees, an empty record says so, and words reach as words.
+    // The rail opens the row, so a row's columns are one grid; sibling roots are separate
+    // trees, an empty record says so, and words reach as words.
     const two = treeBranches([node("story", 1), node("story", 2)]);
     expect([nesting(two, "story", 1), nesting(two, "story", 2), [...two.matchAll(/<ul/g)].length]).toEqual([1, 1, 1]);
     expect(treeBranches([])).toBe(`<p class="empty">nothing in the record yet</p>`);
@@ -241,8 +243,7 @@ describe("what the reader is offered is the declaration's", () => {
     }
     // `failed` is not one — no drawn machine calls it terminal, and it is work still owed.
     expect(MACHINES.task.states).toContain("failed");
-    expect([TERMINAL.includes("failed"), filter.options[0]?.excludes.includes("failed")])
-      .toEqual([false, false]);
+    expect([TERMINAL.includes("failed"), filter.options[0]?.excludes.includes("failed")]) .toEqual([false, false]);
     // And a field the declaration does not hold is a refusal, named by what is missing.
     for (const [from, to, said] of [
       [`    says: "filter:"`, "", /tree\.filter\.says says nothing/],
@@ -268,12 +269,13 @@ describe("the filter is one select in a form, and not a row of chips", () => {
     // The chips are gone, the project's own among them, and so is the disclosure that held them.
     for (const c of ["in-progress", "needs-me", "project"]) expect(body, c).not.toContain(`filter.${c}`);
     for (const g of [`class="tag`, `<details class="pick"`, `<summary>open only`]) expect(body, g).not.toContain(g);
-    // One select of the declared answers, and the held one is what a browser shows shut — so
-    // the page says what it is narrowed to without being opened.
-    expect([[...body.matchAll(/<select/g)].length, [...body.matchAll(/<option /g)].length]).toEqual([1, 2]);
+    // Two selects — this filter and the project picker beside it — each of the declared answers,
+    // and the held one of each is what a browser shows shut, so the page says what it is narrowed
+    // to unopened. Four options: the filter's two, all-projects, and the one project held.
+    expect([[...body.matchAll(/<select/g)].length, [...body.matchAll(/<option /g)].length]).toEqual([2, 4]);
     expect([drawn(body, "tree.filter.open").includes(" selected"), [...body.matchAll(/ selected>/g)].length,
       drawn(other, "tree.filter.all").includes(" selected"),
-      drawn(other, "tree.filter.open").includes(" selected")]).toEqual([true, 1, true, false]);
+      drawn(other, "tree.filter.open").includes(" selected")]).toEqual([true, 2, true, false]);
   });
   /** A select goes nowhere on its own and this page has no script to send it, so it sits in a
    *  `get` form on the page's own path that ends in a control the reader presses. */
@@ -290,22 +292,20 @@ describe("the filter is one select in a form, and not a row of chips", () => {
     // And the page's own path, not a literal: the form goes back where the reader already is.
     expect(treeSection([WHOLE], new URL("http://localhost/elsewhere?show=all"))).toContain(`action="/elsewhere"`);
   });
-  /** A `get` submission replaces the whole query with the form's own fields, so everything else
-   *  the reader arrived with rides along as hidden ones or is silently thrown away. */
   it("carries the rest of the query as hidden fields, and never the filter's own parameter", () => {
     const kept = treeSection([WHOLE], at("?task=8&show=all&from=board"));
     expect(kept).toContain(`<input type="hidden" name="task" value="8">`);
     expect(kept).toContain(`<input type="hidden" name="from" value="board">`);
     expect([[...kept.matchAll(/<input /g)].length, kept.includes(`name="show" value=`)]).toEqual([2, false]);
-    // The fields come before the control, and a reader who arrived with nothing else gets none.
+    // The fields come before the control, a reader who arrived with nothing else gets none, and
+    // a person's own words reach a field as words: a value is an attribute, not markup.
     expect([kept.indexOf("<input") < kept.indexOf("<label>"), body.includes("<input")]).toEqual([true, false]);
-    // A person's own words reach a field as words: a value is an attribute, not markup.
     const odd = treeSection([WHOLE], at(`?q=${encodeURIComponent(`a "quote" & <tag>`)}`));
     expect([odd.includes(`name="q" value="a &quot;quote&quot; &amp; &lt;tag&gt;"`), odd.includes("<tag>")]).toEqual([true, false]);
     expect([submits(body, "all"), submits(other, "open")])
-      .toEqual(["/tree?show=all", "/tree?show=open"]);
+      .toEqual(["/tree?project=all&show=all", "/tree?project=all&show=open"]);
     expect([submits(treeSection([WHOLE], at("?task=8")), "all"), submits(kept, "open")])
-      .toEqual(["/tree?task=8&show=all", "/tree?task=8&from=board&show=open"]);
+      .toEqual(["/tree?task=8&project=all&show=all", "/tree?task=8&from=board&project=all&show=open"]);
     // An absent answer and one nothing offers are both the default, so a mistyped query lands.
     for (const q of ["", "?show=open", "?show=sideways"]) expect(chosen(at(q), filter).value, q).toBe("open");
     expect(chosen(at("?show=all"), filter).value).toBe("all");
@@ -338,7 +338,7 @@ describe("open only leaves out every terminal state and every passed test, and n
     const none = treeSection([node("project", 6, { state: "dropped" })], at());
     expect([none.includes("nothing in the record matches this filter"), none.includes("nothing in the record yet")]).toEqual([true, false]);
     expect([drawn(none, "tree.filter.open").includes(" selected"), submits(none, "all"),
-      treeSection([], at()).includes("nothing in the record yet")]).toEqual([true, "/tree?show=all", true]);
+      treeSection([], at()).includes("nothing in the record yet")]).toEqual([true, "/tree?project=all&show=all", true]);
     // The headline of the change before this: a requirement in `met` no longer keeps a `delivered`
     // standing. `met` was not one of the four states written here before, so the requirement read
     // as work still owed, and the story it hangs under was kept in order to place it.
@@ -411,9 +411,9 @@ describe("the page is served in the shell, and the surface routes it", () => {
     // The arriving page is narrowed; its own submit, pressed with the other answer picked, is
     // the address that widens it — and the widened page's form narrows it back again.
     const arrived = await (await fetch(`${addressOf(server)}/tree`)).text();
-    expect([arrived.includes(`<li id="story-11"`), submits(arrived, "all")]).toEqual([false, "/tree?show=all"]);
+    expect([arrived.includes(`<li id="story-11"`), submits(arrived, "all")]).toEqual([false, "/tree?project=all&show=all"]);
     const widened = await (await fetch(`${addressOf(server)}${submits(arrived, "all")}`)).text();
-    expect([widened === body, submits(widened, "open")]).toEqual([true, "/tree?show=open"]);
+    expect([widened === body, submits(widened, "open")]).toEqual([true, "/tree?project=all&show=open"]);
     expect(await (await fetch(`${addressOf(server)}${submits(widened, "open")}`)).text()).not.toContain(`<li id="story-11"`);
     // Work moves without anybody reloading, so the record is read again on every request.
     nodes = [];
