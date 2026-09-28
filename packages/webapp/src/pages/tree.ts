@@ -31,8 +31,16 @@
  *  The nodes arrive as nodes, not as a database, for the reason the board's do: where a
  *  workspace is, is `bin.ts`'s.
  *
- *  How deep a row sits is drawn as the nested list's own indent, and that rule — like every
- *  other rule of this surface — is the shell's: one stylesheet, selected on the markup this
+ *  How deep a row sits is drawn the way a commit graph draws it: every row opens with the
+ *  swimlanes beside it, as one `<svg>` `rail.ts` makes. The line leaves a parent's node going
+ *  right, turns down, and becomes the lane its children are threaded on, so a child is a node
+ *  on a line rather than a stub off a phantom vertical. That file draws one row at a time and
+ *  keeps no memory between rows, so where a row sits is this walk's to say: its depth, which
+ *  ancestors' lanes still have a row to come, whether it is the last row on its own lane,
+ *  whether anything above feeds that lane, and whether anything hangs under it.
+ *
+ *  What is left of that rule — how the rail and the row sit beside each other — is, like
+ *  every other rule of this surface, the shell's: one stylesheet, selected on the markup this
  *  file writes. */
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -40,6 +48,7 @@ import { fileURLToPath } from "node:url";
 import type { Node } from "@wecode/core";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
+import { rail } from "./rail.js";
 import { document, shelled } from "./shell.js";
 
 /** Where the two files are and what reads them. The design and the parser are resolved
@@ -275,26 +284,58 @@ export function shown(nodes: readonly Node[], levels: Levels = loadLevels()): re
   });
 }
 
+/** Where a row sits, as the rail beside it needs it told. `live` is the ancestors whose lanes
+ *  still have a row to come, by the lane each is on — an ancestor that was the last of its
+ *  siblings has nothing below it, so its lane is not carried past here. `first` is true of one
+ *  row in the page: the first root, whose lane nothing above it begins. */
+interface At {
+  readonly depth: number;
+  readonly live: readonly number[];
+  readonly last: boolean;
+  readonly first: boolean;
+}
+
+/** The hue the node wears, as a token named after the state the row is in. Which hue that is
+ *  belongs to the look and not to a page, so what is decided here is only that a node is
+ *  coloured by its state; a state the sheet says nothing about takes the colour of the text
+ *  beside it rather than drawing as a hole. */
+const hueOf = (state: string): string => `var(--st-${state}, currentColor)`;
+
+/** The lanes a row's children are drawn among: one in from this row, carrying whatever this
+ *  row carried, and this row's own lane too unless this row ended it. */
+const under = (at: At, of: readonly Node[], i: number): At => ({
+  depth: at.depth + 1,
+  live: at.last ? at.live : [...at.live, at.depth],
+  last: i === of.length - 1,
+  first: false,
+});
+
 /** One row and whatever hangs under it. A parent's row goes in the `<summary>` of a
  *  `<details>`, so the whole branch closes and opens on that row; a leaf is the row alone.
+ *
+ *  The rail opens the `<li>` and sits outside the disclosure: it is decoration a reader is
+ *  never read, and a drawing inside the `<summary>` would be part of the control's own name.
  *
  *  A branch arrives shut once the proof begins — the row is of a folded level, or what it
  *  holds is — and every branch above that arrives open, so the page lands at the last level
  *  of work. The rest of a long record's text is its own disclosure, and it sits after the
  *  row rather than inside the `<summary>`: a disclosure nested in a summary is one the
  *  reader cannot press without pressing the other. */
-function branch(node: Node, levels: Levels, text: Text): string {
+function branch(node: Node, levels: Levels, text: Text, at: At): string {
   const [said, rest] = spent(node.label, text.budget, text.columns);
   const more = rest === "" ? "" :
     `<details class="more" data-ui="${text.moreId}"><summary>${escape(text.more)}</summary>` +
     `<span class="rest">${escape(rest)}</span></details>`;
-  const open = `<li id="${escape(node.entity)}-${node.id}" data-ui="${NODE}">`;
-  if (node.children.length === 0) return `${open}${row(node, said)}${more}</li>`;
+  const kids = node.children;
+  const drawn = rail({ ...at, children: kids.length > 0, fill: hueOf(node.state) });
+  const open = `<li id="${escape(node.entity)}-${node.id}" data-ui="${NODE}">${drawn}`;
+  if (kids.length === 0) return `${open}${row(node, said)}${more}</li>`;
   const proof = (n: Node): boolean => levels.folds.includes(n.entity);
-  const shut = proof(node) || node.children.some(proof);
+  const shut = proof(node) || kids.some(proof);
   return (
     `${open}<details${shut ? "" : " open"}><summary>${row(node, said)}</summary>${more}` +
-    `<ul>${node.children.map((k) => branch(k, levels, text)).join("")}</ul></details></li>`
+    `<ul>${kids.map((k, i) => branch(k, levels, text, under(at, kids, i))).join("")}</ul>` +
+    `</details></li>`
   );
 }
 
@@ -303,7 +344,11 @@ export function treeBranches(nodes: readonly Node[], levels?: Levels, ui: Ui = l
   const said = levels ?? loadLevels();
   const roots = shown(nodes, said);
   if (roots.length === 0) return `<p class="empty">${NOTHING_YET}</p>`;
-  return `<ul class="tree">${roots.map((n) => branch(n, said, ui.text)).join("")}</ul>`;
+  // The roots are the outermost lane, and the first of them is the one row of the page with
+  // nothing above it: its lane starts at its own node rather than at the top of the row.
+  const top = (i: number): At =>
+    ({ depth: 0, live: [], last: i === roots.length - 1, first: i === 0 });
+  return `<ul class="tree">${roots.map((n, i) => branch(n, said, ui.text, top(i))).join("")}</ul>`;
 }
 
 /** The answer the query is holding. An answer the declaration does not offer is not an

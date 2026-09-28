@@ -15,9 +15,9 @@
  *  One row at a time, and no memory between rows. The svg is flush left and every lane sits
  *  at the same x in every row, so the rails meet across rows without this function ever
  *  seeing two: what a row needs to know is how deep it is, which lanes above it are still
- *  carrying a later sibling, whether it is the last row on its own lane, and whether
- *  anything hangs under it. The caller walking the tree knows all four; this file knows none
- *  of them and asks.
+ *  carrying a later sibling, whether it is the last row on its own lane, whether it is the
+ *  first with nothing above to come down from, and whether anything hangs under it. The
+ *  caller walking the tree knows all five; this file knows none of them and asks.
  *
  *  It decides no colour. The node's fill is the caller's — the state's hue, which is the
  *  page's decision and not a drawing's — and every line is `currentColor` under the lane
@@ -57,6 +57,12 @@ export interface Rail {
   readonly live: readonly number[];
   /** Whether this is the last row on its own lane — the lane ends at this node. */
   readonly last: boolean;
+  /** Whether this is the first row on its own lane with nothing above it to come down from
+   *  — the first row of the outermost lane, and nothing else. Every other lane is begun by
+   *  the turn the row above drew or carried, so it arrives at the top edge; this one is
+   *  begun by its own node, and a line drawn to the top edge here would be a lane coming out
+   *  of a parent that is not there. */
+  readonly first: boolean;
   /** Whether anything hangs under this row, which is what the line out of the node is
    *  for. */
   readonly children: boolean;
@@ -68,9 +74,10 @@ export interface Rail {
  *  arriving from the row above and either passing through or ending at the node, the turn
  *  down into the lane its children are drawn on, and the node itself.
  *
- *  The own lane is drawn from the top edge because that is where it comes from: a first
- *  child's lane is the turn its parent drew in the row above, and a later sibling's is the
- *  lane the row above passed through. */
+ *  The own lane is drawn from the top edge because that is usually where it comes from: a
+ *  first child's lane is the turn its parent drew in the row above, and a later sibling's is
+ *  the lane the row above passed through. The one row neither is true of is the first row of
+ *  the outermost lane — nothing is above it — and there the lane starts at the node. */
 export function rail(row: Rail): string {
   const x = laneAt(row.depth);
   const width = x + GAP;
@@ -78,7 +85,7 @@ export function rail(row: Rail): string {
     .filter((lane) => lane < row.depth)
     .sort((a, b) => a - b)
     .map((lane) => line(lane, `M ${laneAt(lane)} 0 V ${ROW}`));
-  const own = line(row.depth, `M ${x} 0 V ${row.last ? MIDDLE : ROW}`);
+  const own = line(row.depth, `M ${x} ${row.first ? MIDDLE : 0} V ${row.last ? MIDDLE : ROW}`);
   const turn = row.children
     ? line(
         row.depth + 1,

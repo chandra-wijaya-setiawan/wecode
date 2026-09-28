@@ -7,12 +7,13 @@
  *
  *  Four things are proved. The geometry is the sketch's — `the-tree-you-can-read`, which
  *  took it from VS Code's own graph: lanes 11 apart, a row 22 tall, the node halfway down at
- *  radius 4, a corner of 5, a stroke of 1.6. The four questions the caller answers each move
+ *  radius 4, a corner of 5, a stroke of 1.6. The five questions the caller answers each move
  *  the drawing: depth moves the lane, a dead ancestor lane is not drawn, the last row on a
- *  lane ends it at the node, and a row with children turns down into the next lane. The
- *  rails of two rows meet — a parent's turn ends exactly where its child's lane begins,
- *  which is the whole reason one row at a time is enough. And no colour is decided here: the
- *  node wears what the caller handed over, escaped, and every line takes the page's. */
+ *  lane ends it at the node, the first row on one begins it there, and a row with children
+ *  turns down into the next lane. The rails of two rows meet — a parent's turn ends exactly
+ *  where its child's lane begins, which is the whole reason one row at a time is enough. And
+ *  no colour is decided here: the node wears what the caller handed over, escaped, and every
+ *  line takes the page's. */
 import { Window } from "happy-dom";
 import { describe, expect, it } from "vitest";
 import { rail, type Rail } from "../src/pages/rail.js";
@@ -23,10 +24,10 @@ import { rail, type Rail } from "../src/pages/rail.js";
 const doc = new Window().document;
 type El = ReturnType<typeof doc.createElement>;
 
-/** A row of nothing in particular: depth 0, no lane above it, more rows to come on its own
- *  lane, nothing under it. Every test below is this with one answer changed, so what moved
- *  the drawing is the thing the test names. */
-const PLAIN: Rail = { depth: 0, live: [], last: false, children: false, fill: "teal" };
+/** A row of nothing in particular: depth 0, no lane above it, a row above feeding its own
+ *  lane and more rows to come on it, nothing under it. Every test below is this with one
+ *  answer changed, so what moved the drawing is the thing the test names. */
+const PLAIN: Rail = { depth: 0, live: [], last: false, first: false, children: false, fill: "teal" };
 
 const markupOf = (row: Partial<Rail> = {}): string => rail({ ...PLAIN, ...row });
 
@@ -116,6 +117,30 @@ describe("the rail beside one row", () => {
     for (const depth of [0, 2]) {
       expect(dOf(drawn({ depth, last: true }), depth)).toBe(`M ${11 * (depth + 1)} 0 V 11`);
     }
+  });
+
+  /** The other end of the same question, and the one the caller alone can answer: a lane is
+   *  drawn from the top edge because something above it put it there — the turn its parent
+   *  made, or the lane the row above passed through. The first row of the outermost lane has
+   *  neither, and a line to the top edge there reads as a lane whose parent scrolled off. */
+  it("begins its own lane at the node when nothing above it feeds that lane", () => {
+    for (const depth of [0, 2]) {
+      expect(dOf(drawn({ depth, first: true }), depth), `depth ${depth}`)
+        .toBe(`M ${11 * (depth + 1)} 11 V 22`);
+    }
+  });
+
+  it("draws a lane that both begins and ends on its row as the node alone", () => {
+    expect(dOf(drawn({ first: true, last: true }), 0)).toBe("M 11 11 V 11");
+    expect(at(nodeOf(drawn({ first: true, last: true })), "cy"), "which is where the node is")
+      .toBe("11");
+  });
+
+  it("begins nothing else at the node: the lanes above and the turn are where they were", () => {
+    const row = { depth: 2, live: [0, 1], children: true };
+    const [fed, unfed] = [drawn(row), drawn({ ...row, first: true })];
+    for (const lane of [0, 1, 3]) expect(dOf(unfed, lane), `lane ${lane}`).toBe(dOf(fed, lane));
+    expect([dOf(fed, 2), dOf(unfed, 2)]).toEqual(["M 33 0 V 22", "M 33 11 V 22"]);
   });
 
   it("turns out of the node and down into the lane its children are drawn on", () => {
