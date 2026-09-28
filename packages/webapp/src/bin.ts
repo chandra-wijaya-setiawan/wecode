@@ -29,6 +29,7 @@ import {
 } from "@wecode/core";
 import { answerAt } from "./answer.js";
 import { review } from "./browser/annotate.js";
+import { DROP_AT, dropAt } from "./drop.js";
 import { browser, docked } from "./browser/dock.js";
 import { DRAWN_AT, drawingsAt } from "./drawing.js";
 import { pages } from "./pages/discover.js";
@@ -122,6 +123,7 @@ const shell = shellAt(() => dirname(dbPath));
 const routes = {
   ...docked(await pages(readings)),
   "/answer": answerAt(() => db, operator),
+  [DROP_AT]: dropAt(() => db),
   [SHELL_AT]: shell.route,
   [DRAWN_AT]: drawingsAt(readings.sketches),
   ...review(),

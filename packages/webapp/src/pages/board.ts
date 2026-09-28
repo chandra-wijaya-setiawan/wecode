@@ -19,7 +19,8 @@
 import type { Board, Row } from "@wecode/core";
 import { code, description, loadViews, sectionMark, type View } from "@wecode/tui";
 import { html, type Page, type Reply } from "../server.js";
-import { document, shelled } from "./shell.js";
+import { pathOf } from "./discover.js";
+import { documentAt, shelled } from "./shell.js";
 
 /** How this page looks is not here either. It was — a template string with its own hex
  *  colours written into it, one of five such strings across the pages, all of them agreeing
@@ -81,9 +82,15 @@ export function boardBoxes(board: Board, views: readonly View[] = loadViews()): 
   return views.map((v) => section(v, board[v.filter])).join("");
 }
 
-/** The whole document: the board's boxes, in the shell and the look design.yaml declares. */
-export function boardPage(board: Board, views: readonly View[] = loadViews()): Reply {
-  return html(document(boardBoxes(board, views)));
+/** The whole document: the board's boxes, in the shell design.yaml declares, drawn where this
+ *  page is served — so the banner lights its name, as it does over a socket. Where that is
+ *  stays `discover.ts`'s one answer; what is said here is only which page is asking. */
+export function boardPage(
+  board: Board,
+  views: readonly View[] = loadViews(),
+  at = pathOf("board"),
+): Reply {
+  return html(documentAt(boardBoxes(board, views), at));
 }
 
 /** Which reading of the workspace this page is served from. The board is not the record:

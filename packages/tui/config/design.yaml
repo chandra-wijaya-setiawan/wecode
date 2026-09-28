@@ -235,6 +235,28 @@ renderers:
         nav: "display: flex; flex-wrap: wrap; gap: 0 1.5rem; margin: 0; flex: 1"
         "nav a": "color: var(--faint); text-decoration: none; font-weight: 600; padding: .5rem 0; border-bottom: 2px solid transparent; margin-bottom: -1px"
         "nav a:hover": "color: var(--ink); border-bottom-color: var(--mark)"
+        # Which of the names the reader is under. A row of nine names with nothing lit says
+        # only that the surface has nine pages. The one the document is being served at is
+        # drawn in ink and underlined in the mark, using the 2px border every name already
+        # reserves, so nothing shifts when it lights. Keyed to `aria-current`, which the
+        # markup already carries and which is the browser's own word for it, so the reader on
+        # a screen reader is told what the underline tells everyone else.
+        "nav a[aria-current=\"page\"]": "color: var(--ink); border-bottom-color: var(--mark)"
+        # The control that opens the dock. It is not a tenth way in and must not read as one,
+        # and it was reading as neither: a button in the browser's own box, the one element of
+        # the banner nobody had styled. Two things say what it is now — it sits off the end of
+        # the row at the edge the panel comes in from, and it wears a mark pointing that way.
+        # Everything else is the row's own colour, weight and hover, so it belongs to the
+        # banner without joining the names.
+        "nav button": "margin-left: auto; display: flex; align-items: baseline; gap: .4rem; border: 0; background: none; cursor: pointer; padding: .5rem 0; color: var(--faint); font: inherit; font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px"
+        "nav button:hover": "color: var(--ink); border-bottom-color: var(--mark)"
+        # The mark is the side the panel is on rather than another word for it, and it turns
+        # over with the panel: pointing in while the dock is shut, back out while it is
+        # showing. In the sheet and not in the markup, because it is a picture of a state that
+        # `aria-expanded` already says — a reader told the button is expanded must not also be
+        # read a bracket.
+        "nav button::before": "content: '\u2039'; color: var(--mark)"
+        "html.docked nav button::before": "content: '\u203a'"
         "p.empty": "margin: 0; color: var(--faint)"
         # While a drawing is open the surface gets out of its way. A sketch is a mockup or
         # a reading — it is drawn to be looked at whole — and it was being shown through a
@@ -580,6 +602,10 @@ renderers:
           # Nothing ticked is nothing to act on, and the bar says so rather than acting on
           # nothing: the script turns this off as soon as a tick goes on.
           "section.sketches .bar button:disabled": "color: var(--faint); border-color: var(--rule); background: var(--raised); cursor: default"
+          # What a person is told when rows went. The list is shorter by exactly what they
+          # ticked, and a list being shorter is not a message — so the page says it.
+          "section.sketches p.removed": "display: flex; align-items: baseline; gap: .75rem; margin: 0; padding: .45rem .8rem; border: 1px solid var(--mark); border-radius: 3px; background: var(--raised); color: var(--mark)"
+          "section.sketches p.removed a": "margin-left: auto; color: var(--faint); font-family: var(--mono); font-size: .85em"
           "section.sketches .hint": "color: var(--faint); font-size: .9em"
           "section.sketches ul.sketches": "list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule)"
           # The columns the mockup lines up: the tick, the id, the name and what it says, the

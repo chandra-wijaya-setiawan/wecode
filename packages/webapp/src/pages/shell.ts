@@ -146,13 +146,14 @@ const dockOf = (): string =>
  *  word alone took a whole band of the window on every page — a banner is a place to come back
  *  from, not a title card, and the height it was spending belonged to the work below it.
  *
- *  Which of the names the reader is under is not marked here yet: a page can answer at more
- *  than one path — `projects.ts` exports two — so a tab matched on the target alone lights the
- *  wrong name at the alias. Marking it wants the page's own name threaded from `discover.ts`,
- *  which mounts it and is the only thing that knows it. */
-const bannerOf = (banner: string, tabs: readonly Tab[]): string =>
+ *  The name the reader is under is lit — a row of nine names with nothing lit says only that
+ *  the surface has nine. `aria-current="page"` and not a class of this surface's own: the
+ *  browser's word for it, so the screen reader is told what the underline says. `at` is where
+ *  the document is served, which names one page here — `pathOf` is the only answer to where a
+ *  page answers — and empty is a fragment being proved, which lights nothing. */
+const bannerOf = (banner: string, tabs: readonly Tab[], at: string): string =>
   `<header><h1>${banner}</h1><nav>` +
-  tabs.map((tab) => `<a href="${tab.at}">${tab.says}</a>`).join("") +
+  tabs.map((t) => `<a href="${t.at}"${t.at === at ? ` aria-current="page"` : ``}>${t.says}</a>`).join("") +
   terminalButton() +
   `</nav></header>`;
 
@@ -239,13 +240,16 @@ export function stylesheet(look: Look = loadLook()): string {
  *
  *  `retired` is the stylesheet a page used to hand in. It is taken and dropped: the look is the
  *  design's now, so a page that still passes one is served the signed sheet anyway, and the
- *  parameter stays only so such a page compiles. Nothing in it reaches the document. */
+ *  parameter stays only so such a page compiles. Nothing in it reaches the document. `at` is
+ *  where the document is served — what the banner lights a name off — and defaults to nowhere,
+ *  so a caller proving a fragment gets a banner with nothing lit. */
 export function document(
   contents: string,
   retired = "",
   shell: Shell = loadShell(),
   css: string = stylesheet(),
   tabs: readonly Tab[] = loadBanner(),
+  at = "",
 ): string {
   void retired;
   const { doctype, lang, charset, viewport, title, banner, body } = shell;
@@ -253,9 +257,13 @@ export function document(
     `${doctype}\n<html lang="${lang}"><head><meta charset="${charset}">` +
     `<meta name="viewport" content="${viewport}">` +
     `<title>${title}</title><style>${css}</style></head>` +
-    `<body><${body}>${bannerOf(banner, tabs)}${contents}</${body}>${dockOf()}</body></html>\n`
+    `<body><${body}>${bannerOf(banner, tabs, at)}${contents}</${body}>${dockOf()}</body></html>\n`
   );
 }
+
+/** The document, served at `at` — `document()` with its design-read tail left alone. */
+export const documentAt = (contents: string, at: string): string =>
+  document(contents, "", loadShell(), stylesheet(), loadBanner(), at);
 
 /** What a page says, without saying it in a document. A page is given the target so it can
  *  read its own query; what it hands back is markup for the inside of the shell. */
@@ -272,7 +280,7 @@ export const shelled = (
   css: string = stylesheet(),
   tabs: readonly Tab[] = loadBanner(),
 ): Page =>
-  (url: URL): Reply => html(document(contents(url), retired, shell, css, tabs));
+  (url: URL): Reply => html(document(contents(url), retired, shell, css, tabs, url.pathname));
 
 // ─── the far end ────────────────────────────────────────────────────────────────────
 

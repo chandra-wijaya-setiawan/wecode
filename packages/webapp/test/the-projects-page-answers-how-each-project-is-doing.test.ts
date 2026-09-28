@@ -72,13 +72,13 @@ async function fetched(board: () => Board, path = "/", pulse?: () => Pulse): Pro
 }
 
 describe("where the projects page answers", () => {
-  it("is served at / and at /projects, with the same document", async () => {
+  it("is served at / and at /projects, one document but for the name the banner lights", async () => {
     expect([...PROJECTS_PATHS]).toEqual(["/", "/projects"]);
     const board = (): Board => boardWith({ projects: [row(1, "wecode", "active", "1/3 stories")] });
     const front = await (await fetched(board, "/")).text();
     const named = await (await fetched(board, "/projects")).text();
-    expect(front).toContain("wecode");
-    expect(named).toBe(front);
+    const unlit = (b: string): string => b.replace(` aria-current="page"`, "");
+    expect([front.includes("wecode"), unlit(named) === unlit(front), named.includes(`"/projects" aria-current="page"`)]).toEqual([true, true, true]);
   });
 
   it("answers with an html document", async () => {

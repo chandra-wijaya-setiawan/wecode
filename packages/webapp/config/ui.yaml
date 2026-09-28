@@ -122,15 +122,20 @@ sketches:
     # because taking a row out of the record is the cli's and never this surface's. One
     # command per picked sketch, because that is what the verb takes; the row goes and the
     # drawing stays, which is `core`'s `dropSketch` and not this page's choice.
+    # The one act on this surface that is a verb rather than a sentence. It used to type
+    # `wecode sketch drop <id>` at the dock for the operator to press return on, on the
+    # reasoning that this page decides nothing — but the surface already answers approvals
+    # with a real POST, so that was never the rule, and a command typed at a dock that is
+    # running an agent lands in that agent's composer, where it looks sent and does nothing.
+    # `posts` is what makes it a submit: the list is a form, every tick is an `id` field, so
+    # removing several needs no script.
     - id: sketches.act.remove
       name: remove
       says: Remove
       # The quiet button. The mock draws it in a red the signed palette does not hold, and a
       # colour added here would be a colour nobody signed.
       kind: plain
-      lead: ""
-      row: "wecode sketch drop %id%"
-      joins: "; "
+      posts: /sketches/drop
   # What the bar says of the ticks, which is what the acts will act on. The count is the
   # browser's, because a tick is; the words are not.
   picked:

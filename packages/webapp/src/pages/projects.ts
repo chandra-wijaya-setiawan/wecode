@@ -27,7 +27,7 @@ import { loadOffPage, loadViews, sectionMark, type View } from "@wecode/tui";
 import { html, type Page, type Reply, type Routes } from "../server.js";
 import { escape } from "./board.js";
 import { pathOf } from "./discover.js";
-import { document, shelled } from "./shell.js";
+import { documentAt, shelled } from "./shell.js";
 import { PROJECT } from "./tasks.js";
 
 /** A project's beat, by project id: how long since anything under it moved, in
@@ -255,8 +255,9 @@ export function projectsPage(
   pulse: Pulse = {},
   views: readonly View[] = loadViews(),
   off: readonly View[] = loadOffPage(),
+  at = pathOf("projects"),
 ): Reply {
-  return html(document(projectsContents(board, pulse, views, off), STYLE));
+  return html(documentAt(projectsContents(board, pulse, views, off), at));
 }
 
 /** This page is drawn from the board — one cell per box and one card per project row — so
