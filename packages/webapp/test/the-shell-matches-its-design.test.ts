@@ -22,7 +22,7 @@ import type { Board } from "@wecode/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { addressOf, boardAt, boardPage, serve } from "../src/index.js";
 import { discovered } from "../src/pages/discover.js";
-import { document, loadLook, loadShell, shelled, ShellError, stylesheet } from "../src/pages/shell.js";
+import { document, documentAt, loadLook, loadShell, shelled, ShellError, stylesheet } from "../src/pages/shell.js";
 
 const DESIGN = fileURLToPath(
   new URL("../../tui/config/design.yaml", import.meta.url),
@@ -130,7 +130,7 @@ describe("every page wears it", () => {
     const reply = page(new URL("http://localhost/"));
     expect(reply.status).toBe(200);
     expect(reply.type).toBe("text/html; charset=utf-8");
-    expect(reply.body).toBe(document("<p>anything</p>"));
+    expect(reply.body).toBe(documentAt("<p>anything</p>", "/"));
   });
 
   it("gives a page its own query and none of the document", () => {

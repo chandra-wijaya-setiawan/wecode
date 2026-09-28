@@ -30,12 +30,13 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import type { Sketch } from "@wecode/core";
 import { encode } from "@wecode/painter/dist/client/terminal.js";
+import { DROP_AT, REMOVED } from "../drop.js";
 import {
   linkTo, modeOf, openedSketch, opened, PARAM, stale, stateOf, storied, touched, VIEW, waysIn,
 } from "../drawing.js";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
-import { CONTROLS, document, DOCKED, shelled, SHELL_AT } from "./shell.js";
+import { CONTROLS, documentAt, DOCKED, shelled, SHELL_AT } from "./shell.js";
 
 /** What a reader opens a sketch with, offered here as well because it is this page's
  *  vocabulary and a caller of the page should not have to know which half of it holds
@@ -66,6 +67,9 @@ const mapOf = (v: unknown): Record<string, unknown> =>
  *  and `Make a story from it` types prose because no verb turns a drawing into work. */
 export interface Act {
   readonly id: string;
+  /** Where this act posts, for the one that is a verb rather than a sentence. An act with
+   *  this is a submit button in the list's own form; an act without it types at the dock. */
+  readonly posts?: string;
   /** The short name the markup keys a row's clauses by. */
   readonly name: string;
   readonly says: string;
@@ -100,9 +104,10 @@ function actOf(v: unknown, n: number, path: string): Act {
     name: wordOf(said["name"], `${at}.name`, path),
     says: wordOf(said["says"], `${at}.says`, path),
     kind: wordOf(said["kind"], `${at}.kind`, path),
-    lead: wordOf(said["lead"], `${at}.lead`, path),
-    row: wordOf(said["row"], `${at}.row`, path),
-    joins: wordOf(said["joins"], `${at}.joins`, path),
+    lead: said["posts"] === undefined ? wordOf(said["lead"], `${at}.lead`, path) : "",
+    row: said["posts"] === undefined ? wordOf(said["row"], `${at}.row`, path) : "",
+    joins: said["posts"] === undefined ? wordOf(said["joins"], `${at}.joins`, path) : "",
+    ...(said["posts"] === undefined ? {} : { posts: wordOf(said["posts"], `${at}.posts`, path) }),
   };
 }
 
@@ -123,6 +128,24 @@ export function loadUi(path: string = UI): Ui {
 }
 
 // ─── what a row says ────────────────────────────────────────────────────────────────
+
+/** How many rows the verb just removed, as the target spells it. Read off the address so
+ *  the notice survives a reload and is the same page however a reader arrived at it. */
+export const removedIn = (url: URL): number | null => {
+  const said = url.searchParams.get(REMOVED);
+  if (said === null) return null;
+  const n = Number(said);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+};
+
+/** What a person is told when rows went, and how to be rid of the notice. */
+const SAYS_REMOVED = (n: number): string =>
+  n === 1 ? "one sketch removed — the drawing is still on disk" : `${n} sketches removed — the drawings are still on disk`;
+const SAYS_DISMISS = "dismiss";
+
+const removed = (n: number): string =>
+  `<p class="removed" data-ui="sketches.removed">${SAYS_REMOVED(n)}` +
+  `<a href="?" data-ui="sketches.removed.dismiss">${SAYS_DISMISS}</a></p>`;
 
 /** What the page says when the record holds no sketch at all. Most days there are none,
  *  and a page that came back blank reads as a page that failed. */
@@ -168,7 +191,9 @@ const BAR = "sketches.bar";
  *  every sentence a person's shell can receive from this page is a sentence a test has
  *  already read. */
 const wordsOf = (acts: readonly Act[], s: Sketch): string =>
-  escape(JSON.stringify(Object.fromEntries(acts.map((a) => [a.name, clauseOf(a, s)]))));
+  escape(JSON.stringify(Object.fromEntries(
+    acts.filter((a) => a.posts === undefined).map((a) => [a.name, clauseOf(a, s)]),
+  )));
 
 /** One sketch: a row and not a card, because this is a list you scan. The tick leads
  *  because it is what the bar acts on; the name carries what the sketch says of itself
@@ -182,7 +207,7 @@ const wordsOf = (acts: readonly Act[], s: Sketch): string =>
 function row(s: Sketch, acts: readonly Act[], now: number): string {
   return (
     `<li id="sketch-${s.id}" data-ui="${ITEM}" data-words="${wordsOf(acts, s)}">` +
-    `<input type="checkbox" value="${s.id}" aria-label="pick #${s.id}">` +
+    `<input type="checkbox" name="id" value="${s.id}" aria-label="pick #${s.id}">` +
     `<span class="id">#${s.id}</span>` +
     `<span class="name"><a href="${linkTo(s.id, VIEW)}">${escape(s.name)}</a>` +
     `<span class="says">${escape(s.says)}</span></span>` +
@@ -204,11 +229,15 @@ const head = (): string =>
  *  a control that acts on nothing is a control that does nothing. `Remove` wears the plain
  *  button: the mock draws it in a red the signed palette does not hold. */
 function bar(ui: Ui): string {
-  const buttons = ui.acts.map(
-    (a) =>
-      `<button type="button" class="${a.kind}" data-ui="${a.id}" data-act="${a.name}" ` +
-      `data-lead="${escape(a.lead)}" data-joins="${escape(a.joins)}" disabled>` +
-      `${escape(a.says)}</button>`,
+  const buttons = ui.acts.map((a) =>
+    a.posts === undefined
+      ? `<button type="button" class="${a.kind}" data-ui="${a.id}" data-act="${a.name}" ` +
+        `data-lead="${escape(a.lead)}" data-joins="${escape(a.joins)}" disabled>` +
+        `${escape(a.says)}</button>`
+      // A submit, so removing what is ticked needs no script at all: the form carries one
+      // `id` per tick and the verb answers with the list again.
+      : `<button type="submit" class="${a.kind}" data-ui="${a.id}" data-act="${a.name}" ` +
+        `formaction="${a.posts}" formmethod="post" disabled>${escape(a.says)}</button>`,
   );
   return (
     `<div class="bar" data-ui="${BAR}">` +
@@ -232,13 +261,17 @@ const script = (ui: Ui): string =>
 const AT = ${JSON.stringify(SHELL_AT)};
 const frame = ${FRAMES};
 const rows = [...window.document.querySelectorAll('[data-ui="${ITEM}"]')];
-const acts = [...window.document.querySelectorAll('[data-ui="${BAR}"] [data-act]')];
+// Only the acts that type at the dock. The one that posts is a submit the browser handles,
+// and wiring it here sent the shell the word "undefined" alongside the real removal.
+const acts = [...window.document.querySelectorAll('[data-ui="${BAR}"] [data-act]')]
+  .filter((b) => b.getAttribute("formaction") === null);
+const submits = [...window.document.querySelectorAll('[data-ui="${BAR}"] [formaction]')];
 const count = window.document.querySelector('[data-ui="${ui.pickedId}"]');
 const picked = () => rows.filter((li) => li.querySelector("input").checked);
 const shown = () => {
   const n = picked().length;
   count.textContent = n === 0 ? ${JSON.stringify(ui.none)} : n + " " + ${JSON.stringify(ui.picked)};
-  for (const act of acts) act.disabled = n === 0;
+  for (const act of [...acts, ...submits]) act.disabled = n === 0;
 };
 for (const li of rows) li.querySelector("input").addEventListener("change", shown);
 shown();
@@ -258,12 +291,18 @@ for (const act of acts) {
 /** The list, whole: the bar, the columns, a row each. */
 function listing(all: readonly Sketch[], ui: Ui, now: number): string {
   if (all.length === 0) return `<p class="empty">${NOTHING_DRAWN}</p>`;
+  // A form around the whole list: the ticks are its fields, so the act that removes needs
+  // no script and works with several rows at once. `method=get` is never used — the one
+  // act that submits carries its own `formmethod=post` — but a form needs an action, and
+  // the page itself is the honest one for a submit that never happens.
   return (
+    `<form action="?" method="get" data-ui="sketches.form">` +
     bar(ui) +
     `<ul class="sketches" data-ui="${LIST}">` +
     head() +
     all.map((s) => row(s, ui.acts, now)).join("") +
     `</ul>` +
+    `</form>` +
     script(ui)
   );
 }
@@ -276,12 +315,16 @@ function listing(all: readonly Sketch[], ui: Ui, now: number): string {
  *  the target beside the sketch's own id. */
 export function sketchesList(all: readonly Sketch[], url: URL, ui = loadUi(), now = Date.now()): string {
   const one = opened(all, url);
+  // Only on the list: a notice about rows that went belongs beside the rows, and a reader
+  // who has opened one drawing is not looking at the list.
+  const note = one === null ? removedIn(url) : null;
   const body =
-    one === null
+    (note === null ? "" : removed(note)) +
+    (one === null
       ? listing(all, ui, now)
       : typeof one === "number"
         ? stale(one)
-        : openedSketch(one, modeOf(url), now);
+        : openedSketch(one, modeOf(url), now));
   return (
     `<section class="${SECTION}" data-ui="${SECTION}"><h2>Sketches</h2>` +
     `<p class="q">Anything drawn before it is work. Yours alone until one earns a story.</p>` +
@@ -290,9 +333,10 @@ export function sketchesList(all: readonly Sketch[], url: URL, ui = loadUi(), no
   );
 }
 
-/** The whole document: the list, in the shell design.yaml declares. */
+/** The whole document: the list, in the shell design.yaml declares, drawn at the target so the
+ *  banner lights this page's name — as it does over a socket. */
 export function sketchesPage(all: readonly Sketch[], url: URL): Reply {
-  return html(document(sketchesList(all, url)));
+  return html(documentAt(sketchesList(all, url), url.pathname));
 }
 
 /** The page, bound to a way of reading the record now. Read fresh on every request, for the

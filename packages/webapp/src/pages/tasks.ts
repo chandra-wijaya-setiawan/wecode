@@ -26,7 +26,7 @@
 import type { Node } from "@wecode/core";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
-import { document, shelled } from "./shell.js";
+import { documentAt, shelled } from "./shell.js";
 
 /** Which task the reader picked, as the target spells it. One name, so a link built by the
  *  page and a link typed by a person are the same link. */
@@ -284,9 +284,10 @@ export function tasksInbox(nodes: readonly Node[], url: URL): string {
   );
 }
 
-/** The whole document: the inbox, in the shell design.yaml declares. */
+/** The whole document: the inbox, in the shell design.yaml declares, drawn at the target so the
+ *  banner lights this page's name — as it does over a socket. */
 export function tasksPage(nodes: readonly Node[], url: URL): Reply {
-  return html(document(tasksInbox(nodes, url)));
+  return html(documentAt(tasksInbox(nodes, url), url.pathname));
 }
 
 /** The page, bound to a way of reading the record now. Read fresh on every request, for the

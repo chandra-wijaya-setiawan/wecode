@@ -22,7 +22,8 @@
 import type { Board, Row } from "@wecode/core";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
-import { document, shelled } from "./shell.js";
+import { pathOf } from "./discover.js";
+import { documentAt, shelled } from "./shell.js";
 
 /** This page is a view of what is moving, so it is served the board and not the record. */
 export const READS = "board";
@@ -214,8 +215,11 @@ export function agentsContents(board: Board): string {
   return `<section class="agents" data-ui="agents">${inside}</section>`;
 }
 
-/** The whole document: what the page says, in the shell design.yaml declares. */
-export const agentsPage = (board: Board): Reply => html(document(agentsContents(board)));
+/** The whole document: what the page says, in the shell design.yaml declares, drawn where
+ *  this page is served — so the banner lights its name, as it does over a socket. Where that
+ *  is stays `discover.ts`'s one answer; what is said here is only which page is asking. */
+export const agentsPage = (board: Board, at = pathOf("agents")): Reply =>
+  html(documentAt(agentsContents(board), at));
 
 /** The page, bound to a way of reading the board now. Read on every request, for the reason
  *  the board is: an agent finishes without anybody reloading. */

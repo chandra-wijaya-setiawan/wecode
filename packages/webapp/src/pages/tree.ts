@@ -49,7 +49,7 @@ import type { Node } from "@wecode/core";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
 import { rail } from "./rail.js";
-import { document, shelled } from "./shell.js";
+import { documentAt, shelled } from "./shell.js";
 
 /** Where the two files are and what reads them. The design and the parser are resolved
  *  through `@wecode/tui`, which owns both the file and the `yaml` dependency that parses it
@@ -429,9 +429,9 @@ export function treeSection(nodes: readonly Node[], url: URL, levels?: Levels, u
   );
 }
 
-/** The whole document: the tree page, in the shell design.yaml declares. */
+/** The whole document: the tree page, drawn at the target, in the shell design.yaml says. */
 export function treePage(ns: readonly Node[], url = NOWHERE, levels?: Levels, ui?: Ui): Reply {
-  return html(document(treeSection(ns, url, levels, ui)));
+  return html(documentAt(treeSection(ns, url, levels, ui), url.pathname));
 }
 
 /** This page declares no `READS`: the record is what a page reads unless it says otherwise,

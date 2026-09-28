@@ -159,9 +159,12 @@ describe("one bar above the list, and no way to draw a sketch from it", () => {
     expect(buttons).toContain("Make a story from it");
     expect(buttons).toContain("Remove");
     expect(body.indexOf(`class="bar"`)).toBeLessThan(body.indexOf(`<ul class="sketches"`));
-    // The absence of a verb and not of a word: the page takes no form at all, and says on
-    // the bar why there is nothing here that draws one.
-    expect(body).not.toContain("<form");
+    // The absence of a way to *draw* one, which is the claim — not the absence of a form.
+    // The list is a form now, because removing what is ticked is a verb this surface owns
+    // and a form is how ticks are posted without a script. What it has no field for is
+    // composing a sketch: no box to type one into, and no act that makes anything.
+    expect(body).not.toMatch(/<(textarea|input type="text")/);
+    expect(body).toContain(`action="?"`);
     expect(body).toContain(UI.hint);
   });
 
@@ -206,9 +209,18 @@ describe("make a story from it types the instruction at the dock, unsent", () =>
     expect(both).toContain(story.joins);
   });
 
-  it("types the cli's own verb for removal, one command per picked sketch", () => {
-    expect(typed(remove, [one])).toBe("wecode sketch drop 112");
-    expect(typed(remove, [one, two])).toBe("wecode sketch drop 112; wecode sketch drop 111");
+  it("removes by posting the verb, rather than by typing a command at the dock", () => {
+    // It typed `wecode sketch drop <id>` at the terminal once, and a dock running an agent
+    // took it into that agent's composer, where it looked sent and did nothing. Removal is
+    // a verb this surface owns — `core`'s own `dropSketch` — so it posts.
+    expect(remove.posts).toBe("/sketches/drop");
+    expect(remove.row).toBe("");
+    const body = listOf([one, two]);
+    expect(body).toContain(`formaction="/sketches/drop"`);
+    expect(body).toContain(`formmethod="post"`);
+    // Every tick is a field of the list's form, which is what lets one submit take several.
+    expect(body).toContain(`<input type="checkbox" name="id" value="112"`);
+    expect(body).toContain(`<input type="checkbox" name="id" value="111"`);
   });
 
   it("hands each row its clauses, so the browser composes out of words a test has read", () => {
@@ -218,7 +230,8 @@ describe("make a story from it types the instruction at the dock, unsent", () =>
       row.slice(at, row.indexOf(`"`, at)).replace(/&quot;/g, `"`).replace(/&amp;/g, "&"),
     ) as Record<string, string>;
     expect(said["story"]).toBe(clauseOf(story, one));
-    expect(said["remove"]).toBe(clauseOf(remove, one));
+    // The act that posts carries no clause: there is no sentence for it to compose.
+    expect(said["remove"]).toBeUndefined();
   });
 
   it("goes up as the painter's keys frame, built the same way on both sides of the wire", () => {
@@ -352,8 +365,10 @@ describe("the design and the declaration carry it", () => {
     const none = edited("  acts:\n", "  absent:\n");
     expect(() => loadUi(none)).toThrow(SketchesUiError);
     expect(() => loadUi(none)).toThrow(/offers no acts/);
-    expect(() => loadUi(edited(`      row: "wecode sketch drop %id%"\n`, ""))).toThrow(
-      /acts\[1\]\.row says nothing/,
+    // The first act types, so it is the one that must name its clause. The second posts,
+    // and an act that posts is not asked for words it has no use for.
+    expect(() => loadUi(edited(`      row: 'sketch #%id% "%name%", drawn at %html%'\n`, ""))).toThrow(
+      /acts\[0\]\.row says nothing/,
     );
   });
 });

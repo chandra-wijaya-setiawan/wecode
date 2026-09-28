@@ -25,7 +25,8 @@
 import type { Board, Row } from "@wecode/core";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
-import { document, shelled } from "./shell.js";
+import { pathOf } from "./discover.js";
+import { documentAt, shelled } from "./shell.js";
 
 /** The reading this page is served from. Not the record: the record is the shape of the
  *  work and holds no spend, and the board is the one reading that does. */
@@ -224,8 +225,11 @@ export function ledgerSections(board: Board): string {
   );
 }
 
-/** The whole document: the account, in the shell design.yaml declares. */
-export const ledgerPage = (board: Board): Reply => html(document(ledgerSections(board)));
+/** The whole document: the account, in the shell design.yaml declares, drawn where this
+ *  page is served — so the banner lights its name, as it does over a socket. Where that is
+ *  stays `discover.ts`'s one answer; what is said here is only which page is asking. */
+export const ledgerPage = (board: Board, at = pathOf("ledger")): Reply =>
+  html(documentAt(ledgerSections(board), at));
 
 /** The page, bound to a way of reading the board.
  *
