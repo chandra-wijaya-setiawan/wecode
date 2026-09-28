@@ -37,7 +37,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import type { Node, Rollup } from "@wecode/core";
+import type { Node } from "@wecode/core";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
 import { document, shelled } from "./shell.js";
@@ -215,13 +215,6 @@ const SECTION = "tree";
 const NODE = "tree.node";
 const SAYS_SECTION = "Tree";
 
-/** How much hangs under a row, in the three buckets the rollup counts. A bucket at nothing
- *  is not written as a zero — a row says what is under it, not what is not. */
-function rollup(counts: Rollup): string {
-  const buckets = ["done", "open", "failed"] as const;
-  return buckets.filter((b) => counts[b] > 0).map((b) => `${counts[b]} ${b}`).join(", ");
-}
-
 /** A record's own text in lines: the text's own newlines, and a line wider than a row is
  *  reckoned to be broken at the last space that fits. The width is declared rather than
  *  measured, because nothing tells a page how wide the reader's window is. */
@@ -251,15 +244,20 @@ export function spent(text: string, budget: number, columns: number): readonly [
 
 /** One row, as a sentence, with the record's text already cut to what the row spends on it.
  *  Everything in it is a person's own words, so nothing reaches the document without coming
- *  through `escape`. */
+ *  through `escape`.
+ *
+ *  The row ends at the state, and the trailing column is that state alone. What used to
+ *  trail it was the rollup — how many done, open and failed hang under the row — and it was
+ *  a second answer to a question the tree already answers by being a tree: the rows it
+ *  counted are the rows underneath, and a reader who wants them opens the branch. It was
+ *  also the widest thing after the state and a number nobody can follow anywhere, so a
+ *  reader scanning the column that says how a row is going read past it every time. */
 function row(node: Node, said: string): string {
-  const counts = rollup(node.rollup);
   return (
     `<span class="label">${escape(said)}</span>${JOIN}` +
     `<span class="id">#${node.id}</span>${JOIN}` +
     `<span class="kind">${escape(node.entity)}</span>${JOIN}` +
-    `<span class="state">${escape(node.state)}</span>` +
-    (counts === "" ? "" : `${JOIN}<span class="rollup">${escape(counts)}</span>`)
+    `<span class="state">${escape(node.state)}</span>`
   );
 }
 
