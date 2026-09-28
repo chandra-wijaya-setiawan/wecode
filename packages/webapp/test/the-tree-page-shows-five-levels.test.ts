@@ -184,27 +184,19 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
     const shut = body.indexOf("<details ");
     for (const p of LEVELS.folds) expect(body.indexOf(`<li id="${p}-`), p).toBeGreaterThan(shut);
   });
-  // A row is four columns and not a sentence — sketch #7 draws it that way, and the reason
-  // is that a reader scans a column and has to read a sentence. The rail is the first of
-  // them, so depth is drawn once; then what kind of record it is, its number, its own words,
-  // and the state. Nothing joins them: the ` · ` that used to made the four one line of
-  // prose, and with it there no two rows' text began at the same place.
-  //
-  // The trailing column carries the state and nothing else; the rollup that used to follow
-  // it is gone. `style` leads the state's span so the row still *ends* `class="state">…`,
-  // which is what says the state is last whatever hue it is wearing.
+  // Five columns and not a sentence, because a reader scans a column and has to read a sentence:
+  // the rail first, so depth is drawn once, then the kind, the id, the words and the state.
+  // Nothing joins them — the ` · ` that used to made the row one line of prose, and with it there
+  // no two rows' text began at the same place. The state ends it; `style` leads its span so the
+  // row still *ends* `class="state">…`.
   it("draws a row as the rail, the kind, the id, the words and the state, and ends there", () => {
     const said = treeBranches([node("story", 4, { label: "ship the tree page" })]);
     expect(rowOf(said, "story", 4)).toContain(`<span class="kind">story</span>` +
-      `<span class="id">#4</span>` +
-      `<span class="label" title="ship the tree page">ship the tree page</span>` +
+      `<span class="id">#4</span><span class="label" title="ship the tree page">ship the tree page</span>` +
       `<span style="--hue:var(--st-planned, currentColor)" class="state">planned</span>`);
     expect([...rowOf(said, "story", 4).matchAll(/<span [^>]*class="([a-z]+)"/g)].map((m) => m[1])).toEqual(["kind", "id", "label", "state"]);
     // The rail opens the row, inside it, so every row's columns are the one grid.
-    const row4 = rowOf(said, "story", 4);
-    expect(row4.indexOf("<svg")).toBeLessThan(row4.indexOf(`<span class="kind">`));
-    expect(row4).toContain(`<div class="row"><svg`);
-    expect(row4, "no part of a row is joined to the next").not.toContain(" · ");
+    expect([said.includes(`<div class="row"><svg`), said.includes(" · ")]).toEqual([true, false]);
     // A row with plenty under it counts none of it, leaf or parent: the tree already says what is
     // underneath, and a reader who wants those rows opens the branch instead of reading a number.
     const counted = { rollup: { done: 3, open: 1, failed: 2 } };
@@ -371,60 +363,32 @@ describe("open only leaves out every terminal state and every passed test, and n
   });
 });
 
-/** What a row calls a level is `ui.yaml`'s word and not the record's, because two of the
- *  record's own names are too long to spend a column of a 22px row on. Sketch #7 signed the
- *  short ones. A level the file names no word for is drawn by the record's own name, which is
- *  the one answer that cannot be wrong. */
-describe("a row calls its level what the declaration calls it", () => {
-  it("draws the declared word, and the record's own name for a level nobody named", () => {
-    expect(DECLARED.kinds["acceptance_criteria"]).toBe("criterion");
-    expect([DECLARED.kinds["acceptance_test"], DECLARED.kinds["task_test"]]).toEqual(["test", "proof"]);
-    const drawn = treeBranches([node("acceptance_criteria", 5)]);
-    expect(drawn).toContain(`<span class="kind">criterion</span>`);
-    expect(drawn, "the record's own name is not what a reader is shown").not.toContain("acceptance_criteria<");
-    // And the word is the file's: restate it and the row moves with it.
-    const moved = loadUi(ui("    acceptance_criteria: criterion", "    acceptance_criteria: rule"));
-    expect(treeBranches([node("acceptance_criteria", 5)], undefined, moved))
-      .toContain(`<span class="kind">rule</span>`);
-    // A level with no word gets the record's, rather than an empty column or a refusal.
-    const short = loadUi(ui("    acceptance_criteria: criterion\n", ""));
-    expect(treeBranches([node("acceptance_criteria", 5)], undefined, short))
-      .toContain(`<span class="kind">acceptance_criteria</span>`);
-  });
-  it("refuses a map that says nothing, and a word that is not one", () => {
-    for (const [from, to, said] of [
-      ["  kinds:\n", "  absent:\n", /tree\.kinds names no level/],
-      ["    story: story", "    story:", /tree\.kinds\.story says nothing/],
-    ] as const) for (const t of [TreeUiError, said]) expect(() => loadUi(ui(from, to)), from).toThrow(t);
-  });
-});
-
-/** A record's own text is drawn whole and cut by the sheet, not by this page. The budget of
- *  lines that used to be counted here — three, against a width of 96 characters nobody could
- *  measure — put the remainder behind a fold, and the fold cost a second line on nearly half
- *  the rows of the real record. A row is 22px because the rail drawn beside it is, so a row
- *  that is 44 leaves a gap and the lanes read as broken pipe. The words are carried whole in
- *  `title` instead, which costs no line and is where a reader looks for the rest of something
- *  cut. */
-describe("a record's own words are drawn whole, on one line, and cut by nobody here", () => {
+/** What a row calls a level is `ui.yaml`'s word: `acceptance_criteria` spends more of a 22px row
+ *  than the record's own words do, so sketch #7 signed the short ones, and a level the file names
+ *  none for is drawn by the record's own name — the one answer that cannot be wrong. The text is
+ *  drawn whole and cut by the sheet: the budget of lines counted here before put the rest behind
+ *  a fold, and the fold cost a second line on half the real record's rows, breaking the rail. */
+describe("a row says what the declaration says, on one line", () => {
   const long = [1, 2, 3, 4, 5].map((n) => `line ${n} ${"w".repeat(86)}`).join(" ");
-  const body = treeBranches([node("acceptance_criteria", 5, { label: long })]);
-  it("draws the whole of a long record and carries the whole of it in title", () => {
-    const row = rowOf(body, "acceptance_criteria", 5);
-    expect(row).toContain(`<span class="label" title="${long}">${long}</span>`);
-    for (const g of ["line 1", "line 5"]) expect(row, g).toContain(g);
+  it("calls a level the declared word, and an undeclared one the record's own name", () => {
+    expect([DECLARED.kinds["acceptance_criteria"], DECLARED.kinds["acceptance_test"], DECLARED.kinds["task_test"]]).toEqual(["criterion", "test", "proof"]);
+    const drawn = treeBranches([node("acceptance_criteria", 5)]);
+    expect([drawn.includes(`<span class="kind">criterion</span>`), drawn.includes("acceptance_criteria<")]).toEqual([true, false]);
+    // The word is the file's: restate it and the row moves. Take it away and the record answers.
+    for (const [from, to, said] of [["    acceptance_criteria: criterion", "    acceptance_criteria: rule", "rule"],
+      ["    acceptance_criteria: criterion\n", "", "acceptance_criteria"]] as const)
+      expect(treeBranches([node("acceptance_criteria", 5)], undefined, loadUi(ui(from, to))), said).toContain(`<span class="kind">${said}</span>`);
+    for (const [from, to, said] of [["  kinds:\n", "  absent:\n", /tree\.kinds names no level/],
+      ["    story: story", "    story:", /tree\.kinds\.story says nothing/]] as const) for (const t of [TreeUiError, said]) expect(() => loadUi(ui(from, to)), from).toThrow(t);
   });
-  it("spends no fold, on a long record or a short one", () => {
-    const short = treeBranches([node("acceptance_criteria", 5, { label: "it holds" })]);
-    expect(short).toContain(`<span class="label" title="it holds">it holds</span>`);
+  // One row, one line: nothing sits between a row and the next, which keeps one rail touching the next.
+  it("draws the whole of a long record, carries it in title, and spends no fold", () => {
+    const body = treeBranches([node("acceptance_criteria", 5, { label: long })]);
+    expect(rowOf(body, "acceptance_criteria", 5)).toContain(`<span class="label" title="${long}">${long}</span>`);
     const parent = treeBranches([node("story", 4, { label: long, children: [node("task", 8)] })]);
-    for (const b of [body, short, parent]) {
+    for (const b of [body, parent])
       for (const g of [`class="more"`, "tree.node.more", `class="rest"`]) expect(b, g).not.toContain(g);
-    }
-    // One row, one line: the row element opens and closes with nothing between it and the
-    // next, which is what keeps one row's rail touching the next one's.
-    expect(parent).toContain(`</span></summary><ul>`);
-    expect(body).toContain(`</span></div></li>`);
+    expect([parent.includes(`</span></summary><ul>`), body.includes(`</span></div></li>`)]).toEqual([true, true]);
   });
 });
 
