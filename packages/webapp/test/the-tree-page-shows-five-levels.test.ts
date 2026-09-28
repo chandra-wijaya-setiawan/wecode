@@ -127,11 +127,9 @@ describe("how deep the tree goes is the design's", () => {
 describe("the proof of a story is drawn under the story, and the tree is nested lists", () => {
   const body = treeBranches([WHOLE]);
   it("keeps every level at the depth the record put it, open above the proof and shut at it", () => {
-    expect(shown([WHOLE])[0]?.children[0]?.children[0]?.children[0]?.children.map((c) => c.entity))
-      .toEqual(["requirement"]);
+    expect(shown([WHOLE])[0]?.children[0]?.children[0]?.children[0]?.children.map((c) => c.entity)).toEqual(["requirement"]);
     expect([body.includes(`<ul class="tree">`), [...body.matchAll(/<ul/g)].length]).toEqual([true, 9]);
-    expect(([...CHAIN, ["task", 8], ["task_test", 9]] as const).map(([e, i]) => nesting(body, e, i)))
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(([...CHAIN, ["task", 8], ["task_test", 9]] as const).map(([e, i]) => nesting(body, e, i))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     for (const proof of LEVELS.folds) expect(body, proof).toContain(`<li id="${proof}-`);
     expect([...body.matchAll(/<li id="/g)]).toHaveLength(9);
     // Nothing is lifted past a proof level: the task hangs under the test that accepts it.
@@ -139,8 +137,7 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
     for (const t of ["ul", "li", "details", "summary"]) expect([...body.matchAll(new RegExp(`<${t}[ >]`, "g"))].length,
       t).toBe([...body.matchAll(new RegExp(`</${t}>`, "g"))].length);
     // The work arrives open and the proof does not, so the page lands at story level.
-    expect([[...body.matchAll(/<details open>/g)].length, [...body.matchAll(/<details>/g)].length])
-      .toEqual([3, 5]);
+    expect([[...body.matchAll(/<details open>/g)].length, [...body.matchAll(/<details>/g)].length]).toEqual([3, 5]);
     // Each proof row is a disclosure of its own, so the reader opens one level at a time.
     for (const [e, id, d] of [["project", 1, " open"], ["release", 2, " open"], ["epic", 3, " open"],
       ["requirement", 5, ""], ["acceptance_criteria", 6, ""]] as const)
@@ -155,20 +152,23 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
     expect(shut).toBe(body.indexOf(open) + open.length);
     for (const p of LEVELS.folds) expect(body.indexOf(`<li id="${p}-`), p).toBeGreaterThan(shut);
   });
-  // A row is a sentence: label, id, kind, state, and what hangs under it, said once.
-  it("leads a row with the label, then the id, the kind, the state and the rollup", () => {
+  // A row is a sentence: label, id, kind, state — and it stops there. The trailing column
+  // carries the state and nothing else; the rollup that used to follow it is gone.
+  it("leads a row with the label, then the id and the kind, and ends at the state alone", () => {
     const said = treeBranches([node("story", 4, { label: "ship the tree page" })]);
     expect(rowOf(said, "story", 4)).toContain(`<span class="label">ship the tree page</span> · ` +
       `<span class="id">#4</span> · <span class="kind">story</span> · <span class="state">planned</span>`);
-    const full = treeBranches([node("epic", 3, { rollup: { done: 3, open: 1, failed: 0 } })]);
-    expect(rowOf(full, "epic", 3)).toContain(`<span class="rollup">3 done, 1 open</span>`);
-    // Never a bucket at nothing, and nothing at all when every bucket is at nothing.
-    expect(rowOf(full, "epic", 3)).not.toContain("failed");
+    expect([...rowOf(said, "story", 4).matchAll(/<span class="([a-z]+)"/g)].map((m) => m[1])).toEqual(["label", "id", "kind", "state"]);
+    // A row with plenty under it counts none of it, leaf or parent: the tree already says what is
+    // underneath, and a reader who wants those rows opens the branch instead of reading a number.
+    const counted = { rollup: { done: 3, open: 1, failed: 2 } };
+    const [full, over] = [treeBranches([node("epic", 3, counted)]), treeBranches([node("epic", 3, { ...counted, children: [node("story", 4)] })])];
+    for (const g of ["rollup", "3 done", "1 open", "2 failed", "done"]) for (const b of [full, over]) expect(b, g).not.toContain(g);
+    expect([rowOf(full, "epic", 3).endsWith(`class="state">planned</span>`), rowOf(over, "epic", 3).endsWith(`class="state">planned</span></summary>`)]).toEqual([true, true]);
     expect(rowOf(treeBranches([node("task", 8)]), "task", 8).endsWith(`class="state">planned</span>`)).toBe(true);
     // Sibling roots are separate trees, an empty record says so, and words reach as words.
     const two = treeBranches([node("project", 1), node("project", 2)]);
-    expect([nesting(two, "project", 1), nesting(two, "project", 2), [...two.matchAll(/<ul/g)].length])
-      .toEqual([1, 1, 1]);
+    expect([nesting(two, "project", 1), nesting(two, "project", 2), [...two.matchAll(/<ul/g)].length]).toEqual([1, 1, 1]);
     expect(treeBranches([])).toBe(`<p class="empty">nothing in the record yet</p>`);
     const odd = treeBranches([node("story", 4, { label: `a <script> & "quotes"` })]);
     expect([odd.includes("<script>"), rowOf(odd, "story", 4).includes("a &lt;script&gt; &amp; &quot;quotes&quot;")]).toEqual([false, true]);
