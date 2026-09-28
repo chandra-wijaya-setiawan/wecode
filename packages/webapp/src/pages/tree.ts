@@ -48,7 +48,7 @@ import { fileURLToPath } from "node:url";
 import type { Node } from "@wecode/core";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
-import { rail } from "./rail.js";
+import { rail } from "../rail.js";
 import { documentAt, shelled } from "./shell.js";
 
 /** Where the two files are and what reads them. The design and the parser are resolved
@@ -328,12 +328,16 @@ function branch(node: Node, levels: Levels, text: Text, at: At): string {
     `<span class="rest">${escape(rest)}</span></details>`;
   const kids = node.children;
   const drawn = rail({ ...at, children: kids.length > 0, fill: hueOf(node.state) });
+  // The rail's own width, handed to the sheet: the row sits to the right of it and the
+  // children start back at nought, so a depth is drawn once — by the rail — and not a
+  // second time by a nested indent.
+  const wide = `--rail:${11 * (at.depth + 2)}px`;
   const open = `<li id="${escape(node.entity)}-${node.id}" data-ui="${NODE}">${drawn}`;
   if (kids.length === 0) return `${open}${row(node, said)}${more}</li>`;
   const proof = (n: Node): boolean => levels.folds.includes(n.entity);
   const shut = proof(node) || kids.some(proof);
   return (
-    `${open}<details${shut ? "" : " open"}><summary>${row(node, said)}</summary>${more}` +
+    `${open}<details${shut ? "" : " open"} style="${wide}"><summary>${row(node, said)}</summary>${more}` +
     `<ul>${kids.map((k, i) => branch(k, levels, text, under(at, kids, i))).join("")}</ul>` +
     `</details></li>`
   );

@@ -432,8 +432,16 @@ renderers:
           "section.tree form.filter button": "border: 1px solid var(--rule); border-radius: 3px; background: var(--raised); padding: .15rem .7rem; color: var(--mark); font: inherit; font-size: .92rem; cursor: pointer"
           "section.tree form.filter button:hover": "border-color: var(--mark); color: var(--ink)"
           "ul.tree": "list-style: none; margin: 0; padding: 0"
-          "ul.tree ul": "list-style: none; margin: 0; padding-left: 1.25rem; border-left: 1px solid var(--rule)"
-          "ul.tree li": "padding: .1rem 0; min-width: 0; overflow-wrap: anywhere"
+          # No indent and no guide: the rail draws the depth, and a nested padding drew it a
+          # second time — which is what put every node on a line of its own.
+          "ul.tree ul": "list-style: none; margin: 0; padding: 0; border: 0"
+          # Flex and not grid: a leaf row is four loose spans, and in a grid each would
+          # take a row of its own. Flex lets them flow on one line beside the rail, and a
+          # branch's children are pulled back so the depth is the rail's alone to say.
+          "ul.tree li": "display: flex; flex-wrap: wrap; align-items: baseline; min-width: 0; overflow-wrap: anywhere"
+          "ul.tree li > svg": "flex: none; align-self: stretch"
+          "ul.tree li > details": "flex: 1 1 auto; min-width: 0"
+          "ul.tree li > details > ul": "margin-left: calc(-1 * var(--rail, 0))"
           "ul.tree li .label": "color: var(--ink)"
           "ul.tree li .id, ul.tree li .kind, ul.tree li .rollup": "color: var(--faint); font-family: var(--mono); font-size: .92em"
           "ul.tree li .state": "color: var(--mark); font-weight: 600"

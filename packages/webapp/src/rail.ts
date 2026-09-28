@@ -28,7 +28,7 @@
  *  The rail is decoration, so it is `aria-hidden`: the depth it draws is the nesting the
  *  list already carries, and a reader who is not looking at it should not be read eleven
  *  pixels of path. */
-import { escape } from "./board.js";
+import { escape } from "./pages/board.js";
 
 /** The sketch's geometry. `MIDDLE` is where the node sits and where the line out of it
  *  leaves — half a row down, which is what makes the lanes of two touching rows one line. */

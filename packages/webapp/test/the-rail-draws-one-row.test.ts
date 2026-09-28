@@ -16,7 +16,7 @@
  *  line takes the page's. */
 import { Window } from "happy-dom";
 import { describe, expect, it } from "vitest";
-import { rail, type Rail } from "../src/pages/rail.js";
+import { rail, type Rail } from "../src/rail.js";
 
 /** A document to parse into. The window is made here rather than asked for as the test
  *  environment, because this module's own imports run under node — a page of the surface
