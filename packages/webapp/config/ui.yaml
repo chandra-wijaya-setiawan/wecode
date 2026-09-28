@@ -75,6 +75,50 @@ tree:
         # All of it. A select with an answer that narrows nothing is how a reader gets the
         # rest of the record back without having to know what the query string is.
         excludes: []
+  # Which project the reader is standing in. Project, release and epic are where a story
+  # *lives* rather than what anybody works on, so sketch #7 — "the tree you can read" —
+  # takes them out of the tree and puts them over it: indent all nine rungs and the one the
+  # reader came for begins two-thirds of the way across the window. This is the first of the
+  # three, drawn; release and epic would sit beside it when they are asked for.
+  #
+  # It is the same shape as the filter above, for the same reasons and by the same mechanism:
+  # one select, in the one `method=get` form, sent by the one control that already sends it.
+  # One form and not two, because the two narrowings are one reading — a reader who has
+  # narrowed to a project and then asks for the finished work is still in the project they
+  # were in, and a second form beside the first would have to carry the first's answer as a
+  # hidden field to say so. On the bar this comes first: which project before which states,
+  # the way the sketch draws it, because where a reader is standing is chosen before what
+  # they want to see of it. In this file it is written after the filter, whose prose is where
+  # the form, the submit and the absent default are all explained.
+  #
+  # The answers are not here, and must not be: they are the record's own projects, by the
+  # slug each already carries, and a list of them spelled in this file is a list that is
+  # wrong the day a project is added. What is this file's is the parameter they travel in,
+  # the name the page carries the control under, and the word the reader is offered it by.
+  project:
+    id: tree.project
+    # The colon is this page's own convention for a word that leads into a control, already
+    # spent on `filter:` above. The sketch's bar labels the picker `project`; two labels on
+    # one bar written two ways read as two bars.
+    says: "project:"
+    param: project
+    # Every project, which is the reading nobody asked for, so it is the absent parameter —
+    # the way `tree.filter` already works. `/tree` and `/tree?project=all` are one page, and
+    # so a narrowed tree is a link a person can send, bookmark, type and reload, and widening
+    # it again is a link too.
+    default: all
+    # The one answer that names no project, which is what the reader gets the rest of the
+    # record back by. It is always offered, including on a page already narrowed to one
+    # project: a select that cannot be set back is a door that shuts behind the reader. It is
+    # the first answer, above the record's own, because it is the arriving one.
+    #
+    # `all` is the value the sketch signed. It is a word and not a slug, and a project slugged
+    # `all` would be a project this control could not name — the record holds no such project,
+    # and the day it does the collision is this file's to settle rather than the page's.
+    all:
+      id: tree.project.all
+      value: all
+      says: all projects
   # A record's own text, which the record wrote and which no length was ever agreed for. A
   # requirement's statement runs to a paragraph; drawn whole, one of them is taller than
   # the branch it sits in and the tree stops reading as a tree.
@@ -93,6 +137,24 @@ tree:
     more:
       id: tree.node.more
       says: more
+  # Where a row ends, which is the one thing a reader scanning the right-hand edge is asking
+  # of it: how it is going.
+  #
+  # `shared.outline.row.order` in `packages/tui/config/design.yaml` ends the terminal's row
+  # `[..., state, rollup]`, and this one does not. That is a decision and not a drift, and
+  # the reason is the same design's `as: sentence` and `columns: none`: a terminal row is one
+  # string read left to right, so the rollup rides at the end of a sentence and costs the
+  # reader nothing until they get there. Here the states line up down the right-hand edge,
+  # and what a reader does with a column is scan it. Anything after the state is then a thing
+  # to read past on every row — and the rollup is the widest of them, a count of how many
+  # done, open and failed hang below, which is a second answer to what the tree already
+  # answers by being a tree and openable. Nor is anyone's name here: who is at a row is the
+  # row's own page's, and a role on every row is a column of one word repeated.
+  #
+  # A list rather than a single name, because what trails is a decision about how many
+  # things end a row and not only about which one does — and what it holds is one.
+  row:
+    trailing: [state]
 
 # What the sketches page offers a reader, which is the bar above the list and nothing else.
 # There is no new-sketch control to declare: a sketch is drawn by the orchestrator, because
