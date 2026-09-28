@@ -11,22 +11,21 @@
  *  was done rather than work being done. Drawn as rows they outnumber the work, which is
  *  why the terminal's outline sends them to a record's own page: a box twenty rows tall
  *  cannot spend twelve of them on one story's paperwork. A page in a browser can, because a
- *  row inside a shut fold costs the reader nothing until they open it. So `levels.web` in
- *  the design names the four as levels this tree shows, and they arrive shut: the page
- *  lands at story level, and the proof of a story is under the story that it proves.
+ *  row inside a fold costs the reader nothing once they shut it. So `levels.web` in the
+ *  design names the four as levels this tree shows, and the proof of a story is under the
+ *  story that it proves.
  *
- *  A parent is a disclosure, the way a comment thread's is: the reader closes a branch they
+ *  A parent is a disclosure, the way a comment thread's is: the reader shuts a branch they
  *  are not reading and opens it again later, and the browser keeps the marker and the
- *  keyboard for us. A branch of work arrives open — a tree that hides work by default is a
- *  tree nobody trusts — a branch of proof arrives shut, and a leaf gets none, because there
- *  is nothing to disclose. Approval 1561 settled that this surface may carry controls; a
- *  disclosure is the mildest of them, and it changes nothing in wecode, only what this
+ *  keyboard for us. Which branches arrive shut is `levels.web.folds`, and it names none, so
+ *  the page lands at the task — the row somebody is at. A leaf gets no disclosure, because
+ *  there is nothing to disclose. Approval 1561 settled that this surface may carry controls;
+ *  a disclosure is the mildest of them, and it changes nothing in wecode, only what this
  *  reader is looking at.
  *
- *  What the reader is offered around the tree — the one select that narrows it, the states
- *  it narrows by, and how much of a record's own text a row spends before the rest goes
- *  behind a fold — is `packages/webapp/config/ui.yaml`'s. A word or a number written here
- *  instead would be a decision about the surface that nobody can read off a file.
+ *  What the reader is offered around the tree — the one select that narrows it, the states it
+ *  narrows by and what a row calls each level — is `packages/webapp/config/ui.yaml`'s. A word
+ *  written here instead would be a decision about the surface nobody can read off a file.
  *
  *  The nodes arrive as nodes, not as a database, for the reason the board's do: where a
  *  workspace is, is `bin.ts`'s.
@@ -79,8 +78,10 @@ export interface Levels {
 const mapOf = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 
-const namesOf = (v: unknown, what: string, path: string): readonly string[] => {
-  const said = Array.isArray(v) && v.length > 0 && v.every((e) => typeof e === "string");
+/** `none` allows the empty list, which is an answer for `folds` — nothing arrives shut — while
+ *  an absent key stays a refusal. It is no answer for `shows`: a tree of no levels is no tree. */
+const namesOf = (v: unknown, what: string, path: string, none = false): readonly string[] => {
+  const said = Array.isArray(v) && (none || v.length > 0) && v.every((e) => typeof e === "string");
   if (!said) throw new TreeDesignError(`${path}: outline.levels declares no ${what}`);
   return v as readonly string[];
 };
@@ -98,7 +99,7 @@ export function loadLevels(path: string = DESIGN): Levels {
   return {
     shows: namesOf(web["shows"] ?? levels["shows"], "shows", path),
     omits: namesOf(web["omits"] ?? levels["omits"], "omits", path),
-    folds: namesOf(web["folds"], "web.folds", path),
+    folds: namesOf(web["folds"], "web.folds", path, true),
   };
 }
 
@@ -302,11 +303,9 @@ const under = (at: At, of: readonly Node[], i: number): At => ({
  *  Every row is one line, whatever the record wrote: a row is where a thing sits in the
  *  work, and a paragraph drawn in one is a row whose rail no longer reaches it.
  *
- *  A branch arrives shut once the proof begins — the row is of a folded level, or what it
- *  holds is — and every branch above that arrives open, so the page lands at the last level
- *  of work. The rest of a long record's text is its own disclosure, and it sits after the
- *  row rather than inside the `<summary>`: a disclosure nested in a summary is one the
- *  reader cannot press without pressing the other. */
+ *  A branch arrives shut once a folded level begins — the row is of one, or what it holds
+ *  is — and every branch above that arrives open, so the page lands wherever `folds` says.
+ *  `folds` names nothing today, so nothing arrives shut and the page lands at the task. */
 function branch(node: Node, levels: Levels, kinds: Ui["kinds"], at: At): string {
   const kids = node.children;
   const drawn = rail({ ...at, children: kids.length > 0, fill: hueOf(node.state) });

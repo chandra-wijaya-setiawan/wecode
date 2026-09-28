@@ -59,7 +59,7 @@ over:
   # beside a row are `pages/rail.ts`'s drawing, but where a row sits — its depth, the
   # ancestors' lanes still live, whether it ends its own lane or begins it — is the walk's
   # to say, and the walk is here. The row records what that cost, and only comes down.
-  packages/webapp/src/pages/tree.ts: 426
+  packages/webapp/src/pages/tree.ts: 425
   packages/explorer/test/repo-explorer.test.ts: 434
   packages/core/src/create.ts: 427
   packages/core/test/typed-delivered.test.ts: 417

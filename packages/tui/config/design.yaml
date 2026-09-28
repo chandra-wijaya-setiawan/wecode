@@ -991,10 +991,10 @@ shared:
       # the reader nothing at all until they open it.
       #
       # So on the web the four are levels the tree shows: in the record's own order, under
-      # the story they prove, each folding like the levels above it. They arrive folded
-      # shut, so the page still lands at story level — a reader scrolling for what is
-      # moving sees exactly what they saw before, and the reader asking what a story was
-      # accepted on opens the story and finds it there rather than on another page.
+      # the story they prove, each folding like the levels above it. And they arrive open,
+      # so the page lands at task level — the task is the row somebody is at, and a page
+      # that arrives at the story asks every reader to click three times to reach the one
+      # thing that is being worked. The disclosures are still there to shut.
       web:
         # The web tree is anchored at the story; the cockpit's cannot be. The cockpit is one
         # box of a fixed height and needs the whole shape in it. A page in a browser is opened
@@ -1010,7 +1010,12 @@ shared:
         # packages/tui/test/the-tree-is-five-levels.test.ts holds it to them.
         shows: [story, acceptance_criteria, acceptance_test, task]
         omits: [project, release, epic, requirement, task_test]
-        folds: [acceptance_criteria, acceptance_test]
+        # Nothing arrives shut, which is what makes the task the level the page lands at. An
+        # empty list is an answer here and an absent key is still a refusal: a tree folded to
+        # a depth nothing declared is a tree nothing gates. Name a level and it arrives shut,
+        # with everything above it — so `[acceptance_criteria]` would land the page on the
+        # stories again.
+        folds: []
 
     # Depth is the indent and nothing else. The rail said what the indent was already
     # saying, at two columns a level on every level above the row — at depth nine that is

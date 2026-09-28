@@ -49,7 +49,7 @@ const PROOF = ["requirement", "acceptance_criteria", "acceptance_test", "task_te
 // The lines this renderer reads, which are the web block's and not the shared five.
 const SHOWS = "        shows: [story, acceptance_criteria, acceptance_test, task]";
 const OMITS = "        omits: [project, release, epic, requirement, task_test]";
-const FOLDS = "        folds: [acceptance_criteria, acceptance_test]";
+const FOLDS = "        folds: []";
 const EXCLUDES = "        excludes: [released, delivered, met, accepted, done, dropped, passed]";
 const NONE: Rollup = { done: 0, open: 0, failed: 0 };
 /** The machines the record is kept by, which is where "terminal" is decided. What this tree draws
@@ -124,18 +124,19 @@ describe("how deep the tree goes is the design's", () => {
     // five — `shared.outline.levels` is untouched, and the tui's own test holds it to them.
     expect(LEVELS.shows).toEqual(["story", "acceptance_criteria", "acceptance_test", "task"]);
     expect(LEVELS.omits).toEqual(["project", "release", "epic", "requirement", "task_test"]);
-    expect(LEVELS.folds).toEqual(["acceptance_criteria", "acceptance_test"]);
+    // Nothing folds, which is what lands the page at the task. An empty list is an answer.
+    expect(LEVELS.folds).toEqual([]);
     const moved = loadLevels(design(SHOWS, "        shows: [epic, story, task]"));
     expect(moved.shows).toEqual(["epic", "story", "task"]);
     // A level named by no list is still drawn: a row nobody decided about is kept.
     expect(treeBranches([deepTask()], loadLevels(design(OMITS, "        omits: [project, epic]"))))
       .toContain(`<li id="release-2" `);
-    // Take a level out of `folds` and it is omitted again, its children rising to whoever is left.
+    // Name a level in `folds` and it arrives shut, with everything above it, so the page lands
+    // higher up. It changes nothing about which rows are drawn: `shows` names the test rung, so
+    // folding it only shuts it — `omits` is what would drop it, requirement dropped either way.
     const fewer = loadLevels(design(FOLDS, "        folds: [acceptance_criteria]"));
     expect(fewer.folds).toEqual(["acceptance_criteria"]);
     const body = treeBranches([WHOLE], fewer);
-    // `shows` names the test rung, so taking it out of `folds` only stops it arriving shut —
-    // it is `omits` that would drop it. The requirement is dropped either way.
     expect(body, "requirement-5").not.toContain(`id="requirement-5"`);
     expect(body, "acceptance_test-7").toContain(`id="acceptance_test-7"`);
     for (const [e, i] of DROPPED) expect(treeBranches([WHOLE]), `${e} is drawn`).not.toContain(`id="${e}-${i}"`);
@@ -152,7 +153,7 @@ describe("how deep the tree goes is the design's", () => {
 /** The proof is drawn in the record's own order, and nothing is lifted past it. */
 describe("the proof of a story is drawn under the story, and the tree is nested lists", () => {
   const body = treeBranches([WHOLE]);
-  it("keeps every level at the depth the record put it, open above the proof and shut at it", () => {
+  it("keeps every level at the depth the record put it, and arrives open down to the task", () => {
     // The story is the root here: the three above it gave their children up, and the
     // requirement gave its criterion to the story.
     expect(shown([WHOLE])[0]?.entity).toBe("story");
@@ -165,14 +166,12 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
     expect(body.slice(body.indexOf(`<li id="acceptance_test-7" `))).toContain(`<ul><li id="task-8" `);
     for (const t of ["ul", "li", "details", "summary"]) expect([...body.matchAll(new RegExp(`<${t}[ >]`, "g"))].length,
       t).toBe([...body.matchAll(new RegExp(`</${t}>`, "g"))].length);
-    // The work arrives open and the proof does not, so the page lands at story level.
-    // Nothing arrives open: a story holds only its proof now, and proof arrives shut, so the
-    // page lands on the stories themselves and a reader opens the one they are working.
-    expect([[...body.matchAll(/<details open/g)].length, [...body.matchAll(/<details/g)].length]).toEqual([0, 3]);
-    // Each proof row is a disclosure of its own, so the reader opens one level at a time.
-    for (const [e, id, d] of [["story", 4, ""], ["acceptance_criteria", 6, ""],
-      ["acceptance_test", 7, ""]] as const)
-      expect(rowOf(body, e, id), e).toContain(`<details${d}`);
+    // Every branch arrives open, because `folds` names no level: the page lands at the task,
+    // which is the row somebody is at. Arriving at the story asked three clicks to reach it.
+    expect([[...body.matchAll(/<details open/g)].length, [...body.matchAll(/<details/g)].length]).toEqual([3, 3]);
+    // And each is a disclosure of its own, so a reader can shut one level at a time.
+    for (const [e, id] of [["story", 4], ["acceptance_criteria", 6], ["acceptance_test", 7]] as const)
+      expect(rowOf(body, e, id), e).toContain(`<details open`);
     // The task is the last rung this tree draws, so it is a row and not a disclosure.
     expect(rowOf(body, "task", 8)).not.toMatch(/<(details|summary)/);
     for (const v of ["onclick", "aria-expanded"]) expect(body, v).not.toContain(v);
@@ -180,9 +179,10 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
     expect(body).toContain(open);
     // The requirement is not drawn, so what hangs under the story is its criterion.
     expect(body.slice(body.indexOf(open))).toContain(`<li id="acceptance_criteria-6" `);
-    // The criterion's is the page's first shut disclosure and every proof row is at or after it.
-    const shut = body.indexOf("<details ");
-    for (const p of LEVELS.folds) expect(body.indexOf(`<li id="${p}-`), p).toBeGreaterThan(shut);
+    // Name the criterion a fold and it arrives shut, with the rows under it still drawn.
+    const folded = treeBranches([WHOLE], loadLevels(design(FOLDS, "        folds: [acceptance_criteria]")));
+    expect(rowOf(folded, "acceptance_criteria", 6)).toContain(`<details><summary`);
+    expect(folded).toContain(`<li id="task-8" `);
   });
   // Five columns and not a sentence, because a reader scans a column and has to read a sentence:
   // the rail first, so depth is drawn once, then the kind, the id, the words and the state.
