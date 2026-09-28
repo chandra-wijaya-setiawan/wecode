@@ -348,6 +348,12 @@ renderers:
           "section.board li .what": "flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere"
         decisions:
           "article": "background: var(--raised); border: 1px solid var(--rule); border-left: 3px solid var(--mark); border-radius: 4px; padding: .8rem 1.25rem"
+          # What a person is told when their answer landed. The card they answered is gone,
+          # and a card vanishing is indistinguishable from one that was never there — so the
+          # page says so rather than leaving them to infer it from an absence. An article
+          # because that is the shape this page's roots declare, and a rule may name no other.
+          "article.answered": "display: flex; align-items: baseline; gap: .75rem; padding: .5rem .8rem; border-left-color: var(--mark); color: var(--mark)"
+          "article.answered a": "margin-left: auto; color: var(--faint); font-family: var(--mono); font-size: .85em"
           "article h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; margin: 0 0 .5rem; overflow-wrap: anywhere; white-space: pre-wrap"
           "article h2 .id": "color: var(--faint); font-family: var(--mono); font-size: .8em; margin-right: .6rem"
           "article dl": "display: grid; grid-template-columns: 6rem 1fr; gap: .2rem .75rem; margin: 0"

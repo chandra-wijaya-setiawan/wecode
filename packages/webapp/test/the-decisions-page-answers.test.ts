@@ -85,7 +85,7 @@ describe("the surface answers an approval", () => {
   it("sends the client back to the decisions page, and says what it did", () => {
     const id = ask();
     const reply = answerPosted(db, posted({ id: String(id), answer: "ship it" }), () => "dana");
-    expect(reply.location).toBe("/decisions");
+    expect(reply.location).toBe(`/decisions?answered=${id}`);
     expect(reply.body).toContain(`approval #${id} answered ship it by dana`);
   });
 
@@ -175,7 +175,9 @@ describe("both paths are routed", () => {
       redirect: "manual",
     });
     expect(res.status).toBe(303);
-    expect(res.headers.get("location")).toBe("/decisions");
+    // The target carries which approval was answered, so the page a client lands on can
+    // say so. The page is the same page; the parameter is what it is told.
+    expect(res.headers.get("location")).toBe(`/decisions?answered=${id}`);
     expect(approvalById(db, id)).toMatchObject({ answer: "ship it", answered_by: "dana" });
   });
 

@@ -24,6 +24,7 @@
  *  What a card looks like is not here either. The surface has one stylesheet and it is the
  *  shell's; this file writes the markup its rules are selected on. */
 import type { Approval, Evidence } from "@wecode/core";
+import { ANSWERED, ANSWERED_AT } from "../answer.js";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
 import { document, shelled } from "./shell.js";
@@ -31,6 +32,10 @@ import { document, shelled } from "./shell.js";
 /** What the page says when nobody owes wecode an answer. A page that came back blank reads
  *  as a page that failed. */
 const NOTHING_WAITING = "nothing is waiting on a person";
+
+/** What a person is told when their answer landed, and how they put the notice away. */
+const SAYS_ANSWERED = (id: number): string => `approval #${id} answered — thank you`;
+const SAYS_DISMISS = "dismiss";
 
 /** What is done about a card, said on the card. The id is what the command takes, so it is
  *  spelled out rather than described. */
@@ -112,9 +117,28 @@ function card(approval: Approval): string {
 }
 
 /** What the page says: its cards, and nothing around them. The frame is the shell's. */
-export function decisionCards(approvals: readonly Approval[]): string {
-  if (approvals.length === 0) return `<p class="empty">${NOTHING_WAITING}</p>`;
-  return approvals.map(card).join("");
+/** What the page says to somebody who has just answered one.
+ *
+ *  Read off the target rather than held anywhere, so it is the same page whether a person
+ *  arrived by answering, by reloading, or by following a link somebody sent them. An id
+ *  that is not a number is no notice at all rather than a guess. */
+export const answeredIn = (url: URL): number | null => {
+  const said = url.searchParams.get(ANSWERED);
+  if (said === null) return null;
+  const id = Number(said);
+  return Number.isInteger(id) ? id : null;
+};
+
+/** The notice itself: what happened, and a way to be rid of it. The link goes to the page
+ *  without the parameter, which is the same page — dismissing is navigation, not script. */
+const noticed = (id: number): string =>
+  `<article class="answered" data-ui="decisions.answered">${SAYS_ANSWERED(id)}` +
+  `<a href="${ANSWERED_AT}" data-ui="decisions.answered.dismiss">${SAYS_DISMISS}</a></article>`;
+
+export function decisionCards(approvals: readonly Approval[], answered: number | null = null): string {
+  const notice = answered === null ? "" : noticed(answered);
+  if (approvals.length === 0) return `${notice}<p class="empty">${NOTHING_WAITING}</p>`;
+  return notice + approvals.map(card).join("");
 }
 
 /** The whole document: the cards, in the shell design.yaml declares. */
@@ -132,4 +156,4 @@ export const READS = "approvals";
  *  command line is gone from the record the moment it is answered, and a page served from
  *  a snapshot would still be asking it. */
 export const decisionsAt = (approvals: () => readonly Approval[]): Page =>
-  shelled(() => decisionCards(approvals()));
+  shelled((url) => decisionCards(approvals(), answeredIn(url)));
