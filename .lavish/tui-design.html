@@ -1,0 +1,141 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>wecode-tui — three screens for sign-off</title>
+<style>
+:root{--bg:#0b0d10;--panel:#11151a;--ink:#d6dde6;--dim:#7d8894;--cyan:#4fd1e0;--amber:#e0a84f;--red:#e0574f;--green:#6fcf7a;--rule:#232a32}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding-block:24px;padding-inline:20px}
+h1{font-size:18px;margin:0 0 4px;letter-spacing:.04em}h1 small{color:var(--dim);font-weight:400}
+h2{font-size:14px;margin:36px 0 10px;color:var(--cyan);letter-spacing:.08em;text-transform:uppercase}
+p.lead{color:var(--dim);max-width:70ch;margin:0 0 14px}
+.pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:14px}
+.pair>div{min-width:0}
+.cap{color:var(--dim);font-size:12px;margin:0 0 6px;letter-spacing:.06em;text-transform:uppercase}
+pre{margin:0;background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:12px 14px;overflow-x:auto;white-space:pre;line-height:1.5}
+.c{color:var(--cyan)}.a{color:var(--amber)}.r{color:var(--red)}.g{color:var(--green)}.d{color:var(--dim)}.b{font-weight:700}.hl{background:#1c2a36;border-radius:3px}
+form{margin-top:12px;background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:12px 14px;display:grid;gap:8px}
+form label{display:block;cursor:pointer}form textarea{width:100%;box-sizing:border-box;background:#0b0d10;color:var(--ink);border:1px solid var(--rule);border-radius:4px;padding:8px;font:inherit;min-height:56px}
+form button{justify-self:start;background:var(--cyan);color:#06202a;border:0;border-radius:4px;padding:6px 14px;font:inherit;font-weight:700;cursor:pointer}
+ul.note{color:var(--dim);margin:8px 0 0;padding-left:18px}
+</style></head><body>
+<h1>wecode-tui <small>— three screens, current beside proposed. Annotate anything; queue one answer per screen.</small></h1>
+<p class="lead">Left is what <code>wecode-tui</code> draws today (captured 05:40). Right is what <code>design.yaml</code> declares plus the repaint you signed off. Approving a screen plans its drawing slice; changing it edits <code>design.yaml</code> first, then the drawing chases it.</p>
+
+<h2>1 · Cockpit</h2>
+<div class="pair"><div><p class="cap">current</p><pre>── = SERVICES ──────────────────────────────────────────────
+pulse   wecode              beating      2 running · 1 queued · 1 stuck…
+runner  workspace           stale build  DESKTOP-03MKEEL/1123534 · beat…
+fleet   workspace           2/13 busy    acceptance-tester 0 busy 1 idle…
+── ? NEEDS YOU [n] ────────────────────────────────────────── 0
+nothing waits on you
+── > RUNNING [r] ───────────────────────────────────────── 2/13
+> #1100       running    draw the outline as design.yaml declares…
+> #1101       running    carry a drop up from criteria to requirem…
+── - QUEUE [q] ────────────────────────────────────────────── 1
+  #543        ready      a land tells, never syncs, and the sync…
+── * COOKING [c] ──────────────────────────────────────────── 1
+x #357        failed     let an epic deliver from planned when eve…
+── . PLANNED [p] ─────────────────────────────────────────── 11
+… and 4 more
+j/k move  g/G top/end  enter open  v box  a act  r refresh  q quit</pre></div>
+<div><p class="cap">proposed</p><pre>┌ cws ── 3 projects ─────────────────── <span class="g">●</span> runner 3s ┐
+ <span class="b">wc</span> wecode        0.0.2  <span class="c">●●</span> · <span class="c">▁▂▃▅▃▂▅▇▅▃</span> 12/hr <span class="r">✗1</span> 13ᵖ
+ <span class="b">t2</span> task-list-v2  0.0.1  ·· · <span class="d">▁▁▁▁▁▁▁▁▁▁</span> idle 4h <span class="a">⚑1</span>  1ᵖ
+ <span class="b">st</span> simple-task…  0.0.1  ·· · <span class="d">▁▁▁▁▁▁▁▁▁▁</span> done       4ᵈ
+
+ <span class="a b">⚑ NEEDS YOU</span>  <span class="d">v n</span>                                      1
+ <span class="a">⚑</span> t2 #88  approve · waiting 4h
+   delete every task in one action — is that what you
+   meant, or only the selected ones?
+
+ <span class="b">▸ RUNNING</span>  <span class="d">v r</span>                                     2/13
+ <span class="c">●</span> wc #1100 dev-9 · opus-5                           4m
+   draw the outline as design.yaml declares it
+   <span class="c">▰▰▰</span>▱▱▱▱▱ 12k/250k  packages/tui/src/outline.tsx +1
+ <span class="c">●</span> wc #1101 dev-3 · opus-5                           1m
+   carry a drop up from criteria to requirement
+   <span class="c">▰</span>▱▱▱▱▱▱▱  3k/250k  packages/core/src/cascade.ts +1
+
+ <span class="b">⧗ QUEUE</span>  <span class="d">v q</span>                                        1
+ ○ wc #543  ready · engineer · a land tells, never syncs,
+            and the sync test is retired
+
+ <span class="b">✗ COOKING</span>  <span class="d">v c</span>                                      1
+ <span class="r">✗</span> wc #357  failed 3 of 3 · let an epic deliver from
+            planned when every story is settled
+ ─────────────────────────────────────────────────────────
+ planned 11ᵖ  delivered 44ᵈ  dropped 35ˣ  tree ᵗ  all ᵃ
+└ j/k move · 1/2/3 project · enter open · a act · q quit ┘</pre></div></div>
+<form data-lavish-question="cockpit" onsubmit="event.preventDefault();const f=new FormData(event.currentTarget);const v=f.get('cockpit');const n=(f.get('note')||'').trim();if(!v)return;window.lavish.queuePrompt('Cockpit: '+v+(n?' — '+n:''),{tag:'decision',text:'Cockpit: '+v,element:event.currentTarget,data:{screen:'cockpit',answer:v,note:n}});">
+<label><input type="radio" name="cockpit" value="approve as drawn"> Approve as drawn — plan the drawing slices</label>
+<label><input type="radio" name="cockpit" value="approve without the sparkline"> Approve, but drop the sparkline for now</label>
+<label><input type="radio" name="cockpit" value="change"> Change it — say what below</label>
+<textarea name="note" placeholder="what to change, in your words"></textarea>
+<button type="submit">Queue this answer</button></form>
+
+<h2>2 · Detail page</h2>
+<div class="pair"><div><p class="cap">current</p><pre>┌─ dropping the last acceptance test under a criteria leaves the c…─┐
+│ entity    story                                                     │
+│ id        #361                                                      │
+│ title     dropping the last acceptance test under a criteria le…   │
+│ state     planned                                                   │
+│ children  0                                                         │
+└─────────────────────────────────────────────────────────────────────┘
+┌─ children (0) · — ──────────────────────────────────────────────────┐
+│ nothing under it                                                    │
+│                                                                     │
+│                          (blank to the bottom)                      │
+└─────────────────────────────────────────────────────────────────────┘</pre></div>
+<div><p class="cap">proposed</p><pre> <span class="b">story #361</span> · planned · epic #102 · 0.0.2
+ dropping the last acceptance test under a criteria
+ leaves the criteria in_progress: 416 and 417 were left
+ with nothing to prove and the story could not deliver.
+
+ <span class="d">recorded</span>  19 Sep 23:10 by the watch
+ <span class="d">blocked</span>   nothing — no tasks planned yet
+ <span class="d">design</span>    none · crosses nothing
+
+ <span class="b">▸ UNDER IT</span>                                          0
+ nothing under it
+
+ <span class="b">▸ HISTORY</span>
+ planned      19 Sep 23:10  created under epic #102
+ 
+ <span class="d">a</span> act · <span class="d">v</span> view · <span class="d">esc</span> back</pre>
+<ul class="note"><li>title once, wrapped, never truncated</li><li>the record as a sentence; no <code>entity</code>/<code>id</code> field rows</li><li>an empty section is one line, no box</li><li>borderless, like the board</li><li>a story page shows its criteria and acceptance tests; a task page shows its task tests — those levels live on the detail pages, not in the tree</li><li>the footer is two levels: at rest it shows only <code>a</code> act · <code>v</code> view; pressing <code>a</code> replaces it with the actions that apply (<code>a</code> approve, <code>r</code> reject, <code>d</code> drop), pressing <code>v</code> with the views (<code>d</code> design, <code>t</code> tree from here); inapplicable ones are omitted</li><li>an approval adds one line: <code>mockup  docs/design/mockups/cockpit.svg</code></li></ul></div></div>
+<form data-lavish-question="detail" onsubmit="event.preventDefault();const f=new FormData(event.currentTarget);const v=f.get('detail');const n=(f.get('note')||'').trim();if(!v)return;window.lavish.queuePrompt('Detail page: '+v+(n?' — '+n:''),{tag:'decision',text:'Detail: '+v,element:event.currentTarget,data:{screen:'detail',answer:v,note:n}});">
+<label><input type="radio" name="detail" value="approve as drawn"> Approve as drawn</label>
+<label><input type="radio" name="detail" value="change"> Change it — say what below</label>
+<textarea name="note" placeholder="what to change"></textarea>
+<button type="submit">Queue this answer</button></form>
+
+<h2>3 · Outline (tree)</h2>
+<div class="pair"><div><p class="cap">current</p><pre>─ Outline — open work (85) [t] ─────────────────────────────
+- wecode · #1 · project · in_progress · 180 under · 78 pla…
+    the runner suite passes · #114 · acceptance_test · pla…
+  - dropping every child of a requirement drops it rather…
+      dropping every child of a requirement drops it rath…
+    a chore is a record with a kind, a target and a check…
+  + cooking holds a delivered story beside a failed task…
+  - 0.0.4 · #105 · release · planned · 27 under · 15 in_pr…
+      the doctor: violations with duration, a pass row, an…</pre></div>
+<div><p class="cap">proposed</p><pre>─ Outline — open work (85) [t] ─────────────────────────────
+<span class="hl"><span class="b">#1</span> project <span class="c">● in_progress</span> wecode · 78 planned · 62 in progress    </span>
+├─ <span class="b">#358</span> story <span class="c">● in_progress</span> dropping every child of a requirement
+│  drops it rather than meeting it, and the same at every level
+│  so a release with every epic dropped is dropped, and a stor…
+│  └─ <span class="b">#552</span> task <span class="g">✓ done</span> draw the outline as design.yaml declares it
+├─ <span class="b">#354</span> story <span class="c">● in_progress</span> cooking holds a delivered story beside
+│  a failed task and reads as one bag
+├─ <span class="b">#357</span> story <span class="r">✗ failed</span> let an epic deliver from planned when
+│  every story under it is settled
+└─ <span class="hl"><span class="b">#105</span> release <span class="d">○ planned</span> 0.0.4 · 27 under · 15 in progress      </span>
+   └─ <span class="hl"><span class="b">#115</span> epic <span class="d">○ planned</span> the doctor: violations with duration, </span>
+      a pass row, and healing as work
+      └─ <span class="b">#311</span> story <span class="c">● in_progress</span> only execution evidence can pass a
+         script test</pre>
+<ul class="note"><li>row is <code>#id  entity  state  description</code>, id first</li><li>connector <code>├─ └─ │</code> on every row below the root</li><li>description wraps under itself; nothing truncated</li><li>heads carry their key as a hint: <code>v n</code>, <code>v r</code>, <code>v q</code>, <code>v c</code> open that list</li><li>queue and cooking are separate sections, each on its own head</li><li>this one is already planned as task #552 — approving here confirms it; changing it edits <code>design.yaml</code> before the agent finishes</li></ul></div></div>
+<form data-lavish-question="outline" onsubmit="event.preventDefault();const f=new FormData(event.currentTarget);const v=f.get('outline');const n=(f.get('note')||'').trim();if(!v)return;window.lavish.queuePrompt('Outline: '+v+(n?' — '+n:''),{tag:'decision',text:'Outline: '+v,element:event.currentTarget,data:{screen:'outline',answer:v,note:n}});">
+<label><input type="radio" name="outline" value="approve as drawn"> Approve as drawn</label>
+<label><input type="radio" name="outline" value="change"> Change it — say what below</label>
+<textarea name="note" placeholder="what to change"></textarea>
+<button type="submit">Queue this answer</button></form>
+</body></html>

@@ -944,7 +944,21 @@ shared:
       # moving sees exactly what they saw before, and the reader asking what a story was
       # accepted on opens the story and finds it there rather than on another page.
       web:
-        folds: [requirement, acceptance_criteria, acceptance_test, task_test]
+        # The web tree is anchored at the story; the cockpit's cannot be. The cockpit is one
+        # box of a fixed height and needs the whole shape in it. A page in a browser is opened
+        # to work a story, and project, release and epic answer where a story lives — a
+        # question asked once above the tree, not answered again on every row.
+        #
+        # So the rungs here are the story, the criterion, the test that proves it and the task
+        # that must make it pass. The requirement is left out because 502 of 583 hold exactly
+        # one criterion, so it is a rung wrapping a single child. The task_test is left out
+        # because it is the ninth and is read on the task's own page.
+        #
+        # `shared.outline.levels` above is unchanged, and the cockpit still shows its five —
+        # packages/tui/test/the-tree-is-five-levels.test.ts holds it to them.
+        shows: [story, acceptance_criteria, acceptance_test, task]
+        omits: [project, release, epic, requirement, task_test]
+        folds: [acceptance_criteria, acceptance_test]
 
     # Depth is the indent and nothing else. The rail said what the indent was already
     # saying, at two columns a level on every level above the row — at depth nine that is

@@ -68,6 +68,9 @@ tree:
         # list than "terminal" on its own would be. `failed` is not here and must not be:
         # no machine of a drawn level calls it terminal, a failed row is work still owed,
         # and it is exactly what a reader who asked for the owed work needs to see.
+        # Every terminal state of every level the *record* keeps, plus `passed`. Not just the
+        # rungs this tree draws: the narrowing runs on the record's own tree, before the rungs
+        # are thinned, so a `met` requirement left in would keep the delivered story above it.
         excludes: [released, delivered, met, accepted, done, dropped, passed]
       - id: tree.filter.all
         value: all

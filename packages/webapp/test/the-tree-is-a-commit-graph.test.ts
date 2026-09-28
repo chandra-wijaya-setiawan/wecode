@@ -73,15 +73,16 @@ async function served(levels?: Levels): Promise<string> {
   return await (await fetch(`${addressOf(server)}/tree?show=all`)).text();
 }
 
-/** The design with the requirement rung taken out of what the web tree draws, read back out of
- *  an edited copy of the file that declares it. */
+/** The design with the requirement rung put back into what the web tree draws, read out of an
+ *  edited copy of the file that declares it. The tree leaves it out by default — 502 of 583
+ *  requirements hold exactly one criterion — so showing it is the edit, not hiding it. */
 const DESIGN = fileURLToPath(new URL("../../tui/config/design.yaml", import.meta.url));
-const FOLDS = "        folds: [requirement, acceptance_criteria, acceptance_test, task_test]";
-function withoutRequirements(): Levels {
+const OMITS = "        omits: [project, release, epic, requirement, task_test]";
+function withRequirements(): Levels {
   const text = readFileSync(DESIGN, "utf8");
-  expect(text, "the design no longer declares web.folds as this test edits it").toContain(FOLDS);
+  expect(text, "the design no longer declares web.omits as this test edits it").toContain(OMITS);
   const said = join(mkdtempSync(join(tmpdir(), "wecode-rail-")), "design.yaml");
-  writeFileSync(said, text.replace(FOLDS, "        folds: [acceptance_criteria, acceptance_test, task_test]"));
+  writeFileSync(said, text.replace(OMITS, "        omits: [project, release, epic, task_test]"));
   return loadLevels(said);
 }
 
@@ -216,7 +217,7 @@ describe("every row of the tree carries exactly one node, drawn on a lane", () =
   // makes the rail's width the reading of its depth.
   it("draws one rail holding one node a row, at the lane its depth puts it on", async () => {
     const page = await drawing();
-    expect(page.length, "the fixture draws no rows").toBe(8);
+    expect(page.length, "the fixture draws no rows").toBe(6);
     for (const [w, rail] of page) {
       const wide = LANE * (w.depth + 2);
       expect([rail.box["width"], rail.box["height"], rail.box["viewBox"]], w.at)
@@ -228,8 +229,9 @@ describe("every row of the tree carries exactly one node, drawn on a lane", () =
       expect(rail.lanes.some((l) => l.x === w.x && l.y0 <= MID && l.y1 >= MID),
         `${w.at}: the node at ${num(rail.node, "cx")} sits on no lane the row draws`).toBe(true);
     }
-    // Four levels, four lanes, 11px apart — and no lane drawn anywhere that nothing sits on.
-    expect(spread(page)).toEqual([[11, 22, 33, 44], [11, 22, 33, 44]]);
+    // Three rungs in this fixture, three lanes, 11px apart — and no lane drawn anywhere that
+    // nothing sits on. The requirement is not one of them, so the tasks come in at 33.
+    expect(spread(page)).toEqual([[11, 22, 33], [11, 22, 33]]);
   });
 });
 
@@ -276,20 +278,24 @@ describe("a lane stops at the last row on it rather than running on into nothing
     // Spelled out at the lane gap the sketch uses, so the numbers are asserted and not only the
     // shape: the last task on the task lane draws it to its node and stops; the one above it
     // carries the lane the full height of the row.
-    expect(lane("task-5", 44)).toEqual({ x: 44, y0: 0, y1: 11 });
-    expect(lane("task-4", 44)).toEqual({ x: 44, y0: 0, y1: 22 });
+    expect(lane("task-5", 33)).toEqual({ x: 33, y0: 0, y1: 11 });
+    expect(lane("task-4", 33)).toEqual({ x: 33, y0: 0, y1: 22 });
     // The outermost lane at both ends: the last story ends it, and the first story begins it at
     // its own node, because no elbow above fed it and a lane out of nothing reads as a lane
     // whose parent has scrolled off.
     expect(lane("story-8", 11)).toEqual({ x: 11, y0: 0, y1: 11 });
     expect(lane("story-1", 11)).toEqual({ x: 11, y0: 11, y1: 22 });
-    // Criterion 3 is the last on the criterion lane, so the two tasks under it redraw no lane
-    // at 33 — an ended lane is not carried on down by the rows that were below it.
-    expect(lane("acceptance_criteria-3", 33)).toEqual({ x: 33, y0: 0, y1: 11 });
-    for (const at of ["task-4", "task-5"]) expect(lane(at, 33), `${at} redraws a lane that ended`).toBeUndefined();
-    // And a requirement whose lane is still going is carried past, at the full height.
+    // Both criteria hang off the story now that the requirement between them is not drawn, so
+    // criterion 3 is not the last on its lane: it carries it the full height, the two tasks
+    // under it carry it on, and criterion 7 is the one that ends it at its own node.
     expect(lane("acceptance_criteria-3", 22)).toEqual({ x: 22, y0: 0, y1: 22 });
-    expect(lane("requirement-6", 22)).toEqual({ x: 22, y0: 0, y1: 11 });
+    for (const at of ["task-4", "task-5"])
+      expect(lane(at, 22), `${at} drops a lane that is still live`).toEqual({ x: 22, y0: 0, y1: 22 });
+    expect(lane("acceptance_criteria-7", 22)).toEqual({ x: 22, y0: 0, y1: 11 });
+    // And the story's own lane is carried past every row under it, at the full height, until
+    // the last story ends it.
+    expect(lane("task-4", 11)).toEqual({ x: 11, y0: 0, y1: 22 });
+    expect(lane("acceptance_criteria-7", 11)).toEqual({ x: 11, y0: 0, y1: 22 });
   });
 });
 
@@ -298,8 +304,10 @@ describe("hiding the requirement rung moves its criteria onto the story's own la
   // what a criterion then sits on is the lane the story's own elbow makes, one lane in from
   // where it was, with everything under it coming in a lane too.
   it("draws a criterion on the lane the story branches, and leaves no lane with nothing on it", async () => {
-    const [wide, narrow] = [await drawing(), await drawing(withoutRequirements())];
-    expect(wide.map(([w]) => w.at), "the requirement rung is not drawn to begin with")
+    const [wide, narrow] = [await drawing(withRequirements()), await drawing()];
+    expect(narrow.map(([w]) => w.at), "the requirement rung is drawn by default")
+      .not.toContain("requirement-2");
+    expect(wide.map(([w]) => w.at), "putting the rung back does not draw it")
       .toContain("requirement-2");
     expect(narrow.map(([w]) => w.at))
       .toEqual(["story-1", "acceptance_criteria-3", "task-4", "task-5", "acceptance_criteria-7", "story-8"]);

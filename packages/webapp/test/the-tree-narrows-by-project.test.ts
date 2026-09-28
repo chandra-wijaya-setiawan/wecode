@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url";
 import type { Node, Rollup } from "@wecode/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { addressOf, serve } from "../src/index.js";
-import { loadUi, treeAt, type Ui } from "../src/pages/tree.js";
+import { loadUi, shown, treeAt, type Ui } from "../src/pages/tree.js";
 
 /** The parameter the criterion fixes, and what travels in it: a project's own slug, so that
  *  `/tree?project=wecode` is a link a person can send, bookmark and type. */
@@ -100,9 +100,16 @@ const SLUGS = RECORD.map((p) => p.label);
  *  holds them in, each named the way its `<li>` is. */
 const keysOf = (ns: readonly Node[]): readonly string[] =>
   ns.flatMap((n) => [`${n.entity}-${n.id}`, ...keysOf(n.children)]);
-/** What is still owed under wecode: the done task and the delivered story are out, and the
- *  story above the done task stays, being work still owed itself. */
-const OPEN_WECODE = ["project-1", "release-2", "epic-3", "story-4"];
+/** The same, thinned the way the page thins it: the tree is anchored at the story, so the
+ *  three rungs above it and the requirement are not rows. Taken from `shown` rather than
+ *  listed here, so these expectations move when the design does. */
+const drawnKeys = (ns: readonly Node[]): readonly string[] => keysOf(shown(ns));
+/** What is still owed under wecode, as the page draws it. The tree is anchored at the story,
+ *  so the project, release and epic above it are not rows — which project a reader is looking
+ *  at is the picker's answer, asked once, rather than three rungs answering on every row. The
+ *  done task and the delivered story are out; the story above the done task stays, being work
+ *  still owed itself. */
+const OPEN_WECODE = ["story-4", "story-10", "task-11", "acceptance_criteria-12"];
 
 const servers: Server[] = [];
 afterEach(async () => { for (const s of servers.splice(0)) await new Promise((done) => s.close(done)); });
@@ -232,9 +239,9 @@ describe("the project control is the declaration's, and the page carries the dec
 describe("/tree?project=<slug> serves that project's rows, and an absent one serves them all", () => {
   it("serves one project for the slug the query names, and every project when it names none", async () => {
     const get = await serving();
-    expect(rowsOf(await get("?show=all")), "an absent parameter narrowed the record").toEqual(keysOf(RECORD));
+    expect(rowsOf(await get("?show=all")), "an absent parameter narrowed the record").toEqual(drawnKeys(RECORD));
     for (const p of RECORD)
-      expect(rowsOf(await get(`?${PARAM}=${p.label}&show=all`)), p.label).toEqual(keysOf([p]));
+      expect(rowsOf(await get(`?${PARAM}=${p.label}&show=all`)), p.label).toEqual(drawnKeys([p]));
     // A slug is matched whole: `wecode` is not `wecode-web`, however the two are spelled.
     const one = await get(`?${PARAM}=wecode&show=all`);
     for (const key of [...keysOf([WEB]), ...keysOf([CONDUIT])])
@@ -257,9 +264,9 @@ describe("/tree?project=<slug> serves that project's rows, and an absent one ser
     // Every answer is an address, and the address is what it said it was: picked, submitted and
     // fetched, with no browser and no script anywhere in it.
     for (const [v] of named)
-      expect(rowsOf(await get(submits(body, PARAM, v))), v).toEqual(keysOf([RECORD.find((p) => p.label === v) as Node]));
+      expect(rowsOf(await get(submits(body, PARAM, v))), v).toEqual(drawnKeys([RECORD.find((p) => p.label === v) as Node]));
     expect(rowsOf(await get(submits(body, PARAM, (rest[0] as readonly [string, string])[0]))),
-      "the answer that names no project does not give the record back").toEqual(keysOf(RECORD));
+      "the answer that names no project does not give the record back").toEqual(drawnKeys(RECORD));
     for (const v of ["<script", "onchange", "onclick", "onsubmit", "data-href", "javascript:"])
       expect(body, v).not.toContain(v);
     // A form left open takes every field after it with it, so which answers a control sends
@@ -276,15 +283,15 @@ describe("the project choice survives alongside the show filter", () => {
     // the project with `show=all` leaves the whole of that project and no other.
     expect(rowsOf(await get(`?${PARAM}=wecode`)), "the show default stopped applying").toEqual(OPEN_WECODE);
     for (const q of [`?${PARAM}=wecode&show=all`, `?show=all&${PARAM}=wecode`])
-      expect(rowsOf(await get(q)), q).toEqual(keysOf([WECODE]));
-    expect(rowsOf(await get(`?show=open&${PARAM}=conduit-realworld`))).toEqual(keysOf([CONDUIT]));
+      expect(rowsOf(await get(q)), q).toEqual(drawnKeys([WECODE]));
+    expect(rowsOf(await get(`?show=open&${PARAM}=conduit-realworld`))).toEqual(drawnKeys([CONDUIT]));
     // Asking for the finished work keeps the reader in the project they were reading: the state
     // answer is changed on the page's own form, and the project rides along with it.
     const narrow = await get(`?${PARAM}=wecode`);
     const widened = submits(narrow, "show", "all");
     expect(asked(widened), "widening the states threw the project away")
       .toEqual(["/tree", [[PARAM, "wecode"], ["show", "all"]]]);
-    expect(rowsOf(await get(widened))).toEqual(keysOf([WECODE]));
+    expect(rowsOf(await get(widened))).toEqual(drawnKeys([WECODE]));
     // And the other way round: picking a project keeps the states the reader had asked for.
     const all = await get("?show=all");
     const picked = submits(all, PARAM, "wecode-web");
@@ -319,7 +326,7 @@ describe("a row's trailing column carries its state and nothing else", () => {
       for (const n of ns) { states.set(`${n.entity}-${n.id}`, n.state); walk(n.children); }
     };
     walk(RECORD);
-    expect(rowsOf(body), "the page draws other rows than the record gave it").toEqual(keysOf(RECORD));
+    expect(rowsOf(body), "the page draws other rows than the record gave it").toEqual(drawnKeys(RECORD));
     for (const key of rowsOf(body)) {
       const row = rowOf(body, key);
       // Four parts, in the design's order, and the state is the last of them — on a leaf and on
@@ -339,7 +346,7 @@ describe("a row's trailing column carries its state and nothing else", () => {
     // The rollup is what used to trail the state — how many done, open and failed hang under the
     // row — and it was a second answer to the question the tree already answers by being a tree.
     // Three rows are given counts nobody could mistake for anything else on the page.
-    for (const key of ["project-1", "story-4", "task-5"]) {
+    for (const key of ["story-4", "task-5"]) {
       const row = rowOf(body, key);
       for (const said of [...COUNTS, `class="rollup"`, `class="role"`, "data-role", "rollup"])
         expect(row, `${key} carries ${said}`).not.toContain(said);

@@ -90,10 +90,15 @@ const namesOf = (v: unknown, what: string, path: string): readonly string[] => {
 export function loadLevels(path: string = DESIGN): Levels {
   const outline = mapOf(mapOf(mapOf(parse(readFileSync(path, "utf8")))["shared"])["outline"]);
   const levels = mapOf(outline["levels"]);
+  const web = mapOf(levels["web"]);
+  // The web block wins where it speaks. `shared.outline.levels` is the cockpit's and this
+  // renderer's both, and the two cannot want the same rungs: a fixed box needs the whole
+  // shape, a page is opened to work one story. A key the web block leaves out is not an
+  // override, so the shared list still answers for it.
   return {
-    shows: namesOf(levels["shows"], "shows", path),
-    omits: namesOf(levels["omits"], "omits", path),
-    folds: namesOf(mapOf(levels["web"])["folds"], "web.folds", path),
+    shows: namesOf(web["shows"] ?? levels["shows"], "shows", path),
+    omits: namesOf(web["omits"] ?? levels["omits"], "omits", path),
+    folds: namesOf(web["folds"], "web.folds", path),
   };
 }
 

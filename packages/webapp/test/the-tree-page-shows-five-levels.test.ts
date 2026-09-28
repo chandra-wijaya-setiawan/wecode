@@ -46,24 +46,36 @@ const ui = edits(fileURLToPath(new URL("../config/ui.yaml", import.meta.url)));
 const LEVELS = loadLevels();
 const DECLARED = loadUi();
 const PROOF = ["requirement", "acceptance_criteria", "acceptance_test", "task_test"];
-const SHOWS = "      shows: [project, release, epic, story, task]";
-const FOLDS = `        folds: [${PROOF.join(", ")}]`;
+// The lines this renderer reads, which are the web block's and not the shared five.
+const SHOWS = "        shows: [story, acceptance_criteria, acceptance_test, task]";
+const OMITS = "        omits: [project, release, epic, requirement, task_test]";
+const FOLDS = "        folds: [acceptance_criteria, acceptance_test]";
 const EXCLUDES = "        excludes: [released, delivered, met, accepted, done, dropped, passed]";
 const NONE: Rollup = { done: 0, open: 0, failed: 0 };
 /** The machines the record is kept by, which is where "terminal" is decided. What this tree draws
  *  is what it shows and folds; `assignment` is neither, so its terminals are not this page's. */
 const MACHINES = loadMachines();
 const DRAWN = [...LEVELS.shows, ...LEVELS.folds] as readonly StatefulEntity[];
-const TERMINAL = [...new Set(DRAWN.flatMap((e) => MACHINES[e].terminal))].sort();
+/** Every level the record keeps, drawn or not: the narrowing runs before the thinning, so a
+ *  rung this renderer hides is still a rung the filter has to have an answer for. */
+const KEPT = ["project", "release", "epic", "story", "requirement", "acceptance_criteria",
+  "acceptance_test", "task", "task_test"] as const;
+const TERMINAL = [...new Set(KEPT.flatMap((e) => MACHINES[e].terminal))].sort();
 
 const node = (entity: string, id: number, over: Partial<Node> = {}): Node =>
   ({ entity, id, label: `${entity} ${id}`, state: "planned", children: [], rollup: NONE, folded: false, ...over });
-/** The record's own nine levels, the four of proof in between, as the ledger keeps them. */
+/** The record's own nine levels. The ledger keeps every one; what this renderer draws of them
+ *  is the web block's business, so the fixture is the whole chain and the page is what thins
+ *  it. `RUNGS` is what should survive that thinning. */
 const under = (parent: Node, child: Node): Node => ({ ...parent, children: [child] });
-const CHAIN = [["project", 1], ["release", 2], ["epic", 3], ["story", 4], ["requirement", 5],
+const LEDGER = [["project", 1], ["release", 2], ["epic", 3], ["story", 4], ["requirement", 5],
   ["acceptance_criteria", 6], ["acceptance_test", 7]] as const;
+/** The rungs the web tree keeps, in the order it keeps them. */
+const CHAIN = [["story", 4], ["acceptance_criteria", 6], ["acceptance_test", 7]] as const;
+/** The rungs it drops: three above the story, and the requirement that wraps one criterion. */
+const DROPPED = [["project", 1], ["release", 2], ["epic", 3], ["requirement", 5]] as const;
 const deepTask = (task: Node = node("task", 8)): Node =>
-  CHAIN.reduceRight<Node>((kid, [e, id]) => under(node(e, id), kid), task);
+  LEDGER.reduceRight<Node>((kid, [e, id]) => under(node(e, id), kid), task);
 const WHOLE = deepTask(node("task", 8, { children: [node("task_test", 9)] }));
 /** The `<li>` of one node, without its descendants' rows. */
 function rowOf(body: string, entity: string, id: number): string {
@@ -105,21 +117,35 @@ afterEach(async () => { for (const s of servers.splice(0)) await new Promise((do
 
 describe("how deep the tree goes is the design's", () => {
   // `folds` overrides `omits` here; and a design that declares no levels refuses.
-  it("reads the five levels of work and the four of proof, and moves when the design moves", () => {
-    expect(LEVELS.shows).toEqual(["project", "release", "epic", "story", "task"]);
-    expect([LEVELS.omits, LEVELS.folds]).toEqual([PROOF, PROOF]);
-    const moved = loadLevels(design(SHOWS, "      shows: [project, epic, story, task]"));
-    expect(moved.shows).toEqual(["project", "epic", "story", "task"]);
+  it("reads the rungs the web block names, and moves when the design moves", () => {
+    // Anchored at the story. Project, release and epic answer where a story lives, which a
+    // picker above the tree answers once instead of three rungs answering on every row; the
+    // requirement wraps a single criterion in 502 of 583 cases. The cockpit still shows its
+    // five — `shared.outline.levels` is untouched, and the tui's own test holds it to them.
+    expect(LEVELS.shows).toEqual(["story", "acceptance_criteria", "acceptance_test", "task"]);
+    expect(LEVELS.omits).toEqual(["project", "release", "epic", "requirement", "task_test"]);
+    expect(LEVELS.folds).toEqual(["acceptance_criteria", "acceptance_test"]);
+    const moved = loadLevels(design(SHOWS, "        shows: [epic, story, task]"));
+    expect(moved.shows).toEqual(["epic", "story", "task"]);
     // A level named by no list is still drawn: a row nobody decided about is kept.
-    expect(treeBranches([deepTask()], moved)).toContain(`<li id="release-2" `);
+    expect(treeBranches([deepTask()], loadLevels(design(OMITS, "        omits: [project, epic]"))))
+      .toContain(`<li id="release-2" `);
     // Take a level out of `folds` and it is omitted again, its children rising to whoever is left.
-    const fewer = loadLevels(design(FOLDS, "        folds: [acceptance_criteria, task_test]"));
-    expect(fewer.folds).toEqual(["acceptance_criteria", "task_test"]);
+    const fewer = loadLevels(design(FOLDS, "        folds: [acceptance_criteria]"));
+    expect(fewer.folds).toEqual(["acceptance_criteria"]);
     const body = treeBranches([WHOLE], fewer);
-    for (const g of ["requirement-5", "acceptance_test-7"]) expect(body, g).not.toContain(`id="${g}"`);
+    // `shows` names the test rung, so taking it out of `folds` only stops it arriving shut —
+    // it is `omits` that would drop it. The requirement is dropped either way.
+    expect(body, "requirement-5").not.toContain(`id="requirement-5"`);
+    expect(body, "acceptance_test-7").toContain(`id="acceptance_test-7"`);
+    for (const [e, i] of DROPPED) expect(treeBranches([WHOLE]), `${e} is drawn`).not.toContain(`id="${e}-${i}"`);
     expect(body.slice(body.indexOf(`<li id="story-4" `))).toContain(`<ul><li id="acceptance_criteria-6" `);
-    for (const [from, miss] of [[SHOWS, /no shows/], [FOLDS, /no web\.folds/]] as const)
-      for (const t of [TreeDesignError, miss]) expect(() => loadLevels(design(from, "")), from).toThrow(t);
+    // Taking the web block's own `shows` away is not a refusal: the shared list answers for
+    // a key the block leaves out, which is what makes it an override rather than a second
+    // declaration to keep in step. `web.folds` has no shared twin, so its absence still is.
+    expect(loadLevels(design(SHOWS, "")).shows).toEqual(["project", "release", "epic", "story", "task"]);
+    for (const t of [TreeDesignError, /no web\.folds/])
+      expect(() => loadLevels(design(FOLDS, "")), "web.folds").toThrow(t);
   });
 });
 
@@ -127,29 +153,35 @@ describe("how deep the tree goes is the design's", () => {
 describe("the proof of a story is drawn under the story, and the tree is nested lists", () => {
   const body = treeBranches([WHOLE]);
   it("keeps every level at the depth the record put it, open above the proof and shut at it", () => {
-    expect(shown([WHOLE])[0]?.children[0]?.children[0]?.children[0]?.children.map((c) => c.entity)).toEqual(["requirement"]);
-    expect([body.includes(`<ul class="tree">`), [...body.matchAll(/<ul/g)].length]).toEqual([true, 9]);
-    expect(([...CHAIN, ["task", 8], ["task_test", 9]] as const).map(([e, i]) => nesting(body, e, i))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    // The story is the root here: the three above it gave their children up, and the
+    // requirement gave its criterion to the story.
+    expect(shown([WHOLE])[0]?.entity).toBe("story");
+    expect(shown([WHOLE])[0]?.children.map((c) => c.entity)).toEqual(["acceptance_criteria"]);
+    expect([body.includes(`<ul class="tree">`), [...body.matchAll(/<ul/g)].length]).toEqual([true, 4]);
+    expect(([...CHAIN, ["task", 8]] as const).map(([e, i]) => nesting(body, e, i))).toEqual([1, 2, 3, 4]);
     for (const proof of LEVELS.folds) expect(body, proof).toContain(`<li id="${proof}-`);
-    expect([...body.matchAll(/<li id="/g)]).toHaveLength(9);
+    expect([...body.matchAll(/<li id="/g)]).toHaveLength(4);
     // Nothing is lifted past a proof level: the task hangs under the test that accepts it.
     expect(body.slice(body.indexOf(`<li id="acceptance_test-7" `))).toContain(`<ul><li id="task-8" `);
     for (const t of ["ul", "li", "details", "summary"]) expect([...body.matchAll(new RegExp(`<${t}[ >]`, "g"))].length,
       t).toBe([...body.matchAll(new RegExp(`</${t}>`, "g"))].length);
     // The work arrives open and the proof does not, so the page lands at story level.
-    expect([[...body.matchAll(/<details open>/g)].length, [...body.matchAll(/<details>/g)].length]).toEqual([3, 5]);
+    // Nothing arrives open: a story holds only its proof now, and proof arrives shut, so the
+    // page lands on the stories themselves and a reader opens the one they are working.
+    expect([[...body.matchAll(/<details open/g)].length, [...body.matchAll(/<details/g)].length]).toEqual([0, 3]);
     // Each proof row is a disclosure of its own, so the reader opens one level at a time.
-    for (const [e, id, d] of [["project", 1, " open"], ["release", 2, " open"], ["epic", 3, " open"],
-      ["requirement", 5, ""], ["acceptance_criteria", 6, ""]] as const)
-      expect(rowOf(body, e, id), e).toContain(`<details${d}><summary>`);
-    expect(rowOf(body, "task_test", 9)).not.toMatch(/<(details|summary)/);
+    for (const [e, id, d] of [["story", 4, ""], ["acceptance_criteria", 6, ""],
+      ["acceptance_test", 7, ""]] as const)
+      expect(rowOf(body, e, id), e).toContain(`<details${d}`);
+    // The task is the last rung this tree draws, so it is a row and not a disclosure.
+    expect(rowOf(body, "task", 8)).not.toMatch(/<(details|summary)/);
     for (const v of ["onclick", "aria-expanded"]) expect(body, v).not.toContain(v);
     const open = `<li id="story-4" data-ui="tree.node">`;
-    expect(body).toContain(`${open}<details><summary><span class="label">`);
-    expect(body.slice(body.indexOf(open))).toContain(`</summary><ul><li id="requirement-5" `);
-    // The story's is the page's first shut disclosure and every proof row is after it.
-    const shut = body.indexOf("<details><summary>");
-    expect(shut).toBe(body.indexOf(open) + open.length);
+    expect(body).toContain(open);
+    // The requirement is not drawn, so what hangs under the story is its criterion.
+    expect(body.slice(body.indexOf(open))).toContain(`<li id="acceptance_criteria-6" `);
+    // The criterion's is the page's first shut disclosure and every proof row is at or after it.
+    const shut = body.indexOf("<details ");
     for (const p of LEVELS.folds) expect(body.indexOf(`<li id="${p}-`), p).toBeGreaterThan(shut);
   });
   // A row is a sentence: label, id, kind, state — and it stops there. The trailing column
@@ -162,13 +194,13 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
     // A row with plenty under it counts none of it, leaf or parent: the tree already says what is
     // underneath, and a reader who wants those rows opens the branch instead of reading a number.
     const counted = { rollup: { done: 3, open: 1, failed: 2 } };
-    const [full, over] = [treeBranches([node("epic", 3, counted)]), treeBranches([node("epic", 3, { ...counted, children: [node("story", 4)] })])];
+    const [full, over] = [treeBranches([node("story", 3, counted)]), treeBranches([node("story", 3, { ...counted, children: [node("story", 4)] })])];
     for (const g of ["rollup", "3 done", "1 open", "2 failed", "done"]) for (const b of [full, over]) expect(b, g).not.toContain(g);
-    expect([rowOf(full, "epic", 3).endsWith(`class="state">planned</span>`), rowOf(over, "epic", 3).endsWith(`class="state">planned</span></summary>`)]).toEqual([true, true]);
+    expect([rowOf(full, "story", 3).endsWith(`class="state">planned</span>`), rowOf(over, "story", 3).endsWith(`class="state">planned</span></summary>`)]).toEqual([true, true]);
     expect(rowOf(treeBranches([node("task", 8)]), "task", 8).endsWith(`class="state">planned</span>`)).toBe(true);
     // Sibling roots are separate trees, an empty record says so, and words reach as words.
-    const two = treeBranches([node("project", 1), node("project", 2)]);
-    expect([nesting(two, "project", 1), nesting(two, "project", 2), [...two.matchAll(/<ul/g)].length]).toEqual([1, 1, 1]);
+    const two = treeBranches([node("story", 1), node("story", 2)]);
+    expect([nesting(two, "story", 1), nesting(two, "story", 2), [...two.matchAll(/<ul/g)].length]).toEqual([1, 1, 1]);
     expect(treeBranches([])).toBe(`<p class="empty">nothing in the record yet</p>`);
     const odd = treeBranches([node("story", 4, { label: `a <script> & "quotes"` })]);
     expect([odd.includes("<script>"), rowOf(odd, "story", 4).includes("a &lt;script&gt; &amp; &quot;quotes&quot;")]).toEqual([false, true]);
@@ -196,7 +228,7 @@ describe("what the reader is offered is the declaration's", () => {
     // And `passed` is the one the machines cannot settle for this page: it is a state of both
     // test levels the tree draws, terminal on neither — each holds an `invalidate` back out of
     // it — so it is left out for being nothing owed, never for being a row that cannot move.
-    for (const e of ["acceptance_test", "task_test"] as const) {
+    for (const e of ["acceptance_test"] as const) {
       expect([DRAWN.includes(e), MACHINES[e].states.includes("passed"), MACHINES[e].terminal], e)
         .toEqual([true, true, ["dropped"]]);
       expect(MACHINES[e].transitions.filter((t) => t.from.includes("passed")).map((t) => [t.verb, t.to]), e)
@@ -332,7 +364,7 @@ describe("open only leaves out every terminal state and every passed test, and n
 describe("a long record is cut to the declared budget", () => {
   const { budget, columns } = DECLARED.text;
   const long = [1, 2, 3, 4, 5].map((n) => `line ${n} ${"w".repeat(columns - 10)}`).join(" ");
-  const body = treeBranches([node("requirement", 5, { label: long })]);
+  const body = treeBranches([node("acceptance_criteria", 5, { label: long })]);
   it("counts a record's text in lines of its own and of the declared width, and cuts there", () => {
     expect([linesOf("one\ntwo", columns), linesOf(long, columns).length]).toEqual([["one", "two"], 5]);
     // A word longer than the whole width is broken rather than left to run on.
@@ -340,12 +372,12 @@ describe("a long record is cut to the declared budget", () => {
     const [said, rest] = spent(long, budget, columns);
     expect([linesOf(said, columns).length, said.startsWith("line 1 "), said.includes("line 4"),
       rest.includes("line 4"), rest.includes("line 5")]).toEqual([budget, true, false, true, true]);
-    const row = rowOf(body, "requirement", 5);
+    const row = rowOf(body, "acceptance_criteria", 5);
     expect([row.includes(`<span class="label">line 1 `), row.includes(`<details class="more" data-ui="tree.node.more">`),
       row.includes(`<summary>more</summary><span class="rest">`), row.slice(0, row.indexOf("<details")).includes("line 4"),
       row.slice(row.indexOf(`class="rest"`)).includes("line 5")]).toEqual([true, true, true, false, true]);
     // A fold over nothing is a control that does nothing, so a short record gets none.
-    const short = treeBranches([node("requirement", 5, { label: "it holds" })]);
+    const short = treeBranches([node("acceptance_criteria", 5, { label: "it holds" })]);
     expect([short.includes(`<span class="label">it holds</span>`), short.includes("tree.node.more"),
       spent("it holds", budget, columns)]).toEqual([true, false, ["it holds", ""]]);
     // The fold sits after the row and never inside a summary: a disclosure nested in one is a
@@ -355,7 +387,7 @@ describe("a long record is cut to the declared budget", () => {
     expect(parent.slice(parent.indexOf("<summary>"), parent.indexOf("</summary>"))).not.toContain("<details");
     for (const v of [`<details class="more" open`, "onclick"]) expect(parent, v).not.toContain(v);
     // And the budget is the file's, not this page's: restate it and the cut moves with it.
-    const cut = rowOf(treeBranches([node("requirement", 5, { label: long })], undefined, loadUi(ui("    budget: 3", "    budget: 1"))), "requirement", 5);
+    const cut = rowOf(treeBranches([node("acceptance_criteria", 5, { label: long })], undefined, loadUi(ui("    budget: 3", "    budget: 1"))), "acceptance_criteria", 5);
     expect([cut.slice(0, cut.indexOf("<details")).includes("line 2"), cut.slice(cut.indexOf(`class="rest"`)).includes("line 2")]).toEqual([false, true]);
   });
 });
@@ -367,7 +399,7 @@ describe("the page is served in the shell, and the surface routes it", () => {
   /** The form is the whole of the filter, so it is pressed against a running surface: the page
    *  that arrives is read, its submit is submitted, and the address it names is fetched. */
   it("answers /tree in the shell, narrowed by the query and by pressing its own submit", async () => {
-    let nodes: readonly Node[] = [node("project", 11, { label: "wemail", state: "dropped" }), WHOLE];
+    let nodes: readonly Node[] = [node("story", 11, { label: "wemail", state: "dropped" }), WHOLE];
     const server = await serve({ "/tree": treeAt(() => nodes) }); servers.push(server);
     const res = await fetch(`${addressOf(server)}/tree?show=all`);
     expect([res.status, res.headers.get("content-type")]).toEqual([200, "text/html; charset=utf-8"]);
@@ -375,14 +407,14 @@ describe("the page is served in the shell, and the surface routes it", () => {
     expect([body.startsWith("<!doctype html>"), body.includes("<title>wecode</title>")]).toEqual([true, true]);
     // Its tree is inside the shell's one element, narrowed by the answer the query named.
     expect(body.slice(body.indexOf("<main>"), body.indexOf("</main>"))).toContain(`<li id="task-8" `);
-    expect([body.includes(`<li id="project-11" data-ui="tree.node">`), body === treePage(nodes, at("?show=all")).body]).toEqual([true, true]);
+    expect([body.includes(`<li id="story-11" data-ui="tree.node">`), body === treePage(nodes, at("?show=all")).body]).toEqual([true, true]);
     // The arriving page is narrowed; its own submit, pressed with the other answer picked, is
     // the address that widens it — and the widened page's form narrows it back again.
     const arrived = await (await fetch(`${addressOf(server)}/tree`)).text();
-    expect([arrived.includes(`<li id="project-11"`), submits(arrived, "all")]).toEqual([false, "/tree?show=all"]);
+    expect([arrived.includes(`<li id="story-11"`), submits(arrived, "all")]).toEqual([false, "/tree?show=all"]);
     const widened = await (await fetch(`${addressOf(server)}${submits(arrived, "all")}`)).text();
     expect([widened === body, submits(widened, "open")]).toEqual([true, "/tree?show=open"]);
-    expect(await (await fetch(`${addressOf(server)}${submits(widened, "open")}`)).text()).not.toContain(`<li id="project-11"`);
+    expect(await (await fetch(`${addressOf(server)}${submits(widened, "open")}`)).text()).not.toContain(`<li id="story-11"`);
     // Work moves without anybody reloading, so the record is read again on every request.
     nodes = [];
     expect(await (await fetch(`${addressOf(server)}/tree`)).text()).toContain("nothing in the record yet");
@@ -390,7 +422,7 @@ describe("the page is served in the shell, and the surface routes it", () => {
   it("binds /tree to the page, and is named in bin.ts no more than the board is", async () => {
     expect(discovered(readdirSync(PAGES))).toContain("tree");
     expect([pathOf("tree"), pathOf("board")]).toEqual(["/tree", "/"]);
-    const record = node("project", 1, { label: "the whole record" });
+    const record = node("story", 1, { label: "the whole record" });
     const module = (await import("../src/pages/tree.js")) as Record<string, unknown>;
     const routes = { [pathOf("tree")]: mounted("tree", module, { record: () => [record] }) };
     const reply = answer(routes, "GET", "/tree");
