@@ -55,6 +55,11 @@ over:
   packages/runner/test/codex-adapter.test.ts: 500
   packages/runner/test/typed-daemon.test.ts: 465
   packages/runner/test/typed-foreman.test.ts: 447
+  # The tree page was at 398 of 400 when the commit graph was wired into it: the swimlanes
+  # beside a row are `pages/rail.ts`'s drawing, but where a row sits — its depth, the
+  # ancestors' lanes still live, whether it ends its own lane or begins it — is the walk's
+  # to say, and the walk is here. The row records what that cost, and only comes down.
+  packages/webapp/src/pages/tree.ts: 443
   packages/explorer/test/repo-explorer.test.ts: 434
   packages/core/src/create.ts: 427
   packages/core/test/typed-delivered.test.ts: 417
