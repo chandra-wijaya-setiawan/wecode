@@ -258,6 +258,19 @@ renderers:
         "nav button::before": "content: '\u2039'; color: var(--mark)"
         "html.docked nav button::before": "content: '\u203a'"
         "p.empty": "margin: 0; color: var(--faint)"
+        # What state a row is in, as a colour, named once for every renderer that draws a
+        # node. Tokens and not colours: the palette is the signed mockup's seven and a
+        # colour added to it is a colour nobody signed.
+        #
+        # Ready is the green one — answered 28 Sep: green means this is ready to be worked,
+        # because that is the row a reader is scanning for. What is moving takes the mark.
+        # Everything settled goes quiet, because it is hidden by default and a colour on it
+        # would compete with the thing that needs somebody.
+        #
+        # `failed` has no red to take: the mockup signed no red. It takes full-strength ink,
+        # which reads as emphasis rather than as alarm, and that is the honest best until a
+        # red is signed into the palette.
+        ":root": "--st-ready: var(--good); --st-in_progress: var(--mark); --st-running: var(--mark); --st-failed: var(--ink); --st-planned: var(--faint); --st-on_hold: var(--faint); --st-done: var(--faint); --st-passed: var(--faint); --st-met: var(--faint); --st-accepted: var(--faint); --st-delivered: var(--faint); --st-released: var(--faint); --st-dropped: var(--rule)"
         # While a drawing is open the surface gets out of its way. A sketch is a mockup or
         # a reading — it is drawn to be looked at whole — and it was being shown through a
         # letterbox: a frame inside a column inside a padded body, scrolling in a box that
@@ -431,18 +444,31 @@ renderers:
           # does not carry the weight the decisions page's send does.
           "section.tree form.filter button": "border: 1px solid var(--rule); border-radius: 3px; background: var(--raised); padding: .15rem .7rem; color: var(--mark); font: inherit; font-size: .92rem; cursor: pointer"
           "section.tree form.filter button:hover": "border-color: var(--mark); color: var(--ink)"
-          "ul.tree": "list-style: none; margin: 0; padding: 0"
+          "ul.tree": "list-style: none; margin: 0; padding: 0; overflow-x: hidden"
           # No indent and no guide: the rail draws the depth, and a nested padding drew it a
           # second time — which is what put every node on a line of its own.
           "ul.tree ul": "list-style: none; margin: 0; padding: 0; border: 0"
           # Flex and not grid: a leaf row is four loose spans, and in a grid each would
           # take a row of its own. Flex lets them flow on one line beside the rail, and a
           # branch's children are pulled back so the depth is the rail's alone to say.
-          "ul.tree li": "display: flex; flex-wrap: wrap; align-items: baseline; min-width: 0; overflow-wrap: anywhere"
-          "ul.tree li > svg": "flex: none; align-self: stretch"
-          "ul.tree li > details": "flex: 1 1 auto; min-width: 0"
+          # Exactly the rail's own height, and the row holds one line. The rail is an <svg>
+          # 22px tall per row, so a row any taller left a gap between one rail and the next
+          # and the lanes read as broken pipe. A long label is cut with an ellipsis rather
+          # than wrapped, because a wrapped row is a row whose rail no longer reaches it.
+          "ul.tree li": "display: flex; align-items: center; height: 22px; min-width: 0; white-space: nowrap; gap: .3rem"
+          "ul.tree li > svg": "flex: none; display: block"
+          "ul.tree li > details": "flex: 1 1 auto; min-width: 0; overflow: hidden"
+          # The summary has to be a row of its own, or the label inside it never shrinks and
+          # the row runs off the page instead of ending in an ellipsis.
+          "ul.tree li > details > summary": "display: flex; align-items: center; min-width: 0; gap: .3rem"
+          # A shut branch's lane leads to rows that are in the document but not on the
+          # screen, so it reads as a pipe going nowhere. The rows are real and the lane is
+          # truthful, so the markup keeps it and the sheet hides it until the branch opens.
+          # `data-lane` is the lane it turns into, which is one in from the row's own.
+          "ul.tree li:has(> details:not([open])) > svg > .lane:last-of-type": "display: none"
+          "ul.tree li > .row, ul.tree li > span": "min-width: 0; overflow: hidden"
           "ul.tree li > details > ul": "margin-left: calc(-1 * var(--rail, 0))"
-          "ul.tree li .label": "color: var(--ink)"
+          "ul.tree li .label": "color: var(--ink); overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto"
           "ul.tree li .id, ul.tree li .kind, ul.tree li .rollup": "color: var(--faint); font-family: var(--mono); font-size: .92em"
           "ul.tree li .state": "color: var(--mark); font-weight: 600"
         tasks:
