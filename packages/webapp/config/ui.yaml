@@ -122,24 +122,27 @@ tree:
       id: tree.project.all
       value: all
       says: all projects
-  # A record's own text, which the record wrote and which no length was ever agreed for. A
-  # requirement's statement runs to a paragraph; drawn whole, one of them is taller than
-  # the branch it sits in and the tree stops reading as a tree.
-  text:
-    # The most lines of it a row shows before the rest goes behind the fold. Three, which
-    # is what the terminal's row already spends — `shared.outline.row.max_lines` — because
-    # a row of the same tree should not be two different heights on two renderers.
-    budget: 3
-    # How wide a line of it is reckoned to be, in characters. A row is as wide as the
-    # reader's window and nothing tells the page how wide that is, so the budget is spent
-    # against a declared width rather than a measured one: this is a width, chosen here,
-    # wide enough that a one-line statement stays one line.
-    columns: 96
-    # The fold the rest is behind. Not a truncation: the text is all in the document, and
-    # the reader opens it in place and closes it again without leaving the page.
-    more:
-      id: tree.node.more
-      says: more
+  # What a row calls the kind of record it is. The record's own names are what the *record*
+  # calls them, and two of the nine are too long to put in a column of a 22px row:
+  # `acceptance_criteria` is nineteen characters, and drawn on every row of a story's proof it
+  # spends more of the line than the record's own words do. Sketch #7 — "the tree you can
+  # read" — signed the short words, so they are here rather than in the page: what a reader is
+  # called a thing by is a decision about the surface.
+  #
+  # A level nobody wrote a word for is drawn by the record's own name for it. That is not this
+  # file supplying a default — it is the record answering for itself, which is the one answer
+  # that cannot be wrong; a refusal would mean a rung the record grew could not be drawn at
+  # all, and an invented word would be worse than the true one.
+  kinds:
+    project: project
+    release: release
+    epic: epic
+    story: story
+    requirement: requirement
+    acceptance_criteria: criterion
+    acceptance_test: test
+    task: task
+    task_test: proof
   # Where a row ends, which is the one thing a reader scanning the right-hand edge is asking
   # of it: how it is going.
   #

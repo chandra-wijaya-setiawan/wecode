@@ -20,7 +20,7 @@ import { loadMachines, type Node, type Rollup, type StatefulEntity } from "@weco
 import { afterEach, describe, expect, it } from "vitest";
 import { addressOf, answer, serve } from "../src/index.js";
 import { discovered, mounted, pathOf } from "../src/pages/discover.js";
-import { chosen, linesOf, loadLevels, loadUi, narrowed, shown, spent,
+import { chosen, loadLevels, loadUi, narrowed, shown,
   treeAt, treeBranches, treePage, treeSection, TreeDesignError, TreeUiError } from "../src/pages/tree.js";
 
 const at = (query = ""): URL => new URL(`http://localhost/tree${query}`);
@@ -184,20 +184,34 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
     const shut = body.indexOf("<details ");
     for (const p of LEVELS.folds) expect(body.indexOf(`<li id="${p}-`), p).toBeGreaterThan(shut);
   });
-  // A row is a sentence: label, id, kind, state — and it stops there. The trailing column
-  // carries the state and nothing else; the rollup that used to follow it is gone.
-  it("leads a row with the label, then the id and the kind, and ends at the state alone", () => {
+  // A row is four columns and not a sentence — sketch #7 draws it that way, and the reason
+  // is that a reader scans a column and has to read a sentence. The rail is the first of
+  // them, so depth is drawn once; then what kind of record it is, its number, its own words,
+  // and the state. Nothing joins them: the ` · ` that used to made the four one line of
+  // prose, and with it there no two rows' text began at the same place.
+  //
+  // The trailing column carries the state and nothing else; the rollup that used to follow
+  // it is gone. `style` leads the state's span so the row still *ends* `class="state">…`,
+  // which is what says the state is last whatever hue it is wearing.
+  it("draws a row as the rail, the kind, the id, the words and the state, and ends there", () => {
     const said = treeBranches([node("story", 4, { label: "ship the tree page" })]);
-    expect(rowOf(said, "story", 4)).toContain(`<span class="label">ship the tree page</span> · ` +
-      `<span class="id">#4</span> · <span class="kind">story</span> · <span class="state">planned</span>`);
-    expect([...rowOf(said, "story", 4).matchAll(/<span class="([a-z]+)"/g)].map((m) => m[1])).toEqual(["label", "id", "kind", "state"]);
+    expect(rowOf(said, "story", 4)).toContain(`<span class="kind">story</span>` +
+      `<span class="id">#4</span>` +
+      `<span class="label" title="ship the tree page">ship the tree page</span>` +
+      `<span style="--hue:var(--st-planned, currentColor)" class="state">planned</span>`);
+    expect([...rowOf(said, "story", 4).matchAll(/<span [^>]*class="([a-z]+)"/g)].map((m) => m[1])).toEqual(["kind", "id", "label", "state"]);
+    // The rail opens the row, inside it, so every row's columns are the one grid.
+    const row4 = rowOf(said, "story", 4);
+    expect(row4.indexOf("<svg")).toBeLessThan(row4.indexOf(`<span class="kind">`));
+    expect(row4).toContain(`<div class="row"><svg`);
+    expect(row4, "no part of a row is joined to the next").not.toContain(" · ");
     // A row with plenty under it counts none of it, leaf or parent: the tree already says what is
     // underneath, and a reader who wants those rows opens the branch instead of reading a number.
     const counted = { rollup: { done: 3, open: 1, failed: 2 } };
     const [full, over] = [treeBranches([node("story", 3, counted)]), treeBranches([node("story", 3, { ...counted, children: [node("story", 4)] })])];
     for (const g of ["rollup", "3 done", "1 open", "2 failed", "done"]) for (const b of [full, over]) expect(b, g).not.toContain(g);
-    expect([rowOf(full, "story", 3).endsWith(`class="state">planned</span>`), rowOf(over, "story", 3).endsWith(`class="state">planned</span></summary>`)]).toEqual([true, true]);
-    expect(rowOf(treeBranches([node("task", 8)]), "task", 8).endsWith(`class="state">planned</span>`)).toBe(true);
+    expect([rowOf(full, "story", 3).endsWith(`class="state">planned</span></div>`), rowOf(over, "story", 3).endsWith(`class="state">planned</span></summary>`)]).toEqual([true, true]);
+    expect(rowOf(treeBranches([node("task", 8)]), "task", 8).endsWith(`class="state">planned</span></div>`)).toBe(true);
     // Sibling roots are separate trees, an empty record says so, and words reach as words.
     const two = treeBranches([node("story", 1), node("story", 2)]);
     expect([nesting(two, "story", 1), nesting(two, "story", 2), [...two.matchAll(/<ul/g)].length]).toEqual([1, 1, 1]);
@@ -210,16 +224,15 @@ describe("the proof of a story is drawn under the story, and the tree is nested 
 /** The words, the default, the states left out and the line budget are all `ui.yaml`'s: a page
  *  holding any of them as a literal is a page nobody can restate without an edit. */
 describe("what the reader is offered is the declaration's", () => {
-  const { filter, text } = DECLARED;
+  const { filter } = DECLARED;
   // Open only is stated against the machines where they answer — every state one will not move a
   // drawn row out of — and over them at the one state they cannot settle, which is `passed`.
-  it("reads the word, parameter, default, submit, answers, budget, every terminal and passed", () => {
+  it("reads the word, parameter, default, submit, answers, every terminal and passed", () => {
     expect([filter.says, filter.param, filter.default]).toEqual(["filter:", "show", "open"]);
     expect([filter.submitId, filter.submit]).toEqual(["tree.filter.submit", "narrow"]);
     expect(filter.options.map((o) => [o.id, o.value, o.says]))
       .toEqual([["tree.filter.open", "open", "open only"], ["tree.filter.all", "all", "all"]]);
-    expect([filter.options[1]?.excludes, text.budget, text.more, text.moreId])
-      .toEqual([[], 3, "more", "tree.node.more"]);
+    expect(filter.options[1]?.excludes).toEqual([]);
     expect([...(filter.options[0]?.excludes ?? [])].sort()).toEqual([...TERMINAL, "passed"].sort());
     expect(TERMINAL).toEqual(["accepted", "delivered", "done", "dropped", "met", "released"]);
     // Two are a story's own proof, which the four states written here before this let stand.
@@ -242,7 +255,6 @@ describe("what the reader is offered is the declaration's", () => {
     for (const [from, to, said] of [
       [`    says: "filter:"`, "", /tree\.filter\.says says nothing/],
       ["      says: narrow", "", /tree\.filter\.submit\.says says nothing/],
-      ["    budget: 3", "", /tree\.text\.budget is no count/],
       [EXCLUDES, "", /excludes\b.*names no states/],
       ["      - id: tree.filter.open", "      - id:", /options\[0\]\.id says nothing/],
     ] as const) for (const t of [TreeUiError, said]) expect(() => loadUi(ui(from, to)), from).toThrow(t);
@@ -359,36 +371,60 @@ describe("open only leaves out every terminal state and every passed test, and n
   });
 });
 
-/** No length was ever agreed for a record's own text, so the row spends the declared budget of
- *  lines on it and the rest goes behind a fold — which sits after the row, never in a summary. */
-describe("a long record is cut to the declared budget", () => {
-  const { budget, columns } = DECLARED.text;
-  const long = [1, 2, 3, 4, 5].map((n) => `line ${n} ${"w".repeat(columns - 10)}`).join(" ");
+/** What a row calls a level is `ui.yaml`'s word and not the record's, because two of the
+ *  record's own names are too long to spend a column of a 22px row on. Sketch #7 signed the
+ *  short ones. A level the file names no word for is drawn by the record's own name, which is
+ *  the one answer that cannot be wrong. */
+describe("a row calls its level what the declaration calls it", () => {
+  it("draws the declared word, and the record's own name for a level nobody named", () => {
+    expect(DECLARED.kinds["acceptance_criteria"]).toBe("criterion");
+    expect([DECLARED.kinds["acceptance_test"], DECLARED.kinds["task_test"]]).toEqual(["test", "proof"]);
+    const drawn = treeBranches([node("acceptance_criteria", 5)]);
+    expect(drawn).toContain(`<span class="kind">criterion</span>`);
+    expect(drawn, "the record's own name is not what a reader is shown").not.toContain("acceptance_criteria<");
+    // And the word is the file's: restate it and the row moves with it.
+    const moved = loadUi(ui("    acceptance_criteria: criterion", "    acceptance_criteria: rule"));
+    expect(treeBranches([node("acceptance_criteria", 5)], undefined, moved))
+      .toContain(`<span class="kind">rule</span>`);
+    // A level with no word gets the record's, rather than an empty column or a refusal.
+    const short = loadUi(ui("    acceptance_criteria: criterion\n", ""));
+    expect(treeBranches([node("acceptance_criteria", 5)], undefined, short))
+      .toContain(`<span class="kind">acceptance_criteria</span>`);
+  });
+  it("refuses a map that says nothing, and a word that is not one", () => {
+    for (const [from, to, said] of [
+      ["  kinds:\n", "  absent:\n", /tree\.kinds names no level/],
+      ["    story: story", "    story:", /tree\.kinds\.story says nothing/],
+    ] as const) for (const t of [TreeUiError, said]) expect(() => loadUi(ui(from, to)), from).toThrow(t);
+  });
+});
+
+/** A record's own text is drawn whole and cut by the sheet, not by this page. The budget of
+ *  lines that used to be counted here — three, against a width of 96 characters nobody could
+ *  measure — put the remainder behind a fold, and the fold cost a second line on nearly half
+ *  the rows of the real record. A row is 22px because the rail drawn beside it is, so a row
+ *  that is 44 leaves a gap and the lanes read as broken pipe. The words are carried whole in
+ *  `title` instead, which costs no line and is where a reader looks for the rest of something
+ *  cut. */
+describe("a record's own words are drawn whole, on one line, and cut by nobody here", () => {
+  const long = [1, 2, 3, 4, 5].map((n) => `line ${n} ${"w".repeat(86)}`).join(" ");
   const body = treeBranches([node("acceptance_criteria", 5, { label: long })]);
-  it("counts a record's text in lines of its own and of the declared width, and cuts there", () => {
-    expect([linesOf("one\ntwo", columns), linesOf(long, columns).length]).toEqual([["one", "two"], 5]);
-    // A word longer than the whole width is broken rather than left to run on.
-    expect(linesOf("z".repeat(columns * 2), columns)).toHaveLength(2);
-    const [said, rest] = spent(long, budget, columns);
-    expect([linesOf(said, columns).length, said.startsWith("line 1 "), said.includes("line 4"),
-      rest.includes("line 4"), rest.includes("line 5")]).toEqual([budget, true, false, true, true]);
+  it("draws the whole of a long record and carries the whole of it in title", () => {
     const row = rowOf(body, "acceptance_criteria", 5);
-    expect([row.includes(`<span class="label">line 1 `), row.includes(`<details class="more" data-ui="tree.node.more">`),
-      row.includes(`<summary>more</summary><span class="rest">`), row.slice(0, row.indexOf("<details")).includes("line 4"),
-      row.slice(row.indexOf(`class="rest"`)).includes("line 5")]).toEqual([true, true, true, false, true]);
-    // A fold over nothing is a control that does nothing, so a short record gets none.
+    expect(row).toContain(`<span class="label" title="${long}">${long}</span>`);
+    for (const g of ["line 1", "line 5"]) expect(row, g).toContain(g);
+  });
+  it("spends no fold, on a long record or a short one", () => {
     const short = treeBranches([node("acceptance_criteria", 5, { label: "it holds" })]);
-    expect([short.includes(`<span class="label">it holds</span>`), short.includes("tree.node.more"),
-      spent("it holds", budget, columns)]).toEqual([true, false, ["it holds", ""]]);
-    // The fold sits after the row and never inside a summary: a disclosure nested in one is a
-    // disclosure the reader cannot press without pressing the other. It arrives shut, unhandled.
+    expect(short).toContain(`<span class="label" title="it holds">it holds</span>`);
     const parent = treeBranches([node("story", 4, { label: long, children: [node("task", 8)] })]);
-    expect(parent).toContain(`</span></summary><details class="more"`);
-    expect(parent.slice(parent.indexOf("<summary>"), parent.indexOf("</summary>"))).not.toContain("<details");
-    for (const v of [`<details class="more" open`, "onclick"]) expect(parent, v).not.toContain(v);
-    // And the budget is the file's, not this page's: restate it and the cut moves with it.
-    const cut = rowOf(treeBranches([node("acceptance_criteria", 5, { label: long })], undefined, loadUi(ui("    budget: 3", "    budget: 1"))), "acceptance_criteria", 5);
-    expect([cut.slice(0, cut.indexOf("<details")).includes("line 2"), cut.slice(cut.indexOf(`class="rest"`)).includes("line 2")]).toEqual([false, true]);
+    for (const b of [body, short, parent]) {
+      for (const g of [`class="more"`, "tree.node.more", `class="rest"`]) expect(b, g).not.toContain(g);
+    }
+    // One row, one line: the row element opens and closes with nothing between it and the
+    // next, which is what keeps one row's rail touching the next one's.
+    expect(parent).toContain(`</span></summary><ul>`);
+    expect(body).toContain(`</span></div></li>`);
   });
 });
 

@@ -331,14 +331,15 @@ describe("a row's trailing column carries its state and nothing else", () => {
       const row = rowOf(body, key);
       // Four parts, in the design's order, and the state is the last of them — on a leaf and on
       // a row with a whole project under it alike.
-      expect([...row.matchAll(/<span class="([a-z]+)"/g)].map((m) => m[1]), key)
-        .toEqual(["label", "id", "kind", "state"]);
-      expect(/<span class="state">([^<]*)<\/span>/.exec(row)?.[1], `${key} does not end at its own state`)
+      expect([...row.matchAll(/<span [^>]*class="([a-z]+)"/g)].map((m) => m[1]), key)
+        .toEqual(["kind", "id", "label", "state"]);
+      expect(/<span [^>]*class="state">([^<]*)<\/span>/.exec(row)?.[1], `${key} does not end at its own state`)
         .toBe(states.get(key));
-      // Three separators for four parts: a fifth column is a fourth ` · ` however it is spelled.
-      expect([...row.matchAll(/ · /g)].length, `${key} joins more parts than it draws`).toBe(3);
+      // They are columns and not a sentence, so nothing joins them: a separator anywhere in a
+      // row is the four columns run back together into one line of prose.
+      expect([...row.matchAll(/ · /g)].length, `${key} joins its parts into a sentence`).toBe(0);
       const after = row.slice(row.lastIndexOf("</span>") + "</span>".length);
-      expect(after.replace("</summary>", ""), `${key} carries something after its state`).toBe("");
+      expect(after.replace("</summary>", "").replace("</div>", ""), `${key} carries something after its state`).toBe("");
     }
   });
   it("counts nothing under a row and names nobody at it: no rollup, no role", async () => {

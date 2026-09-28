@@ -270,7 +270,7 @@ renderers:
         # `failed` has no red to take: the mockup signed no red. It takes full-strength ink,
         # which reads as emphasis rather than as alarm, and that is the honest best until a
         # red is signed into the palette.
-        ":root": "--st-ready: var(--good); --st-in_progress: var(--mark); --st-running: var(--mark); --st-failed: var(--ink); --st-planned: var(--faint); --st-on_hold: var(--faint); --st-done: var(--faint); --st-passed: var(--faint); --st-met: var(--faint); --st-accepted: var(--faint); --st-delivered: var(--faint); --st-released: var(--faint); --st-dropped: var(--rule)"
+        ":root": "--st-ready: var(--good); --st-in_progress: var(--mark); --st-running: var(--mark); --st-failed: var(--ink); --st-planned: var(--faint); --st-on_hold: var(--faint); --st-done: var(--faint); --st-passed: var(--faint); --st-met: var(--faint); --st-accepted: var(--faint); --st-delivered: var(--faint); --st-released: var(--faint); --st-dropped: var(--faint)"
         # While a drawing is open the surface gets out of its way. A sketch is a mockup or
         # a reading — it is drawn to be looked at whole — and it was being shown through a
         # letterbox: a frame inside a column inside a padded body, scrolling in a box that
@@ -421,7 +421,6 @@ renderers:
         tree:
           # The page's own name and the one control over it, above the tree. The heading is
           # an h2 for the reason the tasks page's is: the h1 is the shell's banner.
-          "section.tree": "display: grid; gap: .9rem"
           # Kept in the document and off the screen. The row of names already says which
           # page this is, and repeating it cost a band of every window on every page.
           # Hidden rather than deleted: it is still the heading a screen reader lands on,
@@ -435,7 +434,6 @@ renderers:
           # face the rest of the page is read in. Nothing here draws an arrow or a box of
           # its own: a select a surface redraws is a select that stops behaving like one on
           # somebody's machine.
-          "section.tree form.filter": "display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding: .55rem 0"
           "section.tree form.filter label": "display: flex; gap: .5rem; align-items: baseline; color: var(--faint); font-size: .75rem; text-transform: uppercase; letter-spacing: var(--tracking)"
           "section.tree form.filter select": "border: 1px solid var(--rule); border-radius: 3px; background: var(--raised); padding: .1rem .4rem; color: var(--ink); font-family: var(--mono); font-size: .92rem; text-transform: none; letter-spacing: normal; cursor: pointer"
           "section.tree form.filter select:focus": "outline: none; border-color: var(--mark)"
@@ -444,33 +442,61 @@ renderers:
           # does not carry the weight the decisions page's send does.
           "section.tree form.filter button": "border: 1px solid var(--rule); border-radius: 3px; background: var(--raised); padding: .15rem .7rem; color: var(--mark); font: inherit; font-size: .92rem; cursor: pointer"
           "section.tree form.filter button:hover": "border-color: var(--mark); color: var(--ink)"
-          "ul.tree": "list-style: none; margin: 0; padding: 0; overflow-x: hidden"
+          # The tree is a card, the way sketch #7 draws it: the bar that narrows it is the
+          # card's head, the rows are its body, and the two are one object rather than a
+          # control floating above a list. So the section closes its own gap and the two
+          # borders meet.
+          "section.tree": "display: grid; gap: 0"
+          "section.tree form.filter": "display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; border: 1px solid var(--rule); border-radius: 4px 4px 0 0; background: var(--page); padding: .5rem .9rem"
+          "ul.tree": "list-style: none; margin: 0; padding: .25rem 0; border: 1px solid var(--rule); border-top: 0; border-radius: 0 0 4px 4px; background: var(--raised); overflow-x: hidden"
           # No indent and no guide: the rail draws the depth, and a nested padding drew it a
           # second time — which is what put every node on a line of its own.
           "ul.tree ul": "list-style: none; margin: 0; padding: 0; border: 0"
-          # Flex and not grid: a leaf row is four loose spans, and in a grid each would
-          # take a row of its own. Flex lets them flow on one line beside the rail, and a
-          # branch's children are pulled back so the depth is the rail's alone to say.
-          # Exactly the rail's own height, and the row holds one line. The rail is an <svg>
-          # 22px tall per row, so a row any taller left a gap between one rail and the next
-          # and the lanes read as broken pipe. A long label is cut with an ellipsis rather
-          # than wrapped, because a wrapped row is a row whose rail no longer reaches it.
-          "ul.tree li": "display: flex; align-items: center; height: 22px; min-width: 0; white-space: nowrap; gap: .3rem"
-          "ul.tree li > svg": "flex: none; display: block"
-          "ul.tree li > details": "flex: 1 1 auto; min-width: 0; overflow: hidden"
-          # The summary has to be a row of its own, or the label inside it never shrinks and
-          # the row runs off the page instead of ending in an ellipsis.
-          "ul.tree li > details > summary": "display: flex; align-items: center; min-width: 0; gap: .3rem"
+          "ul.tree li": "display: block; min-width: 0"
+          # A row is five columns, and the same five however deep it sits: the rail, what
+          # kind of record it is, its number, its own words, and the state. Four of them are
+          # fixed, so the kinds, the ids and the states line up down the page and a reader
+          # scans a column instead of reading a sentence. The words take what is left and end
+          # in an ellipsis, because a row that wraps is a row whose rail no longer reaches it.
+          #
+          # Grid and not flex: flex sizes every row to its own content, which is what left
+          # the ids and the states in a different place on every line.
+          #
+          # 22px is VS Code's own row, and the rail is an <svg> exactly that tall — a row any
+          # taller leaves a gap between one rail and the next and the lanes read as broken
+          # pipe. The first column is 66px, which is the widest rail this tree draws: five
+          # rungs at 11px a lane, plus the lane the last one's children would be on.
+          "ul.tree .row": "display: grid; grid-template-columns: 66px 4.8rem 3rem minmax(0, 1fr) auto; gap: .5rem; align-items: center; height: 22px; padding-right: .9rem; font-size: .86rem; white-space: nowrap"
+          "ul.tree summary.row": "cursor: pointer; list-style: none"
+          "ul.tree summary.row::-webkit-details-marker": "display: none"
+          # Which row the pointer is on. A 22px row in a list of three hundred needs it.
+          "ul.tree .row:hover": "background: var(--page)"
+          # The story is the anchor — the unit that is planned, landed and talked about — so
+          # the top-level rows get a band of their own, washed out of the colour their own
+          # lane is drawn in so the tint and the rail say one thing rather than two.
+          "ul.tree > li > .row, ul.tree > li > details > summary.row": "background: color-mix(in srgb, var(--mark) 7%, transparent)"
+          "ul.tree > li > .row:hover, ul.tree > li > details > summary.row:hover": "background: color-mix(in srgb, var(--mark) 13%, transparent)"
+          "ul.tree .row > svg": "display: block; overflow: visible; justify-self: start"
+          # One hue a lane, the way a commit graph gives one colour a branch. The spine the
+          # stories sit on is the mark; everything inside a story is quieter than the story,
+          # because the lane is only there to say where a row hangs from.
+          "ul.tree .row .lane": "stroke: var(--rule)"
+          "ul.tree .row .lane[data-lane=\"0\"]": "stroke: var(--mark)"
+          "ul.tree .row .lane[data-lane=\"1\"]": "stroke: var(--faint)"
           # A shut branch's lane leads to rows that are in the document but not on the
           # screen, so it reads as a pipe going nowhere. The rows are real and the lane is
           # truthful, so the markup keeps it and the sheet hides it until the branch opens.
           # `data-lane` is the lane it turns into, which is one in from the row's own.
-          "ul.tree li:has(> details:not([open])) > svg > .lane:last-of-type": "display: none"
-          "ul.tree li > .row, ul.tree li > span": "min-width: 0; overflow: hidden"
-          "ul.tree li > details > ul": "margin-left: calc(-1 * var(--rail, 0))"
-          "ul.tree li .label": "color: var(--ink); overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto"
-          "ul.tree li .id, ul.tree li .kind, ul.tree li .rollup": "color: var(--faint); font-family: var(--mono); font-size: .92em"
-          "ul.tree li .state": "color: var(--mark); font-weight: 600"
+          "ul.tree li:has(> details:not([open])) > details > summary.row > svg > .lane:last-of-type": "display: none"
+          "ul.tree .row .kind": "font-family: var(--mono); font-size: .63rem; letter-spacing: var(--tracking); text-transform: uppercase; color: var(--faint); text-align: right; overflow: hidden; text-overflow: ellipsis"
+          "ul.tree summary.row > .kind": "color: var(--ink)"
+          "ul.tree .row .id": "font-family: var(--mono); font-size: .78em; color: var(--faint); text-align: right"
+          "ul.tree .row .label": "color: var(--ink); overflow: hidden; text-overflow: ellipsis"
+          "ul.tree summary.row > .label": "font-weight: 600"
+          # The state in words, as a chip at the right-hand edge, wearing the hue the row's
+          # own node wears on the rail — one set of colours for both, so a reader never has
+          # to learn two. `--hue` is the row's, written in by the page; see `tree.ts`.
+          "ul.tree .row .state": "font-family: var(--mono); font-size: .68rem; padding: 0 .38rem; border-radius: 2px; border: 1px solid color-mix(in srgb, var(--hue, currentColor) 40%, transparent); background: color-mix(in srgb, var(--hue, currentColor) 8%, var(--raised)); color: var(--hue, currentColor)"
         tasks:
           # The page's own name and its filter, above the two columns. The heading is an h2
           # for the reason the projects page's is: the h1 is the shell's banner.

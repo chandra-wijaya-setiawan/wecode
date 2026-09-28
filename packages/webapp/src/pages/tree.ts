@@ -31,8 +31,8 @@
  *  The nodes arrive as nodes, not as a database, for the reason the board's do: where a
  *  workspace is, is `bin.ts`'s.
  *
- *  How deep a row sits is drawn the way a commit graph draws it: every row opens with the
- *  swimlanes beside it, as one `<svg>` `rail.ts` makes. The line leaves a parent's node going
+ *  How deep a row sits is drawn the way a commit graph draws it: the first column of every
+ *  row is the swimlanes beside it, as one `<svg>` `rail.ts` makes. The line leaves a parent's node going
  *  right, turns down, and becomes the lane its children are threaded on, so a child is a node
  *  on a line rather than a stub off a phantom vertical. That file draws one row at a time and
  *  keeps no memory between rows, so where a row sits is this walk's to say: its depth, which
@@ -126,30 +126,17 @@ export interface Filter {
   readonly options: readonly Option[];
 }
 
-/** What a row spends on a record's own text: the most lines of it drawn, how wide a line is
- *  reckoned to be, and the fold the rest is behind. */
-export interface Text {
-  readonly budget: number;
-  readonly columns: number;
-  readonly more: string;
-  readonly moreId: string;
-}
-
 /** Everything about this page that `ui.yaml` declares. */
 export interface Ui {
   readonly filter: Filter;
-  readonly text: Text;
+  /** What a row calls each level, by the record's own name for it. A level this map does not
+   *  name is drawn by that name itself — see the note in `ui.yaml`. */
+  readonly kinds: Readonly<Record<string, string>>;
 }
 
 const wordOf = (v: unknown, at: string, path: string): string => {
   if (typeof v !== "string" || v === "") throw new TreeUiError(`${path}: ${at} says nothing`);
   return v;
-};
-
-const countOf = (v: unknown, at: string, path: string): number => {
-  const said = typeof v === "number" && Number.isInteger(v) && v >= 1;
-  if (!said) throw new TreeUiError(`${path}: ${at} is no count`);
-  return v as number;
 };
 
 /** A list of state names. Empty is an answer here — the option that narrows nothing says so
@@ -181,9 +168,10 @@ export function loadUi(path: string = UI): Ui {
   if (!Array.isArray(said) || said.length === 0) {
     throw new TreeUiError(`${path}: tree.filter offers no options`);
   }
-  const text = mapOf(tree["text"]);
-  const more = mapOf(text["more"]);
   const submit = mapOf(filter["submit"]);
+  const kinds = mapOf(tree["kinds"]);
+  if (Object.keys(kinds).length === 0) throw new TreeUiError(`${path}: tree.kinds names no level`);
+  for (const [level, word] of Object.entries(kinds)) wordOf(word, `tree.kinds.${level}`, path);
   return {
     filter: {
       id: wordOf(filter["id"], "tree.filter.id", path),
@@ -194,12 +182,7 @@ export function loadUi(path: string = UI): Ui {
       submitId: wordOf(submit["id"], "tree.filter.submit.id", path),
       options: said.map((o, n) => optionOf(o, n, path)),
     },
-    text: {
-      budget: countOf(text["budget"], "tree.text.budget", path),
-      columns: countOf(text["columns"], "tree.text.columns", path),
-      more: wordOf(more["says"], "tree.text.more.says", path),
-      moreId: wordOf(more["id"], "tree.text.more.id", path),
-    },
+    kinds: kinds as Readonly<Record<string, string>>,
   };
 }
 
@@ -217,10 +200,12 @@ const NOTHING_MATCHES = "nothing in the record matches this filter";
  *  is read off it is the search, and where the surface is deployed is nobody's here. */
 const NOWHERE = new URL("http://localhost/tree");
 
-/** The parts of a row, in the order the design writes them, joined by the separator the
- *  rest of the surface's prose already uses. The label leads because the label is what the
- *  row is; a part with nothing to say is dropped with its separator. */
-const JOIN = ` · `;
+/** The parts of a row, in the order sketch #7 draws them. They are columns and not a
+ *  sentence: the kind and the id are narrow and fixed, the record's own words take what is
+ *  left, and the state ends the row at the right-hand edge. A reader scans a column; a
+ *  sentence has to be read. Which is why nothing joins them — the separator that used to
+ *  was what made four columns one line of prose, and with it gone the rails, the kinds, the
+ *  ids and the states each line up down the page however deep the row sits. */
 
 /** The names `packages/webapp/config/ui.yaml` declares this page's parts by, carried into
  *  the markup as `data-ui` so the drawing and the declaration are checkable against each
@@ -229,49 +214,35 @@ const SECTION = "tree";
 const NODE = "tree.node";
 const SAYS_SECTION = "Tree";
 
-/** A record's own text in lines: the text's own newlines, and a line wider than a row is
- *  reckoned to be broken at the last space that fits. The width is declared rather than
- *  measured, because nothing tells a page how wide the reader's window is. */
-export function linesOf(text: string, columns: number): readonly string[] {
-  const out: string[] = [];
-  for (const paragraph of text.split("\n")) {
-    let rest = paragraph;
-    while (rest.length > columns) {
-      const space = rest.lastIndexOf(" ", columns);
-      const at = space > 0 ? space : columns;
-      out.push(rest.slice(0, at));
-      rest = rest.slice(space > 0 ? at + 1 : at);
-    }
-    out.push(rest);
-  }
-  return out;
-}
-
-/** A record's text in two parts: what the row draws, and what is behind the fold. The
- *  second is empty when the whole of it fits the budget — a fold over nothing is a control
- *  that does nothing. */
-export function spent(text: string, budget: number, columns: number): readonly [string, string] {
-  const lines = linesOf(text, columns);
-  return lines.length <= budget ? [text, ""]
-    : [lines.slice(0, budget).join(" "), lines.slice(budget).join(" ")];
-}
-
-/** One row, as a sentence, with the record's text already cut to what the row spends on it.
- *  Everything in it is a person's own words, so nothing reaches the document without coming
- *  through `escape`.
+/** One row: the rail beside it, what kind of record it is, its number, its own words, and
+ *  the state it is in. Everything in it is a person's own words, so nothing reaches the
+ *  document without coming through `escape`.
+ *
+ *  The rail is the row's first column rather than the `<li>`'s first child. Outside the row
+ *  it had to be paid for twice — once as the drawing's own width, once as a negative margin
+ *  pulling the children back out from under it — and the two never quite cancelled, so no
+ *  two rows' text began at the same place. As a column of the same grid every row declares,
+ *  depth is drawn by the rail and by nothing else, and every row's words start on one line
+ *  down the page. It is `aria-hidden`, so it adds nothing to the name of the control it now
+ *  sits inside.
  *
  *  The row ends at the state, and the trailing column is that state alone. What used to
  *  trail it was the rollup — how many done, open and failed hang under the row — and it was
  *  a second answer to a question the tree already answers by being a tree: the rows it
  *  counted are the rows underneath, and a reader who wants them opens the branch. It was
  *  also the widest thing after the state and a number nobody can follow anywhere, so a
- *  reader scanning the column that says how a row is going read past it every time. */
-function row(node: Node, said: string): string {
+ *  reader scanning the column that says how a row is going read past it every time.
+ *
+ *  The state carries its own hue in, as one custom property the sheet spends. Which hue a
+ *  state wears is the look's — see `hueOf` — and a rule per state in the sheet would be
+ *  thirteen ways of saying the one thing this line says once. `style` leads the span so the
+ *  row still ends `class="state">...</span>`, which is what says the state is last. */
+function row(node: Node, kind: string, drawn: string): string {
   return (
-    `<span class="label">${escape(said)}</span>${JOIN}` +
-    `<span class="id">#${node.id}</span>${JOIN}` +
-    `<span class="kind">${escape(node.entity)}</span>${JOIN}` +
-    `<span class="state">${escape(node.state)}</span>`
+    `${drawn}<span class="kind">${escape(kind)}</span>` +
+    `<span class="id">#${node.id}</span>` +
+    `<span class="label" title="${escape(node.label)}">${escape(node.label)}</span>` +
+    `<span style="--hue:${escape(hueOf(node.state))}" class="state">${escape(node.state)}</span>`
   );
 }
 
@@ -318,32 +289,35 @@ const under = (at: At, of: readonly Node[], i: number): At => ({
 /** One row and whatever hangs under it. A parent's row goes in the `<summary>` of a
  *  `<details>`, so the whole branch closes and opens on that row; a leaf is the row alone.
  *
- *  The rail opens the `<li>` and sits outside the disclosure: it is decoration a reader is
- *  never read, and a drawing inside the `<summary>` would be part of the control's own name.
+ *  A record's own words are drawn whole and cut by the sheet at the width the reader's window
+ *  actually is, and carried whole in `title` for the reader who wants the rest of a cut one
+ *  without leaving the page. What was here instead was a budget of lines counted against a
+ *  declared width, with the remainder behind a fold — three decisions this page had to make
+ *  about a window it cannot measure, and the fold cost a second line on nearly half the rows,
+ *  which is what broke the rail: the drawing is 22px tall a row, so a row that is 44 leaves a
+ *  gap and the lanes read as broken pipe.
+ *
+ *  A leaf's row is a `<div>` and a parent's is the `<summary>`, and both wear the same
+ *  class: the row is one shape whether or not it opens, and the sheet says that shape once.
+ *  Every row is one line, whatever the record wrote: a row is where a thing sits in the
+ *  work, and a paragraph drawn in one is a row whose rail no longer reaches it.
  *
  *  A branch arrives shut once the proof begins — the row is of a folded level, or what it
  *  holds is — and every branch above that arrives open, so the page lands at the last level
  *  of work. The rest of a long record's text is its own disclosure, and it sits after the
  *  row rather than inside the `<summary>`: a disclosure nested in a summary is one the
  *  reader cannot press without pressing the other. */
-function branch(node: Node, levels: Levels, text: Text, at: At): string {
-  const [said, rest] = spent(node.label, text.budget, text.columns);
-  const more = rest === "" ? "" :
-    `<details class="more" data-ui="${text.moreId}"><summary>${escape(text.more)}</summary>` +
-    `<span class="rest">${escape(rest)}</span></details>`;
+function branch(node: Node, levels: Levels, kinds: Ui["kinds"], at: At): string {
   const kids = node.children;
   const drawn = rail({ ...at, children: kids.length > 0, fill: hueOf(node.state) });
-  // The rail's own width, handed to the sheet: the row sits to the right of it and the
-  // children start back at nought, so a depth is drawn once — by the rail — and not a
-  // second time by a nested indent.
-  const wide = `--rail:${11 * (at.depth + 2)}px`;
-  const open = `<li id="${escape(node.entity)}-${node.id}" data-ui="${NODE}">${drawn}`;
-  if (kids.length === 0) return `${open}${row(node, said)}${more}</li>`;
+  const open = `<li id="${escape(node.entity)}-${node.id}" data-ui="${NODE}">`;
+  const drawnRow = row(node, kinds[node.entity] ?? node.entity, drawn);
+  if (kids.length === 0) return `${open}<div class="row">${drawnRow}</div></li>`;
   const proof = (n: Node): boolean => levels.folds.includes(n.entity);
   const shut = proof(node) || kids.some(proof);
   return (
-    `${open}<details${shut ? "" : " open"} style="${wide}"><summary>${row(node, said)}</summary>${more}` +
-    `<ul>${kids.map((k, i) => branch(k, levels, text, under(at, kids, i))).join("")}</ul>` +
+    `${open}<details${shut ? "" : " open"}><summary class="row">${drawnRow}</summary>` +
+    `<ul>${kids.map((k, i) => branch(k, levels, kinds, under(at, kids, i))).join("")}</ul>` +
     `</details></li>`
   );
 }
@@ -357,7 +331,7 @@ export function treeBranches(nodes: readonly Node[], levels?: Levels, ui: Ui = l
   // nothing above it: its lane starts at its own node rather than at the top of the row.
   const top = (i: number): At =>
     ({ depth: 0, live: [], last: i === roots.length - 1, first: i === 0 });
-  return `<ul class="tree">${roots.map((n, i) => branch(n, said, ui.text, top(i))).join("")}</ul>`;
+  return `<ul class="tree">${roots.map((n, i) => branch(n, said, ui.kinds, top(i))).join("")}</ul>`;
 }
 
 /** The answer the query is holding. An answer the declaration does not offer is not an
