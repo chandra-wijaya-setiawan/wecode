@@ -34,10 +34,14 @@ over:
   packages/runner/src/daemon.ts: 1041
   packages/runner/src/doctor.ts: 923
   packages/tui/src/app.ts: 782
+  # `unsettled_parent_is_named` went in on this branch and breached the row of 655 it was
+  # measured against. Restated at what the file is now, per the paragraph above: the next
+  # change to it is weighed against the truth rather than against a number the tree left
+  # behind.
+  packages/core/src/invariants.ts: 732
   packages/tui/test/screens.test.ts: 722
   packages/cli/src/doctor.ts: 682
   packages/runner/test/pi-adapter.test.ts: 679
-  packages/core/src/invariants.ts: 655
   packages/runner/test/foreman.test.ts: 641
   packages/core/test/typed-board.test.ts: 625
   packages/runner/src/git.ts: 625

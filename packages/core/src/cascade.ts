@@ -1,5 +1,6 @@
-/** The cascade a drop sets off: down to what hung off the row, and up to what the row was
- *  the last of.
+/** The cascades apply.ts does not run: the one a drop sets off, down to what hung off the
+ *  row and up to what the row was the last of, and the two upward walks that follow a row
+ *  coming back to life — beginning, and reopening.
  *
  *  apply.ts cascades upward: a settled child fires the completion transition of its
  *  parent. Nothing cascaded the other way, and `acceptance_criteria.drop` carries no
@@ -9,7 +10,8 @@
  *
  *  `cascadeReopen` is the same upward walk run for the opposite event: a new child hung
  *  under a parent that had already settled, which is the one thing `cascadeAbandon` cannot
- *  leave the record in.
+ *  leave the record in. `cascadeStart` is that walk again for the mildest version of the
+ *  same event: work begun under a parent nobody had begun.
  *
  *  Two things it deliberately does not do:
  *
@@ -187,6 +189,82 @@ export function cascadeReopen(
   const held = transact(db, () => rise(repo, machines, entity, id, reopened));
 
   return { ok: true, reopened, held };
+}
+
+/** One ancestor this cascade started. Automatic for the same reason a `Drop` is: the actor
+ *  said `start` to the descendant, not to this row. */
+export interface Started {
+  readonly entity: StatefulEntity;
+  readonly id: number;
+  readonly verb: "start";
+  readonly from: "planned";
+  readonly to: string;
+  readonly automatic: true;
+}
+
+export type StartCascade =
+  | { readonly ok: true; readonly started: readonly Started[]; readonly kept: readonly Kept[] }
+  | { readonly ok: false; readonly why: string };
+
+/** Start every ancestor of a row that has already started and is still merely planned.
+ *
+ *  The upward cascade in apply.ts only fires *completion* transitions, so starting a story
+ *  under a planned epic left the epic planned: the board showed work in progress beneath a
+ *  release nobody had begun. Work begun on a child is work begun on its parents; this says
+ *  so. Like `cascadeDrop` it does not go through Engine.apply — `start` carries guards about
+ *  a row's own children (`task_may_be_attempted`), and a parent is not being proved here.
+ *
+ *  `cascadeReopen` is the same event arriving at a parent that had *finished*; this is it
+ *  arriving at one that had not begun. They are separate walks because the two answers are
+ *  different verbs, and neither is reachable from the other's departure state.
+ *
+ *  It climbs the whole chain rather than stopping at the first ancestor already under way.
+ *  A planned project above an in_progress release is exactly the drift this repairs, and
+ *  stopping early would leave it. An ancestor `start` cannot reach — one on hold, delivered
+ *  or dropped — comes back as `kept`, for the caller to report rather than swallow.
+ */
+export function cascadeStart(
+  db: DatabaseSync,
+  entity: StatefulEntity,
+  id: number,
+  machines: MachineSet = loadMachines(),
+): StartCascade {
+  const repo = new Repo(db);
+  const state = repo.stateOf(entity, id);
+  if (state === null) return { ok: false, why: `no ${entity} #${id}` };
+  if (state === "planned") {
+    return { ok: false, why: `${entity} #${id} is planned, not started: nothing to cascade` };
+  }
+
+  const started: Started[] = [];
+  const kept: Kept[] = [];
+
+  transact(db, () => {
+    let up = repo.parentOf(entity, id);
+    while (up !== null) {
+      const here = up;
+      const at = repo.stateOf(here.entity, here.id);
+      if (at === null) return;
+
+      const t = at === "planned" ? transitionFor(machines[here.entity], at, "start") : undefined;
+      if (t === undefined) {
+        kept.push({ entity: here.entity, id: here.id, state: at });
+      } else {
+        repo.setState(here.entity, here.id, at, t.to, "start", "cascade");
+        started.push({
+          entity: here.entity,
+          id: here.id,
+          verb: "start",
+          from: "planned",
+          to: t.to,
+          automatic: true,
+        });
+      }
+      up = repo.parentOf(here.entity, here.id);
+    }
+  });
+
+  return { ok: true, started, kept };
 }
 
 /** The rungs a cascade may settle or revive, in either direction.
