@@ -121,13 +121,21 @@ describe("the doctor's pass over a record with a known violation", () => {
     expect(violations(db)).toHaveLength(1);
   });
 
-  it("heals nothing and writes to no entity — it reports and stops", async () => {
+  // The doctor's own pass, and not a tick around it. A tick does eleven things and one of
+  // them is `engine.settle()`, which exists to move rows: a parent whose children are all
+  // settled settles itself, so a tick over this fixture now delivers the epic and releases
+  // the release, correctly. Snapshotting a whole tick to prove the doctor wrote nothing only
+  // ever worked because settle() happened to find nothing to do here, and it stopped working
+  // the moment settle() could reach a parent. The claim is about the doctor, so the doctor is
+  // what runs between the two snapshots.
+  it("heals nothing and writes to no entity — it reports and stops", () => {
     deliveredButNeverLanded("password reset");
 
     const before = recordOf();
-    await runner().tick();
+    const found = new Doctor(db, INVARIANTS).check();
     const after = recordOf();
 
+    expect(found.map((v) => v.invariant)).toContain("delivered_story_has_landed");
     expect(after).toBe(before);
     // Nor does it propose: a chore is the healing slice's, and this one has not landed it.
     expect((db.prepare("SELECT count(*) AS n FROM chore").get() as { n: number }).n).toBe(0);
@@ -142,6 +150,12 @@ describe("the doctor's pass over a record with a known violation", () => {
     // in_progress with nothing under it breaks a different sentence, so give it a
     // requirement: the point here is that the delivered drift stops being reported.
     make.requirement(story, "the link expires");
+    // And the tick above settled this story's parents, because every story under them was
+    // delivered. Putting the story back and leaving them settled is a record the machine
+    // would never write — a story being worked under a delivered epic — and it breaks a
+    // different sentence again. The fixture forces state, so it forces the whole chain.
+    db.prepare("UPDATE epic SET state = 'in_progress' WHERE id = ?").run(epic);
+    db.prepare("UPDATE release SET state = 'in_progress' WHERE id = (SELECT release_id FROM epic WHERE id = ?)").run(epic);
 
     expect((await runner().tick()).doctor).toEqual([]);
     expect(violations(db)).toEqual([]);
@@ -207,11 +221,14 @@ describe("an invariant that throws", () => {
     expect(violations(db).map((v) => v.invariant)).toContain("the_moon_is_where_we_left_it");
   });
 
-  it("still leaves the record untouched", async () => {
+  // The pass and not a tick around it, for the reason given where the same claim is made of a
+  // sound invariant: a tick settles rows on purpose, and a check that throws must not be the
+  // thing that stopped it.
+  it("still leaves the record untouched", () => {
     deliveredButNeverLanded("password reset");
 
     const before = recordOf();
-    await withExplosion().tick();
+    new Doctor(db, [explodes, ...INVARIANTS]).check();
 
     expect(recordOf()).toBe(before);
   });
