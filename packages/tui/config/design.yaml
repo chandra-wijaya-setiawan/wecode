@@ -192,26 +192,26 @@ renderers:
         faint: "#6b7178"
         mark: "#2f6f77"
         good: "#3d6b4f"
-        # One hue a lane, the way a commit graph gives one colour a branch, and one hue a
-        # state. Both sets are sketch #7's — "the tree you can read" — whose `:root` holds the
-        # seven above at the same values and these ten beside them. The lane says where a row
-        # sits and the state says how it is going, which are different questions, so they are
-        # different colours: a node spends the state set while the line it hangs off spends
-        # the lane set.
+        # The other three the shell mockup signed and the transcription dropped: its `--amber`,
+        # `--red` and `--vio`. `.lavish/webapp-design.html` declares ten colours in its `:root`
+        # and only these seven were ever lifted out of it, which is the whole of story #561 —
+        # so `failed` took plain ink for want of a red that was sitting in the file, and what
+        # was moving took the mark, which already means something else.
         #
-        # Named by the hue and not by the record's state, because thirteen states share six
-        # hues — every finished state is one green — and the mapping from one to the other is
-        # the frame's `:root`, in one place, rather than six colours written out thirteen times.
+        # Named for what they are on this surface rather than for their hue, the way the seven
+        # above are: a colour is a decision about what a reader is being told.
+        warn: "#a4711c"
+        stop: "#a8423a"
+        violet: "#5b4d8a"
+        # One hue a lane, the way a commit graph gives one colour a branch. These four are
+        # sketch #7's — "the tree you can read" — and they answer a question the shell mockup
+        # has no opinion about, because the shell has no tree in it. The lane says where a row
+        # sits; the state says how it is going. Different questions, so different colours, and
+        # the state set is the mockup's ten above rather than a second set drawn here.
         lane-story: "#2f6f77"
         lane-req: "#8a5a2b"
         lane-crit: "#5a5a8c"
         lane-task: "#6b7178"
-        hue-done: "#1ee65c"
-        hue-doing: "#f5b301"
-        hue-ready: "#14c8b8"
-        hue-planned: "#1a73e8"
-        hue-failed: "#dc2626"
-        hue-dropped: "#8d8a80"
       # Three faces, as the mockup is set: a serif for what is read, a sans for the surface
       # itself, and a mono for what must line up — an id, a code, a count.
       #
@@ -279,16 +279,20 @@ renderers:
         "html.docked nav button::before": "content: '\u203a'"
         "p.empty": "margin: 0; color: var(--faint)"
         # What state a row is in, as a colour: the one place the record's thirteen states are
-        # mapped onto the six hues sketch #7 signed. Every renderer that draws a node reads
+        # mapped onto the mockup's own hues. Every renderer that draws a node reads
         # `--st-<state>` and never a colour, so a hue is changed in the palette above and
         # nowhere else.
         #
-        # Six hues and thirteen states, because the question a reader is asking is not which
-        # state a row is in but whether anything is owed on it. So every finished state — done,
-        # passed, met, accepted, delivered, released — is one green; `in_progress` and `running`
-        # are one amber; `planned` and `on_hold` are one blue. Ready keeps its own, because that
-        # is the row somebody is scanning for, and failed keeps the red.
-        ":root": "--st-ready: var(--hue-ready); --st-in_progress: var(--hue-doing); --st-running: var(--hue-doing); --st-failed: var(--hue-failed); --st-planned: var(--hue-planned); --st-on_hold: var(--hue-planned); --st-done: var(--hue-done); --st-passed: var(--hue-done); --st-met: var(--hue-done); --st-accepted: var(--hue-done); --st-delivered: var(--hue-done); --st-released: var(--hue-done); --st-dropped: var(--hue-dropped)"
+        # Thirteen states and six colours, because the question a reader is asking is not which
+        # state a row is in but whether anything is owed on it. Ready is the green — answered
+        # 28 Sep: green means this is ready to be worked, because that is the row a reader is
+        # scanning for. What is moving takes the amber. Failed takes the red, which the mockup
+        # signed and the transcription had dropped. Planned and on_hold take the violet, which
+        # it also signed: work that exists and has not started is not the same as work nobody
+        # is owed anything on. And every finished state — done, passed, met, accepted,
+        # delivered, released — goes quiet in the faint, because it is hidden by default and a
+        # colour on it would compete with the thing that needs somebody.
+        ":root": "--st-ready: var(--good); --st-in_progress: var(--warn); --st-running: var(--warn); --st-failed: var(--stop); --st-planned: var(--violet); --st-on_hold: var(--violet); --st-done: var(--faint); --st-passed: var(--faint); --st-met: var(--faint); --st-accepted: var(--faint); --st-delivered: var(--faint); --st-released: var(--faint); --st-dropped: var(--rule)"
         # While a drawing is open the surface gets out of its way. A sketch is a mockup or
         # a reading — it is drawn to be looked at whole — and it was being shown through a
         # letterbox: a frame inside a column inside a padded body, scrolling in a box that

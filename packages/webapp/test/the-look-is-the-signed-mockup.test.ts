@@ -31,14 +31,22 @@ const SHEET = stylesheet();
 /** The mockups' `:root`, transcribed. The name on the left is what the colour is for on this
  *  surface; the name in the comment is what the mockup calls it.
  *
- *  Two signed mockups, and they agree. The shell's — `webapp-design.html` — signed the seven
- *  the surface is drawn in. Sketch #7, "the tree you can read", signed those same seven at the
- *  same values and ten more beside them: one hue a lane, the way a commit graph gives one
- *  colour a branch, and one hue a state. Those ten were drawn and approved and then not built,
- *  so the tree spent the seven on questions they cannot answer — `failed` took plain ink,
- *  because the seven hold no red, and `dropped` took the rule, which on the raised background
- *  is a word nobody can read. They are the tree's own hues and the tree's sketch is where they
- *  were signed, so that is where they are read from. */
+ *  Two signed mockups. The shell's — `.lavish/webapp-design.html` — signed **ten** colours,
+ *  and for a long time only seven of them were ever lifted out of it: `--amber`, `--red` and
+ *  `--vio` were dropped in transcription, which is story #561 in full. The tree then spent the
+ *  seven on questions they cannot answer, so `failed` took plain ink for want of a red that was
+ *  sitting in the file all along.
+ *
+ *  Nothing caught it, because this file used to name the seven mappings it wanted checked and
+ *  assert those agreed. A transcription checked that way can only ever confirm what it already
+ *  says; it cannot notice a colour it left out. So the check below runs the other way round:
+ *  every `--name:#hex` in the mockup's own `:root` must be a colour this palette holds, whatever
+ *  it is called here. Add an eleventh to the artifact and this file fails until somebody
+ *  decides what it is for.
+ *
+ *  Sketch #7, "the tree you can read", signs the four lane hues — one colour a branch, the way
+ *  a commit graph does. Those answer a question the shell mockup has no opinion about, because
+ *  the shell has no tree in it. */
 const SIGNED_PALETTE: Readonly<Record<string, string>> = {
   page: "#f8f7f3", // --bg / --page
   raised: "#fdfcfa", // --panel / --raised
@@ -47,19 +55,22 @@ const SIGNED_PALETTE: Readonly<Record<string, string>> = {
   faint: "#6b7178", // --dim / --faint
   mark: "#2f6f77", // --cyan / --mark
   good: "#3d6b4f", // --green / --good
-  // Sketch #7's, and its names for them. The states are named by the hue rather than by the
-  // record's state, because thirteen states share these six; `design.yaml`'s frame `:root` is
-  // the one place that mapping is written.
+  // The three the shell mockup signed and the transcription dropped.
+  warn: "#a4711c", // --amber
+  stop: "#a8423a", // --red
+  violet: "#5b4d8a", // --vio
+  // Sketch #7's four lane hues.
   "lane-story": "#2f6f77", // --lane-story
   "lane-req": "#8a5a2b", // --lane-req
   "lane-crit": "#5a5a8c", // --lane-crit
   "lane-task": "#6b7178", // --lane-task
-  "hue-done": "#1ee65c", // --st-done
-  "hue-doing": "#f5b301", // --st-doing
-  "hue-ready": "#14c8b8", // --st-ready
-  "hue-planned": "#1a73e8", // --st-planned
-  "hue-failed": "#dc2626", // --st-failed
-  "hue-dropped": "#8d8a80", // --st-dropped
+};
+
+/** What the shell mockup calls each of them. Every colour in its `:root` is here, which is what
+ *  the check below holds it to: a name missing from this map is a colour nobody decided about. */
+const CALLED: Readonly<Record<string, string>> = {
+  "--bg": "page", "--panel": "raised", "--line": "rule", "--ink": "ink", "--dim": "faint",
+  "--cyan": "mark", "--green": "good", "--amber": "warn", "--red": "stop", "--vio": "violet",
 };
 
 /** The mockup's three faces, first name and fallbacks both. A stack is signed whole: the
@@ -175,12 +186,17 @@ const rootOf = (at: string): string => {
 describe("the mockups themselves agree, where the machine has them", () => {
   it.skipIf(!MOCKUP)("declares the same colours and the same stacks as the artifact", () => {
     const said = rootOf(MOCKUP as string);
-    for (const [mockup, here] of [
-      ["--bg", "page"], ["--panel", "raised"], ["--line", "rule"], ["--ink", "ink"],
-      ["--dim", "faint"], ["--cyan", "mark"], ["--green", "good"],
-    ] as const) {
-      expect(said, mockup).toContain(`${mockup}:${LOOK.palette[here]}`);
+    // Every colour the artifact declares, and not a list of the ones this file wants checked:
+    // a transcription held to its own seven names could never have noticed the three it lost.
+    const drawn = [...said.matchAll(/(--[a-z]+):(#[0-9a-fA-F]{3,8})\b/g)].map(([, n, v]) => [n, v] as const);
+    expect(drawn.length, "the mockup's :root declares no colours — has its shape changed?").toBeGreaterThan(6);
+    for (const [name, held] of drawn) {
+      const here = CALLED[name];
+      expect(here, `${name} ${held} is in the mockup and this file names nothing for it`).toBeDefined();
+      expect(LOOK.palette[here as string], `${name} is ${held} in the mockup`).toBe(held);
     }
+    // …and the other way: a name this file maps must be one the artifact still declares.
+    for (const name of Object.keys(CALLED)) expect(said, `${name} is mapped here and gone from the mockup`).toContain(`${name}:`);
     for (const [mockup, here] of [["--serif", "serif"], ["--sans", "sans"], ["--mono", "mono"]] as const) {
       expect(said, mockup).toContain(`${mockup}:${(LOOK.type[here] as string).replace(/, /g, ",")}`);
     }
@@ -188,13 +204,11 @@ describe("the mockups themselves agree, where the machine has them", () => {
 
   // Sketch #7 is where the lanes and the states were signed, and it holds the shell's seven
   // too — at the same values, which is what makes the two one look rather than two.
-  it.skipIf(!SKETCH)("declares the lanes and the states sketch #7 drew, and the same seven", () => {
+  it.skipIf(!SKETCH)("declares the four lane hues sketch #7 drew, and the shell's own seven", () => {
     const said = rootOf(SKETCH as string);
     for (const [drawn, here] of [
       ["--lane-story", "lane-story"], ["--lane-req", "lane-req"], ["--lane-crit", "lane-crit"],
-      ["--lane-task", "lane-task"], ["--st-done", "hue-done"], ["--st-doing", "hue-doing"],
-      ["--st-ready", "hue-ready"], ["--st-planned", "hue-planned"], ["--st-failed", "hue-failed"],
-      ["--st-dropped", "hue-dropped"],
+      ["--lane-task", "lane-task"],
       ["--page", "page"], ["--raised", "raised"], ["--rule", "rule"], ["--ink", "ink"],
       ["--faint", "faint"], ["--mark", "mark"], ["--good", "good"],
     ] as const) expect(said, drawn).toContain(`${drawn}:${LOOK.palette[here]}`);
