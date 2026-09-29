@@ -7,42 +7,35 @@
  *  than rows — a card is the unit that fits a whole question — and it is the same rows,
  *  read through `waitingApprovals`, not a second opinion about what is waiting.
  *
- *  The page itself draws no control. `POST /answer` — `answer.ts` — is the surface's one
- *  verb and will answer a card's question, but what this document offers is still the
- *  question and the command that settles it: a card that grew a button would be a design
- *  change to `renderers.webapp`, which says the web surface has no bars, and design.yaml
- *  is where that is decided rather than here. So the verb exists, reachable by anything
- *  that can post, and the card goes on naming the command a reader has to hand.
+ *  So the card takes the answer. `POST /answer` — `answer.ts` — is the surface's one verb,
+ *  and a page that made a person read the question here and then go and find a terminal to
+ *  answer it in was printing the command instead of doing the thing. The card carries a
+ *  form: one radio per declared option in that option's own words, a note for an answer
+ *  nobody listed, and a button. The command stays on the card beside it, because a reader
+ *  with a terminal already open still has one.
+ *
+ *  Only the form is new markup, and every shape it draws is declared in the `decisions`
+ *  block of `renderers.webapp`: this file writes markup, design.yaml says what it looks
+ *  like, and a shape the design does not name is a shape nobody signed.
  *
  *  The approvals arrive as a function, not as a database: what is proved here is the page,
- *  and where a workspace is, is `bin.ts`'s. */
+ *  and where a workspace is, is `bin.ts`'s.
+ *
+ *  What a card looks like is not here either. The surface has one stylesheet and it is the
+ *  shell's; this file writes the markup its rules are selected on. */
 import type { Approval, Evidence } from "@wecode/core";
+import { ANSWERED, ANSWERED_AT } from "../answer.js";
 import { html, type Page, type Reply } from "../server.js";
 import { escape } from "./board.js";
 import { document, shelled } from "./shell.js";
 
-/** This page's own presentation. A card is a bordered block because a browser draws boxes
- *  out of shapes; the document's margins, type and banner are the shell's and none of them
- *  is here. */
-const STYLE = `
-  article { border: 1px solid #333; border-radius: 4px; padding: .75rem 1rem }
-  article h2 { font-size: 1rem; font-weight: 600; margin: 0 0 .5rem;
-               overflow-wrap: anywhere; white-space: pre-wrap }
-  article h2 .id { color: #888; margin-right: .6rem }
-  dl { display: grid; grid-template-columns: 6rem 1fr; gap: .2rem .75rem; margin: 0 }
-  dt { color: #888 }
-  dd { margin: 0; min-width: 0; overflow-wrap: anywhere }
-  dd ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap;
-          gap: .4rem }
-  dd li { border: 1px solid #444; border-radius: 3px; padding: 0 .4rem; color: #6cf }
-  dd.open { color: #666 }
-  p.empty { margin: 0; color: #666 }
-  p.how { margin: .6rem 0 0; color: #666 }
-`;
-
 /** What the page says when nobody owes wecode an answer. A page that came back blank reads
  *  as a page that failed. */
 const NOTHING_WAITING = "nothing is waiting on a person";
+
+/** What a person is told when their answer landed, and how they put the notice away. */
+const SAYS_ANSWERED = (id: number): string => `approval #${id} answered — thank you`;
+const SAYS_DISMISS = "dismiss";
 
 /** What is done about a card, said on the card. The id is what the command takes, so it is
  *  spelled out rather than described. */
@@ -55,7 +48,8 @@ const answerWith = (id: number): string => `wecode answer ${id} "<text>"`;
  *  says that plainly: a question with nothing behind it is a thing a person needs told,
  *  not a card that renders empty. */
 function evidence(said: Evidence | null): string {
-  if (said === null) return `<dd class="open">the work this asked about is gone</dd>`;
+  if (said === null)
+    return `<dd class="open">the work this asked about is gone</dd>`;
   return (
     `<dd>${escape(said.type)} #${said.id} · ${escape(said.statement)}` +
     ` · ${escape(said.state)}</dd>`
@@ -72,6 +66,42 @@ function options(offered: readonly string[] | null): string {
   return `<dd><ul>${offered.map((o) => `<li>${escape(o)}</li>`).join("")}</ul></dd>`;
 }
 
+/** Where the answer is posted. `bin.ts` mounts `answer.ts` here; the form has to spell the
+ *  path it posts to, and this is the one place on the page that spells it. */
+const ANSWER_AT = "/answer";
+
+/** The two fields `answer.ts` reads. Named here so the markup cannot drift from the verb. */
+const ID_FIELD = "id";
+const ANSWER_FIELD = "answer";
+
+/** One radio per declared option, in the option's own words — the words are the value as
+ *  well as the label, because `answerApproval` matches the answer against the options as
+ *  they were written and a prettier label would be a second vocabulary. */
+function choices(offered: readonly string[] | null): string {
+  if (offered === null || offered.length === 0) return "";
+  const one = (o: string): string =>
+    `<li><label><input type="radio" name="${ANSWER_FIELD}" value="${escape(o)}">` +
+    `<span>${escape(o)}</span></label></li>`;
+  return `<ul class="choices">${offered.map(one).join("")}</ul>`;
+}
+
+/** The form that settles the question.
+ *
+ *  The note carries the same field name as the radios and is written after them, so a
+ *  browser sends the picked option first and `answer.ts` reads that — the note is for an
+ *  answer nobody listed, which is every answer when the question declared no options. */
+function form(approval: Approval): string {
+  return (
+    `<form class="answer" method="post" action="${ANSWER_AT}">` +
+    `<input type="hidden" name="${ID_FIELD}" value="${approval.id}">` +
+    choices(approval.options) +
+    `<label class="note"><span>anything else</span>` +
+    `<input type="text" name="${ANSWER_FIELD}" autocomplete="off"></label>` +
+    `<button type="submit">send</button>` +
+    `</form>`
+  );
+}
+
 /** One approval, whole. */
 function card(approval: Approval): string {
   const asked = approval.question ?? "";
@@ -80,20 +110,40 @@ function card(approval: Approval): string {
     `<h2><span class="id">#${approval.id}</span>${escape(asked)}</h2>` +
     `<dl><dt>about</dt>${evidence(approval.evidence)}` +
     `<dt>answers</dt>${options(approval.options)}</dl>` +
+    form(approval) +
     `<p class="how">${escape(answerWith(approval.id))}</p>` +
     `</article>`
   );
 }
 
 /** What the page says: its cards, and nothing around them. The frame is the shell's. */
-export function decisionCards(approvals: readonly Approval[]): string {
-  if (approvals.length === 0) return `<p class="empty">${NOTHING_WAITING}</p>`;
-  return approvals.map(card).join("");
+/** What the page says to somebody who has just answered one.
+ *
+ *  Read off the target rather than held anywhere, so it is the same page whether a person
+ *  arrived by answering, by reloading, or by following a link somebody sent them. An id
+ *  that is not a number is no notice at all rather than a guess. */
+export const answeredIn = (url: URL): number | null => {
+  const said = url.searchParams.get(ANSWERED);
+  if (said === null) return null;
+  const id = Number(said);
+  return Number.isInteger(id) ? id : null;
+};
+
+/** The notice itself: what happened, and a way to be rid of it. The link goes to the page
+ *  without the parameter, which is the same page — dismissing is navigation, not script. */
+const noticed = (id: number): string =>
+  `<article class="answered" data-ui="decisions.answered">${SAYS_ANSWERED(id)}` +
+  `<a href="${ANSWERED_AT}" data-ui="decisions.answered.dismiss">${SAYS_DISMISS}</a></article>`;
+
+export function decisionCards(approvals: readonly Approval[], answered: number | null = null): string {
+  const notice = answered === null ? "" : noticed(answered);
+  if (approvals.length === 0) return `${notice}<p class="empty">${NOTHING_WAITING}</p>`;
+  return notice + approvals.map(card).join("");
 }
 
 /** The whole document: the cards, in the shell design.yaml declares. */
 export function decisionsPage(approvals: readonly Approval[]): Reply {
-  return html(document(decisionCards(approvals), STYLE));
+  return html(document(decisionCards(approvals)));
 }
 
 /** Which reading of the workspace this page is served from. What is waiting on a person is
@@ -106,4 +156,4 @@ export const READS = "approvals";
  *  command line is gone from the record the moment it is answered, and a page served from
  *  a snapshot would still be asking it. */
 export const decisionsAt = (approvals: () => readonly Approval[]): Page =>
-  shelled(() => decisionCards(approvals()), STYLE);
+  shelled((url) => decisionCards(approvals(), answeredIn(url)));

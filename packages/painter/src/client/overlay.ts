@@ -11,8 +11,11 @@
  *  (a send that fails keeps the reviewer's words; ending is final; picking is refused on
  *  the overlay's own furniture) be tested as rules rather than through a browser.
  *
- *  Ported from Lavish without the whiteboard: no Mermaid, no Excalidraw, no scene files.
- *  A pick is a node or a stretch of prose, and that is all it is. */
+ *  There is no whiteboard: no Mermaid, no Excalidraw, no scene files. A pick is a node or a
+ *  stretch of prose, and that is all it is. The overlay was ported from the tool wecode used
+ *  before it had one of its own, and the diagramming half was deliberately left behind —
+ *  annotating a drawing and drawing one are different jobs, and `wecode sketch` is the
+ *  second. */
 
 import { CLASS } from "./overlay.css.js";
 import { isPickable, pickElement, pickMessage, pickText } from "./pick.js";
@@ -250,7 +253,7 @@ export class Overlay {
     return true;
   }
 
-  /** Send what is queued and end the session in one act — Lavish's "Send & End". */
+  /** Send what is queued and end the session in one act. */
   sendAndEnd(): Promise<boolean> {
     return this.send(true);
   }

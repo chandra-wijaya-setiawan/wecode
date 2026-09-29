@@ -281,15 +281,91 @@ export function allChildrenDroppedIsNotSuccess(s: Snapshot): readonly Violation[
     });
 }
 
-/** The state that means this entity succeeded. `PARENTS` already carries it for every
+/** The success state of an entity with no children, and so no row in `PARENTS`. Same data
+ *  definition as `PARENTS` and it moves to config/invariants.yaml with it; it is apart only
+ *  because `PARENTS` is keyed by the entities that have a child. */
+const LEAF_SUCCESS: Readonly<Record<string, string>> = { task_test: "passed" };
+
+/** The one state that means this entity succeeded. `PARENTS` already carries it for every
  *  entity that has children, so this reads it back rather than keeping a second copy;
- *  task_test is the leaf of the chain and has no row there. */
-export const successOf = (entity: Checked): string => (entity === "task_test" ? "passed" : PARENTS[entity]!.success);
+ *  task_test is the leaf of the chain and is the only row `LEAF_SUCCESS` has to add. */
+export const successOf = (entity: Checked): string => (PARENTS[entity]?.success ?? LEAF_SUCCESS[entity])!;
 
 /** Settled is succeeded or dropped: the two ways of being finished with. Every other state
  *  — planned, in_progress, on_hold, ready, failed — is open, and `failed` is open on
- *  purpose: a red test is work outstanding, not work concluded. */
+ *  purpose: a red test is work outstanding, not work concluded. It is the same set
+ *  `checks.ts` cascades on — a cascade fires when every child is settled. */
 export const isSettled = (n: RecordNode): boolean => n.state === "dropped" || n.state === successOf(n.entity);
+
+/** The automatic settlement of each parent: the state the cascade departs from, and the verb
+ *  that takes it. Read straight off the `automatic: true` transitions of
+ *  config/machines.yaml, whose guards are all "every child settled"; a data definition, and
+ *  it moves to config/invariants.yaml with `PARENTS`.
+ *
+ *  Two rows of `PARENTS` are deliberately absent, because their settlement is nobody's
+ *  cascade:
+ *
+ *  - `release`. `release.release` carries the same guard but is not automatic — shipping is
+ *    a person's decision, so a release holding none but delivered epics is awaiting an
+ *    answer, not a missed transition.
+ *  - `acceptance_test`. `pass` is guarded by `test_has_been_red` and is the result of
+ *    actually running the test; it is never inherited from the tasks beneath it. */
+const SETTLES_AUTOMATICALLY: Readonly<Record<string, { readonly from: string; readonly verb: string }>> = {
+  epic: { from: "in_progress", verb: "deliver" },
+  story: { from: "in_progress", verb: "deliver" },
+  requirement: { from: "in_progress", verb: "meet" },
+  acceptance_criteria: { from: "in_progress", verb: "accept" },
+  task: { from: "ready", verb: "finish" },
+};
+
+/** Said of the automatic transition that should have taken this parent and did not. */
+export const DID_NOT_FIRE = "did not fire";
+
+/** How many children are in each state, in the order the states were first seen, so that
+ *  the evidence is the count and not a list that grows with the tree. */
+const tally = (children: readonly RecordNode[]): string => {
+  const counts = new Map<string, number>();
+  for (const c of children) counts.set(c.state, (counts.get(c.state) ?? 0) + 1);
+  return [...counts].map(([state, n]) => `${n} ${state}`).join(", ");
+};
+
+/** A parent sitting in the state its automatic transition departs from, with every child
+ *  already settled, is named: its guard is satisfied, so the transition was due and the
+ *  record is one the machine was never run against. The work beneath it is finished, one way
+ *  or the other, and the parent is still claiming to be in flight.
+ *
+ *  The departure state is the test, not merely "unsettled". A `planned` epic over a
+ *  delivered story has no automatic transition available to it at all — `deliver` is
+ *  `from: [in_progress]` — so no cascade was skipped there, and neither is one skipped from
+ *  `on_hold`, which is a person's answer to this very question. Both are some other
+ *  sentence's case, as is a childless parent: nothing was finished under it, which is
+ *  `story_in_progress_has_a_requirement`'s sentence.
+ *
+ *  The one exclusion left is the parent whose children are all dropped. The cascade
+ *  deliberately does not fire there — a success inherited from nothing but abandonment is
+ *  the defect `all_children_dropped_is_not_success` refuses — so staying unsettled is
+ *  correct, and dropping it is a person's call.
+ *
+ *  The evidence is the count of settled children and what they settled as: it says how much
+ *  finished work the claim is standing on top of, which is what makes the case reviewable
+ *  without opening the tree. */
+export function unsettledParentIsNamed(s: Snapshot): readonly Violation[] {
+  return s.nodes.flatMap((n) => {
+    const settles = SETTLES_AUTOMATICALLY[n.entity];
+    if (settles === undefined || n.state !== settles.from) return [];
+    const children = childrenOf(s, n);
+    if (children.length === 0 || !children.every(isSettled)) return [];
+    if (children.every((c) => c.state === "dropped")) return [];
+    const child = PARENTS[n.entity]?.child;
+    return [
+      violation(
+        "unsettled_parent_is_named",
+        n,
+        `${n.state} with all ${children.length} ${child} settled — ${tally(children)} — automatic ${settles.verb} ${DID_NOT_FIRE}`,
+      ),
+    ];
+  });
+}
 
 /** Said of a child still open beneath a parent that has finished with it. */
 export const ITS_PARENT_HAS_FINISHED = "its parent is settled and it is not";
@@ -486,6 +562,7 @@ export const INVARIANTS: readonly { readonly name: string; readonly check: (s: S
   { name: "delivered_story_has_landed", check: deliveredStoryHasLanded },
   { name: "story_in_progress_has_a_requirement", check: storyInProgressHasARequirement },
   { name: "all_children_dropped_is_not_success", check: allChildrenDroppedIsNotSuccess },
+  { name: "unsettled_parent_is_named", check: unsettledParentIsNamed },
   { name: "nothing_is_open_under_a_settled_parent", check: nothingIsOpenUnderASettledParent },
   { name: "ready_acceptance_test_was_red_at_base", check: readyAcceptanceTestWasRedAtBase },
   { name: "role_with_ready_work_has_a_worker", check: roleWithReadyWorkHasAWorker },

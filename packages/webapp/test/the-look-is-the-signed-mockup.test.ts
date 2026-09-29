@@ -18,7 +18,9 @@
  *  look is declared once, scoped per page, and spent by name. This one asks only whether the
  *  values are the signed ones.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { loadLook, type Rules, stylesheet } from "../src/pages/shell.js";
@@ -26,16 +28,49 @@ import { loadLook, type Rules, stylesheet } from "../src/pages/shell.js";
 const LOOK = loadLook();
 const SHEET = stylesheet();
 
-/** The mockup's `:root`, transcribed. The name on the left is what the colour is for on this
- *  surface; the name in the comment is what the mockup calls it. */
+/** The mockups' `:root`, transcribed. The name on the left is what the colour is for on this
+ *  surface; the name in the comment is what the mockup calls it.
+ *
+ *  Two signed mockups. The shell's — `docs/design/mockups/webapp-design.html` — signed **ten** colours,
+ *  and for a long time only seven of them were ever lifted out of it: `--amber`, `--red` and
+ *  `--vio` were dropped in transcription, which is story #561 in full. The tree then spent the
+ *  seven on questions they cannot answer, so `failed` took plain ink for want of a red that was
+ *  sitting in the file all along.
+ *
+ *  Nothing caught it, because this file used to name the seven mappings it wanted checked and
+ *  assert those agreed. A transcription checked that way can only ever confirm what it already
+ *  says; it cannot notice a colour it left out. So the check below runs the other way round:
+ *  every `--name:#hex` in the mockup's own `:root` must be a colour this palette holds, whatever
+ *  it is called here. Add an eleventh to the artifact and this file fails until somebody
+ *  decides what it is for.
+ *
+ *  Sketch #7, "the tree you can read", signs the four lane hues — one colour a branch, the way
+ *  a commit graph does. Those answer a question the shell mockup has no opinion about, because
+ *  the shell has no tree in it. */
 const SIGNED_PALETTE: Readonly<Record<string, string>> = {
-  page: "#f8f7f3", // --bg
-  raised: "#fdfcfa", // --panel
-  rule: "#e5e2d9", // --line
+  page: "#f8f7f3", // --bg / --page
+  raised: "#fdfcfa", // --panel / --raised
+  rule: "#e5e2d9", // --line / --rule
   ink: "#1f2328", // --ink
-  faint: "#6b7178", // --dim
-  mark: "#2f6f77", // --cyan
-  good: "#3d6b4f", // --green
+  faint: "#6b7178", // --dim / --faint
+  mark: "#2f6f77", // --cyan / --mark
+  good: "#3d6b4f", // --green / --good
+  // The three the shell mockup signed and the transcription dropped.
+  warn: "#a4711c", // --amber
+  stop: "#a8423a", // --red
+  violet: "#5b4d8a", // --vio
+  // Sketch #7's four lane hues.
+  "lane-story": "#2f6f77", // --lane-story
+  "lane-req": "#8a5a2b", // --lane-req
+  "lane-crit": "#5a5a8c", // --lane-crit
+  "lane-task": "#6b7178", // --lane-task
+};
+
+/** What the shell mockup calls each of them. Every colour in its `:root` is here, which is what
+ *  the check below holds it to: a name missing from this map is a colour nobody decided about. */
+const CALLED: Readonly<Record<string, string>> = {
+  "--bg": "page", "--panel": "raised", "--line": "rule", "--ink": "ink", "--dim": "faint",
+  "--cyan": "mark", "--green": "good", "--amber": "warn", "--red": "stop", "--vio": "violet",
 };
 
 /** The mockup's three faces, first name and fallbacks both. A stack is signed whole: the
@@ -46,16 +81,25 @@ const SIGNED_TYPE: Readonly<Record<string, string>> = {
   mono: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
 };
 
-/** The mockup, if this machine has it. It is written beside the checkout it was drawn for,
- *  which is the parent of this worktree when the work is done in one. */
-const MOCKUP = [
-  "../../../.lavish/webapp-design.html",
-  // …and a worktree of it sits two levels down, under `.wecode/worktrees`.
-  "../../../../../.lavish/webapp-design.html",
-  "../../../../../../.lavish/webapp-design.html",
-]
-  .map((at) => fileURLToPath(new URL(at, import.meta.url)))
-  .find((at) => existsSync(at));
+/** The shell's mockup, in the repository. It is committed, so it is here in a fresh clone, in
+ *  CI and in every worktree — one relative path, no searching, and no way for this file to skip
+ *  itself because the artifact was somewhere else.
+ *
+ *  It used to be looked for outside the checkout, in three guesses at where the
+ *  checkout's parent might be, and found in none of them. So the check below never ran and the
+ *  transcription went unverified — which is how three signed colours stayed lost. An artifact a
+ *  gate depends on belongs beside the code, and `config/roles.yaml` gives the designer
+ *  `docs/design/mockups/**` for exactly that. */
+const MOCKUP = fileURLToPath(new URL("../../../docs/design/mockups/webapp-design.html", import.meta.url));
+
+/** Sketch #7, which is where the lane and state hues were signed. A sketch is written into the
+ *  workspace it was drawn in, which is the operator's own directory and not this repository's —
+ *  so it is looked for under every workspace this machine has rather than at one path. */
+const SKETCH = existsSync(join(homedir(), ".wecode/workspaces"))
+  ? readdirSync(join(homedir(), ".wecode/workspaces"))
+      .map((w) => join(homedir(), ".wecode/workspaces", w, "sketches/the-tree-you-can-read-2.html"))
+      .find((at) => existsSync(at))
+  : undefined;
 
 /** Every declaration in the look, wherever it sits. */
 const declarations = (rules: Rules): readonly string[] =>
@@ -132,18 +176,48 @@ describe("the type is the mockup's three faces", () => {
   });
 });
 
-describe("the mockup itself agrees, where the machine has it", () => {
-  it.skipIf(!MOCKUP)("declares the same colours and the same stacks as the artifact", () => {
-    const root = readFileSync(MOCKUP as string, "utf8");
-    const said = root.slice(root.indexOf(":root{"), root.indexOf("}", root.indexOf(":root{")));
-    for (const [mockup, here] of [
-      ["--bg", "page"], ["--panel", "raised"], ["--line", "rule"], ["--ink", "ink"],
-      ["--dim", "faint"], ["--cyan", "mark"], ["--green", "good"],
-    ] as const) {
-      expect(said, mockup).toContain(`${mockup}:${LOOK.palette[here]}`);
+/** The `:root` of a mockup on this machine, so the transcription above is held to the artifact
+ *  rather than taken on trust. */
+const rootOf = (at: string): string => {
+  const text = readFileSync(at, "utf8");
+  return text.slice(text.indexOf(":root{"), text.indexOf("}", text.indexOf(":root{")));
+};
+
+describe("the mockups themselves agree", () => {
+  // Not `skipIf`: the shell's mockup is in the repository, so a run that cannot find it is a
+  // run with something wrong with it, and saying nothing is what let the transcription drift.
+  it("is in the repository, where a gate can always read it", () => {
+    expect(existsSync(MOCKUP), `${MOCKUP} is gone — the look has nothing left to be signed by`).toBe(true);
+  });
+
+  it("declares the same colours and the same stacks as the artifact", () => {
+    const said = rootOf(MOCKUP);
+    // Every colour the artifact declares, and not a list of the ones this file wants checked:
+    // a transcription held to its own seven names could never have noticed the three it lost.
+    const drawn = [...said.matchAll(/(--[a-z]+):(#[0-9a-fA-F]{3,8})\b/g)].map(([, n, v]) => [n, v] as const);
+    expect(drawn.length, "the mockup's :root declares no colours — has its shape changed?").toBeGreaterThan(6);
+    for (const [name, held] of drawn) {
+      const here = CALLED[name];
+      expect(here, `${name} ${held} is in the mockup and this file names nothing for it`).toBeDefined();
+      expect(LOOK.palette[here as string], `${name} is ${held} in the mockup`).toBe(held);
     }
+    // …and the other way: a name this file maps must be one the artifact still declares.
+    for (const name of Object.keys(CALLED)) expect(said, `${name} is mapped here and gone from the mockup`).toContain(`${name}:`);
     for (const [mockup, here] of [["--serif", "serif"], ["--sans", "sans"], ["--mono", "mono"]] as const) {
       expect(said, mockup).toContain(`${mockup}:${(LOOK.type[here] as string).replace(/, /g, ",")}`);
     }
+  });
+
+  // Sketch #7 signs the lane hues. It stays conditional, because a sketch is written into the
+  // operator's own workspace and is not repository data — so on CI these four are held to the
+  // transcription above and to nothing else. Where the machine has the drawing, it is read.
+  it.skipIf(!SKETCH)("declares the four lane hues sketch #7 drew, and the shell's own seven", () => {
+    const said = rootOf(SKETCH as string);
+    for (const [drawn, here] of [
+      ["--lane-story", "lane-story"], ["--lane-req", "lane-req"], ["--lane-crit", "lane-crit"],
+      ["--lane-task", "lane-task"],
+      ["--page", "page"], ["--raised", "raised"], ["--rule", "rule"], ["--ink", "ink"],
+      ["--faint", "faint"], ["--mark", "mark"], ["--good", "good"],
+    ] as const) expect(said, drawn).toContain(`${drawn}:${LOOK.palette[here]}`);
   });
 });

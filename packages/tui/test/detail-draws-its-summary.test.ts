@@ -119,7 +119,7 @@ describe("the summary block at the top of a record's screen", () => {
     descendTo("one link, one change", "a link is emailed", "the mail arrives");
     const out = lines();
     expect(out[0]).toContain("─ the mail arrives · planned ");
-    expect(out.join("\n")).toContain("─ children (4) · ready 3 · done 1");
+    expect(out.join("\n")).toContain("─ children (4) · ready³ · done¹");
     expect(summary(out)).toEqual([
       "entity    acceptance_test",
       "id        #1",
@@ -162,7 +162,7 @@ describe("the tally the block counts with", () => {
   const row = (state: string) => ({ id: 1, what: "x", state, detail: "task" });
 
   it("orders the states by how many there are, and ties by name", () => {
-    expect(tally(["done", "ready", "ready", "blocked"].map(row))).toBe("ready 2 · blocked 1 · done 1");
+    expect(tally(["done", "ready", "ready", "blocked"].map(row))).toBe("ready² · blocked¹ · done¹");
   });
 
   it("is a dash rather than a blank when there are no children", () => {

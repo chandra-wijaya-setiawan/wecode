@@ -22,7 +22,7 @@ import type { Board } from "@wecode/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { addressOf, boardAt, boardPage, serve } from "../src/index.js";
 import { discovered } from "../src/pages/discover.js";
-import { document, loadShell, shelled, ShellError, stylesheet } from "../src/pages/shell.js";
+import { document, documentAt, loadLook, loadShell, shelled, ShellError, stylesheet } from "../src/pages/shell.js";
 
 const DESIGN = fileURLToPath(
   new URL("../../tui/config/design.yaml", import.meta.url),
@@ -116,7 +116,10 @@ describe("the document is the declared frame", () => {
     // own board on its own machine, and a second request for a sheet buys nothing. What is
     // in the sheet is `the-shell-is-the-signed-design.test.ts`'s question.
     expect(body).toContain(`<style>${stylesheet()}</style>`);
-    expect(body).toContain("color-scheme: dark");
+    // Which scheme it is, is the design's word and not this file's: the surface was drawn
+    // dark once and is drawn light now, and a literal here would have to be edited every
+    // time the mockup is re-signed.
+    expect(body).toContain(`color-scheme: ${loadLook().scheme}`);
     expect(body).not.toContain("<link");
   });
 });
@@ -127,7 +130,7 @@ describe("every page wears it", () => {
     const reply = page(new URL("http://localhost/"));
     expect(reply.status).toBe(200);
     expect(reply.type).toBe("text/html; charset=utf-8");
-    expect(reply.body).toBe(document("<p>anything</p>"));
+    expect(reply.body).toBe(documentAt("<p>anything</p>", "/"));
   });
 
   it("gives a page its own query and none of the document", () => {

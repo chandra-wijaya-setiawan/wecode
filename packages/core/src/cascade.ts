@@ -1,11 +1,17 @@
-/** The cascade a drop sets off: down to what hung off the row, and up to what the row was
- *  the last of.
+/** The cascades apply.ts does not run: the one a drop sets off, down to what hung off the
+ *  row and up to what the row was the last of, and the two upward walks that follow a row
+ *  coming back to life — beginning, and reopening.
  *
  *  apply.ts cascades upward: a settled child fires the completion transition of its
  *  parent. Nothing cascaded the other way, and `acceptance_criteria.drop` carries no
  *  guard, so dropping a criteria left its acceptance_tests in `ready` — dispatchable
  *  work under a criteria nobody intends to accept, and a task under that test still on
  *  the board. Abandoning a parent abandons what hangs off it; this file says so.
+ *
+ *  `cascadeReopen` is the same upward walk run for the opposite event: a new child hung
+ *  under a parent that had already settled, which is the one thing `cascadeAbandon` cannot
+ *  leave the record in. `cascadeStart` is that walk again for the mildest version of the
+ *  same event: work begun under a parent nobody had begun.
  *
  *  Two things it deliberately does not do:
  *
@@ -20,6 +26,7 @@
  */
 
 import type { DatabaseSync } from "node:sqlite";
+import { CHECKED, type Checked, successOf } from "./invariants.js";
 import { loadMachines, transitionFor } from "./machines.js";
 import { Repo } from "./repo.js";
 import { transact } from "./store.js";
@@ -128,19 +135,166 @@ export function cascadeAbandon(
   return { ok: true, dropped, held };
 }
 
-/** The rungs a cascade may abandon.
+/** One ancestor this cascade reopened. Automatic for the same reason the others are: the
+ *  actor hung a child, and nobody said `reopen` to the parent. */
+export interface Reopen {
+  readonly entity: StatefulEntity;
+  readonly id: number;
+  readonly verb: "reopen";
+  readonly from: string;
+  readonly to: "in_progress";
+  readonly automatic: true;
+}
+
+export type ReopenCascade =
+  | { readonly ok: true; readonly reopened: readonly Reopen[]; readonly held: Held | null }
+  | { readonly ok: false; readonly why: string };
+
+/** Reopen every settled ancestor of a row that is open — a new child hung under a parent
+ *  that had finished with it.
+ *
+ *  `cascadeAbandon` is the same walk run the other way, and this is the state it cannot
+ *  leave the record in. A parent settles on a guard over the children it could see, so a
+ *  criteria accepted last week is accepted on a count of acceptance_tests that no longer
+ *  holds the moment somebody hangs a new one under it. Nothing downward notices: from the
+ *  criteria's side nothing is missing. invariants.ts sees it from the child's side and calls
+ *  it `nothing_is_open_under_a_settled_parent` — a `ready` test under an `accepted` criteria
+ *  under a `delivered` story, work that will be dispatched and proved and reported under a
+ *  story that already said it was done. This is the heal: the ancestors go back to
+ *  `in_progress`, where the completion guards can weigh the new child and settle them again
+ *  on their own.
+ *
+ *  It stops at the first ancestor that is already open — that one is weighing the new work
+ *  by definition, and everything above it is too. It stops the same way, as `held`, at an
+ *  ancestor no cascade revives: a released version and a `done` task are somebody's
+ *  decision to undo, not a walk's.
+ *
+ *  Like both other walks it invokes no verb through Engine.apply, so no completion
+ *  transition fires. A reopen proves nothing either.
+ */
+export function cascadeReopen(
+  db: DatabaseSync,
+  entity: StatefulEntity,
+  id: number,
+  machines: MachineSet = loadMachines(),
+): ReopenCascade {
+  const repo = new Repo(db);
+  const state = repo.stateOf(entity, id);
+  if (state === null) return { ok: false, why: `no ${entity} #${id}` };
+  if (settled(entity, state)) {
+    return { ok: false, why: `${entity} #${id} is ${state}, not open: nothing to cascade` };
+  }
+
+  const reopened: Reopen[] = [];
+  const held = transact(db, () => rise(repo, machines, entity, id, reopened));
+
+  return { ok: true, reopened, held };
+}
+
+/** One ancestor this cascade started. Automatic for the same reason a `Drop` is: the actor
+ *  said `start` to the descendant, not to this row. */
+export interface Started {
+  readonly entity: StatefulEntity;
+  readonly id: number;
+  readonly verb: "start";
+  readonly from: "planned";
+  readonly to: string;
+  readonly automatic: true;
+}
+
+export type StartCascade =
+  | { readonly ok: true; readonly started: readonly Started[]; readonly kept: readonly Kept[] }
+  | { readonly ok: false; readonly why: string };
+
+/** Start every ancestor of a row that has already started and is still merely planned.
+ *
+ *  The upward cascade in apply.ts only fires *completion* transitions, so starting a story
+ *  under a planned epic left the epic planned: the board showed work in progress beneath a
+ *  release nobody had begun. Work begun on a child is work begun on its parents; this says
+ *  so. Like `cascadeDrop` it does not go through Engine.apply — `start` carries guards about
+ *  a row's own children (`task_may_be_attempted`), and a parent is not being proved here.
+ *
+ *  `cascadeReopen` is the same event arriving at a parent that had *finished*; this is it
+ *  arriving at one that had not begun. They are separate walks because the two answers are
+ *  different verbs, and neither is reachable from the other's departure state.
+ *
+ *  It climbs the whole chain rather than stopping at the first ancestor already under way.
+ *  A planned project above an in_progress release is exactly the drift this repairs, and
+ *  stopping early would leave it. An ancestor `start` cannot reach — one on hold, delivered
+ *  or dropped — comes back as `kept`, for the caller to report rather than swallow.
+ */
+export function cascadeStart(
+  db: DatabaseSync,
+  entity: StatefulEntity,
+  id: number,
+  machines: MachineSet = loadMachines(),
+): StartCascade {
+  const repo = new Repo(db);
+  const state = repo.stateOf(entity, id);
+  if (state === null) return { ok: false, why: `no ${entity} #${id}` };
+  if (state === "planned") {
+    return { ok: false, why: `${entity} #${id} is planned, not started: nothing to cascade` };
+  }
+
+  const started: Started[] = [];
+  const kept: Kept[] = [];
+
+  transact(db, () => {
+    let up = repo.parentOf(entity, id);
+    while (up !== null) {
+      const here = up;
+      const at = repo.stateOf(here.entity, here.id);
+      if (at === null) return;
+
+      const t = at === "planned" ? transitionFor(machines[here.entity], at, "start") : undefined;
+      if (t === undefined) {
+        kept.push({ entity: here.entity, id: here.id, state: at });
+      } else {
+        repo.setState(here.entity, here.id, at, t.to, "start", "cascade");
+        started.push({
+          entity: here.entity,
+          id: here.id,
+          verb: "start",
+          from: "planned",
+          to: t.to,
+          automatic: true,
+        });
+      }
+      up = repo.parentOf(here.entity, here.id);
+    }
+  });
+
+  return { ok: true, started, kept };
+}
+
+/** The rungs a cascade may settle or revive, in either direction.
  *
  *  Everything between a criteria and an epic is work: it exists to be proved, and with
- *  nothing left to prove it there is nothing left of it. A release and the project above it
- *  are not — cascade.test.ts already stops the upward *success* cascade at the release,
- *  because shipping is a decision, and abandoning a version is the same decision said the
- *  other way. A task is not on the list either: it is dropped by whoever gave it up. */
-const ABANDONS: readonly StatefulEntity[] = [
+ *  nothing left to prove it there is nothing left of it — and when something to prove it
+ *  turns up again, it is work again. A release and the project above it are not —
+ *  cascade.test.ts already stops the upward *success* cascade at the release, because
+ *  shipping is a decision, and abandoning or unshipping a version is the same decision said
+ *  another way. A task is not on the list either: it is dropped by whoever gave it up, and
+ *  a task that finished on a branch of its own is revived by a person too.
+ *
+ *  One list, not two: the rung a cascade may walk down through is the rung it may walk back
+ *  up through, and two copies of it would be two things that have to agree. */
+const RUNGS: readonly StatefulEntity[] = [
   "acceptance_criteria",
   "requirement",
   "story",
   "epic",
 ];
+
+/** Settled is succeeded or dropped — the two ways of being finished with, spelled exactly as
+ *  invariants.ts spells it. `nothing_is_open_under_a_settled_parent` is the finding the
+ *  upward reopen walk heals, so the walk and the check must mean the same thing by the word
+ *  or the doctor reports what the cascade thinks it already fixed. Success comes from
+ *  `successOf`; an entity no invariant speaks about has only `dropped`. */
+const checked = (entity: StatefulEntity): entity is Checked => (CHECKED as readonly string[]).includes(entity);
+
+const settled = (entity: StatefulEntity, state: string): boolean =>
+  state === "dropped" || (checked(entity) && state === successOf(entity));
 
 function climb(
   repo: Repo,
@@ -155,7 +309,7 @@ function climb(
     const state = repo.stateOf(here.entity, here.id);
     if (state === null) return null;
 
-    if (!ABANDONS.includes(here.entity)) {
+    if (!RUNGS.includes(here.entity)) {
       return { ...here, why: `${here.entity} #${here.id} is not abandoned by a cascade: dropping it is a decision` };
     }
 
@@ -173,6 +327,37 @@ function climb(
 
     repo.setState(here.entity, here.id, state, "dropped", "drop", "cascade");
     dropped.push({ ...here, verb: "drop", from: state, to: "dropped", automatic: true });
+    up = repo.parentOf(here.entity, here.id);
+  }
+  return null;
+}
+
+/** The mirror of `climb`: up from an open child, reopening what had finished with it. */
+function rise(
+  repo: Repo,
+  machines: MachineSet,
+  entity: StatefulEntity,
+  id: number,
+  reopened: Reopen[],
+): Held | null {
+  let up = repo.parentOf(entity, id);
+  while (up !== null) {
+    const here = up;
+    const state = repo.stateOf(here.entity, here.id);
+    if (state === null) return null;
+
+    // Already open, so it is already weighing this child — and so is everything above it.
+    if (!settled(here.entity, state)) return null;
+
+    if (!RUNGS.includes(here.entity)) {
+      return { ...here, why: `${here.entity} #${here.id} is not reopened by a cascade: reviving it is a decision` };
+    }
+    if (transitionFor(machines[here.entity], state, "reopen") === undefined) {
+      return { ...here, why: `${here.entity} #${here.id} is ${state}: the machine will not reopen it` };
+    }
+
+    repo.setState(here.entity, here.id, state, "in_progress", "reopen", "cascade");
+    reopened.push({ ...here, verb: "reopen", from: state, to: "in_progress", automatic: true });
     up = repo.parentOf(here.entity, here.id);
   }
   return null;

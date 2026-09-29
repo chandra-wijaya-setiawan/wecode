@@ -23,6 +23,15 @@ import { seeOther, text, type Reply, type Verb } from "./server.js";
  *  no longer has it. */
 export const ANSWERED_AT = "/decisions";
 
+/** What the page is told on the way back: which approval was just answered.
+ *
+ *  A 303 already sends a client to the page the question was read on, and the card is gone
+ *  from it — but a card vanishing is indistinguishable from a card that was never there. A
+ *  person who answered wants to be told they answered. So the id rides on the target and
+ *  the page says so: it is the target that carries it, not a script and not a cookie,
+ *  which means the confirmation survives a reload and can be linked to. */
+export const ANSWERED = "answered";
+
 /** How the verb is posted, said in the one place that has to be right. It is in the refusal
  *  a malformed post gets, because the reader of that refusal is a person with a curl. */
 export const POSTED_AS = "post id=<number>&answer=<text> as application/x-www-form-urlencoded";
@@ -59,7 +68,7 @@ export function answerPosted(db: DatabaseSync, body: string, operator: Operator)
 
   try {
     const done = answerApproval(db, Number(id), answer, by);
-    return seeOther(ANSWERED_AT, `approval #${done.id} answered ${done.answer ?? ""} by ${by}`);
+    return seeOther(`${ANSWERED_AT}?${ANSWERED}=${done.id}`, `approval #${done.id} answered ${done.answer ?? ""} by ${by}`);
   } catch (err) {
     if (err instanceof ApprovalError) return text(400, err.message);
     throw err;

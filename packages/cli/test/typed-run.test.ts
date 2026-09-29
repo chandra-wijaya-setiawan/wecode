@@ -2,10 +2,10 @@
  *
  *  Two things are proved here, and they are not the same thing.
  *
- *  The first is that no prepared statement is left: `run.ts` holds no SQL text but the one
- *  `CREATE TABLE IF NOT EXISTS` that is schema rather than a query, so every identifier the
- *  client sends comes from a declared table and every value is a bound parameter. That is a
- *  property of the source, and it is read off the source.
+ *  The first is that no prepared statement is left: `run.ts` holds no SQL text at all, and
+ *  the one `CREATE TABLE IF NOT EXISTS` that is schema rather than a query sits with the merge
+ *  that needs it, in `verbs/run-and-see.ts`. So every identifier the client sends comes from a
+ *  declared table and every value is a bound parameter, read off the source.
  *
  *  The second is that the declared tables are the schema. `show` prints a whole record, so
  *  the column lists in `run.ts` are a second copy of the database's own — and a second copy
@@ -26,6 +26,7 @@ import { DECLARED, run } from "../src/run.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
 const SOURCE = readFileSync(new URL("../src/run.ts", import.meta.url), "utf8");
+const LANDING = readFileSync(new URL("../src/verbs/run-and-see.ts", import.meta.url), "utf8");
 
 let out: string[];
 let err: string[];
@@ -60,15 +61,14 @@ describe("no prepared statement is left in the cli", () => {
     expect(SOURCE).not.toMatch(/\.prepare\(/);
   });
 
-  it("leaves exactly one piece of SQL text, and it is a schema rather than a query", () => {
-    const statements = [...SOURCE.matchAll(/\.exec\(/g)];
-    expect(statements).toHaveLength(1);
-    // A SELECT, an UPDATE or an INSERT written out in this file would be a query the layer
-    // was meant to compile. Only DDL is left, because the dialect spells queries.
+  it("leaves no SQL text in run.ts, and exactly one schema statement where landing is", () => {
+    // A SELECT, an UPDATE or an INSERT here would be a query the layer was meant to compile.
+    expect([...SOURCE.matchAll(/\.exec\(/g)]).toHaveLength(0);
     expect(SOURCE).not.toMatch(/SELECT .* FROM /);
     expect(SOURCE).not.toMatch(/INSERT INTO/);
     expect(SOURCE).not.toMatch(/UPDATE [a-z_]+ SET/);
-    expect(SOURCE).toContain("CREATE TABLE IF NOT EXISTS landed_branch");
+    expect([...LANDING.matchAll(/\.exec\(/g)]).toHaveLength(1);
+    expect(LANDING).toContain("CREATE TABLE IF NOT EXISTS landed_branch");
   });
 
   it("reads no row out through a cast, which is the checking the port is for", () => {

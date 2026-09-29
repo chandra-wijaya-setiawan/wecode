@@ -122,6 +122,19 @@ describe("the ceiling, declared in configuration", () => {
   it("ratchets nothing when the key is absent, which reports drift rather than hiding it", () => {
     expect([...readCeilings("ceiling: 40\n").over]).toEqual([]);
   });
+
+  it("names every file once, so no two rows can disagree about one file", () => {
+    const rows = config.split("\n").flatMap((l) => {
+      const row = /^\s+(\S+):\s*\d+\s*$/.exec(l);
+      return row === null ? [] : [row[1] as string];
+    });
+    expect(rows.length).toBe(new Set(rows).size);
+  });
+
+  it("ratchets only files that are over the ceiling, so a row is never a cap something already meets", () => {
+    const { ceiling, over } = readCeilings(config);
+    expect([...over].filter(([, length]) => length <= ceiling)).toEqual([]);
+  });
 });
 
 describe("what the ceiling refuses", () => {

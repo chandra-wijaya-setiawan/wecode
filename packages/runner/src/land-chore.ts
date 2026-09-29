@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -126,7 +127,23 @@ export async function landStanding(repo: string, base: string, branch: string): 
 async function clearAway(repo: string, tree: string): Promise<string | null> {
   await quiet(repo, ["worktree", "remove", "--force", tree]);
   await quiet(repo, ["worktree", "prune"]);
+  // What is left now is a directory git has disowned: a cut that died part-way, or a tick
+  // killed between `worktree add` and its own cleanup. There is no record to remove it by,
+  // so `worktree remove` will refuse it for ever and the next `worktree add` will refuse to
+  // cut over it — one interrupted tick and no landing is ever made again. The path is
+  // wecode's own and holds no copy of anything, so wecode takes it away itself.
+  if (existsSync(tree) && !(await isCheckout(repo, tree)) && statSync(tree).isDirectory()) {
+    await rm(tree, { recursive: true, force: true }).catch(() => undefined);
+  }
   return existsSync(tree) ? `${tree} would not be removed and wants a person` : null;
+}
+
+/** Whether git still counts `tree` among this repository's checkouts. Asked of git rather
+ *  than of the disk, because the disk cannot tell a checkout from its remains. */
+async function isCheckout(repo: string, tree: string): Promise<boolean> {
+  const listed = ((await quiet(repo, ["worktree", "list", "--porcelain"])) ?? "").split("\n");
+  const here = [tree, realpathSync(tree)].map((p) => `worktree ${p}`);
+  return listed.some((line) => here.includes(line));
 }
 
 /** The subject every landing commit carries, and the one the doctor reads a `landed_sha`
@@ -156,7 +173,14 @@ export async function attemptLanding(place: LandPlace): Promise<LandAttempt> {
   // of anything that matters, and the tree is cut afresh at the base tip below.
   await clearAway(repo, tree);
   const cut = await quiet(repo, ["worktree", "add", "--detach", tree, base]);
-  if (cut === null) return { kind: "refused", why: `no tree to merge in: ${tree} could not be cut at ${base}` };
+  if (cut === null) {
+    // A cut dies with the base half written out — a filter that refused, a full disk — and
+    // git's own cleanup can fail after it. Same promise as every other way out: the refusal
+    // is worded after the path has been taken away, and names it only if it is still there.
+    const left = await clearAway(repo, tree);
+    const where = left ?? "nothing is left at that path";
+    return { kind: "refused", why: `no tree to merge in: ${tree} could not be cut at ${base} — ${where}` };
+  }
 
   const conflicted = await merge(tree, branch);
   const sha = conflicted === null ? await quiet(tree, ["rev-parse", "HEAD"]) : null;

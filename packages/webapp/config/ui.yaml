@@ -1,0 +1,292 @@
+# What a page of the web surface offers a reader, in words rather than in the page.
+#
+# `packages/webapp/src/pages/tree.ts` draws the tree; what the tree is made of is not its
+# to decide. How deep it goes is the design's — `shared.outline.levels` in
+# `packages/tui/config/design.yaml`, one answer for every renderer of it. What is left out
+# of the arriving page, what the reader is offered for putting it back, and how much of a
+# record's own text a row spends are this file's: they are decisions about the surface, and
+# a word or a number spelled in the page is a decision nobody can read off a file.
+#
+# Every `id` here is a `data-ui` name the page carries into its markup, so the drawing and
+# the declaration are checkable against each other by name rather than by eye.
+tree:
+  # The filter, which is one select and not a row of chips. The row asked the reader six
+  # questions — owed work, which project, under way, stopped — to arrive at one reading,
+  # and the reading is binary: the work still owed, or the whole record. So it is one
+  # question with two answers, and the answer it arrives holding is the first. A select is
+  # what a browser already draws for one question with a closed list of answers: it says
+  # which answer is held without being opened, it is reached by keyboard and by touch
+  # without this surface deciding how, and it cannot grow a third answer by accident.
+  #
+  # The choice travels in the query string, which is what makes a narrowed tree a link a
+  # person can send, bookmark and reload. The default is the answer nobody asked for, so it
+  # is the absent parameter: `/tree` and `/tree?show=open` are the same page.
+  #
+  # A select does not go anywhere on its own, and the thing that would make it — a handler
+  # on its change — is script, which this page has none of and will not grow for a reading.
+  # So the select sits in a `method=get` form that ends in a control the reader presses,
+  # and pressing it is what puts the answer on the query. That is the whole of the
+  # mechanism: it works in a browser with script turned off, and the address it arrives at
+  # is the same address the reader could have typed.
+  filter:
+    id: tree.filter
+    says: "filter:"
+    param: show
+    default: open
+    # The control that sends the answer. A verb rather than "go" or "ok", because what it
+    # does is narrow a reading — and a form with no submit is a form a keyboard can reach
+    # and never send.
+    submit:
+      id: tree.filter.submit
+      says: narrow
+    options:
+      - id: tree.filter.open
+        value: open
+        says: open only
+        # The states a row is left out by. Six of them the machines settle: every terminal
+        # state of every level this tree draws — `released`, `delivered`, `met`,
+        # `accepted`, `done`, `dropped` — which is the union of the `terminal:` lists in
+        # `packages/core/config/machines.yaml` over the nine entities
+        # `shared.outline.levels` names. A state a machine will never move a row out of is
+        # a row nothing is owed on, and the four that were written here before left a met
+        # requirement and an accepted criterion standing under a story whose work was done.
+        #
+        # The seventh is `passed`, and the machines cannot settle it. It is the state of a
+        # green `acceptance_test` or `task_test` — both of them levels this tree draws —
+        # and neither machine calls it terminal, nor may: each holds `invalidate`, from
+        # `passed` back to `ready`, because the artefact a test proves can move under it
+        # and a green that could never be re-proved after that is a green nobody should
+        # trust. So the machines answer "can this row still move", which of `passed` is
+        # yes, while the reader who picked open only asked "is anything owed on it", which
+        # is no. Two questions, and only the second is this page's; reading `terminal:` as
+        # an answer to it works for the other six by luck and fails here. Nobody is working
+        # a green test, so it is left out — and when its artefact does move, `invalidate`
+        # puts it back in `ready` and it returns to this reading on its own.
+        #
+        # Written out rather than read off the machines, because what a reader is offered
+        # is this file's decision and not the interpreter's — and because it is a shorter
+        # list than "terminal" on its own would be. `failed` is not here and must not be:
+        # no machine of a drawn level calls it terminal, a failed row is work still owed,
+        # and it is exactly what a reader who asked for the owed work needs to see.
+        # Every terminal state of every level the *record* keeps, plus `passed`. Not just the
+        # rungs this tree draws: the narrowing runs on the record's own tree, before the rungs
+        # are thinned, so a `met` requirement left in would keep the delivered story above it.
+        excludes: [released, delivered, met, accepted, done, dropped, passed]
+      - id: tree.filter.all
+        value: all
+        says: all
+        # All of it. A select with an answer that narrows nothing is how a reader gets the
+        # rest of the record back without having to know what the query string is.
+        excludes: []
+  # Which project the reader is standing in. Project, release and epic are where a story
+  # *lives* rather than what anybody works on, so sketch #7 — "the tree you can read" —
+  # takes them out of the tree and puts them over it: indent all nine rungs and the one the
+  # reader came for begins two-thirds of the way across the window. This is the first of the
+  # three, drawn; release and epic would sit beside it when they are asked for.
+  #
+  # It is the same shape as the filter above, for the same reasons and by the same mechanism:
+  # one select, in the one `method=get` form, sent by the one control that already sends it.
+  # One form and not two, because the two narrowings are one reading — a reader who has
+  # narrowed to a project and then asks for the finished work is still in the project they
+  # were in, and a second form beside the first would have to carry the first's answer as a
+  # hidden field to say so. On the bar this comes first: which project before which states,
+  # the way the sketch draws it, because where a reader is standing is chosen before what
+  # they want to see of it. In this file it is written after the filter, whose prose is where
+  # the form, the submit and the absent default are all explained.
+  #
+  # The answers are not here, and must not be: they are the record's own projects, by the
+  # slug each already carries, and a list of them spelled in this file is a list that is
+  # wrong the day a project is added. What is this file's is the parameter they travel in,
+  # the name the page carries the control under, and the word the reader is offered it by.
+  project:
+    id: tree.project
+    # The colon is this page's own convention for a word that leads into a control, already
+    # spent on `filter:` above. The sketch's bar labels the picker `project`; two labels on
+    # one bar written two ways read as two bars.
+    says: "project:"
+    param: project
+    # Every project, which is the reading nobody asked for, so it is the absent parameter —
+    # the way `tree.filter` already works. `/tree` and `/tree?project=all` are one page, and
+    # so a narrowed tree is a link a person can send, bookmark, type and reload, and widening
+    # it again is a link too.
+    default: all
+    # The one answer that names no project, which is what the reader gets the rest of the
+    # record back by. It is always offered, including on a page already narrowed to one
+    # project: a select that cannot be set back is a door that shuts behind the reader. It is
+    # the first answer, above the record's own, because it is the arriving one.
+    #
+    # `all` is the value the sketch signed. It is a word and not a slug, and a project slugged
+    # `all` would be a project this control could not name — the record holds no such project,
+    # and the day it does the collision is this file's to settle rather than the page's.
+    all:
+      id: tree.project.all
+      value: all
+      says: all projects
+  # What a row calls the kind of record it is. The record's own names are what the *record*
+  # calls them, and two of the nine are too long to put in a column of a 22px row:
+  # `acceptance_criteria` is nineteen characters, and drawn on every row of a story's proof it
+  # spends more of the line than the record's own words do. Sketch #7 — "the tree you can
+  # read" — signed the short words, so they are here rather than in the page: what a reader is
+  # called a thing by is a decision about the surface.
+  #
+  # A level nobody wrote a word for is drawn by the record's own name for it. That is not this
+  # file supplying a default — it is the record answering for itself, which is the one answer
+  # that cannot be wrong; a refusal would mean a rung the record grew could not be drawn at
+  # all, and an invented word would be worse than the true one.
+  kinds:
+    project: project
+    release: release
+    epic: epic
+    story: story
+    requirement: requirement
+    acceptance_criteria: criterion
+    acceptance_test: test
+    task: task
+    task_test: proof
+  # Where a row ends, which is the one thing a reader scanning the right-hand edge is asking
+  # of it: how it is going.
+  #
+  # `shared.outline.row.order` in `packages/tui/config/design.yaml` ends the terminal's row
+  # `[..., state, rollup]`, and this one does not. That is a decision and not a drift, and
+  # the reason is the same design's `as: sentence` and `columns: none`: a terminal row is one
+  # string read left to right, so the rollup rides at the end of a sentence and costs the
+  # reader nothing until they get there. Here the states line up down the right-hand edge,
+  # and what a reader does with a column is scan it. Anything after the state is then a thing
+  # to read past on every row — and the rollup is the widest of them, a count of how many
+  # done, open and failed hang below, which is a second answer to what the tree already
+  # answers by being a tree and openable. Nor is anyone's name here: who is at a row is the
+  # row's own page's, and a role on every row is a column of one word repeated.
+  #
+  # A list rather than a single name, because what trails is a decision about how many
+  # things end a row and not only about which one does — and what it holds is one.
+  row:
+    trailing: [state]
+
+# What the sketches page offers a reader, which is the bar above the list and nothing else.
+# There is no new-sketch control to declare: a sketch is drawn by the orchestrator, because
+# drawing one means writing a file and an agent is the one who writes files.
+#
+# The two acts are here rather than in `packages/webapp/src/pages/sketches.ts` because each
+# of them is two decisions, and neither is a page's. The word a button carries is a decision
+# about the surface; what the button *types at the operator's own shell* is a decision about
+# their machine, and a command spelled in a page is a command nobody can read off a file.
+sketches:
+  # Nothing is sent. Both acts post a `keys` frame to the dock's far end, so the words land
+  # on the command line unsent and editable — the operator reads them, changes them and
+  # presses return, or does not. See `pages/sketches.ts`.
+  acts:
+    # Prose, because there is no verb that turns a drawing into work: what makes a story out
+    # of a sketch is whoever is at the dock, and what they need is what to do, which sketch,
+    # and where the drawing is. `%id%`, `%name%` and `%html%` are the record's own columns.
+    - id: sketches.act.story
+      name: story
+      says: Make a story from it
+      # The marked button: it is the one act that makes something.
+      kind: primary
+      lead: "make a story from "
+      row: 'sketch #%id% "%name%", drawn at %html%'
+      joins: "; and from "
+    # The cli's own verb, spelled the way the cli spells it — `wecode sketch drop <id>` —
+    # because taking a row out of the record is the cli's and never this surface's. One
+    # command per picked sketch, because that is what the verb takes; the row goes and the
+    # drawing stays, which is `core`'s `dropSketch` and not this page's choice.
+    # The one act on this surface that is a verb rather than a sentence. It used to type
+    # `wecode sketch drop <id>` at the dock for the operator to press return on, on the
+    # reasoning that this page decides nothing — but the surface already answers approvals
+    # with a real POST, so that was never the rule, and a command typed at a dock that is
+    # running an agent lands in that agent's composer, where it looks sent and does nothing.
+    # `posts` is what makes it a submit: the list is a form, every tick is an `id` field, so
+    # removing several needs no script.
+    - id: sketches.act.remove
+      name: remove
+      says: Remove
+      # The quiet button. The mock draws it in a red the signed palette does not hold, and a
+      # colour added here would be a colour nobody signed.
+      kind: plain
+      posts: /sketches/drop
+  # What the bar says of the ticks, which is what the acts will act on. The count is the
+  # browser's, because a tick is; the words are not.
+  picked:
+    id: sketches.picked
+    says: picked
+    none: nothing picked
+  # Why the bar has only two buttons, said on the bar rather than left to be wondered at.
+  hint: a sketch is drawn by the orchestrator, never by this page
+  # The two ways into a sketch, and each of them offers the same two readings of it. The end
+  # of a row is the first: it is where a reader standing in the list points at one drawing.
+  # The opened header is the second: it is where a reader already inside a drawing changes
+  # how they are reading it without leaving it. Both were markup — an `open` written into a
+  # template in `pages/sketches.ts` — and a word spelled in a page is a word nobody can read
+  # off a file. They are the same two decisions every other word here is: what the reader is
+  # offered, and what it says.
+  #
+  # The word `open` is on neither of them, and is gone from the surface. It named a reading
+  # that had no sibling, and beside `edit` it reads as the opposite of closed rather than the
+  # opposite of editing. The two words are `view` and `edit`, because that is what the two
+  # readings are: one is the drawing as it is served today, the other is the same drawing
+  # with the painter's review loop over it.
+  #
+  # Neither way in goes anywhere but this page, so both are declared as the query they put on
+  # it and never as a path. Which reading `/sketches` is showing is the query's answer, so a
+  # way in that spelled a path of its own would be a second answer to where a drawing is, and
+  # a board served from somewhere else would follow it off its own surface. `%id%` is the
+  # record's own column, as the bar's clauses spell it.
+  #
+  # The parameter that names *which* sketch stays `open`. It is what `PARAM` in
+  # `pages/sketches.ts` reads and what every link already sent carries — it says which
+  # drawing and never which reading, and the reading is a second parameter beside it. The
+  # mock draws one more act on a sketch that earned a story — `story` — and it is not
+  # declared, because no page of this surface answers for a story and a word aimed at a
+  # target nobody chose is worse than the number the state column already says.
+  mode:
+    # Which of the two readings a target asks for. The default is the absent parameter, the
+    # way `tree.filter` already works: `?open=1` and `?open=1&mode=view` are one document, so
+    # every link sent before edit existed still opens the drawing it always opened, and both
+    # readings stay something a person can send, bookmark and reload into rather than a state
+    # a script holds.
+    param: mode
+    default: view
+  row:
+    # What a row offers at its end, in the order a reader meets them. Reading comes before
+    # annotating, because a reader who has not seen a drawing has nothing to say about it.
+    acts:
+      - id: sketches.row.view
+        mode: view
+        says: view
+        goes: "?open=%id%"
+      - id: sketches.row.edit
+        mode: edit
+        says: edit
+        goes: "?open=%id%&mode=edit"
+  # The one that is open, which is this page with a sketch chosen.
+  open:
+    # The switch the opened header wears: the same two readings, offered from inside the one
+    # the reader is already in, so changing how a drawing is read costs nothing but the link.
+    # Two links and not a control: the reading *is* the target, and a radio or a select would
+    # need a handler on its change to go anywhere — script, which this page has none of and
+    # will not grow for a reading. The one being shown is marked `aria-current="page"`, which
+    # is how a reader who cannot see the fill is told which of the two they are in, and it is
+    # the shape the look draws the held side by.
+    modes:
+      id: sketches.open.modes
+      # What the pair of them is, for a reader meeting it without a screen.
+      says: how this sketch is open
+      of:
+        - id: sketches.open.view
+          mode: view
+          says: view
+          goes: "?open=%id%"
+        - id: sketches.open.edit
+          mode: edit
+          says: edit
+          goes: "?open=%id%&mode=edit"
+    # The way back out, which is neither of the two ways in: the list gave way to the
+    # drawing, and this is what gives it back. `?` and not `/sketches`, so the link the page
+    # builds and the link a person could have typed are the same link. An arrow and two words
+    # rather than "back", because what a reader is going back to is the thing worth naming —
+    # and it is a switch between the page's two readings rather than a browser's history,
+    # which would take a reader who arrived on `?open=112` somewhere else entirely.
+    back:
+      id: sketches.open.back
+      says: "← every sketch"
+      goes: "?"

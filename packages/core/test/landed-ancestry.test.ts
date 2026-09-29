@@ -9,6 +9,7 @@ import { checkRecord, keepUnlanded, Maker, open, NEVER_REACHED_THE_BASE, REACHED
 // by path because core may not depend on `@wecode/runner`; vitest resolves both from the
 // one root config.
 import { ancestryOf, Doctor, healLandedMarkers, snapshot, type Git } from "../../runner/src/doctor.js";
+import { recordAttemptCommit } from "./db.js";
 
 /** Field report, 15 Sep: the doctor said stories 134 and 148 were "delivered with no
  *  landed_sha — it never reached the base", and `merge-base --is-ancestor` said both
@@ -51,7 +52,10 @@ beforeEach(() => {
 function deliveredStory(title: string): { story: number; slug: string } {
   const story = make.story(epic, title);
   const criteria = make.criteria(make.requirement(story, "it works"), `${title} is accepted`);
-  make.task(make.acceptanceTest(criteria, `${title} passes`, "manual"), `build ${title}`);
+  const task = make.task(make.acceptanceTest(criteria, `${title} passes`, "manual"), `build ${title}`);
+  // A done task with no attempt sha is its own piece of drift, and the doctor says so. The
+  // marker is what these tests are about, so the fixture records the commit the task did.
+  recordAttemptCommit(db, task);
   db.prepare("UPDATE story SET state = 'delivered' WHERE id = ?").run(story);
   db.prepare("UPDATE requirement SET state = 'met' WHERE story_id = ?").run(story);
   db.prepare(

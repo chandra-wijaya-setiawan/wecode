@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 80 30">
+<rect x="0" y="0" width="80" height="30" fill="none" stroke="#000" data-depth="0"/>
+<text x="0" y="0.8" font-family="monospace" font-size="0.8" textLength="7" lengthAdjust="spacingAndGlyphs" data-row="0">Outline</text>
+<rect x="1" y="1" width="78" height="5" fill="none" stroke="#000" data-depth="1"/>
+<text x="1" y="1.8" font-family="monospace" font-size="0.8" textLength="4" lengthAdjust="spacingAndGlyphs" data-row="0">tree</text>
+<text x="1" y="2.8" font-family="monospace" font-size="0.8" textLength="48" lengthAdjust="spacingAndGlyphs" data-row="1">- {label} · #{id} · project · {state} · {rollup}</text>
+<text x="1" y="3.8" font-family="monospace" font-size="0.8" textLength="50" lengthAdjust="spacingAndGlyphs" data-row="2">  - {label} · #{id} · release · {state} · {rollup}</text>
+<text x="1" y="4.8" font-family="monospace" font-size="0.8" textLength="49" lengthAdjust="spacingAndGlyphs" data-row="3">    - {label} · #{id} · epic · {state} · {rollup}</text>
+<text x="1" y="5.8" font-family="monospace" font-size="0.8" textLength="52" lengthAdjust="spacingAndGlyphs" data-row="4">      - {label} · #{id} · story · {state} · {rollup}</text>
+<text x="1" y="6.8" font-family="monospace" font-size="0.8" textLength="53" lengthAdjust="spacingAndGlyphs" data-row="5">          {label} · #{id} · task · {state} · {rollup}</text>
+<rect x="0" y="29" width="80" height="1" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="29.8" font-family="monospace" font-size="0.8" textLength="7" lengthAdjust="spacingAndGlyphs" data-row="0">Key bar</text>
+<text x="0" y="30.8" font-family="monospace" font-size="0.8" textLength="99" lengthAdjust="spacingAndGlyphs" data-row="1">j/k move  g/G top/end  +/- fold  enter open  esc back  v box  v t outline  a act  r refresh  q quit</text>
+</svg>

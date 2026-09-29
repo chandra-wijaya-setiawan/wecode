@@ -129,7 +129,7 @@ describe("the summary block a record's screen opens with", () => {
     descendTo(...TO_TEST);
     const out = lines();
     expect(out[0]).toContain("─ the mail arrives · planned ");
-    expect(out.join("\n")).toContain("─ children (4) · ready 3 · done 1");
+    expect(out.join("\n")).toContain("─ children (4) · ready³ · done¹");
     expect(summary(out)).toEqual([
       "entity    acceptance_test",
       "id        #1",
@@ -170,7 +170,7 @@ describe("the tally the block's title is written with", () => {
 
   it("orders the states by how many there are, and ties by name", () => {
     expect(tally(["done", "ready", "ready", "blocked"].map(row))).toBe(
-      "ready 2 · blocked 1 · done 1",
+      "ready² · blocked¹ · done¹",
     );
   });
 

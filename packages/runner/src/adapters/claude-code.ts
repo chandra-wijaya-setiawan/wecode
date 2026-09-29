@@ -21,13 +21,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
      *  answer — an agent that stops to ask permission has burned an attempt and proved
      *  nothing. Never `bypassPermissions`: the tool list is still a list. */
     private readonly permissionMode = "acceptEdits",
-    /** The model an assignment that names none is run on. Every spawn passes `--model`,
-     *  so the choice is always this adapter's or the assignment's — never whatever the
-     *  harness would have inferred from the machine it woke up on. */
+    /** The model an assignment that names none is run on. Every spawn passes `--model`, so
+     *  the choice is the adapter's or the assignment's, never the machine's. */
     private readonly model = DEFAULT_MODEL,
     /** How hard the worker is told to think. Stated on every spawn for the same reason the
-     *  model is: an effort nobody named is the machine's, and then the attempt's outcome
-     *  says nothing about the work. */
+     *  model is: an effort nobody named is the machine's. */
     private readonly effort: Effort = DEFAULT_BUDGET.effort,
   ) {}
 
@@ -51,14 +49,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
   }
 
   async start(work: Work): Promise<Observation> {
-    return this.spawn(work, [
-      "-p",
-      this.prompt(work),
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      ...this.scopeFlags(work),
-    ]);
+    return this.spawn(work, ["-p", this.prompt(work), ...this.rest(work)]);
+  }
+
+  /** Everything after the prompt: how the session reports, and what it is confined to.
+   *  One list, so start, resume and answer cannot drift apart — the seal included. */
+  private rest(work: Work): string[] {
+    return ["--output-format", "stream-json", "--verbose", ...this.scopeFlags(work)];
   }
 
   /** What that session has done since. The observation it ended with, or that it is still
@@ -76,35 +73,16 @@ export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
     return { phase: "running", session: session.id ?? work.session ?? "", spent: session.spent };
   }
 
-  /** Reattach to a session this process did not start. Claude Code keeps the transcript, so
-   *  `--resume` continues the attempt rather than beginning it again; the instruction goes
-   *  back in because the resumed run needs to know what it is still for. */
+  /** Reattach to a session this process did not start. The transcript is kept, so `--resume`
+   *  continues the attempt; the instruction goes back in because the run must know its job. */
   async resume(work: Work): Promise<Observation> {
     if (work.session === null) return { phase: "failed", session: null, spent: zero(), reason: "lost" };
-    return this.spawn(work, [
-      "--resume",
-      work.session,
-      "-p",
-      this.prompt(work),
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      ...this.scopeFlags(work),
-    ]);
+    return this.spawn(work, ["--resume", work.session, "-p", this.prompt(work), ...this.rest(work)]);
   }
 
   async answer(work: Work, answer: string): Promise<Observation> {
     if (work.session === null) return { phase: "failed", session: null, spent: zero(), reason: "lost" };
-    return this.spawn(work, [
-      "--resume",
-      work.session,
-      "-p",
-      answer,
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      ...this.scopeFlags(work),
-    ]);
+    return this.spawn(work, ["--resume", work.session, "-p", answer, ...this.rest(work)]);
   }
 
   async kill(work: Work): Promise<void> {
@@ -124,13 +102,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
     });
   }
 
-  /** A role's scope, as flags. This is the whole of the translation.
+  /** A role's scope, as flags, plus the seal every session carries.
    *
    *  Tool names are the harness's, not ours: a role says `write`, Claude Code calls it
-   *  `Write`, and a name it does not recognise is not an error — it is a permission gate
-   *  that silently refuses every edit. The first live run lost a session to exactly that. */
+   *  `Write`, and an unrecognised name is not an error but a gate that refuses every edit. */
   private scopeFlags(work: Work): string[] {
-    const flags = ["--add-dir", work.worktree, "--permission-mode", this.permissionMode];
+    const flags = [...SEALED, "--add-dir", work.worktree, "--permission-mode", this.permissionMode];
     const tools = work.scope.tools.map((t) => TOOL_NAMES[t.toLowerCase()] ?? t).filter((t) => t !== "");
     if (tools.length > 0) flags.push("--allowedTools", tools.join(","));
     return flags;
@@ -152,11 +129,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
     ].join("\n");
   }
 
-  /** What happened before, for a retry. A first attempt gets nothing: no heading, no blank
-   *  line, exactly the prompt it would have got anyway.
+  /** What happened before, for a retry. A first attempt gets nothing at all.
    *
-   *  The point is the commit. A new session remembers nothing, but the branch it is
-   *  standing on already holds the last attempt, so the choice is read it or redo it. */
+   *  The point is the commit: a new session remembers nothing, but the branch it stands on
+   *  already holds the last attempt, so the choice is read it or redo it. */
   private before(work: Work): string[] {
     const h = work.history;
     if (h === null) return [];
@@ -192,9 +168,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter, WriteDenials {
     mkdirSync(this.logDir, { recursive: true });
     const log = join(this.logDir, `assignment-${work.id}.jsonl`);
 
-    // Here rather than in each caller: every session this adapter starts goes through
-    // this one spawn, so naming the model here is the whole guarantee that none of them
-    // is left to the environment.
+    // Here rather than in each caller: every session goes through this one spawn, so
+    // naming the model here is the guarantee that none is left to the environment.
     const child = spawnProcess(this.bin, ["--model", work.model ?? this.model, ...args], {
       cwd: work.worktree,
       stdio: ["ignore", "pipe", "pipe"],
@@ -280,18 +255,45 @@ const zero = (): Budget => ({ tokens: 0, seconds: 0 });
 /** The model used when the assignment does not name one.
  *
  *  A literal here, and the one thing in this file that ought not to be: which model a role
- *  works on is the operator's to set, so it belongs beside the role's scope and budget in
- *  config/roles.yaml, carried onto the assignment and read off `work.model`. That path
- *  needs core, so until it exists this constant is the declared fallback — explicit, in
- *  one place, and not the environment's. */
+ *  works on is the operator's to set, so it belongs in config/roles.yaml and comes back on
+ *  `work.model`. That path needs core; until it exists this is the declared fallback. */
 export const DEFAULT_MODEL = "claude-opus-5";
+
+/** What a worker is sealed against, read off `claude --help`.
+ *
+ *  A plain `claude -p` discovers the operator's CLAUDE.md, resolves every skill they have
+ *  installed and starts every MCP server they have configured. None of that is the
+ *  assignment. It is one machine's habits deciding what an attempt does, and the reason the
+ *  same row behaves differently in two places: a worker that read somebody's global
+ *  CLAUDE.md was following instructions the record cannot show, and one that loaded their
+ *  MCP servers had reach the scope never granted it.
+ *
+ *  `--safe-mode` is the one flag that turns all of it off — CLAUDE.md discovery, skills,
+ *  plugins, hooks, MCP servers, custom commands and agents — while leaving auth, the model
+ *  and the built-in tools working normally. The three flags beside it restate the bans this
+ *  seal exists for, in the spawn line itself, so a later change to what safe mode covers
+ *  cannot quietly give one of them back.
+ *
+ *  Not `--bare`, which seals the same ground: it also makes Anthropic auth strictly
+ *  ANTHROPIC_API_KEY or an apiKeyHelper, never OAuth and never the keychain. The operator
+ *  here authenticates by subscription login, so under `--bare` every worker on a working
+ *  machine would fail to reach the API at all. Only managed (policy) settings survive this
+ *  seal, which is correct: they are the operator's organisation, not their habits. */
+export const SEALED: readonly string[] = [
+  "--safe-mode",
+  // No user, project or local settings file: hooks, permissions and MCP entries alike.
+  "--setting-sources",
+  "",
+  // Only MCP servers from a --mcp-config we do not pass — so none.
+  "--strict-mcp-config",
+  "--disable-slash-commands",
+];
 
 /** The only variables a worker inherits from whatever started the runner.
  *
  *  Everything else the child would have got by default — a settings path, a model, a
- *  thinking budget, a half-finished login, an editor, a repo's own tooling switches — is
- *  the daemon's shell leaking into the attempt, and the reason one assignment behaved
- *  differently on two machines. A name here is a claim that the harness cannot start
+ *  thinking budget, a half-finished login, a repo's own tooling switches — is the daemon's
+ *  shell leaking into the attempt. A name here is a claim that the harness cannot start
  *  without it (reaching the API, or finding a binary); the rest is built below. */
 export const INHERITED: readonly string[] = [
   // Finding and running the harness at all.
@@ -318,10 +320,8 @@ export const INHERITED: readonly string[] = [
   "no_proxy",
 ];
 
-/** The environment one session is given, built rather than inherited.
- *
- *  Exported because it is the claim the test reads: what is in it, and — the part that
- *  matters — that nothing else is. */
+/** The environment one session is given, built rather than inherited. Exported because it
+ *  is the claim the test reads: what is in it, and that nothing else is. */
 export function environmentFor(
   work: Work,
   effort: Effort,
@@ -332,8 +332,8 @@ export function environmentFor(
     const value = ambient[name];
     if (value !== undefined) env[name] = value;
   }
-  // Stated, not inherited: how hard to think, and which assignment is thinking. The second
-  // is what makes a stray process on the machine attributable to a row in the record.
+  // Stated, not inherited: how hard to think, and which assignment is thinking — the
+  // second makes a stray process attributable to a row in the record.
   env["MAX_THINKING_TOKENS"] = String(THINKING_TOKENS[effort]);
   env["WECODE_ASSIGNMENT"] = String(work.id);
   env["WECODE_WORKTREE"] = work.worktree;
@@ -346,8 +346,8 @@ const ASK =
   "If you learned something a future attempt on this repository should know, end your " +
   "final message with a single line beginning LESSON:";
 
-/** The reading half. The last `LESSON:` line of the final message, or nothing: an agent
- *  with nothing to say says nothing, and that must not be recorded as a lesson. */
+/** The reading half. The last `LESSON:` line of the final message, or nothing: an agent with
+ *  nothing to say says nothing, and that must not be recorded as a lesson. */
 function lessonIn(message: string): string | null {
   let found: string | null = null;
   for (const line of message.split("\n")) {

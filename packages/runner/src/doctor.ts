@@ -19,9 +19,20 @@ import {
 // core builds it to, the one specifier that resolves without widening that barrel.
 import { excluded, queries, table, type Dialect } from "@wecode/core/dist/db.js";
 import { fileCeilingInvariant } from "./ceiling.js";
+import {
+  builtTree,
+  DIST_CHECK,
+  distIsBuiltFromSource,
+  newestUnder,
+  staleDists,
+  type Built,
+  type Newest,
+} from "./doctor/trees.js";
+// The examiner already reads a failing file off the runner's own failure banner and never
+// off the lines it ran and passed. One reading of it, so a tally and a re-run cannot
+// disagree about which file is red.
+import { failingFilesOf } from "./examiner.js";
 import { execFileSync } from "node:child_process";
-import { readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 /** docs/design/19, the check, on the runner's tick.
@@ -113,105 +124,60 @@ export const taskWorkIsCommitted = (db: DatabaseSync): Invariant => ({
   },
 });
 
-/** docs/design/19, applied to what the record is judged by rather than to the record.
+/** A task branch its story branch has already got, merged at every tick for ever.
  *
- *  Every package is run from `dist`: a bin, the tick, and every specifier that resolves
- *  through a package name read the compiled tree and never the source beside it. So a
- *  `dist` older than its `src` is a pass that judged code nobody wrote, and it is the one
- *  drift no test can find — the stale tree is the thing running the tests. Said per package
- *  and naming the source that is newer, because that is what says which build is late.
- *
- *  A package with no `dist` at all is not stale: it is unbuilt, which is a different fact
- *  and one the build says far louder than a report would. Like the ceiling, it reads a tree
- *  rather than the record, so it is the Doctor's own default and not in the pure set. */
-export const DIST_CHECK = "dist_is_built_from_its_source";
+ *  The lander retries a done task's merge until `landed_branch` records it, and remembers a
+ *  conflict only by the pair of tips it happened between — so a branch the story has taken
+ *  by another route (cherry-picked, recut, landed by hand) is merged again every time either
+ *  tip moves, and git refuses it every time. Nothing on the branch the story does not already
+ *  hold is what superseded means, which is `ancestryOf`'s `in` read against the story branch
+ *  rather than against the base of the repository. Named, so the answer is the sentence and
+ *  not another merge. Like the ceiling and the dist check it reads the world, so it is the
+ *  Doctor's own default and not in the pure set. */
+export const SUPERSEDED_CHECK = "task_branch_is_not_superseded";
 
-/** The newest file under one tree, repository-relative, and when it was written. */
-export interface Newest {
-  readonly path: string;
-  readonly at: number;
+/** Every task the lander has recorded a merge for. Its own table, keyed by task. */
+function landedTasks(db: DatabaseSync): ReadonlySet<number> {
+  if (!hasTable(db, "landed_branch")) return new Set();
+  return new Set(queries(db).selectFrom(landedBranch).select(["task_id"]).all().map((r) => r.task_id));
 }
 
-/** One package, as the two trees this check holds against each other. `null` is a tree with
- *  nothing in it, which includes a tree that is not there. */
-export interface Built {
-  readonly pkg: string;
-  readonly source: Newest | null;
-  readonly dist: Newest | null;
-}
-
-/** Source is what a person writes; `dist` is what `tsc` leaves. Declarations and maps are
- *  written by the same pass as the `.js`, so the one extension answers for the build. */
-const SOURCE_EXT = [".ts", ".tsx"] as const;
-const DIST_EXT = [".js"] as const;
-
-const dirents = (dir: string) => {
-  try {
-    return readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-};
-
-/** The newest file of these kinds anywhere under `dir`. */
-export function newestUnder(dir: string, ext: readonly string[]): Newest | null {
-  let best: Newest | null = null;
-  for (const e of dirents(dir)) {
-    const path = join(dir, e.name);
-    const found = e.isDirectory()
-      ? newestUnder(path, ext)
-      : ext.some((x) => e.name.endsWith(x))
-        ? { path, at: statSync(path).mtimeMs }
-        : null;
-    if (found !== null && (best === null || found.at > best.at)) best = found;
-  }
-  return best;
-}
-
-/** Every package in the workspace, each with the newest of its two trees. Paths come back
- *  repository-relative with forward slashes, so a violation reads the same on every host. */
-export function builtTree(root: string): readonly Built[] {
-  const packages = join(root, "packages");
-  const rel = (n: Newest | null): Newest | null =>
-    n === null ? null : { path: relative(root, n.path).split("\\").join("/"), at: n.at };
-  return dirents(packages)
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name)
-    .sort()
-    .map((pkg) => ({
-      pkg,
-      source: rel(newestUnder(join(packages, pkg, "src"), SOURCE_EXT)),
-      dist: rel(newestUnder(join(packages, pkg, "dist"), DIST_EXT)),
-    }));
-}
-
-/** What is stale, one sentence each, in package order — a report whose lines moved between
- *  two identical passes reads as drift that is not there. */
-export function staleDists(built: readonly Built[]): readonly Violation[] {
-  return built
-    .filter((b) => b.source !== null && b.dist !== null && b.source.at > b.dist.at)
-    .map((b) => ({
-      invariant: DIST_CHECK,
-      entity: "package",
-      // A package is not a row of the record, so there is no id to name it by. The path is.
-      id: null,
-      slug: `packages/${b.pkg}`,
-      detail:
-        `packages/${b.pkg}/dist is older than its source — ${b.source?.path} was written ` +
-        `after ${b.dist?.path}, so everything that imports the package is running a build ` +
-        `that predates it: run pnpm -r build`,
-    }));
-}
-
-/** The check, bound to a repository. `read` is the seam the test uses: a pair of trees is
- *  handed in rather than written to disk, so the case being proven is the comparison. */
-export const distIsBuiltFromSource = (
-  root: string,
-  read: (root: string) => readonly Built[] = builtTree,
-): Invariant => ({
-  name: DIST_CHECK,
-  check: (): readonly Violation[] => staleDists(read(root)),
+export const taskBranchIsNotSuperseded = (db: DatabaseSync, git: Git): Invariant => ({
+  name: SUPERSEDED_CHECK,
+  check: (s: Snapshot): readonly Violation[] => {
+    // Exactly the set the lander retries: done, something committed against it, no marker.
+    const landed = landedTasks(db);
+    const committed = committedTasks(db);
+    const owner = storyOfTask(queries(db));
+    const slugOfStory = new Map(s.nodes.filter((n) => n.entity === "story").map((n) => [n.id, n.slug]));
+    return s.nodes
+      .filter((n) => n.entity === "task" && n.state === "done" && committed.has(n.id) && !landed.has(n.id))
+      .flatMap((n) => {
+        const story = slugOfStory.get(owner.get(n.id) ?? -1);
+        if (story === undefined) return [];
+        const base = storyBranch(story);
+        const branch = `task/${n.slug}`;
+        // `no-branch` is a branch that is gone, which is a different fact and not this one.
+        if (ancestryOf(git, base)(branch) !== "in") return [];
+        return [
+          {
+            invariant: SUPERSEDED_CHECK,
+            entity: n.entity,
+            id: n.id,
+            slug: n.slug,
+            detail:
+              `done, and ${base} already holds every commit on ${branch} — the merge is ` +
+              `retried every tick and can move nothing: the branch is superseded, not unmerged`,
+          },
+        ];
+      });
+  },
 });
+
+/** The tree checks live in `doctor/trees.ts` — the ones whose subject is a build on disk
+ *  rather than the record. Re-exported here because this module is the doctor's face: a
+ *  caller asks the doctor for its checks, not for the file one of them happens to be in. */
+export { builtTree, DIST_CHECK, distIsBuiltFromSource, newestUnder, staleDists, type Built, type Newest };
 
 /** The pure set: core's, plus the checks that are the runner's own. The file-length check is
  *  not here — it reads a tree rather than the record, so it is built per repository and added
@@ -288,6 +254,19 @@ interface PassRow {
   at: string;
 }
 const doctorPass = table<PassRow>("doctor_pass", ["rowid", "invariant", "world", "reachable", "found", "at"]);
+
+/** One whole-suite run, as the pass recorded it. One row: "how red is the tip" is answered
+ *  by the last run and no other. `files` is the failures' files newline-joined, kept in the
+ *  row that counted them so the number and the names cannot come from two different runs. */
+interface SuiteRow {
+  tip: string;
+  failed: number;
+  passed: number;
+  skipped: number;
+  files: string;
+  at: string;
+}
+const doctorSuite = table<SuiteRow>("doctor_suite", ["tip", "failed", "passed", "skipped", "files", "at"]);
 
 const sqliteMaster = table<{ type: string; name: string }>("sqlite_master", ["type", "name"]);
 
@@ -449,6 +428,7 @@ export class Doctor {
       fileCeilingInvariant(repoOf(db)),
       distIsBuiltFromSource(repoOf(db)),
       taskWorkIsCommitted(db),
+      taskBranchIsNotSuperseded(db, gitIn(repoOf(db))),
     ],
     /** How the ancestry question gets asked. The runner is the half that may read the
      *  world, so `delivered_story_has_landed` is only ever reported here after git has
@@ -473,6 +453,16 @@ export class Doctor {
          reachable INTEGER NOT NULL,
          found     INTEGER NOT NULL,
          at        TEXT    NOT NULL
+       )`,
+    );
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS doctor_suite (
+         tip     TEXT    NOT NULL,
+         failed  INTEGER NOT NULL,
+         passed  INTEGER NOT NULL,
+         skipped INTEGER NOT NULL,
+         files   TEXT    NOT NULL,
+         at      TEXT    NOT NULL
        )`,
     );
   }
@@ -858,4 +848,76 @@ export function redAtBase(db: DatabaseSync): readonly RedFile[] {
     found.set(t.script_path, { file: t.script_path, test: t.slug, sha: t.red_at_base_sha });
   }
   return [...found.values()];
+}
+
+/** docs/design/19, applied to the tree the pass ran against rather than to the record.
+ *
+ *  The watch called master green for hours off `the-cockpit-matches-its-design` alone while
+ *  the whole suite was red on about a hundred tests: a run narrowed to one file answers for
+ *  that file and nothing else, and no count of the record can find that out. So the suite is
+ *  run whole, at the tip it ran against, and `failed` is the number the board puts beside
+ *  the branch. `files` is the failures' files in the order the runner named them, empty for
+ *  a green run, because a number nobody can act on gets argued with instead. */
+export interface Tally {
+  /** The commit the suite ran against. A tally with no tip is a number about nothing. */
+  readonly tip: string;
+  readonly failed: number;
+  readonly passed: number;
+  readonly skipped: number;
+  readonly files: readonly string[];
+}
+
+/** The runner's summary, read off the line counting tests and not the one above it counting
+ *  files: one red file holding a hundred red tests is a hundred, and `Test Files 1 failed
+ *  (1)` would call it one. A word the summary omits is nought of that kind, which is how
+ *  vitest prints a run with nothing skipped. `null` is output carrying no summary at all — a
+ *  suite that died before it counted anything, which must never read as green. */
+export function tallyOf(coloured: string, tip: string): Tally | null {
+  // A runner that believes it is talking to a terminal writes its counts in escape codes,
+  // and a pass that read only the plain spelling would call such a run uncountable.
+  const output = coloured.replace(/\u001b\[[0-9;]*m/g, "");
+  const line = /^[^\S\n]*Tests[^\S\n]+(.*)$/m.exec(output)?.[1];
+  if (line === undefined) return null;
+  const n = (word: string): number => Number(new RegExp(`(\\d+) ${word}`).exec(line)?.[1] ?? 0);
+  return { tip, failed: n("failed"), passed: n("passed"), skipped: n("skipped"), files: failingFilesOf(output) };
+}
+
+/** The suite as the pass may see it: a tree in, everything the runner printed out. Both
+ *  streams, because vitest counts on stdout and names its failing files on stderr. */
+export type Suite = (cwd: string) => string;
+
+/** A red suite exits non-zero. That is the answer, not an error, so the output is taken off
+ *  the failure exactly as off the success. */
+export const runSuite: Suite = (cwd: string): string => {
+  try {
+    return execFileSync("pnpm", ["exec", "vitest", "run"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string };
+    return `${e.stdout ?? ""}\n${e.stderr ?? ""}`;
+  }
+};
+
+/** Run the whole suite over a tree and say what it came to. The runner is a seam so a test
+ *  can hand in a tree of its own; the default is the one the watch and the tick would use. */
+export const suiteTally = (cwd: string, tip: string, suite: Suite = runSuite): Tally | null => tallyOf(suite(cwd), tip);
+
+/** Written as the doctor's other rows are: replaced, never appended — two rows would leave
+ *  a view to guess which of them the branch is at. A run with no tally to record writes
+ *  nothing and clears nothing: the last real count is still true of the tip it names. */
+export function recordSuite(db: DatabaseSync, tally: Tally | null): void {
+  if (tally === null) return;
+  const q = queries(db);
+  transact(db, () => {
+    q.deleteFrom(doctorSuite).run();
+    q.insertInto(doctorSuite, { ...tally, files: tally.files.join("\n"), at: now() }).run();
+  });
+}
+
+/** What the board reads to say how red the tip is. `null` is no suite has been run against
+ *  this record at all, which is not the same fact as a suite that found nothing. */
+export function lastSuite(db: DatabaseSync): (Tally & { readonly at: string }) | null {
+  if (!hasTable(db, "doctor_suite")) return null;
+  const row = queries(db).selectFrom(doctorSuite).all()[0];
+  if (row === undefined) return null;
+  return { ...row, files: row.files === "" ? [] : row.files.split("\n") };
 }

@@ -31,7 +31,7 @@ const node = (entity: Checked, id: number, slug: string, state: string, rest: Pa
 const clean = (): Snapshot => ({
   nodes: [
     node("release", 1, "v1", "in_progress"),
-    node("epic", 1, "recovery", "in_progress", { parent_id: 1 }),
+    node("epic", 1, "recovery", "delivered", { parent_id: 1 }),
     node("story", 1, "reset", "delivered", { parent_id: 1, landed_sha: "base0000" }),
     node("requirement", 1, "one-change", "met", { parent_id: 1 }),
     node("acceptance_criteria", 1, "emailed", "accepted", { parent_id: 1 }),
@@ -248,7 +248,8 @@ const broken: Snapshot = {
     node("epic", 2, "signin", "in_progress", { parent_id: 1 }),
     node("story", 1, "reset", "dropped", { parent_id: 1 }),
     node("story", 2, "lockout", "delivered", { parent_id: 2 }),
-    node("story", 3, "unlock", "in_progress", { parent_id: 2 }),
+    node("epic", 3, "unlocking", "in_progress", { parent_id: 1 }),
+    node("story", 3, "unlock", "in_progress", { parent_id: 3 }),
     // `met`, over a criteria still in_progress: the child of a settled parent, which is the
     // one shape only the upward check sees.
     node("requirement", 1, "one-change", "met", { parent_id: 1 }),
@@ -282,6 +283,7 @@ describe("one pass", () => {
         "acceptance_criteria#1 emailed",
         "acceptance_test#1 mail-arrives",
         "epic#1 recovery",
+        "epic#2 signin",
         "schema_version#- 0",
         "role#- engineer",
         "story#2 lockout",

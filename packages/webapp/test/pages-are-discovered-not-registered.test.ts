@@ -51,6 +51,7 @@ const READINGS = {
   record: () => "the record",
   board: () => "the board",
   approvals: () => "the approvals",
+  sketches: () => "the sketches",
 };
 
 describe("a page is a file under pages/", () => {

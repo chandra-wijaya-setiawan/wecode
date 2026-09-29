@@ -2,7 +2,7 @@ import { inverted, plain } from "./force-color.js";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { spawn, type ChildProcess, execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
@@ -11,7 +11,9 @@ import { loadMachines, open } from "@wecode/core";
 import { App } from "../src/app.js";
 import { tmp } from "../../core/test/tmpdir.js";
 import { Cockpit, raised } from "../src/screens.js";
-import { loadOffPage, loadViews, ViewError } from "../src/views.js";
+import { loadOffPage, loadViews, ViewError, type View } from "../src/views.js";
+import { boxKeys, ESC, KeyReader, type Keyed, type Mode } from "../src/keys.js";
+import { OUTLINE } from "../src/outline.js";
 import { loadServices } from "../src/services.js";
 import { sectionMark } from "../src/list.js";
 import { seed, T, ins } from "./seed.js";
@@ -534,5 +536,187 @@ describe("the terminal", () => {
 
   afterEach(async () => {
     await Promise.all(kids.splice(0).map((c) => (c.exitCode === null ? (c.kill("SIGKILL"), exited(c)) : null)));
+  });
+});
+
+/** The keyboard is a module of its own. What a key is bound to and what the binding does are
+ *  two questions with two answers, so keys.ts holds the first and app.ts holds the second. */
+describe("the keyboard", () => {
+  const SRC = fileURLToPath(new URL("../src", import.meta.url));
+  const read = (file: string): string => readFileSync(join(SRC, file), "utf8");
+
+  /** A screen that does nothing but write down what it was asked for, so a binding can be
+   *  read off the reader alone — no database, no frame, no cursor to clamp. */
+  class Noted implements Keyed {
+    status = "";
+    quit = false;
+    cursor = 0;
+    rows = 7;
+    said: string[] = [];
+    /** What the next `arm*` will answer. A screen refuses an arming by answering null. */
+    arms: Mode | null = null;
+    private note(what: string): void {
+      this.said.push(what);
+    }
+    openBox(k: string): void { this.note(`openBox ${k}`); }
+    pickVerb(k: string): void { this.note(`pickVerb ${k}`); }
+    sayAnswer(k: string): void { this.note(`sayAnswer ${k}`); }
+    narrow(k: string): void { this.note(`narrow ${k}`); }
+    stepDepth(k: string): void { this.note(`stepDepth ${k}`); }
+    descend(): void { this.note("descend"); }
+    pop(): void { this.note("pop"); }
+    move(by: number): void { this.note(`move ${by}`); }
+    refreshNow(): void { this.note("refreshNow"); }
+    fold(open: boolean): void { this.note(`fold ${open}`); }
+    jump(by: number): void { this.note(`jump ${by}`); }
+    seek(query: string): void { this.note(`seek ${query}`); }
+    armView(): Mode | null { this.note("armView"); return this.arms; }
+    armVerb(): Mode | null { this.note("armVerb"); return this.arms; }
+    armScope(): Mode | null { this.note("armScope"); return this.arms; }
+    armDepth(): Mode | null { this.note("armDepth"); return this.arms; }
+    armSearch(): Mode | null { this.note("armSearch"); return this.arms; }
+  }
+
+  let to: Noted;
+  let reader: KeyReader;
+
+  beforeEach(() => {
+    to = new Noted();
+    reader = new KeyReader(to);
+  });
+
+  const type = (keys: string): void => {
+    for (const k of keys) reader.read(k);
+  };
+
+  it("lives in keys.ts, and app.ts no longer holds the key table", () => {
+    const app_ts = read("app.ts");
+    const keys_ts = read("keys.ts");
+    for (const bound of ['case "j":', 'case "v":', 'case "q":', 'case "/":']) {
+      expect(keys_ts, `${bound} belongs in keys.ts`).toContain(bound);
+      expect(app_ts, `${bound} is still in app.ts`).not.toContain(bound);
+    }
+    // The control codes a terminal sends are the keyboard's business too, so there is one
+    // place that knows what byte 27 is called.
+    expect(app_ts).not.toContain("String.fromCharCode");
+    expect(keys_ts).toContain("String.fromCharCode(27)");
+  });
+
+  it("sends every bare key to the action it names", () => {
+    for (const [k, did] of [
+      ["j", "move 1"], ["k", "move -1"], ["r", "refreshNow"],
+      ["+", "fold true"], ["-", "fold false"], ["n", "jump 1"], ["N", "jump -1"],
+      ["enter", "descend"], ["\r", "descend"], ["esc", "pop"], [ESC, "pop"],
+    ] as const) {
+      to.said = [];
+      reader.read(k);
+      expect(to.said, `${k}`).toEqual([did]);
+    }
+  });
+
+  it("moves the cursor and quits without asking the screen anything", () => {
+    to.cursor = 4;
+    reader.read("g");
+    expect(to.cursor).toBe(0);
+    reader.read("G");
+    expect(to.cursor).toBe(to.rows - 1);
+    expect(to.quit).toBe(false);
+    reader.read("q");
+    expect(to.quit).toBe(true);
+    expect(to.said).toEqual([]);
+  });
+
+  it("says so, and does nothing, on a key that is not bound", () => {
+    reader.read("z");
+    expect(to.said).toEqual([]);
+    expect(to.status).toBe("z does nothing here");
+  });
+
+  it("holds the mode a key armed, and spends it on the next key", () => {
+    for (const [k, mode, spent] of [
+      ["v", "view", "openBox x"], ["a", "verb", "pickVerb x"], ["a", "answer", "sayAnswer x"],
+      ["f", "scope", "narrow x"], ["t", "depth", "stepDepth x"],
+    ] as const) {
+      to.said = [];
+      to.arms = mode;
+      reader.read(k);
+      expect(reader.waitingFor).toBe(mode);
+      reader.read("x");
+      expect(to.said.at(-1)).toBe(spent);
+      // One key, then the keyboard is a keyboard again: `v` twice is not two boxes deep.
+      expect(reader.waitingFor).toBe(null);
+    }
+  });
+
+  it("arms nothing when the screen refuses the arming", () => {
+    to.arms = null;
+    reader.read("f");
+    expect(to.said).toEqual(["armScope"]);
+    expect(reader.waitingFor).toBe(null);
+    // So the next key is a command, not a scope letter that was never offered.
+    reader.read("j");
+    expect(to.said).toEqual(["armScope", "move 1"]);
+  });
+
+  it("takes every printable key as a letter of the search, not as a command", () => {
+    to.arms = "search";
+    reader.read("/");
+    expect(to.status).toBe("/");
+    type("njq");
+    expect(to.status).toBe("/njq");
+    expect(to.quit).toBe(false);
+    expect(to.said).toEqual(["armSearch"]);
+  });
+
+  it("rubs out the last letter, by name and by either code point", () => {
+    to.arms = "search";
+    reader.read("/");
+    type("abc");
+    for (const rub of ["backspace", String.fromCharCode(127), String.fromCharCode(8)]) {
+      reader.read(rub);
+    }
+    expect(to.status).toBe("/");
+  });
+
+  it("commits what was typed on enter, trimmed, and disarms", () => {
+    to.arms = "search";
+    reader.read("/");
+    type(" cart ");
+    reader.read("enter");
+    expect(to.said.at(-1)).toBe("seek cart");
+    expect(reader.waitingFor).toBe(null);
+  });
+
+  it("abandons the search on esc, and leaves the line clear", () => {
+    to.arms = "search";
+    reader.read("/");
+    type("cart");
+    reader.read(ESC);
+    expect(to.said).toEqual(["armSearch"]);
+    expect(to.status).toBe("");
+    expect(reader.waitingFor).toBe(null);
+    // And the next `/` opens an empty prompt rather than the query that was abandoned.
+    reader.read("/");
+    expect(to.status).toBe("/");
+  });
+
+  it("gives a box a letter, its own where it declares one", () => {
+    const keys = boxKeys([
+      { name: "queued", title: "Queued", filter: "queued" },
+      { name: "quarantine", title: "Quarantine", filter: "failed", key: "z" },
+    ] as unknown as View[]);
+    expect(keys.get("z")?.name).toBe("quarantine");
+    expect(keys.get("q")?.name).toBe("queued");
+  });
+
+  it("is what the App answers a key with, all the way to the screen", () => {
+    app.key("v");
+    expect(app.status).toContain("box?");
+    app.key(OUTLINE.key);
+    expect(app.screen.kind).toBe("outline");
+    app.key("j");
+    expect(app.cursor).toBe(1);
+    app.key("esc");
+    expect(app.screen.kind).toBe("dashboard");
   });
 });

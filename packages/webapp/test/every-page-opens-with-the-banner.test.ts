@@ -24,7 +24,7 @@ import type { Server } from "node:http";
 import { addressOf, serve } from "../src/server.js";
 import { boardAt } from "../src/pages/board.js";
 import { discovered, pathOf } from "../src/pages/discover.js";
-import { document, loadBanner, loadShell, shelled, ShellError } from "../src/pages/shell.js";
+import { document, documentAt, loadBanner, loadShell, shelled, ShellError } from "../src/pages/shell.js";
 
 const DESIGN = fileURLToPath(new URL("../../tui/config/design.yaml", import.meta.url));
 const TEXT = readFileSync(DESIGN, "utf8");
@@ -93,6 +93,17 @@ describe("it names every page the package serves, and only those", () => {
     expect(ORDER.map((tab) => tab.page).sort()).toEqual([...pages].sort());
   });
 
+  it("names the three that landed as files without a way in", () => {
+    // agents, cooking and ledger were served — discovery found their files — and the
+    // banner named none of them, so the only way to any of the three was to type the
+    // path. Named here by hand as well as by the directory above: the general statement
+    // goes green again the moment somebody deletes the pages, and this one does not.
+    for (const page of ["agents", "cooking", "ledger"]) {
+      expect(pages, page).toContain(page);
+      expect(ORDER.map((tab) => tab.page), page).toContain(page);
+    }
+  });
+
   it("names each page once, so a page has one way in and not two", () => {
     const named = ORDER.map((tab) => tab.page);
     expect(named.length).toBe(new Set(named).size);
@@ -133,7 +144,7 @@ describe("every document wears it", () => {
   });
 
   it("writes one link per declared page, in the declared order", () => {
-    const links = [...body.matchAll(/<a href="([^"]*)">([^<]*)<\/a>/g)].map((m) => [m[1], m[2]]);
+    const links = [...body.matchAll(/<a href="([^"]*)"[^>]*>([^<]*)<\/a>/g)].map((m) => [m[1], m[2]]);
     expect(links).toEqual(ORDER.map((tab) => [tab.at, tab.says]));
   });
 
@@ -149,14 +160,38 @@ describe("every document wears it", () => {
     const server = await serve({ "/": boardAt(emptyBoard) });
     servers.push(server);
     const served = await (await fetch(`${addressOf(server)}/`)).text();
-    for (const tab of ORDER) expect(served).toContain(`<a href="${tab.at}">${tab.says}</a>`);
+    // Read to the quote that ends the target rather than to the ">": the name the reader is
+    // under carries `aria-current`, and what is claimed here is that every name is offered.
+    for (const tab of ORDER) {
+      expect(served).toMatch(new RegExp(`<a href="${tab.at.replace(/[/]/g, "\\/")}"[^>]*>${tab.says}</a>`));
+    }
+  });
+
+  it("lights the one name the reader is under, and only over a socket lights it", async () => {
+    // `aria-current="page"` and not a class of this surface's own: it is the browser's word
+    // for which of a set of links is where you are, so the underline and the screen reader
+    // say the same thing. The board is what `/` answers, so the board is what is lit there.
+    const server = await serve({ "/": boardAt(emptyBoard) });
+    servers.push(server);
+    const served = await (await fetch(`${addressOf(server)}/`)).text();
+    // Counted in the row and not in the document: the sheet is inline, and the rule that
+    // draws the lit name spells the attribute too.
+    const row = served.slice(served.indexOf("<nav>"), served.indexOf("</nav>"));
+    expect([...row.matchAll(/aria-current="page"/g)]).toHaveLength(1);
+    expect(row).toContain(`<a href="/" aria-current="page">Board</a>`);
+    // A document built with no target is a fragment being proved and not a page being
+    // served, so nothing in its banner is lit rather than the first name being guessed at.
+    const unserved = document("<p>a page</p>");
+    expect(unserved.slice(unserved.indexOf("<nav>"), unserved.indexOf("</nav>")))
+      .not.toContain("aria-current");
   });
 
   it("gives a page no way to be served without it", () => {
     // `shelled` is the only way a page becomes a reply, and it does not take an opinion
-    // about the banner from the page — the default is the design's.
+    // about the banner from the page — the default is the design's. What it does take from
+    // the request is where the request went, which is the one thing the banner lights from.
     const reply = shelled(() => "<p>anything</p>")(new URL("http://localhost/"));
-    expect(reply.body).toBe(document("<p>anything</p>"));
+    expect(reply.body).toBe(documentAt("<p>anything</p>", "/"));
     expect(reply.body).toContain("<nav>");
   });
 });

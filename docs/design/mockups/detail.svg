@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 80 30">
+<rect x="0" y="0" width="80" height="30" fill="none" stroke="#000" data-depth="0"/>
+<text x="0" y="0.8" font-family="monospace" font-size="0.8" textLength="16" lengthAdjust="spacingAndGlyphs" data-row="0">{what} · {state}</text>
+<rect x="1" y="1" width="78" height="5" fill="none" stroke="#000" data-depth="1"/>
+<text x="1" y="1.8" font-family="monospace" font-size="0.8" textLength="5" lengthAdjust="spacingAndGlyphs" data-row="0">block</text>
+<text x="1" y="2.8" font-family="monospace" font-size="0.8" textLength="11" lengthAdjust="spacingAndGlyphs" data-row="1">entity    —</text>
+<text x="1" y="3.8" font-family="monospace" font-size="0.8" textLength="11" lengthAdjust="spacingAndGlyphs" data-row="2">id        —</text>
+<text x="1" y="4.8" font-family="monospace" font-size="0.8" textLength="11" lengthAdjust="spacingAndGlyphs" data-row="3">title     —</text>
+<text x="1" y="5.8" font-family="monospace" font-size="0.8" textLength="11" lengthAdjust="spacingAndGlyphs" data-row="4">state     —</text>
+<text x="1" y="6.8" font-family="monospace" font-size="0.8" textLength="11" lengthAdjust="spacingAndGlyphs" data-row="5">children  —</text>
+<rect x="1" y="6" width="78" height="1" fill="none" stroke="#000" data-depth="1"/>
+<text x="1" y="6.8" font-family="monospace" font-size="0.8" textLength="28" lengthAdjust="spacingAndGlyphs" data-row="0">children ({count}) · {tally}</text>
+<text x="1" y="7.8" font-family="monospace" font-size="0.8" textLength="16" lengthAdjust="spacingAndGlyphs" data-row="1">nothing under it</text>
+<rect x="1" y="7" width="78" height="1" fill="none" stroke="#000" data-depth="1"/>
+<text x="1" y="7.8" font-family="monospace" font-size="0.8" textLength="25" lengthAdjust="spacingAndGlyphs" data-row="0">proof ({count}) · {tally}</text>
+<text x="1" y="8.8" font-family="monospace" font-size="0.8" textLength="21" lengthAdjust="spacingAndGlyphs" data-row="1">nothing proves it yet</text>
+<rect x="0" y="28" width="80" height="1" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="28.8" font-family="monospace" font-size="0.8" textLength="6" lengthAdjust="spacingAndGlyphs" data-row="0">record</text>
+<text x="0" y="29.8" font-family="monospace" font-size="0.8" textLength="40" lengthAdjust="spacingAndGlyphs" data-row="1">j/k move  g/G top/end  enter open  a act</text>
+<rect x="0" y="29" width="80" height="1" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="29.8" font-family="monospace" font-size="0.8" textLength="6" lengthAdjust="spacingAndGlyphs" data-row="0">global</text>
+<text x="0" y="30.8" font-family="monospace" font-size="0.8" textLength="47" lengthAdjust="spacingAndGlyphs" data-row="1">esc back  v box  v t outline  r refresh  q quit</text>
+</svg>

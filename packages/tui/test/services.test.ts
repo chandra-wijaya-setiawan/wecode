@@ -201,13 +201,13 @@ describe("the box", () => {
     expect(rows()["runner"]?.state).toBe("alive");
   });
 
-  /** Ruled rather than boxed, and headed the way every section is: the mark views.yaml
-   *  gives it, then its name in capitals. The rows are under the rule at the left edge —
-   *  a border is not taking a column off them any more. */
-  it("is ruled, marked, titled in capitals, and above every section of work", () => {
+  /** Unruled rather than boxed, and headed the way every section is: its mark in column
+   *  zero, then its name in capitals, and no dashes either side of them. The rows are
+   *  under that head at the left edge — a border is not taking a column off them. */
+  it("is marked, titled in capitals, and above every section of work", () => {
     const out = lines();
-    const at = out.findIndex((l) => l.startsWith(`── ${sectionMark("services")} ${config.title.toUpperCase()} `));
-    expect(at, "no rule heads the services section").toBe(0);
+    const at = out.findIndex((l) => l === `${sectionMark("services")} ${config.title.toUpperCase()}`);
+    expect(at, "no mark-and-name heads the services section").toBe(0);
 
     // A pulse line per project leads the four fixed rows; nothing here is inside a border.
     const drawn = services(db, 1, config, AT).length;
@@ -220,7 +220,12 @@ describe("the box", () => {
       "doctor",
     ]);
 
-    const first = out.findIndex((l) => l.includes(` ${(views[0]?.title ?? "").toUpperCase()} (`));
+    // The first box's head, which is its own mark and its name in capitals — the count it
+    // ends with is a bare number and a raised letter now, not a parenthesis.
+    const lead = views[0];
+    const first = out.findIndex(
+      (l) => l.startsWith(`${sectionMark(lead?.name ?? "")} ${(lead?.title ?? "").toUpperCase()}`),
+    );
     expect(first).toBeGreaterThan(at + drawn);
   });
 

@@ -1,6 +1,6 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { matchesGlob, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { parseArgs } from "node:util";
 import {
@@ -24,6 +24,9 @@ import {
 // publishes, which is the same `dist` every other import from core above resolves to.
 import { queries, table, type Dialect } from "@wecode/core/dist/db.js";
 import { openCodegraph, type RepoIndex } from "@wecode/explorer";
+// Every rule that refuses a plan for what its scopes and tests say, kept whole in one
+// module: they are read together, and none of them touches the ledger.
+import { artefacts, collisions, needs, OWNERS, owners, reach } from "./plan/refusals.js";
 import { promised, proposeScope, type Promised, type Proposal } from "./scope-proposal.js";
 
 // yaml is @wecode/core's dependency, and this package declares none of its own. Resolving it
@@ -341,78 +344,6 @@ function read(doc: unknown, config: ProjectConfig | null, roles: RoleConfig | nu
   return { root, join: top?.id ?? id(m[root]), parent, top };
 }
 
-/** Two tasks under one story that may both write a path are two agents editing one file at
- *  once: whichever lands second either loses the other's work or fails to apply, and no test
- *  says which. The story is the unit because its tasks are what run together. Refused here,
- *  where moving one path from one task to the other costs a line, rather than at merge. */
-function collisions(l: Level, say: string[]): void {
-  for (const c of l.children) collisions(c, say);
-  if (l.kind !== "story") return;
-  const tasks = l.requirements.flatMap((r) => r.criteria.flatMap((c) => c.tasks)).filter((t) => t.given);
-  const story = l.name ?? `#${String(l.id)}`;
-  for (const [i, a] of tasks.entries()) {
-    for (const b of tasks.slice(i + 1)) {
-      const path = shared(a.scope, b.scope);
-      if (path !== null) {
-        say.push(`story ${story}: ${a.title} and ${b.title} both write ${path}; two tasks under one story share no path`);
-      }
-    }
-  }
-}
-
-/** Where the tree says which component owns which module. A repository without this file
- *  claims nothing, so it has no owner to go missing and the rule below never fires. */
-const OWNERS = "packages/core/config/components.yaml";
-
-/** A scope path that spells one new module: a literal file — no wildcard, so the plan means
- *  this file and not a shape — under some package's `src/`, which is not there yet. A path
- *  already on disk is an edit, and an edit needs no new row. */
-function newModules(scope: readonly string[]): readonly string[] {
-  return scope.filter(
-    (p) => !p.includes("*") && /^packages\/[^/]+\/src\/.+\.tsx?$/.test(p) && !existsSync(resolve(process.cwd(), p)),
-  );
-}
-
-/** A module whose owner nobody may write is a module with no owner: the map that says which
- *  component a file belongs to is checked by a test, so the story goes red on a row its own
- *  scope forbids it to add. The story is the unit because any task under it may carry the
- *  map — one hand adds the module, another may add the row. Refused here, where scoping one
- *  more file costs a line, rather than at pass time, where it costs the story. */
-function owners(l: Level, say: string[]): void {
-  for (const c of l.children) owners(c, say);
-  if (l.kind !== "story" || !existsSync(resolve(process.cwd(), OWNERS))) return;
-  const tasks = l.requirements.flatMap((r) => r.criteria.flatMap((c) => c.tasks));
-  if (tasks.some((t) => t.scope.some((g) => matchesGlob(OWNERS, g)))) return;
-  const story = l.name ?? `#${String(l.id)}`;
-  for (const t of tasks) {
-    for (const module of newModules(t.scope)) {
-      say.push(`story ${story}: ${t.title} adds ${module}, and no task here may write ${OWNERS}`);
-    }
-  }
-}
-
-/** The first pair of globs from two scopes that can write the same file, named as the file
- *  says them. Two globs collide when neither segment rules the other out — a wildcard in a
- *  segment reaches whatever a name there reaches, and `**` reaches everything below it. */
-function shared(a: readonly string[], b: readonly string[]): string | null {
-  for (const x of a) {
-    for (const y of b) {
-      if (overlaps(x, y)) return x === y ? x : `${x} and ${y}`;
-    }
-  }
-  return null;
-}
-
-function overlaps(x: string, y: string): boolean {
-  const g = x.split("/");
-  const h = y.split("/");
-  for (let i = 0; i < Math.min(g.length, h.length); i++) {
-    if (g[i] === "**" || h[i] === "**") return true;
-    if (!matchesGlob(g[i] as string, h[i] as string) && !matchesGlob(h[i] as string, g[i] as string)) return false;
-  }
-  return g.length === h.length;
-}
-
 const found = (key: string | undefined): string => (key === undefined ? "; this one is empty" : `, not ${key}`);
 
 /** A root given as a number joins that existing row; a sentence is created under its parent. */
@@ -503,102 +434,13 @@ function requirement(
   return joined === null && statement === null ? null : { id: joined, statement, criteria };
 }
 
-/** The files a test command names: a word carrying a slash whose last segment has an
- *  extension. `packages/tui` is a filter over whatever is there; `test/list.test.ts` is a
- *  file, and either it is there or nothing runs. */
-function files(artefact: string): readonly string[] {
-  return artefact
-    .split(/\s+/)
-    .map((w) => w.replace(/^['"]+|['"]+$/g, ""))
-    .filter((w) => w.includes("/") && /\.[A-Za-z0-9]+$/.test(w.slice(w.lastIndexOf("/") + 1)));
-}
-
-/** A test command naming a file that is not there and that nobody is scoped to write runs
- *  no tests and passes — `vitest run maler` is green forever. It is refused by path, while
- *  the whole file is still being read, because a typo costs a keystroke here and a story at
- *  pass time. A path some task under it will write is not yet a file and is not a mistake.
- *  `gate` adds the converse, for the caller that has a scope of its own: a test file that is
- *  there but outside that scope is a gate the task may not edit. */
-function artefacts(test: string | null, scope: readonly string[], where: string, say: string[], gate = false): void {
-  for (const path of test === null ? [] : files(test)) {
-    if (scope.some((g) => matchesGlob(path, g))) continue;
-    if (!existsSync(resolve(process.cwd(), path))) say.push(`${where}: test: no file matches ${path}`);
-    else if (gate && /\.(test|spec)\.[cm]?[jt]sx?$/.test(path)) say.push(`${where}: test: ${path} is a gate this scope cannot write`);
-  }
-}
-
-/** The workspace's packages, as `pnpm-workspace.yaml` spells them: the globs are that file's
- *  to declare, not this module's to assume, and a tree with no workspace file has no packages
- *  and so nothing to reach past. */
-function workspace(root: string): readonly { dir: string; name: string }[] {
-  const file = resolve(root, "pnpm-workspace.yaml");
-  if (!existsSync(file)) return [];
-  const doc = parse(readFileSync(file, "utf8")) as { packages?: unknown } | null;
-  const globs = Array.isArray(doc?.packages) ? doc.packages.filter((g): g is string => typeof g === "string") : [];
-  const out: { dir: string; name: string }[] = [];
-  for (const glob of globs) {
-    const parent = glob.endsWith("/*") ? glob.slice(0, -2) : null;
-    if (parent === null || !existsSync(resolve(root, parent))) continue;
-    for (const entry of readdirSync(resolve(root, parent))) {
-      const manifest = resolve(root, parent, entry, "package.json");
-      if (!existsSync(manifest)) continue;
-      const name = (JSON.parse(readFileSync(manifest, "utf8")) as { name?: unknown }).name;
-      out.push({ dir: `${parent}/${entry}`, name: typeof name === "string" ? name : entry });
-    }
-  }
-  return out;
-}
-
-/** Whether a scope glob can write anything inside a directory. Compared segment by segment, so
- *  that a wildcard in the package slot reaches every package and a named one reaches its own. */
-function touches(glob: string, dir: string): boolean {
-  const g = glob.split("/");
-  const d = dir.split("/");
-  for (let i = 0; i < Math.min(g.length, d.length); i++) {
-    if (g[i] === "**") return true;
-    if (!matchesGlob(d[i] as string, g[i] as string)) return false;
-  }
-  return true;
-}
-
-/** The packages a command runs: one it names by path, and one it names by `--filter`. Both
- *  are how pnpm is told which package a suite belongs to, and both narrow the run to it. */
-function runs(test: string, packages: readonly { dir: string; name: string }[]): readonly string[] {
-  const words = test.split(/\s+/).map((w) => w.replace(/^['"]+|['"]+$/g, ""));
-  const filtered = new Set<string>();
-  for (const [i, w] of words.entries()) {
-    const arg = w.startsWith("--filter=") ? w.slice("--filter=".length) : w === "--filter" ? words[i + 1] : undefined;
-    if (arg !== undefined) filtered.add(arg.replace(/^[.^]+|\.+$/g, ""));
-  }
-  return packages
-    .filter((p) => filtered.has(p.name) || words.some((w) => w === p.dir || w.startsWith(`${p.dir}/`)))
-    .map((p) => p.dir);
-}
-
-/** A task whose test runs a package its scope cannot write is a task that cannot change its
- *  own verdict: the suite is green or red on work done elsewhere, and the agent is graded on
- *  a tree it may not touch. Refused at plan time, where it costs one line of the file. */
-function reach(test: string | null, scope: readonly string[], where: string, say: string[]): void {
-  if (test === null) return;
-  for (const dir of runs(test, workspace(process.cwd()))) {
-    if (scope.some((g) => touches(g, dir))) continue;
-    say.push(`${where}: test: runs ${dir}, which this scope cannot reach`);
-  }
-}
-
-function criterion(
-  v: unknown,
-  where: string,
-  config: ProjectConfig | null,
-  roles: RoleConfig | null,
-  say: string[],
-): Criteria | null {
+function criterion(v: unknown, where: string, config: ProjectConfig | null, roles: RoleConfig | null, say: string[]): Criteria | null {
   const m = mapping(v, where, KEYS.criteria, say);
   if (m === null) return null;
   const statement = required(m, "statement", where, say);
   const test = optional(m["test"], `${where}: test`, say) ?? config?.test ?? null;
   const tasks = list(m["tasks"], `${where}: tasks`, say)
-    .map((t, i) => task(t, `${where}, task ${i + 1}`, config, roles, say))
+    .map((t, i) => task(t, `${where}, task ${i + 1}`, config, roles, say, statement))
     .filter((t) => t !== null);
   if (statement === null) return null;
 
@@ -609,7 +451,7 @@ function criterion(
 
   // Only what this file spells: a path in `project.yaml`'s fallback is that file's to answer
   // for. A criteria has no scope of its own, so the test it names may be one its tasks write.
-  if (m["test"] !== undefined) artefacts(test, all.flatMap((t) => t.scope), where, say);
+  if (m["test"] !== undefined) { artefacts(test, all.flatMap((t) => t.scope), where, say); needs(test, all.flatMap((t) => t.scope), where, say); }
   return { statement, test, tasks: all };
 }
 
@@ -632,13 +474,7 @@ function authoringTask(statement: string, config: ProjectConfig | null, roles: R
   };
 }
 
-function task(
-  v: unknown,
-  where: string,
-  config: ProjectConfig | null,
-  roles: RoleConfig | null,
-  say: string[],
-): Task | null {
+function task(v: unknown, where: string, config: ProjectConfig | null, roles: RoleConfig | null, say: string[], statement: string | null): Task | null {
   const m = mapping(v, where, KEYS.task, say);
   if (m === null) return null;
   const title = required(m, "title", where, say);
@@ -646,12 +482,7 @@ function task(
   const test = optional(m["test"], `${where}: test`, say) ?? config?.test ?? null;
 
   const given = m["scope"] === undefined ? null : list(m["scope"], `${where}: scope`, say);
-  const scope =
-    given !== null
-      ? given.filter((g): g is string => typeof g === "string")
-      : config === null
-        ? null
-        : [...config.source, ...config.tests];
+  const scope = given !== null ? given.filter((g): g is string => typeof g === "string") : config === null ? null : [...config.source, ...config.tests];
 
   // A task that may change anything is not a task.
   if (scope === null || scope.length === 0) {
@@ -669,7 +500,7 @@ function task(
     if (!within.ok) say.push(`${where}: ${within.why}`);
   }
 
-  if (m["test"] !== undefined) artefacts(test, scope ?? [], where, say, true);
+  if (m["test"] !== undefined) artefacts(test, scope ?? [], where, say, statement);
 
   // Unlike the path check above, this one judges the fallback test too: a project-wide command
   // that narrows to one package is as unreachable as one the file spells out.

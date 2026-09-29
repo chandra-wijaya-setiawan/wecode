@@ -22,14 +22,14 @@ import { plain } from "./force-color.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
-import { loadMachines, open } from "@wecode/core";
+import { loadMachines, open, SCHEMA_VERSION } from "@wecode/core";
 import { check, type CapturedNode } from "@wecode/lens";
 // By path, because index.ts re-exports `check` and not yet the design half beside it. The
 // package is declared in this package's devDependencies all the same: the dependency is
 // real, it is the published surface that is one export short.
 import { against, expected, type Design } from "@wecode/lens/dist/expected.js";
 import { App } from "../src/app.js";
-import { Cockpit } from "../src/screens.js";
+import { Cockpit, raised } from "../src/screens.js";
 import { loadViews } from "../src/views.js";
 import { seed, T } from "./seed.js";
 
@@ -65,19 +65,31 @@ const frame = (): string[] =>
 
 /** A head, read back off the line that drew it: the name in it, and the letter that opens
  *  the box, if it is one. Read off the frame rather than out of views.yaml on purpose — a
- *  capture that consulted the config could not report a box drawn under the wrong name. */
-const HEAD = /^──\s(?:\S\s)?(.+?)\s(?:\[(\S)\]\s)?─/;
+ *  capture that consulted the config could not report a box drawn under the wrong name.
+ *
+ *  `proposal.head` writes a head as the section's own glyph in column zero, the name in
+ *  capitals beside it, and — for every box but the countless lead — the count held at the
+ *  right edge with the opening letter raised onto it. There are no dashes to find it by,
+ *  so a head is the one line whose second column is a space and whose name is capitals. */
+const HEAD = /^(\S) ([A-Z][A-Z ]*?)(?:\s{2,}(\d+(?:\/\d+)?)(\S))?$/;
+
+/** The raised letter, put back down. `raised` is the one place the map lives, so the way
+ *  back is a search of it rather than a second copy written the other way round. */
+const LETTERS = "abcdefghijklmnopqrstuvwxyz";
+const unraised = (glyph: string | undefined): string | undefined =>
+  glyph === undefined ? undefined : (LETTERS.split("").find((l) => raised(l) === glyph) ?? glyph);
 
 /** What the cockpit drew, as a capture.
  *
- *  A dashboard section is a rule with its body under it, so a section owns the full width
+ *  A dashboard section is a head with its body under it, so a section owns the full width
  *  from its head down to the next one, and what it holds is the lines between. The bar is
  *  the last line and is a box of its own; the blank the body stops short of the bar with
  *  is the page's slack and belongs to nobody. */
 function capture(out: readonly string[]): CapturedNode {
   const heads = out.flatMap((line, at) => (HEAD.test(line) ? [at] : []));
   const children = heads.map((at, i): CapturedNode => {
-    const [, name = "", key] = HEAD.exec(out[at] ?? "") ?? [];
+    const [, , name = "", , glyph] = HEAD.exec(out[at] ?? "") ?? [];
+    const key = unraised(glyph);
     const until = heads[i + 1] ?? out.length;
     const under = out.slice(at + 1, until);
     const blank = under.indexOf("");
@@ -121,7 +133,9 @@ const COCKPIT: Design = {
       rows: [
         "pulse   storefront  still      0 running · 1 queued · 0 stuck · moved 2h0m ago",
         "runner  workspace   none       no runner holds this workspace · 1 queued",
-        "schema  workspace   current    database 14 · this build understands 14",
+        // The one number here nobody designed: a migration moves it, and a design that
+        // had to be re-typed each time would be re-typed off the screen it is about.
+        `schema  workspace   current    database ${SCHEMA_VERSION} · this build understands ${SCHEMA_VERSION}`,
         "fleet   workspace   short      no engineer for 1 ready",
         "doctor  workspace   not built  0.0.2 · healing and collection",
       ],

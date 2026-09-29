@@ -3,10 +3,12 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Box, Text } from "ink";
+import type { ReactNode } from "react";
 import { parse } from "yaml";
 import { STATEFUL } from "@wecode/core";
 
 const CONFIG = fileURLToPath(new URL("../config/views.yaml", import.meta.url));
+const DESIGN = fileURLToPath(new URL("../config/design.yaml", import.meta.url));
 
 /** An allowance, or a spend against one, in the two dimensions that run out. */
 export interface Spend {
@@ -49,8 +51,7 @@ const PLAIN = "";
 
 export class CookingError extends Error {}
 
-/** Why a row is in flight, and how one with that answer is drawn. Every word is in
- *  views.yaml: none of it is something this file can work out. */
+/** Why a row is in flight, and how one with that answer is drawn — every word views.yaml's. */
 export interface CookingGroup {
   readonly name: string;
   readonly why: string;
@@ -96,11 +97,9 @@ export function loadCooking(path: string = CONFIG): CookingConfig {
 
   // A state in two groups is two whys for one row, decided by the order of the file.
   const seen = new Set<string>();
-  for (const g of loaded) {
-    for (const s of g.states) {
-      if (seen.has(s)) throw new CookingError(`cooking: ${s} is in more than one group`);
-      seen.add(s);
-    }
+  for (const s of loaded.flatMap((g) => g.states)) {
+    if (seen.has(s)) throw new CookingError(`cooking: ${s} is in more than one group`);
+    seen.add(s);
   }
 
   const un = (cfg["ungrouped"] ?? {}) as Record<string, unknown>;
@@ -113,27 +112,27 @@ export function loadCooking(path: string = CONFIG): CookingConfig {
   };
 }
 
-/** Read once, and not at import: a read at module scope makes the config a condition of
- *  loading this module rather than of drawing a row. */
+/** Read once, and not at import: a read at module scope gates loading, not drawing. */
 let cached: CookingConfig | null = null;
 export const cooking = (): CookingConfig => (cached ??= loadCooking());
 
 /** For tests, and for a config reloaded under a running board. */
-export const forgetCooking = (): void => {
-  cached = null;
-  marks = null;
-};
+export const forgetCooking = (): void => { cached = null; marks = null; };
 
 let marks: ReadonlyMap<string, string> | null = null;
 
 /** The glyph a section is headed with, by the name views.yaml declares it under — a view,
- *  an off-page box, or `services`. Declared there, like the title, because what stands for
- *  a section is a word about the board; read here because this file reads that file. */
+ *  an off-page box, or `services`. Which sections there are is that file's; what one *is*,
+ *  in one character, is the signed proposal's — so the glyph comes off design.yaml's
+ *  `proposal.marks`, keyed by the section's title said as one word, and views.yaml's own
+ *  `mark` answers only where the proposal is silent: the lead, and the off-page box. */
 export const sectionMark = (name: string, path: string = CONFIG): string => {
   if (marks === null) {
     const doc = (parse(readFileSync(path, "utf8")) ?? {}) as Record<string, Record<string, Record<string, unknown>>>;
     const said = { ...doc["views"], ...doc["off_page"], services: doc["services"] };
-    marks = new Map(Object.entries(said).map(([n, v]) => [n, String(v?.["mark"] ?? " ")]));
+    const drawn = (((parse(readFileSync(DESIGN, "utf8")) ?? {}) as Record<string, Record<string, unknown>>)["proposal"]?.["marks"] ?? {}) as Record<string, unknown>;
+    const titled = (v: Record<string, unknown> | undefined, n: string): string => String(v?.["title"] ?? n).toLowerCase().replace(/ /g, "_");
+    marks = new Map(Object.entries(said).map(([n, v]) => [n, String(drawn[titled(v, n)] ?? v?.["mark"] ?? " ")]));
   }
   return marks.get(name) ?? " ";
 };
@@ -142,14 +141,12 @@ export const groupOf = (state: string): CookingGroup | undefined =>
   cooking().groups.find((g) => g.states.includes(state));
 
 /** Every cooking row has a why. A state no group claims answers with its own word. */
-export const why = (row: Row): string =>
-  groupOf(row.state)?.why ?? row.state.replace(/_/g, " ");
+export const why = (row: Row): string => groupOf(row.state)?.why ?? row.state.replace(/_/g, " ");
 
 export const mark = (row: Row): string => groupOf(row.state)?.mark ?? cooking().ungrouped.mark;
 
-export function stateColour(state: string): string {
-  return groupOf(state)?.colour ?? cooking().ungrouped.colour;
-}
+export const stateColour = (state: string): string =>
+  groupOf(state)?.colour ?? cooking().ungrouped.colour;
 
 /** Grouped by why, in views.yaml's order and, inside a group, arrival order; ungrouped
  *  rows last. */
@@ -169,18 +166,14 @@ const cell = (row: Row, column: (typeof COLUMNS)[number]): string =>
   column === "code" ? code(row) : column === "state" ? row.state : description(row);
 
 /** Never wrap: a cell too wide for its slot loses its tail to an ellipsis. */
-export function clip(text: string, width: number): string {
-  if (width <= 0) return "";
-  if (text.length <= width) return text;
-  return text.slice(0, width - 1) + "…";
-}
+export const clip = (text: string, width: number): string =>
+  width <= 0 ? "" : text.length <= width ? text : text.slice(0, width - 1) + "…";
 
 const pad = (text: string, width: number): string => text.padEnd(width, " ");
 
 /** How wide each column must be. Passed down so a screen's boxes share one set. */
-export function columnWidths(rows: readonly Row[], _columns?: readonly Column[]): number[] {
-  return COLUMNS.map((c) => Math.max(...rows.map((r) => cell(r, c).length), 0));
-}
+export const columnWidths = (rows: readonly Row[], _columns?: readonly Column[]): number[] =>
+  COLUMNS.map((c) => Math.max(...rows.map((r) => cell(r, c).length), 0));
 
 /** Rows the height can show, scrolled so the cursor is among them. `per` is a row's cost. */
 function window(count: number, height: number, cursor: number | null, per = 1): [number, number] {
@@ -227,9 +220,8 @@ export function listLines(
   return lines;
 }
 
-/** The cooking box's lines: the grouping and the why, both read off views.yaml. The glyph
- *  leading each row is the one this box used to add itself. The why closes, and its column
- *  is sized from the whole list so scrolling does not slide it sideways. */
+/** The cooking box's lines: the grouping and the why, both read off views.yaml. The why
+ *  closes, sized from the whole list so scrolling does not slide its column sideways. */
 export function cookingLines(
   rows: readonly Row[], height: number, cursor: number | null, width: number,
 ): Line[] {
@@ -241,8 +233,7 @@ export function cookingLines(
   return listLines(grouped, height, cursor, body).map((line, i) => {
     // The "… and N more" tally has no row behind it: no why to give.
     if (first + i >= last) return line;
-    // Clipped again: on a narrow box the why is what the cut reaches first, and losing it
-    // is right — the row is still the row.
+    // Clipped again: on a narrow box the why goes first, and rightly — the row is the row.
     const text = `${pad(line.text, body)}${GAP}${why(grouped[first + i] as Row)}`.trimEnd();
     return { ...line, text: clip(text, width) };
   });
@@ -304,8 +295,8 @@ export function wrap(text: string, width: number, max: number): string[] {
 const BAR = 10;
 
 /** How far through its allowance a row is: whichever of tokens and the clock is nearer the
- *  end, named. An allowance of zero is a budget nobody set, not a full bar, so a row with
- *  neither draws none. The bar stops at full and the percentage does not. */
+ *  end, named. Zero is a budget nobody set, so a row with neither draws none; the bar stops
+ *  at full and the percentage does not. */
 export function gauge(row: Row): string {
   const { budget, spent } = row;
   if (budget === undefined || spent === undefined) return "";
@@ -347,8 +338,7 @@ export function runningLines(
   if (height <= 0) return [];
   const [first, last] = window(rows.length, height, cursor, RUNNING_LINES);
   const visible = rows.slice(first, last);
-  // The code and the state keep their columns, so every head lines up and the title block
-  // starts one column down. The description is not a column — it is the two lines below.
+  // Code and state keep their columns, so every head lines up; the description is no column.
   const widest = (of: (r: Row) => string): number => Math.max(...visible.map((r) => of(r).length), 0);
   const sizes = [widest(code), widest((r) => r.state)];
   const lines = visible.flatMap((row, i) =>
@@ -389,12 +379,20 @@ export function RunningList({ rows, height, cursor, width }: ListProps) {
   return <Lines lines={runningLines(rows, height, cursor, width)} />;
 }
 
+/** A drawn line, with the colour on the one word it is a fact about. A row painted end to
+ *  end said the whole row was the ask; the state is what is red, and the code, the title and
+ *  the why beside it are the foreground the terminal already had. A line that names no state
+ *  — a tally, a running row's lower lines — is drawn plain throughout; the settled tally
+ *  counts states rather than saying one, so its group's name takes the colour instead. */
+export function say(line: Line): ReactNode {
+  const said = [line.state, groupOf(line.state)?.name ?? PLAIN].find((w) => w !== PLAIN && line.text.includes(w));
+  if (said === undefined) return line.text;
+  const at = line.text.indexOf(said);
+  return [line.text.slice(0, at), <Text key="state" color={stateColour(line.state)}>{said}</Text>, line.text.slice(at + said.length)];
+}
+
 const Lines = ({ lines }: { readonly lines: readonly Line[] }) => (
   <Box flexDirection="column">
-    {lines.map((line, i) => (
-      <Text key={i} wrap="truncate" inverse={line.cursor} color={stateColour(line.state)}>
-        {line.text}
-      </Text>
-    ))}
+    {lines.map((line, i) => <Text key={i} wrap="truncate" inverse={line.cursor}>{say(line)}</Text>)}
   </Box>
 );

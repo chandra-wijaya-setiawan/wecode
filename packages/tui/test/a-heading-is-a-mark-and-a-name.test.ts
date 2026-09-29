@@ -12,10 +12,11 @@
  *  stands at the far end is the count, with the letter that opens the box raised onto it.
  *
  *  The rows take the same trade. Every row now leads with the glyph of the group its state
- *  is in, the same vocabulary views.yaml already gave the Cooking box, so `+` means settled
- *  whether it is read on a head or on a row. That is the claim worth testing: not that some
- *  characters appear, but that the mark on a section and the glyph on its rows come from
- *  one place, and that place is the config file and not a .tsx.
+ *  is in, the vocabulary views.yaml already gave the Cooking box. The two vocabularies are
+ *  not one character each: a head says what a section *is*, which is the signed proposal's
+ *  to say, so design.yaml's `proposal.marks` heads the boxes and views.yaml marks the rows.
+ *  That is the claim worth testing: not that some characters appear, but that both the mark
+ *  on a section and the glyph on its rows come out of a config file and not a .tsx.
  *
  *  Asserted against the rendered frame, because every other way of asking answers about a
  *  screen nobody is looking at. */
@@ -37,6 +38,7 @@ import { seed, T, ins } from "./seed.js";
 
 interface Design {
   readonly proposal: {
+    readonly marks: Record<string, string>;
     readonly head: {
       readonly opens_with: string;
       readonly begins_at_column: number;
@@ -146,16 +148,25 @@ describe("a section's head is its mark and then its name", () => {
   });
 
   /** The mark is not in the code. Change the file and the head changes: that is the whole
-   *  of what makes it configuration rather than a character somebody typed into a .tsx. */
-  it("reads every mark off views.yaml and holds none of its own", () => {
+   *  of what makes it configuration rather than a character somebody typed into a .tsx.
+   *  Which file is the point of the split — what a section *is* in one character is the
+   *  signed proposal's, so design.yaml's `proposal.marks` answers first, keyed by the
+   *  title said as one word, and views.yaml's own `mark` answers where it is silent. */
+  it("reads every mark off the proposal first and views.yaml after, and holds none of its own", () => {
     const doc = parse(readFileSync(CONFIG, "utf8")) as Record<string, Record<string, unknown>>;
     const declared = { ...doc["views"], services: doc["services"] } as Record<
       string,
-      { readonly mark?: string }
+      { readonly mark?: string; readonly title?: string }
     >;
+    const drawn = design.proposal.marks;
     for (const name of [...views.map((v) => v.name), "services"]) {
-      expect(sectionMark(name), `${name} declares no mark`).toBe(declared[name]?.mark);
+      const said = declared[name];
+      const key = String(said?.title ?? name).toLowerCase().replace(/ /g, "_");
+      expect(sectionMark(name), `${name} declares no mark`).toBe(drawn[key] ?? said?.mark);
     }
+    // And the proposal is doing the answering for the boxes, not just standing behind it.
+    expect(views.filter((v) => drawn[v.title.toLowerCase().replace(/ /g, "_")] !== undefined).length)
+      .toBeGreaterThan(0);
   });
 });
 
@@ -177,8 +188,11 @@ describe("a row's glyph is the one its state has earned", () => {
     const row = under(lines(), "Delivered")[0] ?? "";
     expect(row).toContain("the board says more");
     expect(row.startsWith(`${settled?.mark as string} `)).toBe(true);
-    // The same glyph the Delivered section is headed with: one vocabulary, not two.
-    expect(sectionMark("delivered")).toBe(settled?.mark);
+    // The head is marked from the proposal and the row from its group, so the two glyphs
+    // are not the same character. What they share is that neither is in a .tsx.
+    expect(sectionMark("delivered")).toBe(
+  design.proposal.marks["delivered"],
+    );
   });
 
   it("gives every row the same two columns, so the codes stay a column", () => {

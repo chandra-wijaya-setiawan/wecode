@@ -19,6 +19,7 @@ import {
   reraiseChore,
   Verbs,
 } from "../src/index.js";
+import { recordAttemptCommit } from "./db.js";
 import { freshDb, recordRed, seed, stateOf } from "./helpers.js";
 
 /** docs/design — the facade exists so a verb is a method and not a string. It only earns
@@ -109,7 +110,9 @@ describe("a bulk drop drops through the facade", () => {
     recordRed(db, tree.acceptance);
     const second = extraTask("second");
     const engine = new Engine(db);
-    // done is terminal for a task: drop does not exist from there.
+    // done is terminal for a task: drop does not exist from there. Getting there needs the
+    // attempt record too — `finish` asks for a commit of the task's own, not just tests.
+    recordAttemptCommit(db, tree.task);
     engine.apply("task", tree.task, "start", "chief");
     engine.apply("task_test", tree.taskTest, "pass", "runner");
     expect(stateOf(db, "task", tree.task)).toBe("done");

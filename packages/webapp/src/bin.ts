@@ -13,6 +13,8 @@
  *  them: a board is for looking at work that exists, and `open()` would cheerfully write an
  *  empty workspace wherever the operator happened to be standing. */
 import { existsSync } from "node:fs";
+import type { Server } from "node:http";
+import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import {
   board,
@@ -21,11 +23,17 @@ import {
   databaseOf,
   listWorkspaces,
   open,
+  sketches,
   tree,
   waitingApprovals,
 } from "@wecode/core";
 import { answerAt } from "./answer.js";
+import { review } from "./browser/annotate.js";
+import { DROP_AT, dropAt } from "./drop.js";
+import { browser, docked } from "./browser/dock.js";
+import { DRAWN_AT, drawingsAt } from "./drawing.js";
 import { pages } from "./pages/discover.js";
+import { SHELL_AT, shellAt } from "./pages/shell.js";
 import { addressOf, serve } from "./server.js";
 
 process.removeAllListeners("warning");
@@ -81,23 +89,62 @@ const readings = {
   record: () => tree(db),
   board: () => board(db),
   approvals: () => waitingApprovals(db),
+  /** Every drawing made before there was work to hang it on, newest first. Its own reading
+   *  and not the record's: a sketch hangs under nothing, so `tree()`'s nodes carry none of
+   *  it — no id, no kind, no line saying what it is, and no path to the html. */
+  sketches: () => sketches(db),
 };
 
-/** The surface, whole: the pages found under `pages/`, and the one verb this surface has.
- *  Answering an approval is not a page — it is not under `pages/` and it is not discovered
- *  — so it is named, at the path it posts to. */
+/** The shell behind the dock, opened where this board's workspace is. The database's own
+ *  directory rather than wherever the operator happened to start the process, so
+ *  `--workspace` and `--db` move the shell with the board — and it is certainly a directory
+ *  that exists, because the check above has just said the database in it does. */
+const shell = shellAt(() => dirname(dbPath));
+
+/** The surface, whole: the pages found under `pages/`, and the things that are not pages.
+ *  Answering an approval is not a page, the dock's shell is not a page, and neither are the
+ *  files the dock's pane is in a browser — none is under `pages/`, none is discovered — so
+ *  each is named here, at the path it answers on.
+ *
+ *  What a browser is sent for the dock is `browser/dock.ts`'s, whole: `browser()` is those
+ *  four files at the four paths they answer on, and `docked` is the one line that asks for
+ *  the first of them, in every document the pages hand back. That line is not in
+ *  `document()` — a document is `renderers.webapp.shell`'s sentence and a page is a fragment
+ *  of one, so what the wiring adds is added here, to the replies, and the pages and the
+ *  shell go on saying exactly what they said.
+ *
+ *  The sketch a reader is editing is served from `DRAWN_AT`, and it is mounted *outside*
+ *  `docked()` on purpose: what answers there is the bytes an agent wrote, and a document
+ *  this board has added its own script to is no longer the drawing. It is same-origin
+ *  because that is the only way the review loop can read the frame it is annotating, and
+ *  that loop is `review()` — the painter's own pick-and-queue machine, at the four paths a
+ *  browser resolves it at. The two are mounted together because neither is worth anything
+ *  alone: a frame nothing can reach into, or a notes machine with nothing to annotate. */
 const routes = {
-  ...(await pages(readings)),
+  ...docked(await pages(readings)),
   "/answer": answerAt(() => db, operator),
+  [DROP_AT]: dropAt(() => db),
+  [SHELL_AT]: shell.route,
+  [DRAWN_AT]: drawingsAt(readings.sketches),
+  ...review(),
+  ...browser(),
 };
 
-const server = await serve(routes, port, values.host ?? "127.0.0.1");
-process.stdout.write(`workspace ${values.workspace ?? currentWorkspace()} at ${addressOf(server)}\n`);
-
+/** The way out, and it is installed before there is a socket to close. Ctrl-C can arrive at
+ *  any moment, including the one between binding a port and saying which port it was: a
+ *  board interrupted in that window used to die of the signal's own default action, with its
+ *  database and the operator's shell left to the operating system to tidy. So the handler
+ *  exists first, and copes with a server that is not there yet. */
+let server: Server | undefined;
 let closed = false;
 const leave = (code: number): void => {
   if (closed) process.exit(code);
   closed = true;
+  shell.close();
+  if (server === undefined) {
+    db.close();
+    process.exit(code);
+  }
   server.close(() => {
     db.close();
     process.exit(code);
@@ -105,3 +152,10 @@ const leave = (code: number): void => {
 };
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => leave(0));
+
+/** One socket, on one host. The pages, the one verb, the dock's shell and the dock's pane
+ *  all answer on it, so the shell is reachable exactly where the board is and nowhere else:
+ *  a shell given a listener of its own would be a second decision about who can reach the
+ *  operator's machine, taken here rather than by whoever passed `--host`. */
+server = await serve(routes, port, values.host ?? "127.0.0.1");
+process.stdout.write(`workspace ${values.workspace ?? currentWorkspace()} at ${addressOf(server)}\n`);

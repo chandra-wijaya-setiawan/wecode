@@ -3,3 +3,7 @@ dist/
 *.tsbuildinfo
 .wecode/
 coverage/
+
+# lavish's own scratch directory. The signed mockups live in docs/design/mockups,
+# which is in the repository and which config/roles.yaml gives the designer.
+.lavish/

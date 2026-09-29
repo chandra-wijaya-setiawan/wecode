@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Engine, Maker, open } from "@wecode/core";
 import { DEFAULT_BUDGET, Runner, type Observation, type WorkerAdapter, type Work } from "../src/index.js";
 import { tmp } from "../../core/test/tmpdir.js";
@@ -14,8 +14,26 @@ import { tmp } from "../../core/test/tmpdir.js";
  *  attempt commits, so a second empty attempt at the same tip is the same nothing happening
  *  twice. Refund it too and the task never exhausts — it just loops, and nobody is told. */
 
+/** A tick spawns git and writes sqlite: how long that takes is the host's business, not the
+ *  refund rule's. Every assertion below is about the attempt count a tick leaves behind, so
+ *  the test waits for the tick rather than for a clock. */
+vi.setConfig({ testTimeout: 0, hookTimeout: 0 });
+
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+/** Runs `body` with the host deliberately busy, so a verdict reached here is the verdict the
+ *  test means rather than one that only holds on an idle machine. */
+async function underLoad<T>(body: () => Promise<T> | T): Promise<T> {
+  const spin = Array.from({ length: 4 }, () =>
+    spawn(process.execPath, ["-e", "for (;;) Math.sqrt(Math.random());"], { stdio: "ignore" }),
+  );
+  try {
+    return await body();
+  } finally {
+    for (const p of spin) p.kill("SIGKILL");
+  }
+}
 
 /** An agent that exits cleanly and writes nothing, so its tree has no commit in it. */
 class Idle implements WorkerAdapter {
@@ -159,5 +177,15 @@ describe("a tip that moved", () => {
     await runner(new Idle()).tick();
 
     expect(attemptsOf(task)).toBe(3);
+  });
+
+  it("counts the same attempts with the host under load, because a tick is awaited, not timed", async () => {
+    await underLoad(async () => {
+      await runner(new Worker("a.ts")).tick();
+      await runner(new Idle()).tick();
+      await runner(new Idle()).tick();
+    });
+
+    expect(attemptsOf(task)).toBe(2);
   });
 });

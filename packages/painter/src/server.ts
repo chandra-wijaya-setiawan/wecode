@@ -1,6 +1,8 @@
 /** The painter's transport, and the routing it does — and nothing about what a review is
- *  for. Every decision worth arguing about lives in the session store; this file turns a
- *  method and a path into a call on one, and a call on one into bytes.
+ *  for. Nearly every decision worth arguing about lives in the session store; this file
+ *  turns a method and a path into a call on one, and a call on one into bytes. The one
+ *  decision that lives here is where a comment on the artefact goes: queued for a poller
+ *  to come and take, or typed into the terminal the session owns.
  *
  *  `answer()` is the whole router and takes no socket, so what a request does can be
  *  proved without listening on a port. `serve()` is left owning only the socket. */
@@ -8,7 +10,8 @@ import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { frame } from "./frame.js";
-import { end, poll, prompts, reply, sessionOf, type Store } from "./session.js";
+import { Session as Terminal } from "./pty.js";
+import { end, poll, prompts, reply, sessionOf, SessionError, type Store } from "./session.js";
 
 export interface Reply {
   readonly status: number;
@@ -53,6 +56,31 @@ const tag = (value: unknown): string | undefined => {
   const got = (value as Record<string, unknown> | null)?.["tag"];
   return typeof got === "string" ? got : undefined;
 };
+
+/** The terminal a session owns, when the agent sits in one rather than polling for its
+ *  words. Kept beside the store rather than in it: the store is the review — what was
+ *  said, whether it is over — and a terminal is where the agent is sitting, which is the
+ *  transport's business. Keyed weakly by the store, so two stores never share a seating
+ *  and a store nobody holds anymore takes its terminals with it. */
+const terminals = new WeakMap<Store, Map<string, Terminal>>();
+
+/** Make a session own a terminal. From then on a comment on the artefact is typed into
+ *  it — a line of input followed by its return — for the agent sitting there to read
+ *  where the operator can watch it answer, and nothing is queued, because there is no
+ *  poller to queue for.
+ *
+ *  Seating a second terminal replaces the first without closing it: a terminal is closed
+ *  by whoever opened it, like every other way one leaves. */
+export function own(store: Store, id: string, terminal: Terminal): void {
+  if (sessionOf(store, id) === undefined) throw new SessionError(`no session ${id}`);
+  const seated = terminals.get(store) ?? new Map<string, Terminal>();
+  seated.set(id, terminal);
+  terminals.set(store, seated);
+}
+
+/** The terminal a session owns, if it owns one at all. */
+const terminalOf = (store: Store, id: string): Terminal | undefined =>
+  terminals.get(store)?.get(id);
 
 /** Everything the painter decides. A reader asking "why did I get that" reads this and
  *  stops.
@@ -105,7 +133,23 @@ export async function answer(
     }
     const said = text(sent);
     if (said === undefined) return plain(400, "a prompt needs text");
-    return json(reply(store, route.id, said, tag(sent)));
+    if (session.status === "ended") return plain(409, `session ${route.id} has ended`);
+
+    // Where a comment goes depends on where the agent is. No terminal, and the words are
+    // queued for a poller to come and take, as they always were. A terminal, and they are
+    // typed into it as one line of input with the return that submits it — so a comment
+    // made while the agent is mid-turn waits in the input and is read when the turn ends,
+    // exactly as if the operator had typed it at a busy program.
+    const terminal = terminalOf(store, route.id);
+    if (terminal === undefined) return json(reply(store, route.id, said, tag(sent)));
+    if (!terminal.running) {
+      // Refused rather than queued: the agent that would have read the queue is the one
+      // that left, and words parked where nobody will ever take them are words lost.
+      return plain(409, "the agent's session has left — the comment was not sent");
+    }
+    terminal.prompt(said);
+    const tagged = tag(sent);
+    return json(tagged === undefined ? { typed: said } : { typed: said, tag: tagged });
   }
 
   return plain(405, `${String(method)} is not served here — GET and POST only`);

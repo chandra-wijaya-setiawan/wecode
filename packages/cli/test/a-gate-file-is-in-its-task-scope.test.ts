@@ -39,7 +39,10 @@ function project(): void {
 }
 
 /** A file already in the tree: the gate is a file that is there, which is exactly what makes
- *  it invisible to the missing-path check. */
+ *  it invisible to the missing-path check. Empty, so it carries none of the criteria's
+ *  statement — a gate this task would still have to write. Which of the two refusals a file
+ *  with a body of its own earns is
+ *  `a-gate-file-outside-scope-is-refused-only-when-it-must-be-written.test.ts`. */
 function existing(...paths: readonly string[]): void {
   for (const path of paths) {
     mkdirSync(join(repo, path.slice(0, path.lastIndexOf("/"))), { recursive: true });
