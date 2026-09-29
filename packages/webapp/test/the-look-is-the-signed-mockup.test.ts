@@ -81,16 +81,16 @@ const SIGNED_TYPE: Readonly<Record<string, string>> = {
   mono: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
 };
 
-/** The shell's mockup, if this machine has it. It is written beside the checkout it was drawn
- *  for, which is the parent of this worktree when the work is done in one. */
-const MOCKUP = [
-  "../../../.lavish/webapp-design.html",
-  // …and a worktree of it sits two levels down, under `.wecode/worktrees`.
-  "../../../../../.lavish/webapp-design.html",
-  "../../../../../../.lavish/webapp-design.html",
-]
-  .map((at) => fileURLToPath(new URL(at, import.meta.url)))
-  .find((at) => existsSync(at));
+/** The shell's mockup, in the repository. It is committed, so it is here in a fresh clone, in
+ *  CI and in every worktree — one relative path, no searching, and no way for this file to skip
+ *  itself because the artifact was somewhere else.
+ *
+ *  It used to be looked for at `.lavish/webapp-design.html`, in three guesses at where the
+ *  checkout's parent might be, and found in none of them. So the check below never ran and the
+ *  transcription went unverified — which is how three signed colours stayed lost. An artifact a
+ *  gate depends on belongs beside the code, and `config/roles.yaml` gives the designer
+ *  `docs/design/mockups/**` for exactly that. */
+const MOCKUP = fileURLToPath(new URL("../../../docs/design/mockups/webapp-design.html", import.meta.url));
 
 /** Sketch #7, which is where the lane and state hues were signed. A sketch is written into the
  *  workspace it was drawn in, which is the operator's own directory and not this repository's —
@@ -183,9 +183,15 @@ const rootOf = (at: string): string => {
   return text.slice(text.indexOf(":root{"), text.indexOf("}", text.indexOf(":root{")));
 };
 
-describe("the mockups themselves agree, where the machine has them", () => {
-  it.skipIf(!MOCKUP)("declares the same colours and the same stacks as the artifact", () => {
-    const said = rootOf(MOCKUP as string);
+describe("the mockups themselves agree", () => {
+  // Not `skipIf`: the shell's mockup is in the repository, so a run that cannot find it is a
+  // run with something wrong with it, and saying nothing is what let the transcription drift.
+  it("is in the repository, where a gate can always read it", () => {
+    expect(existsSync(MOCKUP), `${MOCKUP} is gone — the look has nothing left to be signed by`).toBe(true);
+  });
+
+  it("declares the same colours and the same stacks as the artifact", () => {
+    const said = rootOf(MOCKUP);
     // Every colour the artifact declares, and not a list of the ones this file wants checked:
     // a transcription held to its own seven names could never have noticed the three it lost.
     const drawn = [...said.matchAll(/(--[a-z]+):(#[0-9a-fA-F]{3,8})\b/g)].map(([, n, v]) => [n, v] as const);
@@ -202,8 +208,9 @@ describe("the mockups themselves agree, where the machine has them", () => {
     }
   });
 
-  // Sketch #7 is where the lanes and the states were signed, and it holds the shell's seven
-  // too — at the same values, which is what makes the two one look rather than two.
+  // Sketch #7 signs the lane hues. It stays conditional, because a sketch is written into the
+  // operator's own workspace and is not repository data — so on CI these four are held to the
+  // transcription above and to nothing else. Where the machine has the drawing, it is read.
   it.skipIf(!SKETCH)("declares the four lane hues sketch #7 drew, and the shell's own seven", () => {
     const said = rootOf(SKETCH as string);
     for (const [drawn, here] of [
