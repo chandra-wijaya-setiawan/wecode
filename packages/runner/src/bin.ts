@@ -16,7 +16,7 @@ import {
   runnerId,
   takeLease,
 } from "@wecode/core";
-import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
+import { adapterFor } from "./adapter-for.js";
 import { DEFAULT_BUDGET, loadBudget } from "./budget.js";
 import { loop, Runner, type Tick } from "./daemon.js";
 
@@ -56,7 +56,9 @@ const budget = existsSync(budgetPath) ? loadBudget(budgetPath) : DEFAULT_BUDGET;
 
 const runner = new Runner(db, {
   budget,
-  adapters: { agent: new ClaudeCodeAdapter() },
+  // Built from the budget, not from the adapter's defaults: the model and the effort every
+  // worker runs on are the two things budget.yaml decides about an attempt.
+  adapters: { agent: adapterFor(budget) },
   ...(values.root === undefined ? {} : { repoRoot: values.root }),
 });
 
