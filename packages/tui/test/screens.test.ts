@@ -2,7 +2,7 @@ import { inverted, plain } from "./force-color.js";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { spawn, type ChildProcess, execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
@@ -10,8 +10,10 @@ import { cleanup, render } from "ink-testing-library";
 import { loadMachines, open } from "@wecode/core";
 import { App } from "../src/app.js";
 import { tmp } from "../../core/test/tmpdir.js";
-import { Cockpit } from "../src/screens.js";
-import { loadOffPage, loadViews, ViewError } from "../src/views.js";
+import { Cockpit, raised } from "../src/screens.js";
+import { loadOffPage, loadViews, ViewError, type View } from "../src/views.js";
+import { boxKeys, ESC, KeyReader, type Keyed, type Mode } from "../src/keys.js";
+import { OUTLINE } from "../src/outline.js";
 import { loadServices } from "../src/services.js";
 import { sectionMark } from "../src/list.js";
 import { seed, T, ins } from "./seed.js";
@@ -32,36 +34,39 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-/** The frame as written — box-drawing characters, colour and all. */
 const frame = (width = 100, height = 60): string =>
   render(createElement(Cockpit, { app, width, height })).lastFrame() ?? "";
 
 const lines = (width = 100, height = 60): string[] => plain(frame(width, height)).split("\n");
 
-/** A section's name as its rule says it: capitals, but `v`'s letter as a person types it. */
-const said = (title: string): string =>
-  title.toUpperCase().replace(/\[(.)\]/, (_, k: string) => `[${k.toLowerCase()}]`);
+/** How a section's head opens: its glyph from views.yaml, then its name in capitals. The
+ *  letter it is opened by is no longer in the name — it rides the count at the right edge. */
+const opening = (name: string, title: string): string => `${sectionMark(name)} ${title.toUpperCase()}`;
 
-/** A region's title: on a box's border, or on a section's rule behind its glyph. */
+const OPENINGS = [opening("services", services.title), ...views.map((v) => opening(v.name, v.title))];
+
+const isHead = (line: string): boolean => OPENINGS.some((o) => line.startsWith(o));
+
+const headsOf = (line: string, title: string): boolean =>
+  OPENINGS.some((o) => o.endsWith(` ${title.toUpperCase()}`) && line.startsWith(o));
+
+/** A region's title: on a box's border, or opening a section's head after its glyph. */
 const titled = (out: string[], title: string): number =>
-  out.findIndex(
-    (l) => l.includes(`─ ${title}`) || (l.startsWith("──") && l.includes(` ${said(title)}`)),
-  );
+  out.findIndex((l) => l.includes(`─ ${title}`) || headsOf(l, title));
 
 /** The rows of the region at `at`: a page's inside its borders, a section's bare. */
 function inside(out: string[], at: number): string[] {
-  const ruled = out[at]?.startsWith("──") === true;
+  const headed = isHead(out[at] ?? "");
   const rows: string[] = [];
   for (const line of out.slice(at + 1)) {
     if (line.startsWith("│")) rows.push(line.slice(1, -1).trimEnd());
-    else if (ruled && line.trim() !== "" && !line.startsWith("──")) rows.push(line.trimEnd());
+    else if (headed && line.trim() !== "" && !isHead(line)) rows.push(line.trimEnd());
     else break;
   }
   return rows;
 }
 
-/** The dashboard has no projects box any more, so a walk that starts at a project opens
- *  the outline first and descends from the row there. */
+/** No projects box any more: a walk from a project opens the outline and descends. */
 const fromTheOutline = (): void => {
   app.key("v");
   app.key("t");
@@ -92,17 +97,17 @@ describe("the frame", () => {
     for (const line of lines(28, 40)) expect(line.length).toBeLessThanOrEqual(28);
   });
 
-  /** Every region the dashboard draws, by name and by its chrome — a rule now, not a
-   *  border. A tally against views.length broke the moment the services block arrived. */
-  it("is laid out, not printed: every region on it is ruled off", () => {
+  /** Every region the dashboard draws, by name and by its chrome — a head that opens with
+   *  the section's own glyph, not a border. A tally against views.length broke the moment
+   *  the services block arrived. */
+  it("is laid out, not printed: every region on it opens with its own mark", () => {
     const out = lines();
     for (const title of [services.title, ...views.map((v) => v.title)]) {
       const at = titled(out, title);
       expect(at, `no region titled ${title}`).toBeGreaterThanOrEqual(0);
-      expect(out[at]?.startsWith("──"), `${title} has no rule`).toBe(true);
-      expect((out[at] as string).length, `${title}'s rule is short`).toBe(100);
+      expect(isHead(out[at] ?? ""), `${title} has no head`).toBe(true);
     }
-    // And nothing on the page is boxed: the whole of the chrome the rules replaced.
+    // And nothing on the page is boxed: the whole of the chrome a head does without.
     expect(out.filter((l) => /[┌┐└┘│]/.test(l))).toEqual([]);
   });
 });
@@ -111,8 +116,7 @@ describe("the dashboard", () => {
   it("draws the services box first, above every box of work", () => {
     const out = lines();
     expect(titled(out, "Services")).toBe(0);
-    // The pulse line, then the four fixed rows: a section is sized from the rows it is
-    // given, where the box was sized from a constant that did not count the pulse.
+    // The pulse line, then the four fixed rows: a section is sized from its own rows.
     expect(inside(out, 0).map((l) => l.split(/ {2,}/)[0])).toEqual(["pulse", "runner", "schema", "fleet", "doctor"]);
     // And it is above the first box views.yaml orders.
     expect(titled(out, `${views[0]?.title}`)).toBeGreaterThan(0);
@@ -135,14 +139,16 @@ describe("the dashboard", () => {
     expect([...titles].sort((a, b) => a - b)).toEqual(titles);
   });
 
-  it("names each box with the letter that opens it, and counts it at the width", () => {
+  it("counts each box at the width, the letter that opens it raised onto the number", () => {
     const out = lines();
-    // Every one of the seven, with the mark and the letter views.yaml declares for it, and
-    // its count at the far end. The seed fills one; the other six say zero, an answer too.
+    // Each opens with its mark and ends in its count, with the letter that opens it
+    // raised onto the number. The seed fills one; the other six say zero, an answer too.
     for (const [i, count] of [0, 0, 1, 0, 0, 0, 0].entries()) {
-      const name = said(`${views[i]?.title} [${views[i]?.key}]`);
-      const rule = `── ${sectionMark(views[i]?.name ?? "")} ${name} ─`;
-      expect(out.find((l) => l.startsWith(rule)) ?? "").toMatch(new RegExp(`─ ${count}$`));
+      const view = views[i] as (typeof views)[number];
+      const head = out.find((l) => l.startsWith(opening(view.name, view.title))) ?? "";
+      expect(head, `${view.title} is not counted at the width`).toMatch(
+        new RegExp(` {2}${count}${raised(view.key ?? "")}$`),
+      );
     }
   });
 
@@ -162,7 +168,7 @@ describe("the dashboard", () => {
     expect(rows).toHaveLength(declared);
     // The declared rows, the last of which is the tally of what did not fit.
     expect(rows.at(-1)).toContain(`… and ${12 - (declared - 1)} more`);
-    // And the next section's rule begins directly under this one's last row.
+    // And the next section's head begins directly under this one's last row.
     expect(titled(out, "Delivered")).toBe(at + declared + 1);
   });
 
@@ -174,28 +180,27 @@ describe("the dashboard", () => {
   });
 });
 
-/** The running head says held of seats. Its numerator is the board as of the last refresh, so
- *  its denominator has to be as of that same refresh: counted while the frame was drawn it came
- *  from a later instant, and a seat enrolled between the two read as one the rows were short of. */
+/** The running head says held of seats. Both halves are the board as of the last refresh: a
+ *  seat counted at draw time would come from a later instant than the rows beside it. */
 describe("the running head's fraction", () => {
   const enrol = (slug: string): void => {
     ins(db, "INSERT INTO worker (slug,name,role,kind,created_at,updated_at) VALUES (?,?,?,?,?,?)", slug, slug, "engineer", "agent", T, T);
   };
-  const running = (): string => lines().find((l) => l.startsWith("──") && l.includes(" RUNNING ")) ?? "";
+  const running = (): string => lines().find((l) => headsOf(l, "Running")) ?? "";
 
   it("says the seats the board it draws was refreshed with, and no others", () => {
     enrol("eng-1");
     app.refresh();
     expect(app.seats()).toBe(1);
-    expect(running().endsWith(" 0/1"), running()).toBe(true);
+    expect(running().endsWith(` 0/1${raised("r")}`), running()).toBe(true);
 
     // A worker enrolled with nobody pressing a key: the two halves move together or not at all.
     enrol("eng-2");
     expect(app.seats()).toBe(1);
-    expect(running().endsWith(" 0/1"), running()).toBe(true);
+    expect(running().endsWith(` 0/1${raised("r")}`), running()).toBe(true);
 
     app.refresh();
-    expect(running().endsWith(" 0/2"), running()).toBe(true);
+    expect(running().endsWith(` 0/2${raised("r")}`), running()).toBe(true);
   });
 });
 
@@ -218,8 +223,7 @@ describe("a box screen", () => {
     expect(inverted(frame(100, 12))).toHaveLength(1);
   });
 
-  /** The columns stand in the same places on both — not the same string: the page gives
-   *  two columns to its border, so the longer row runs past the shorter. */
+  /** Same places on both — not the same string: the page's border costs two columns. */
   it("lines its columns up with the same box on the dashboard", () => {
     const onDashboard = inside(lines(), titled(lines(), "Queue"))[0] as string;
     app.key("v");
@@ -340,8 +344,7 @@ describe("the key bar", () => {
   });
 });
 
-/** views.yaml is what the screens are built out of, so what it refuses is part of what a
- *  screen is. These moved here when render.ts went. */
+/** views.yaml is what the screens are built out of, so what it refuses is part of what a screen is. */
 describe("views", () => {
   it("loads every box the page orders", () => {
     // Seven, in the page's order: what wants you, what is moving, what waits its turn,
@@ -405,10 +408,9 @@ describe("views", () => {
   });
 });
 
-/** bin.tsx, driven as a process. Everything here is about the terminal rather than the
- *  frame: the keys reaching App, the frame coming back, and the terminal being left usable
- *  however the process ends. stdin is a pipe, so raw mode itself is not observable — what
- *  is observable is that a keystroke is acted on and the cursor comes back. */
+/** bin.tsx, driven as a process: the keys reaching App, the frame coming back, and the
+ *  terminal left usable however the process ends. stdin is a pipe, so raw mode is not
+ *  observable — what is, is that a keystroke is acted on and the cursor comes back. */
 describe("the terminal", () => {
   const root = fileURLToPath(new URL("../../..", import.meta.url));
   const bin = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
@@ -416,7 +418,7 @@ describe("the terminal", () => {
   const HIDE = "\u001b[?25l";
 
   let path: string;
-  let child: ChildProcess | null = null;
+  const kids: ChildProcess[] = [];
   let out = "";
 
   beforeAll(() => {
@@ -429,7 +431,7 @@ describe("the terminal", () => {
     seed(file);
     file.close();
     out = "";
-    child = null;
+    kids.length = 0;
   });
 
   const start = (): ChildProcess => {
@@ -438,7 +440,7 @@ describe("the terminal", () => {
     c.stdout?.on("data", (chunk: string) => {
       out += chunk;
     });
-    child = c;
+    kids.push(c);
     return c;
   };
 
@@ -457,16 +459,16 @@ describe("the terminal", () => {
     start();
     await until("q quit");
     expect(out).toContain(HIDE);
-    expect(out).toMatch(/QUEUE \[q\] ─+ 1/);
+    expect(out).toMatch(/QUEUE +1q/);
     expect(out).toContain("send the reset mail");
     expect(out).toContain("workspace ");
   });
 
-  /** The acceptance greps the binary for a box-drawing character; a cockpit of plain
-   *  lines passes everything else here. The corners come from a box page. */
+  /** The acceptance greps the binary for a box-drawing character; the corners come from
+   *  a box page, since the dashboard's sections draw none. */
   it("draws rules and boxes, not plain lines, when it is watched through a pipe", async () => {
     const c = start();
-    await until(`── ${sectionMark("services")} SERVICES ─`);
+    await until(`${sectionMark("services")} SERVICES`);
     c.stdin?.write("vq");
     await until("esc back");
     for (const corner of ["┌", "┐", "└", "┘", "│", "─"]) expect(out).toContain(corner);
@@ -485,13 +487,13 @@ describe("the terminal", () => {
 
   it("redraws on a timer, without a keystroke", async () => {
     start();
-    await until(/PLANNED \[p\] ─+ 0/);
+    await until(new RegExp(`PLANNED +0${raised("p")}`));
     const file = open(path);
     file
       .prepare("INSERT INTO story (slug,epic_id,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?)")
       .run("second", 1, "second story", "planned", T, T);
     file.close();
-    await until(/PLANNED \[p\] ─+ 1/);
+    await until(new RegExp(`PLANNED +1${raised("p")}`));
   }, 20_000);
 
   it("leaves the terminal clean on q", async () => {
@@ -527,12 +529,194 @@ describe("the terminal", () => {
     c.stderr?.on("data", (chunk: Buffer) => {
       err += chunk.toString();
     });
-    child = c;
+    kids.push(c);
     expect(await exited(c)).toBe(1);
     expect(err).toContain("no wecode workspace at");
   });
 
-  afterEach(() => {
-    child?.kill("SIGKILL");
+  afterEach(async () => {
+    await Promise.all(kids.splice(0).map((c) => (c.exitCode === null ? (c.kill("SIGKILL"), exited(c)) : null)));
+  });
+});
+
+/** The keyboard is a module of its own. What a key is bound to and what the binding does are
+ *  two questions with two answers, so keys.ts holds the first and app.ts holds the second. */
+describe("the keyboard", () => {
+  const SRC = fileURLToPath(new URL("../src", import.meta.url));
+  const read = (file: string): string => readFileSync(join(SRC, file), "utf8");
+
+  /** A screen that does nothing but write down what it was asked for, so a binding can be
+   *  read off the reader alone — no database, no frame, no cursor to clamp. */
+  class Noted implements Keyed {
+    status = "";
+    quit = false;
+    cursor = 0;
+    rows = 7;
+    said: string[] = [];
+    /** What the next `arm*` will answer. A screen refuses an arming by answering null. */
+    arms: Mode | null = null;
+    private note(what: string): void {
+      this.said.push(what);
+    }
+    openBox(k: string): void { this.note(`openBox ${k}`); }
+    pickVerb(k: string): void { this.note(`pickVerb ${k}`); }
+    sayAnswer(k: string): void { this.note(`sayAnswer ${k}`); }
+    narrow(k: string): void { this.note(`narrow ${k}`); }
+    stepDepth(k: string): void { this.note(`stepDepth ${k}`); }
+    descend(): void { this.note("descend"); }
+    pop(): void { this.note("pop"); }
+    move(by: number): void { this.note(`move ${by}`); }
+    refreshNow(): void { this.note("refreshNow"); }
+    fold(open: boolean): void { this.note(`fold ${open}`); }
+    jump(by: number): void { this.note(`jump ${by}`); }
+    seek(query: string): void { this.note(`seek ${query}`); }
+    armView(): Mode | null { this.note("armView"); return this.arms; }
+    armVerb(): Mode | null { this.note("armVerb"); return this.arms; }
+    armScope(): Mode | null { this.note("armScope"); return this.arms; }
+    armDepth(): Mode | null { this.note("armDepth"); return this.arms; }
+    armSearch(): Mode | null { this.note("armSearch"); return this.arms; }
+  }
+
+  let to: Noted;
+  let reader: KeyReader;
+
+  beforeEach(() => {
+    to = new Noted();
+    reader = new KeyReader(to);
+  });
+
+  const type = (keys: string): void => {
+    for (const k of keys) reader.read(k);
+  };
+
+  it("lives in keys.ts, and app.ts no longer holds the key table", () => {
+    const app_ts = read("app.ts");
+    const keys_ts = read("keys.ts");
+    for (const bound of ['case "j":', 'case "v":', 'case "q":', 'case "/":']) {
+      expect(keys_ts, `${bound} belongs in keys.ts`).toContain(bound);
+      expect(app_ts, `${bound} is still in app.ts`).not.toContain(bound);
+    }
+    // The control codes a terminal sends are the keyboard's business too, so there is one
+    // place that knows what byte 27 is called.
+    expect(app_ts).not.toContain("String.fromCharCode");
+    expect(keys_ts).toContain("String.fromCharCode(27)");
+  });
+
+  it("sends every bare key to the action it names", () => {
+    for (const [k, did] of [
+      ["j", "move 1"], ["k", "move -1"], ["r", "refreshNow"],
+      ["+", "fold true"], ["-", "fold false"], ["n", "jump 1"], ["N", "jump -1"],
+      ["enter", "descend"], ["\r", "descend"], ["esc", "pop"], [ESC, "pop"],
+    ] as const) {
+      to.said = [];
+      reader.read(k);
+      expect(to.said, `${k}`).toEqual([did]);
+    }
+  });
+
+  it("moves the cursor and quits without asking the screen anything", () => {
+    to.cursor = 4;
+    reader.read("g");
+    expect(to.cursor).toBe(0);
+    reader.read("G");
+    expect(to.cursor).toBe(to.rows - 1);
+    expect(to.quit).toBe(false);
+    reader.read("q");
+    expect(to.quit).toBe(true);
+    expect(to.said).toEqual([]);
+  });
+
+  it("says so, and does nothing, on a key that is not bound", () => {
+    reader.read("z");
+    expect(to.said).toEqual([]);
+    expect(to.status).toBe("z does nothing here");
+  });
+
+  it("holds the mode a key armed, and spends it on the next key", () => {
+    for (const [k, mode, spent] of [
+      ["v", "view", "openBox x"], ["a", "verb", "pickVerb x"], ["a", "answer", "sayAnswer x"],
+      ["f", "scope", "narrow x"], ["t", "depth", "stepDepth x"],
+    ] as const) {
+      to.said = [];
+      to.arms = mode;
+      reader.read(k);
+      expect(reader.waitingFor).toBe(mode);
+      reader.read("x");
+      expect(to.said.at(-1)).toBe(spent);
+      // One key, then the keyboard is a keyboard again: `v` twice is not two boxes deep.
+      expect(reader.waitingFor).toBe(null);
+    }
+  });
+
+  it("arms nothing when the screen refuses the arming", () => {
+    to.arms = null;
+    reader.read("f");
+    expect(to.said).toEqual(["armScope"]);
+    expect(reader.waitingFor).toBe(null);
+    // So the next key is a command, not a scope letter that was never offered.
+    reader.read("j");
+    expect(to.said).toEqual(["armScope", "move 1"]);
+  });
+
+  it("takes every printable key as a letter of the search, not as a command", () => {
+    to.arms = "search";
+    reader.read("/");
+    expect(to.status).toBe("/");
+    type("njq");
+    expect(to.status).toBe("/njq");
+    expect(to.quit).toBe(false);
+    expect(to.said).toEqual(["armSearch"]);
+  });
+
+  it("rubs out the last letter, by name and by either code point", () => {
+    to.arms = "search";
+    reader.read("/");
+    type("abc");
+    for (const rub of ["backspace", String.fromCharCode(127), String.fromCharCode(8)]) {
+      reader.read(rub);
+    }
+    expect(to.status).toBe("/");
+  });
+
+  it("commits what was typed on enter, trimmed, and disarms", () => {
+    to.arms = "search";
+    reader.read("/");
+    type(" cart ");
+    reader.read("enter");
+    expect(to.said.at(-1)).toBe("seek cart");
+    expect(reader.waitingFor).toBe(null);
+  });
+
+  it("abandons the search on esc, and leaves the line clear", () => {
+    to.arms = "search";
+    reader.read("/");
+    type("cart");
+    reader.read(ESC);
+    expect(to.said).toEqual(["armSearch"]);
+    expect(to.status).toBe("");
+    expect(reader.waitingFor).toBe(null);
+    // And the next `/` opens an empty prompt rather than the query that was abandoned.
+    reader.read("/");
+    expect(to.status).toBe("/");
+  });
+
+  it("gives a box a letter, its own where it declares one", () => {
+    const keys = boxKeys([
+      { name: "queued", title: "Queued", filter: "queued" },
+      { name: "quarantine", title: "Quarantine", filter: "failed", key: "z" },
+    ] as unknown as View[]);
+    expect(keys.get("z")?.name).toBe("quarantine");
+    expect(keys.get("q")?.name).toBe("queued");
+  });
+
+  it("is what the App answers a key with, all the way to the screen", () => {
+    app.key("v");
+    expect(app.status).toContain("box?");
+    app.key(OUTLINE.key);
+    expect(app.screen.kind).toBe("outline");
+    app.key("j");
+    expect(app.cursor).toBe(1);
+    app.key("esc");
+    expect(app.screen.kind).toBe("dashboard");
   });
 });

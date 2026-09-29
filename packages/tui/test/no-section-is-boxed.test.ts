@@ -19,7 +19,8 @@ import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
 import { loadMachines, open } from "@wecode/core";
 import { App } from "../src/app.js";
-import { Cockpit } from "../src/screens.js";
+import { Cockpit, raised } from "../src/screens.js";
+import { groupOf, sectionMark } from "../src/list.js";
 import { loadViews } from "../src/views.js";
 import { loadServices } from "../src/services.js";
 import { seed, T, ins } from "./seed.js";
@@ -49,21 +50,29 @@ afterEach(cleanup);
 const lines = (width = 100, height = 90): string[] =>
   plain(render(createElement(Cockpit, { app, width, height })).lastFrame() ?? "").split("\n");
 
-/** The eight names the dashboard heads a section with: the services block, then the seven
- *  boxes views.yaml orders. */
-const HEADS: readonly string[] = [services.title, ...views.map((v) => v.title)];
+/** The eight sections the dashboard heads: the services block, then the seven boxes
+ *  views.yaml orders. A head opens with the section's own glyph — design.yaml's
+ *  `proposal.marks`, keyed by title — and carries the name in capitals beside it. */
+const HEADS: readonly { name: string; title: string; opens: string }[] = [
+  { name: "services", title: services.title, opens: `${sectionMark("services")} ${services.title.toUpperCase()}` },
+  ...views.map((v) => ({ name: v.name, title: v.title, opens: `${sectionMark(v.name)} ${v.title.toUpperCase()}` })),
+];
 
-/** Where the section titled `title` is headed, or -1. A head is a rule with the name in
- *  it and nothing before the name but the rule. */
-const headed = (out: readonly string[], title: string): number =>
-  out.findIndex((l) => new RegExp(`^──+ ${title}[ (]`).test(l));
+const isHead = (line: string): boolean => HEADS.some((h) => line.startsWith(h.opens));
+
+/** Where the section titled `title` is headed, or -1. A head is its glyph in column zero
+ *  and the name in capitals — no dashes before the glyph and none after the name. */
+const headed = (out: readonly string[], title: string): number => {
+  const opens = HEADS.find((h) => h.title === title)?.opens ?? title;
+  return out.findIndex((l) => l.startsWith(opens));
+};
 
 /** The lines under a section's head, up to the next head or the end of the body. */
 function under(out: readonly string[], title: string): string[] {
   const at = headed(out, title);
   expect(at, `nothing heads ${title}`).toBeGreaterThanOrEqual(0);
   const rest = out.slice(at + 1);
-  const next = rest.findIndex((l) => l.startsWith("──"));
+  const next = rest.findIndex(isHead);
   return (next < 0 ? rest : rest.slice(0, next)).map((l) => l.trimEnd());
 }
 
@@ -81,19 +90,23 @@ describe("no section of the dashboard is boxed", () => {
    *  is what a border's bottom edge would have become had the rule simply been dropped. */
   it("spends one line of chrome on a section, where a box spent two", () => {
     const out = lines();
-    const chrome = out.filter((l) => l.startsWith("──"));
+    const chrome = out.filter(isHead);
     expect(chrome).toHaveLength(HEADS.length);
     expect(HEADS.length * 2 - chrome.length).toBe(8);
     for (const line of chrome) expect(line.trim()).not.toBe("");
   });
 
-  it("starts every row at the left edge, with no column given to a border", () => {
+  /** What a row spends its first two columns on is its own state's mark and not chrome —
+   *  design.yaml's `row_leads_with: mark`. A state no group claims marks with a space, so
+   *  the seed's `ready` row reads as indented and is not: the columns are the row's. */
+  it("gives a row's first columns to its own mark, not to a border", () => {
     const out = lines();
     // The queue holds the seed's one ready task, so this is a real row and not a blank.
     const row = under(out, "Queue")[0] ?? "";
     expect(row).toContain("send the reset mail");
-    expect(row.startsWith(" ")).toBe(false);
-    // And the rule reaches the full width, so the section is as wide as the terminal.
+    expect(row.slice(0, 2)).toBe(`${groupOf("ready")?.mark ?? " "} `);
+    expect(row.slice(2).startsWith("#")).toBe(true);
+    // And the head reaches the full width, so the section is as wide as the terminal.
     expect((out[headed(out, "Queue")] ?? "").length).toBe(100);
   });
 });
@@ -101,18 +114,22 @@ describe("no section of the dashboard is boxed", () => {
 describe("a section is still a section", () => {
   it("heads each of the eight, in the page's order, and heads nothing else", () => {
     const out = lines();
-    const at = HEADS.map((t) => headed(out, t));
-    expect(at.every((i) => i >= 0), `missing: ${HEADS.filter((t, i) => at[i] === -1).join(", ")}`).toBe(true);
+    const at = HEADS.map((h) => headed(out, h.title));
+    expect(at.every((i) => i >= 0), `missing: ${HEADS.filter((h, i) => at[i] === -1).map((h) => h.title).join(", ")}`).toBe(true);
     expect([...at].sort((a, b) => a - b)).toEqual(at);
-    expect(out.filter((l) => l.startsWith("──"))).toHaveLength(HEADS.length);
+    expect(out.filter(isHead)).toHaveLength(HEADS.length);
   });
 
-  it("carries each box's count and the letter that opens it in its head", () => {
-    const out = lines().join("\n");
+  /** The count stands at the right edge with the box's letter raised onto it, so the eight
+   *  of them down the page are a column to compare. The lead section is countless. */
+  it("carries each box's count and the letter that opens it at its head's right edge", () => {
+    const out = lines();
     for (const view of views) {
       const count = view.name === "queued" ? 1 : 0;
-      expect(out).toContain(`── ${view.title} (${count}) [${view.key ?? ""}] ─`);
+      const head = out[headed(out, view.title)] ?? "";
+      expect(head.endsWith(`${count}${raised(view.key)}`), `${view.title}: ${head}`).toBe(true);
     }
+    expect(out[headed(out, services.title)]).toBe(`${sectionMark("services")} ${services.title.toUpperCase()}`);
   });
 
   it("keeps each section's rows under its own head and out of the next", () => {

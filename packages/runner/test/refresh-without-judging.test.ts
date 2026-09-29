@@ -76,6 +76,12 @@ function baseGains(file: string, line: string): void {
   git(repo, "commit", "-q", "-m", `base gains ${file}`);
 }
 
+/** Merge the story branch into the base, as landing does. The base then contains the
+ *  branch, which is the opposite of the branch containing the base. */
+function baseTakesBranch(slug: string): void {
+  git(repo, "-c", "user.name=t", "-c", "user.email=t@localhost", "merge", "-q", "--no-ff", "-m", `land story/${slug}`, `story/${slug}`);
+}
+
 /** Merge the base into the story branch, as a worker taking the chore would. */
 function branchTakesBase(slug: string): void {
   const tree = join(repo, `.take-${slug}`);
@@ -154,6 +160,41 @@ describe("staleness is read off the branch, not off the proving pass", () => {
 
     expect(choreFor(db, "refresh", "story", none.id)).toBeNull();
     expect(choreFor(db, "refresh", "story", fresh.id)).toBeNull();
+  });
+
+  it("closes it for a finished story whose branch the base already has", async () => {
+    // Chores 51 and 89 sat `failed` for days over stories master had contained all along.
+    // The branch is behind the base and always will be, because nothing will be built on it
+    // and nothing merged from it: the refresh is owed about a branch nobody will read.
+    const s = unjudgedStory("landed, then left behind", "in_progress");
+    branchWith(s.slug, "mine.ts", "mine\n");
+    baseGains("services.ts", "the box\n");
+    await runner().tick();
+    const refresh = choreFor(db, "refresh", "story", s.id);
+    expect(refresh?.state).not.toBe("done");
+
+    baseTakesBranch(s.slug);
+    baseGains("later.ts", "after the landing\n");
+    setStoryState(s.id, "delivered");
+    const tick = await runner().tick();
+
+    expect(choreFor(db, "refresh", "story", s.id)?.state).toBe("done");
+    expect(tick.chores).not.toContain(refresh?.id);
+  });
+
+  it("leaves it raised for a story still in progress, whose tree does have to take the base", async () => {
+    // The same branch, the same base, one difference: work is still being done in that tree,
+    // so it is owed the base however trivially the merge would go.
+    const s = unjudgedStory("landed, and still being built on", "in_progress");
+    branchWith(s.slug, "mine.ts", "mine\n");
+    baseGains("services.ts", "the box\n");
+    await runner().tick();
+
+    baseTakesBranch(s.slug);
+    baseGains("later.ts", "after the landing\n");
+    await runner().tick();
+
+    expect(choreFor(db, "refresh", "story", s.id)?.state).not.toBe("done");
   });
 
   it("keeps the chore raised while the proving pass is skipping the story for it", async () => {

@@ -35,12 +35,12 @@ export function delivered(args: readonly string[]): number {
 
   // Standing in a repository, the question is about this project. Outside every one of
   // them there is no "here", and the answer is the workspace's.
-  const here = queries(db).selectFrom(project).select(["id", "repo"]).where("repo", "=", resolve(process.cwd())).get();
+  const here = queries(db).selectFrom(project).select(["id"]).where("repo", "=", resolve(process.cwd())).get();
   const asked = values.project === undefined ? here?.id ?? null : Number(values.project);
   const chosen = values.all === true ? null : asked;
   if (chosen !== null && !Number.isInteger(chosen)) return fail("wecode delivered --project <id>");
 
-  const stories = query(db, chosen).map(asTheBaseHasIt(gitIn(repoOf(db, chosen) ?? here?.repo ?? resolve(process.cwd()))));
+  const stories = deliveredOnTheBase(db, chosen);
 
   if (values.json === true) {
     process.stdout.write(`${JSON.stringify(stories, null, 2)}\n`);
@@ -65,6 +65,30 @@ export function delivered(args: readonly string[]): number {
   process.stdout.write(`${out.join("\n")}\n`);
   return 0;
 }
+
+/** Every delivered story of a project, with landing read from the base branch rather than
+ *  from the marker table.
+ *
+ *  Exported because two surfaces asked the same question and answered it differently. This
+ *  command asks git; the standup's "delivered, not landed" group read the marker alone. The
+ *  lander writes no marker when it merges a story, so that group listed 378 stories of which
+ *  371 were already sitting in master. One reading, both callers. */
+export function deliveredOnTheBase(db: DatabaseSync, chosen: number | null): readonly DeliveredStory[] {
+  if (chosen !== null) return query(db, chosen).map(asTheBaseHasIt(gitIn(repoOf(db, chosen) ?? resolve(process.cwd()))));
+
+  // The whole workspace is not one repository. An ancestry question asked in the wrong one
+  // answers `no-branch` and the record's answer stands, which is how 56 stories of other
+  // projects read unlanded while their code sat in their own master. So each project's
+  // stories are read in that project's own repo, and the newest-first order core sorted
+  // them into is put back across the projects.
+  return projects(db)
+    .flatMap((p) => query(db, p.id).map(asTheBaseHasIt(gitIn(p.repo))))
+    .sort((a, b) => (a.delivered_at < b.delivered_at ? 1 : a.delivered_at > b.delivered_at ? -1 : b.id - a.id));
+}
+
+/** Every project in the workspace, with the repository it is. */
+const projects = (db: DatabaseSync): readonly { id: number; repo: string }[] =>
+  queries(db).selectFrom(project).select(["id", "repo"]).all();
 
 const short = (sha: string | null): string => (sha === null ? "" : sha.slice(0, 8));
 

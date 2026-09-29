@@ -103,13 +103,23 @@ describe("the box", () => {
     expect(out.filter((l) => l.startsWith("└"))).toHaveLength(1);
   });
 
-  it("draws each row as one sentence rather than as a set of columns", () => {
-    // Nothing on the line is held to a column, so the id sits wherever the label it
-    // follows leaves it — see a-row-is-a-sentence for why that is the point.
-    const at = (what: string): number => row(what).indexOf("#");
-    expect(at("storefront")).toBeGreaterThan(0);
-    expect(new Set(["storefront", "account recovery", "password reset"].map(at)).size)
-      .toBeGreaterThan(1);
+  it("draws each row in the order config/design.yaml writes the sentence in", () => {
+    // One string, not columns: the label leads because the label is what the row is, and
+    // its particulars follow it in full words, joined by the separator the rest of the
+    // screen's prose uses. See the-outline-is-drawn-as-declared for the declaration.
+    const named = ["storefront", "account recovery", "password reset"];
+    for (const what of named) {
+      const line = row(what);
+      expect(line).toMatch(/^ *[-+ ] \S/);
+      expect(line.indexOf(what)).toBeLessThan(line.indexOf("#"));
+      expect(line).toMatch(/ · #\d+ · [a-z_]+ · [a-z_]+/);
+    }
+    // Nothing is padded to anything: a shallow row is not made to pay a deeper row's
+    // width, so two rows at different depths start their particulars at different columns.
+    const at = (what: string): number => row(what).indexOf(" · #");
+    expect(new Set(named.map(at)).size).toBeGreaterThan(1);
+    // And no run of padding inside a row either.
+    for (const what of named) expect(row(what)).not.toMatch(/\S {2,}\S/);
   });
 
   it("uses colour for state and for nothing else", () => {
@@ -148,27 +158,32 @@ describe("what it opens at", () => {
     }
   });
 
-  it("indents each level under its parent", () => {
-    // The indent is the whole of the guide: a row is a sentence moved right by its depth,
-    // with no rail drawn down the space it moved across.
-    const indent = (what: string): number => {
-      const line = row(what);
-      return line.length - line.trimStart().length;
-    };
-    expect(indent("storefront")).toBe(0);
-    expect(indent("1.0.0")).toBe(indent("storefront") + INDENT);
-    expect(indent("account recovery")).toBe(indent("1.0.0") + INDENT);
-    expect(indent("password reset")).toBe(indent("account recovery") + INDENT);
+  it("moves each level one indent further right than its parent, and nothing else", () => {
+    // Depth is the indent: a level is read off the column the labels line up in, a
+    // comparison between rows rather than a count of spaces on one. See
+    // outline-connectors for the indent on its own.
+    /** What sits immediately in front of the label: the indent and the fold marker. */
+    const leadOf = (what: string): string => row(what).slice(0, row(what).indexOf(what));
+    const label = (what: string): number => row(what).indexOf(what);
+    expect(row("storefront")).toContain("- storefront");
+    expect(label("1.0.0")).toBe(label("storefront") + INDENT);
+    expect(label("account recovery")).toBe(label("1.0.0") + INDENT);
+    expect(label("password reset")).toBe(label("account recovery") + INDENT);
+    for (const under of ["1.0.0", "account recovery", "password reset"]) {
+      expect(leadOf(under), under).toMatch(/^ +[-+ ] $/);
+    }
   });
 
-  it("shows every row's id, kind and state beside it, in full", () => {
+  it("shows every row's id, kind and state after its label, in full", () => {
     // A code, not a bare number — the outline draws rows through the same contract as
     // every other list, and list.tsx is the one place that decides what a code looks like.
-    // The label leads the sentence and the particulars follow it.
+    // The three follow the label, in the order they narrow the tree.
     expect(row("storefront")).toMatch(
       new RegExp(`^- storefront · #${tree.project} · project · in_progress\\b`),
     );
-    expect(row("password reset")).toContain(" · story · ");
+    expect(row("password reset")).toMatch(/password reset · #\d+ · story · in_progress\b/);
+    // And no four-letter word: a reader should not have to learn this screen's vocabulary.
+    for (const line of inside()) expect(line, line).not.toMatch(/\bproj\b|\bstor\b|\brequ\b/);
   });
 });
 

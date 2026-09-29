@@ -1,0 +1,5 @@
+# Append-only registries: two branches each adding their own line is not a conflict.
+# Approved on #1204 (2026-09-20) after every page task's merge into its story tree
+# conflicted here and the daemon retried it silently, forever.
+packages/core/config/components.yaml merge=union
+pnpm-lock.yaml                       merge=union

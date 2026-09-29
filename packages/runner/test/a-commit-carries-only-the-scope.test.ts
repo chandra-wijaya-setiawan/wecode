@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { Trees } from "../src/index.js";
+import { GitError, Trees } from "../src/index.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
 /** The harness holds the scope for the tools it grants, and a shell, a generator or a test
@@ -38,6 +38,15 @@ const dirty = (path: string): string[] =>
     .sort();
 
 const SCOPE = ["packages/runner/src/git.ts", "packages/runner/test/**"];
+
+/** Stop one ref from moving, and only that one, through git's own `reference-transaction`
+ *  hook: a non-zero exit aborts the update. A detached worktree's HEAD is a ref of its own,
+ *  so refusing the branch leaves the scoped commit made and the branch behind it. */
+const refuse = (ref: string): void => {
+  const hook = join(repo, ".git/hooks/reference-transaction");
+  writeFileSync(hook, `#!/bin/sh\nwhile read -r old new name; do\n  [ "$name" = "${ref}" ] && exit 1\ndone\nexit 0\n`);
+  chmodSync(hook, 0o755);
+};
 
 beforeEach(async () => {
   repo = tmp("wecode-scoped-commit-");
@@ -139,6 +148,25 @@ describe("a commit carries only the scope", () => {
 
     expect(filesOn(branch).sort()).toEqual(["mail.ts", "packages/runner/src/git.ts"]);
     expect(dirty(path)).toEqual([]);
+  });
+
+  it("names the scoped commit it made when the branch will not take it", async () => {
+    const { branch, path } = await attempt();
+    const tip = run(repo, "rev-parse", branch);
+    write(path, "packages/runner/src/git.ts", "export const cut = 1;\n");
+    write(path, "mail.ts", "export const stray = true;\n");
+    refuse(`refs/heads/${branch}`);
+
+    const err = await trees
+      .commitAttempt(path, branch, "t: attempt", SCOPE)
+      .catch((e: unknown) => e as GitError);
+
+    // The staging was never the problem: the commit exists, it holds the scope and nothing
+    // else, and the only thing that did not happen is the branch moving onto it.
+    expect(err.made).toBe(run(path, "rev-parse", "HEAD"));
+    expect(run(path, "show", "--name-only", "--format=", "HEAD")).toBe("packages/runner/src/git.ts");
+    expect(run(repo, "rev-parse", branch)).toBe(tip);
+    expect(dirty(path)).toEqual(["mail.ts"]);
   });
 
   it("still carries the attempt's own commits, whatever they touched", async () => {

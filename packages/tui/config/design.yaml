@@ -11,286 +11,1207 @@
 # Changing how the cockpit looks is an edit here first, and a red test until the drawing
 # follows.
 #
-# The keys below `proposal` are the screen the operator signed off. The keys outside it
-# describe the board as it is drawn today, which is how they were written — by reading
-# screens.tsx — and so they gate nothing the code could fail. Where the two disagree the
-# proposal wins, and the drawn key is retired as the board reaches it. A design is what
-# the screen must become, never a transcript of what it already draws.
-
+# The keys below `proposal` are the screen the operator signed off. Some keys outside it
+# were written the other way round — by reading screens.tsx — and so gated nothing the code
+# could fail. Where the two disagreed the proposal won, and the drawn key was retired as
+# the board reached it: `head:` is the first to go, because the board now writes a head the
+# way the proposal does. A design is what the screen must become, never a transcript of
+# what it already draws.
+#
+# ── The split ────────────────────────────────────────────────────────────────────────────
+#
+# One design, two renderers. The tree `views.ts` builds out of this file is read twice: by
+# the ink gate, which holds the terminal to it, and by the SVG projector, which draws a
+# picture of it for someone to sign. A file that does not say which of its statements each
+# renderer is answerable for makes the two renderers argue — the projector is held to a
+# rule character it cannot draw, or the terminal is excused a decision that was never
+# about characters at all.
+#
+# So the file is in two halves and an index:
+#
+#   renderers:  what one renderer draws and the other does not. A `─` filled to the width,
+#               a border spent on a page, which line the bar is pinned to — these are a
+#               terminal's way of saying "box", and an SVG says it with a rectangle.
+#   shared:     what the screen *is*, which both renderers are given unchanged: which
+#               sections there are, what a record's page holds, what a row of the tree
+#               says, which keys the screen answers, and the proposal that was signed.
+#   (the tail): the top-level names the gate's tests still read. Aliases, not copies —
+#               every block below is defined exactly once, in the half it belongs to, and
+#               the tail points at that one definition. Deleting the tail is a rename in
+#               the tests and nothing else.
+#
 # Nothing in this file repeats views.yaml. The section names, their order and their letters
 # are read from there; `lead` is the one section that is not a box and so has no row there.
-page:
-  # Drawn above the boxes: a dead runner or an unreadable schema is the reason every box
-  # under it is wrong, so it is read before the board and not after it.
-  lead: services
-  # The rest of the page, in order, is views.yaml `page.order`. It is not copied here.
-  boxes: views.yaml#page.order
 
-# A dashboard section is a rule with its name in it. A border would cost two lines and two
-# columns to make the same separation: eight sections at two lines is sixteen — more height
-# than the Cooking box is allowed to draw — and the columns come off every row on the page.
-# So the chrome is one line, the name sits in the rule rather than above it, and every row
-# starts at the terminal's left edge.
-dashboard:
-  chrome: rule
-  chrome_lines_per_section: 1
-  rows_begin_at_column: 0
-  # What a row spends its first two columns on is its own state's mark from views.yaml —
-  # the same vocabulary the heads are marked in — and not chrome. A state no group claims
-  # marks with a space, which is why a row can read as indented and is not.
-  row_leads_with: mark
-  # What a box is made of. The rule keeps `─`, which is why it is not here: what a box
-  # costs is these two lines and these two columns.
-  forbidden: ["┌", "┐", "└", "┘", "│", "├", "┤"]
+renderers:
+  # The terminal. Everything here is a decision about characters, lines and columns, and
+  # every one of them is void on a renderer that has shapes instead.
+  terminal:
+    # A dashboard section is a rule with its name in it. A border would cost two lines and
+    # two columns to make the same separation: eight sections at two lines is sixteen —
+    # more height than the Cooking box is allowed to draw — and the columns come off every
+    # row on the page. So the chrome is one line, the name sits in the rule rather than
+    # above it, and every row starts at the terminal's left edge.
+    dashboard: &dashboard
+      chrome: rule
+      chrome_lines_per_section: 1
+      rows_begin_at_column: 0
+      # What a row spends its first two columns on is its own state's mark from views.yaml
+      # — the same vocabulary the heads are marked in — and not chrome. A state no group
+      # claims marks with a space, which is why a row can read as indented and is not.
+      row_leads_with: mark
+      # What a box is made of. The rule keeps `─`, which is why it is not here: what a box
+      # costs is these two lines and these two columns.
+      forbidden: ["┌", "┐", "└", "┘", "│", "├", "┤"]
 
-# How a head is written, and then filled with `glyph` to the full width. It opens with the
-# section's own `mark` from views.yaml and writes the name in capitals: the mark and the
-# case are what tell a head from a row at a glance, on a page whose chrome is one rule.
-# A box carries the letter `v` opens it by, and the count of what it is holding pushed to
-# the far end — the numbers down a page of eight are then a column to compare, and the fill
-# is what holds each of them there. The lead section is neither a filter nor keyed, so it
-# carries neither letter nor count.
-head:
-  glyph: "─"
-  case: upper
-  section: "── {mark} {title} "
-  box: "── {mark} {title} [{key}] "
-  count: " {count}"
-  count_at: width
-  # One box's count is a fraction, because its rows are not just rows: a running row is
-  # holding one of the fleet's seats. `3` says how much is moving and nothing about whether
-  # the machine is full — three of four seats is a workspace with nothing spare, three of
-  # twenty is nineteen workers standing idle, and the operator's next move is different in
-  # each. So the seated box says `held/seats`, and every other box says the plain count.
-  # A workspace with no workers has no seats to be short of and falls back to the count.
-  seated:
-    box: running
-    of: workers
-    count: " {held}/{seats}"
+    # How a head is written is not here. It was, as `head:` — a rule opened with `── `,
+    # the name in capitals, the letter in brackets and the count held at the width by the
+    # fill — and every line of it was a transcript of what screens.tsx already drew. The
+    # proposal the operator signed writes a head differently, the board now draws it that
+    # way, and a retired key kept beside the live one is a second answer to what a head is.
+    # So there is one: `shared.proposal.head`, which both renderers read.
 
-# A screen given the whole terminal for one thing keeps its border: two lines once is not
-# sixteen, and the border is what tells that page from the bars under it.
-pages:
-  chrome: border
-  bordered: [box, outline, node, assignment]
+    # A screen given the whole terminal for one thing keeps its border: two lines once is
+    # not sixteen, and the border is what tells that page from the bars under it.
+    pages: &pages
+      chrome: border
+      bordered: [box, outline, node, assignment]
 
-# What a record's own screen looks like, declared beside the cockpit rather than left in
-# screens.tsx. The cockpit answers what is happening; a detail page answers what one record
-# is, and until now the only way to ask what it is supposed to show was to read the code
-# that shows it. Two screens are records — a node and an assignment — and they share one
-# block so the blocks line up with each other instead of each choosing its own gutter.
-detail:
-  screens: [node, assignment]
-  chrome: border
-  # A page is named after its work and its state, never after its key: the reader who
-  # pressed enter already knows the id, so a title of `task #3` spends its line saying
-  # what they just typed. The assignment is the one record with no work of its own to be
-  # named by, so it falls back to the id.
-  title:
-    node: "{what} · {state}"
-    assignment: "assignment #{id} · {state}"
-  # The block: `name  value`, names left-aligned into a gutter as wide as the longest of
-  # them, and a value nobody wrote reading as a dash rather than as a gap.
-  block:
-    entry: "{name}  {value}"
-    gutter: longest_name
-    align: left
-    empty: "—"
-    # A page given the whole terminal wraps; a block sized to its own fields clips, because
-    # it has no line to wrap onto. A wrapped value continues under the value, never under
-    # the name.
-    overflow:
-      node: clip
-      assignment: wrap
-    wrap_under: value
-  # What each record says about itself. Neither list restates the other's half: the board
-  # already decided what a row is worth saying, and what the four columns had no room for
-  # is the rest.
-  fields:
-    node: [entity, id, title, state, children]
-    assignment: [entity, id, objective, state, budget, beat, worktree, detail]
-  # A node is a branch, so its screen carries the list under it. An assignment is a leaf
-  # and carries none.
-  children:
-    of: node
-    title: "children ({count}) · {tally}"
-    columns: ["#", what, state, detail]
-    empty: "nothing under it"
-  # A page drawing past its own border overwrites the two lines that must stay readable,
-  # so what will not fit is dropped and counted rather than drawn.
-  overrun: "… and {count} more"
+    # The last line is the bar, and the one line the App has to say anything on sits
+    # directly above it. Both always have to be readable, which is why the body states its
+    # height rather than flexing into whatever is left. A terminal has a last line; a
+    # picture has a bottom edge and no notion of which line is final, which is why this is
+    # here and not in the half both renderers read.
+    bars: &bars
+      key_bar: last
+      status: above_key_bar
 
-  # An approval is an assignment whose objective is a design, and the operator is being
-  # asked to sign a picture. The page names the design and stops there, so the signature is
-  # asked for with no way to look at what is being signed. It is the assignment page with
-  # one line added — the path the mockup was written to — and that line is a path because
-  # the operator opens the file in something that can draw an SVG.
-  approval:
-    of: assignment
-    adds: [mockup]
-    # Not a second rendering. A terminal cannot draw an SVG, and a text projection beside
-    # the file would be a second answer to what the design looks like — the one the operator
-    # signed would then be whichever they happened to read.
-    projection: none
-    projects_inline: false
-    forbidden: [wireframe, svg, ascii, thumbnail]
-    # One entry of the same block every other field is drawn in: no gutter of its own, no
-    # alignment of its own, the path as its value. A design nobody has projected yet has no
-    # path, and says so rather than offering a line that opens nothing.
-    mockup:
-      name: mockup
-      value: path
-      entry: "{name}  {path}"
-      opens: file
-      empty: "not projected yet"
+  # The browser. The third renderer of the same tree, and the one a person reaches without
+  # a terminal. A document is not a grid of cells: it has no last line to pin a bar to, no
+  # width to fill a rule to and no column a row begins at, so every statement the terminal
+  # half makes is answered here rather than inherited.
+  #
+  # What this block is for is the shell — the frame every page of the web surface wears,
+  # declared once here instead of written out again in each page's template string. A
+  # second page that spelled its own `<!doctype>` would be a second answer to what the web
+  # surface looks like, and the two would drift on the first rename.
+  # packages/webapp/test/the-shell-matches-its-design.test.ts gates the served document
+  # against these words, and holds every page in `src/pages` to going through the shell.
+  webapp:
+    chrome: document
+    # A browser draws boxes out of shapes, as the projector does; nothing here is spelled
+    # with a character the terminal half forbids.
+    glyphs: none
+    shell:
+      doctype: "<!doctype html>"
+      lang: en
+      charset: utf-8
+      viewport: "width=device-width, initial-scale=1"
+      # What the tab says, and what the page says at the top of itself. The same word: the
+      # product has one name, and a banner that disagreed with the title would be two.
+      title: wecode
+      banner: wecode
+      # One element holds the whole page. A page's own markup goes inside it and nowhere
+      # else, which is what makes "is this page in the shell" a thing a test can ask.
+      body: main
+      # In the document, not beside it: the surface is one workspace's own board on one
+      # workspace's own machine, and a second request for a stylesheet buys nothing.
+      stylesheet: inline
+    # What the banner carries under the word: every page of the surface, in the order a
+    # reader meets them. Which page comes first is a decision about the surface and not
+    # about any one page, so it is said here once rather than in five files that would each
+    # have to agree — and it is said in the design, beside the frame the banner is part of,
+    # because an order nobody can read off the design is an order nobody signed.
+    #
+    # `page` is the file in `src/pages`, not a path: where a page answers is `discover.ts`'s
+    # one answer (the board answers at `/`, everything else at its own name) and repeating
+    # it here would be a second one. `says` is what the reader is offered, which is not the
+    # filename — a filename is for the machine.
+    #
+    # Every discovered page is here and nothing else is: a page missing from the order is a
+    # page with no way in, which is the same failure as a page with no file, and
+    # `every-page-opens-with-the-banner.test.ts` holds the list to the directory.
+    banner:
+      order:
+        # The board first, because it is what the surface opens on.
+        - page: board
+          says: Board
+        - page: projects
+          says: Projects
+        - page: tasks
+          says: Tasks
+        - page: decisions
+          says: Decisions
+        - page: tree
+          says: Tree
+        # The three that read the board sideways — who is working, what is stuck, what it
+        # all cost — after the four that read the record.
+        - page: agents
+          says: Agents
+        - page: cooking
+          says: In flight
+        - page: ledger
+          says: Ledger
+        # Last, because it is the one page that is not about work: a sketch is a drawing made
+        # before there is any, and a reader goes looking for it rather than meeting it.
+        - page: sketches
+          says: Sketches
+    # A section of the page is separated by a rule, as it is in the terminal — but the rule
+    # is a border on the element, not a row of characters spent out of the height.
+    sections:
+      chrome: rule
+      drawn_with: border
+    # The look. What the terminal half spends on characters and columns, a browser spends on
+    # colour, type and space, and those are decisions about the surface exactly as `chrome:
+    # rule` is. They used to be five template strings, one per page, each with its own
+    # `#888` in it: five answers to what "faint" is, which agree until one page is restyled.
+    #
+    # So the look is here, once, and `shell.ts` is the only thing that turns it into a
+    # stylesheet. The palette and the type are named, every rule spends them by name, and a
+    # colour is changed in one row rather than grepped for across the pages.
+    #
+    # `roots` is what keeps one page's rules off another's markup: the whole sheet is in
+    # every document, so each page's block is scoped to a shape only that page draws, and
+    # `the-shell-is-the-signed-design.test.ts` holds every selector to its page's roots.
+    look:
+      # Every value below is the signed mockup's own. The look used to be a dark surface in
+      # one typeface, which nobody signed — it was what the five pages happened to spell.
+      # The mockup is a light paper surface set in three faces, and this is it: the palette
+      # is its `:root`, colour for colour, and the type is its three families.
+      #
+      # A browser is told which way round the surface is so its own chrome agrees with it.
+      scheme: light
+      # The colours, by what they are for, holding the mockup's values. Nothing below spells
+      # one out. A colour the mockup has and no rule spends is not listed: a token nothing
+      # names is a decision nobody made.
+      palette:
+        page: "#f8f7f3"
+        raised: "#fdfcfa"
+        rule: "#e5e2d9"
+        ink: "#1f2328"
+        faint: "#6b7178"
+        mark: "#2f6f77"
+        good: "#3d6b4f"
+        # The other three the shell mockup signed and the transcription dropped: its `--amber`,
+        # `--red` and `--vio`. `docs/design/mockups/webapp-design.html` declares ten in its `:root`
+        # and only these seven were ever lifted out of it, which is the whole of story #561 —
+        # so `failed` took plain ink for want of a red that was sitting in the file, and what
+        # was moving took the mark, which already means something else.
+        #
+        # Named for what they are on this surface rather than for their hue, the way the seven
+        # above are: a colour is a decision about what a reader is being told.
+        warn: "#a4711c"
+        stop: "#a8423a"
+        violet: "#5b4d8a"
+        # One hue a lane, the way a commit graph gives one colour a branch. These four are
+        # sketch #7's — "the tree you can read" — and they answer a question the shell mockup
+        # has no opinion about, because the shell has no tree in it. The lane says where a row
+        # sits; the state says how it is going. Different questions, so different colours, and
+        # the state set is the mockup's ten above rather than a second set drawn here.
+        lane-story: "#2f6f77"
+        lane-req: "#8a5a2b"
+        lane-crit: "#5a5a8c"
+        lane-task: "#6b7178"
+      # Three faces, as the mockup is set: a serif for what is read, a sans for the surface
+      # itself, and a mono for what must line up — an id, a code, a count.
+      #
+      # Each is a stack ending in one the machine already has. The mockup pulls the first of
+      # each from a font service; this surface is one workspace's own board on its own
+      # machine, and a document that waits on the network to draw is a worse document than
+      # one set in Georgia.
+      type:
+        serif: '"Newsreader", Georgia, "Times New Roman", serif'
+        sans: '"Source Sans 3", "Segoe UI", system-ui, sans-serif'
+        mono: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace'
+        size: "15px"
+        leading: "1.6"
+        tracking: ".12em"
+      # The shape each page draws that no other page does. A page's rules may name nothing
+      # outside these.
+      roots:
+        board: ["section.board"]
+        decisions: ["article"]
+        tree: ["section.tree", "ul.tree"]
+        tasks: ["section.tasks", "div.inbox", "ul.inbox", "section.detail"]
+        projects: ["main > h2", "ul.strip", "ul.cards"]
+        agents: ["section.agents"]
+        cooking: ["section.cooking"]
+        ledger: ["section.ledger"]
+        sketches: ["section.sketches"]
+      # The document itself — its margins, its type, its banner, and the one line every page
+      # says when it has nothing to show.
+      frame:
+        body: "margin: 0; padding: 1.75rem clamp(1rem, 4vw, 3rem); background: var(--page); color: var(--ink); font: var(--size)/var(--leading) var(--sans); font-variant-numeric: tabular-nums"
+        main: "display: grid; gap: 1.5rem; max-width: 74rem; margin: 0 auto"
+        h1: "font-family: var(--serif); font-size: 1.6rem; font-weight: 500; letter-spacing: -.01em; margin: 0; color: var(--ink)"
+        # The banner's way in to every page: one row of names under the word, ruled off
+        # from the page the way the mockup rules it off. It is the frame's and not any
+        # page's, because it is the same row in every document.
+        # The word and the row share a line. Stacked, the word alone took a band of every
+        # window — a banner is somewhere to come back from, not a title card, and that
+        # height belongs to the work under it. The rule is the header's, so the row keeps
+        # its own wrapping when the window is narrow.
+        header: "display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 1.75rem; border-bottom: 1px solid var(--rule)"
+        nav: "display: flex; flex-wrap: wrap; gap: 0 1.5rem; margin: 0; flex: 1"
+        "nav a": "color: var(--faint); text-decoration: none; font-weight: 600; padding: .5rem 0; border-bottom: 2px solid transparent; margin-bottom: -1px"
+        "nav a:hover": "color: var(--ink); border-bottom-color: var(--mark)"
+        # Which of the names the reader is under. A row of nine names with nothing lit says
+        # only that the surface has nine pages. The one the document is being served at is
+        # drawn in ink and underlined in the mark, using the 2px border every name already
+        # reserves, so nothing shifts when it lights. Keyed to `aria-current`, which the
+        # markup already carries and which is the browser's own word for it, so the reader on
+        # a screen reader is told what the underline tells everyone else.
+        "nav a[aria-current=\"page\"]": "color: var(--ink); border-bottom-color: var(--mark)"
+        # The control that opens the dock. It is not a tenth way in and must not read as one,
+        # and it was reading as neither: a button in the browser's own box, the one element of
+        # the banner nobody had styled. Two things say what it is now — it sits off the end of
+        # the row at the edge the panel comes in from, and it wears a mark pointing that way.
+        # Everything else is the row's own colour, weight and hover, so it belongs to the
+        # banner without joining the names.
+        "nav button": "margin-left: auto; display: flex; align-items: baseline; gap: .4rem; border: 0; background: none; cursor: pointer; padding: .5rem 0; color: var(--faint); font: inherit; font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px"
+        "nav button:hover": "color: var(--ink); border-bottom-color: var(--mark)"
+        # The mark is the side the panel is on rather than another word for it, and it turns
+        # over with the panel: pointing in while the dock is shut, back out while it is
+        # showing. In the sheet and not in the markup, because it is a picture of a state that
+        # `aria-expanded` already says — a reader told the button is expanded must not also be
+        # read a bracket.
+        "nav button::before": "content: '\u2039'; color: var(--mark)"
+        "html.docked nav button::before": "content: '\u203a'"
+        "p.empty": "margin: 0; color: var(--faint)"
+        # What state a row is in, as a colour: the one place the record's thirteen states are
+        # mapped onto the mockup's own hues. Every renderer that draws a node reads
+        # `--st-<state>` and never a colour, so a hue is changed in the palette above and
+        # nowhere else.
+        #
+        # Thirteen states and six colours, because the question a reader is asking is not which
+        # state a row is in but whether anything is owed on it. Ready is the green — answered
+        # 28 Sep: green means this is ready to be worked, because that is the row a reader is
+        # scanning for. What is moving takes the amber. Failed takes the red, which the mockup
+        # signed and the transcription had dropped. Planned and on_hold take the violet, which
+        # it also signed: work that exists and has not started is not the same as work nobody
+        # is owed anything on. And every finished state — done, passed, met, accepted,
+        # delivered, released — goes quiet in the faint, because it is hidden by default and a
+        # colour on it would compete with the thing that needs somebody.
+        ":root": "--st-ready: var(--good); --st-in_progress: var(--warn); --st-running: var(--warn); --st-failed: var(--stop); --st-planned: var(--violet); --st-on_hold: var(--violet); --st-done: var(--faint); --st-passed: var(--faint); --st-met: var(--faint); --st-accepted: var(--faint); --st-delivered: var(--faint); --st-released: var(--faint); --st-dropped: var(--rule)"
+        # While a drawing is open the surface gets out of its way. A sketch is a mockup or
+        # a reading — it is drawn to be looked at whole — and it was being shown through a
+        # letterbox: a frame inside a column inside a padded body, scrolling in a box that
+        # scrolled in a page. Two bars for one document, and never wide enough to read as
+        # the thing it draws. The banner, the page title and its standfirst are all in the
+        # list you came from; what is not in the list is the drawing.
+        #
+        # The frame's and not the sketches page's: `body` and `header` belong to no page,
+        # and a page block may only name shapes its own roots declare.
+        #
+        # `:has()` rather than a class the page sets — which document this is is already
+        # in the markup, and a second way of saying so is a second thing to keep true.
+        "body:has([data-ui=\"sketches.open\"]) header": "display: none"
+        "body:has([data-ui=\"sketches.open\"]) section.sketches > h2": "display: none"
+        "body:has([data-ui=\"sketches.open\"]) section.sketches > p.q": "display: none"
+        "body:has([data-ui=\"sketches.open\"])": "padding: 0"
+        # …except the dock's own column, which still has to be kept clear — but only the
+        # column. The gutter `html.docked body` adds beside it is the frame being tidy
+        # around a page of rows, and a drawing is not rows: it goes to the dock's edge.
+        "html.docked body:has([data-ui=\"sketches.open\"])": "padding-right: min(100vw, max(33vw, 32rem))"
+        "body:has([data-ui=\"sketches.open\"]) main": "max-width: none; margin: 0; gap: 0"
+        # The terminal dock, which the banner's last control opens. It is in every document
+        # and belongs to no page, so it is the frame's — as the banner's row is.
+        #
+        # It is a sidebar: a column down the right edge, full height, with the page taking
+        # the width that is left. It was a popover, which is the browser's own top-layer
+        # box — drawn over the page rather than beside it, and shut by every link a reader
+        # follows, because the top layer belongs to the document and a navigation is a new
+        # one. So the open-or-shut state is a class the root wears, which a browser
+        # remembers across a navigation, and these three rows are what it means.
+        #
+        # `position: fixed` and `inset: 0 0 0 auto` pin it to that edge with no regard for
+        # where in the document it is drawn; `height` says the full window, which an inset
+        # alone does not buy on a box the browser would otherwise size to its contents; and
+        # `margin`, `padding` and `border` are spelled out because each is something the
+        # browser would otherwise choose.
+        #
+        # A third of the window, which is about the mockup's proportion, and never narrower
+        # than a line of output worth reading — a terminal that wraps at forty columns tells
+        # the reader less than no terminal. On a window too narrow for even that, the floor
+        # gives way rather than hanging the dock off the side.
+        #
+        # `display: none` is the shut state, because shut is what every document is served
+        # in: the class is put on by the script at the foot, so a dock drawn open would
+        # stand open for the length of a page load on every page of the surface.
+        "#terminal": "position: fixed; inset: 0 0 0 auto; width: min(100vw, max(33vw, 32rem)); height: 100dvh; margin: 0; padding: 0; border: 0; border-left: 1px solid var(--rule); background: var(--raised); color: var(--ink); overflow: hidden; display: none"
+        "html.docked #terminal": "display: flex; flex-direction: column"
+        # …and the page gets the rest of the width. The dock is `position: fixed`, so it is
+        # out of the flow and nothing makes room for it on its own: the room is this row,
+        # which is the dock's width and the gutter the body already keeps on that side, so
+        # the page is neither under the panel nor flush against it. Two rows saying one
+        # width is two chances to drift, and `the-banner-opens-a-terminal.test.ts` holds
+        # them to each other — a token would be the other answer, but the look's tokens are
+        # the palette's and the type's and a width is neither.
+        "html.docked body": "padding-right: calc(min(100vw, max(33vw, 32rem)) + clamp(1rem, 4vw, 3rem))"
+        # The ways out, at the top, where a reader looks for them: restart, and then close at
+        # the edge where close has always been. They are one row across the panel rather than
+        # two rows down it, because they are the same kind of thing — the chrome of a panel
+        # whose content is the point — and because the rule along their feet is the whole
+        # width of the panel that way, which is the line that used to be the screen's own top
+        # border, moved onto the chrome for the reason below.
+        #
+        # The direct child only: the emulator builds a tree of its own inside the screen, and
+        # a rule about every `div` under this panel would be a rule about the terminal's guts.
+        "#terminal > div": "display: flex; align-items: stretch"
+        # The first of the two takes the slack, so the pair sits together at the right edge
+        # and the rule under them runs the whole width rather than the width of two words.
+        "#terminal > div > button:first-child": "flex: 1 1 auto"
+        "#terminal button": "align-self: stretch; text-align: right; flex: 0 0 auto; border: 0; border-bottom: 1px solid var(--rule); background: none; padding: .55rem .9rem; color: var(--faint); font: inherit; font-family: var(--mono); font-size: .92em; cursor: pointer"
+        "#terminal button:hover": "color: var(--ink)"
+        # The screen fills everything between the two, and it is a terminal's box rather than
+        # a transcript's.
+        #
+        # Those are different things to declare. A transcript is text the browser lays out:
+        # it wraps where the panel ends, it scrolls itself, and it is read in whatever
+        # leading the document sets. A terminal lays itself out — the emulator is told how
+        # many cells it has and draws exactly that grid, with its own viewport and its own
+        # scrollback inside — so every one of those declarations is the document answering a
+        # question the emulator has already answered, and answering it differently:
+        # `white-space: pre-wrap` wraps rows the emulator wrapped itself, `overflow: auto`
+        # is a second scroller around the one the emulator brought, and a leading of the
+        # document's is a cell of a height the emulator did not choose.
+        #
+        # So what is left is the box and nothing in it: room to grow, a floor of nothing so
+        # a flex child may actually shrink, the padding the design wants around the cells,
+        # and `overflow: hidden` because anything the grid does not cover is the panel's
+        # ground and not somewhere to scroll to. The rules that used to be drawn across it
+        # are on the chrome above now, because the pane's box is what the fit divides into
+        # cells — a border is two pixels of the reader's screen that the emulator is told it
+        # has and does not.
+        #
+        # And it reaches the foot, because there is nothing under it any more. There was a
+        # line along the bottom the next word was typed on — a form, a label and a text input
+        # — and the four rules that drew it are gone with the markup. A terminal is typed
+        # into at the screen: the reader clicks the black box and the keys go up from there,
+        # so a second box below it was a second answer to where the next word went. The room
+        # it took is the screen's now, which is more cells for the far end to draw in.
+        "#terminal pre": "flex: 1 1 auto; min-height: 0; min-width: 0; margin: 0; padding: .9rem; overflow: hidden; color: var(--ink); font-family: var(--mono); font-size: .92em"
+      # One block per page, in the order the sheet writes them.
+      pages:
+        board:
+          "section.board": "border-top: 2px solid var(--rule); padding-top: .6rem"
+          "section.board h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; letter-spacing: -.01em; margin: 0 0 .4rem"
+          "section.board h2 .mark": "display: inline-block; width: 1.25rem; color: var(--mark)"
+          "section.board h2 kbd": "float: right; color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "section.board ul": "list-style: none; margin: 0; padding: 0"
+          "section.board li": "display: flex; gap: .75rem; padding: .1rem 0"
+          "section.board li .code": "flex: 0 0 9rem; color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "section.board li .state": "flex: 0 0 9rem; color: var(--mark); font-weight: 600"
+          "section.board li .what": "flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere"
+        decisions:
+          "article": "background: var(--raised); border: 1px solid var(--rule); border-left: 3px solid var(--mark); border-radius: 4px; padding: .8rem 1.25rem"
+          # What a person is told when their answer landed. The card they answered is gone,
+          # and a card vanishing is indistinguishable from one that was never there — so the
+          # page says so rather than leaving them to infer it from an absence. An article
+          # because that is the shape this page's roots declare, and a rule may name no other.
+          "article.answered": "display: flex; align-items: baseline; gap: .75rem; padding: .5rem .8rem; border-left-color: var(--mark); color: var(--mark)"
+          "article.answered a": "margin-left: auto; color: var(--faint); font-family: var(--mono); font-size: .85em"
+          "article h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; margin: 0 0 .5rem; overflow-wrap: anywhere; white-space: pre-wrap"
+          "article h2 .id": "color: var(--faint); font-family: var(--mono); font-size: .8em; margin-right: .6rem"
+          "article dl": "display: grid; grid-template-columns: 6rem 1fr; gap: .2rem .75rem; margin: 0"
+          "article dt": "color: var(--faint); font-size: .85em; text-transform: uppercase; letter-spacing: var(--tracking)"
+          "article dd": "margin: 0; min-width: 0; overflow-wrap: anywhere"
+          "article dd ul": "list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .4rem"
+          "article dd li": "border: 1px solid var(--rule); border-radius: 3px; padding: 0 .4rem; color: var(--mark); font-family: var(--mono); font-size: .92em"
+          "article dd.open": "color: var(--faint)"
+          # The card takes the answer. The form is the one place on this surface a person
+          # says something back, so it is drawn as a row of choices with the send beside
+          # them rather than as a panel — a card is still the unit, and the verb belongs to
+          # the question it settles.
+          "article form.answer": "display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .9rem; margin: .8rem 0 0; padding-top: .7rem; border-top: 1px solid var(--rule)"
+          "article form.answer ul.choices": "list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .4rem"
+          "article form.answer ul.choices li": "min-width: 0"
+          # An option is a chip that is picked, and it is the same chip the answers row
+          # draws, so the two readings of one option look like one option.
+          "article form.answer ul.choices label": "display: flex; align-items: baseline; gap: .35rem; border: 1px solid var(--rule); border-radius: 3px; padding: .1rem .5rem; color: var(--mark); font-family: var(--mono); font-size: .92em; cursor: pointer"
+          "article form.answer ul.choices label:hover": "background: var(--page)"
+          "article form.answer ul.choices label:focus-within": "border-color: var(--mark)"
+          "article form.answer ul.choices label span": "overflow-wrap: anywhere"
+          # The way past the list. Faint, because it is what a reader falls back to.
+          "article form.answer label.note": "display: flex; align-items: baseline; gap: .4rem; flex: 1 1 12rem; min-width: 0"
+          "article form.answer label.note span": "color: var(--faint); font-size: .75rem; text-transform: uppercase; letter-spacing: var(--tracking)"
+          "article form.answer label.note input": "flex: 1 1 auto; min-width: 0; background: var(--page); border: 1px solid var(--rule); border-radius: 3px; padding: .2rem .45rem; color: var(--ink); font: inherit"
+          "article form.answer label.note input:focus": "outline: none; border-color: var(--mark)"
+          "article form.answer button": "border: 1px solid var(--mark); border-radius: 3px; background: var(--mark); padding: .25rem 1rem; color: var(--raised); font: inherit; font-weight: 600; cursor: pointer"
+          "article form.answer button:hover": "background: var(--ink); border-color: var(--ink)"
+          "article p.how": "margin: .6rem 0 0; color: var(--faint); font-family: var(--serif)"
+        tree:
+          # The page's own name and the one control over it, above the tree. The heading is
+          # an h2 for the reason the tasks page's is: the h1 is the shell's banner.
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.tree > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
+          # One question and the control that sends it, ruled off from the tree the way the
+          # tasks page rules its strip off. The word is the label, set small and quiet the
+          # way every other word that names a control on this surface is; the answer is the
+          # select, and the select is the browser's own, borrowing only the frame and the
+          # face the rest of the page is read in. Nothing here draws an arrow or a box of
+          # its own: a select a surface redraws is a select that stops behaving like one on
+          # somebody's machine.
+          "section.tree form.filter label": "display: flex; gap: .5rem; align-items: baseline; color: var(--faint); font-size: .75rem; text-transform: uppercase; letter-spacing: var(--tracking)"
+          "section.tree form.filter select": "border: 1px solid var(--rule); border-radius: 3px; background: var(--raised); padding: .1rem .4rem; color: var(--ink); font-family: var(--mono); font-size: .92rem; text-transform: none; letter-spacing: normal; cursor: pointer"
+          "section.tree form.filter select:focus": "outline: none; border-color: var(--mark)"
+          # The submit, which is what makes the select work with no script at all. Quiet
+          # rather than marked: pressing it changes a reading and never the record, so it
+          # does not carry the weight the decisions page's send does.
+          "section.tree form.filter button": "border: 1px solid var(--rule); border-radius: 3px; background: var(--raised); padding: .15rem .7rem; color: var(--mark); font: inherit; font-size: .92rem; cursor: pointer"
+          "section.tree form.filter button:hover": "border-color: var(--mark); color: var(--ink)"
+          # The tree is a card, the way sketch #7 draws it: the bar that narrows it is the
+          # card's head, the rows are its body, and the two are one object rather than a
+          # control floating above a list. So the section closes its own gap and the two
+          # borders meet.
+          "section.tree": "display: grid; gap: 0"
+          "section.tree form.filter": "display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; border: 1px solid var(--rule); border-radius: 4px 4px 0 0; background: var(--page); padding: .5rem .9rem"
+          "ul.tree": "list-style: none; margin: 0; padding: .25rem 0; border: 1px solid var(--rule); border-top: 0; border-radius: 0 0 4px 4px; background: var(--raised); overflow-x: hidden"
+          # No indent and no guide: the rail draws the depth, and a nested padding drew it a
+          # second time — which is what put every node on a line of its own.
+          "ul.tree ul": "list-style: none; margin: 0; padding: 0; border: 0"
+          "ul.tree li": "display: block; min-width: 0"
+          # A row is five columns, and the same five however deep it sits: the rail, what
+          # kind of record it is, its number, its own words, and the state. Four of them are
+          # fixed, so the kinds, the ids and the states line up down the page and a reader
+          # scans a column instead of reading a sentence. The words take what is left and end
+          # in an ellipsis, because a row that wraps is a row whose rail no longer reaches it.
+          #
+          # Grid and not flex: flex sizes every row to its own content, which is what left
+          # the ids and the states in a different place on every line.
+          #
+          # 22px is VS Code's own row, and the rail is an <svg> exactly that tall — a row any
+          # taller leaves a gap between one rail and the next and the lanes read as broken
+          # pipe. The first column is 66px, which is the widest rail this tree draws: five
+          # rungs at 11px a lane, plus the lane the last one's children would be on.
+          "ul.tree .row": "display: grid; grid-template-columns: 66px 4.8rem 3rem minmax(0, 1fr) auto; gap: .5rem; align-items: center; height: 22px; padding-right: .9rem; font-size: .86rem; white-space: nowrap"
+          "ul.tree summary.row": "cursor: pointer; list-style: none"
+          "ul.tree summary.row::-webkit-details-marker": "display: none"
+          # Which row the pointer is on. A 22px row in a list of three hundred needs it.
+          "ul.tree .row:hover": "background: var(--page)"
+          # The story is the anchor — the unit that is planned, landed and talked about — so
+          # the top-level rows get a band of their own, washed out of the colour their own
+          # lane is drawn in so the tint and the rail say one thing rather than two.
+          "ul.tree > li > .row, ul.tree > li > details > summary.row": "background: color-mix(in srgb, var(--mark) 7%, transparent)"
+          "ul.tree > li > .row:hover, ul.tree > li > details > summary.row:hover": "background: color-mix(in srgb, var(--mark) 13%, transparent)"
+          "ul.tree .row > svg": "display: block; overflow: visible; justify-self: start"
+          # One hue a lane, the way a commit graph gives one colour a branch — the four sketch
+          # #7 signed, in the order the rungs come. A fifth lane would be a rung this tree does
+          # not draw, so it takes the last of them rather than a colour nobody signed.
+          "ul.tree .row .lane": "stroke: var(--lane-task)"
+          "ul.tree .row .lane[data-lane=\"0\"]": "stroke: var(--lane-story)"
+          "ul.tree .row .lane[data-lane=\"1\"]": "stroke: var(--lane-req)"
+          "ul.tree .row .lane[data-lane=\"2\"]": "stroke: var(--lane-crit)"
+          # A shut branch's lane leads to rows that are in the document but not on the
+          # screen, so it reads as a pipe going nowhere. The rows are real and the lane is
+          # truthful, so the markup keeps it and the sheet hides it until the branch opens.
+          # `data-lane` is the lane it turns into, which is one in from the row's own.
+          "ul.tree li:has(> details:not([open])) > details > summary.row > svg > .lane:last-of-type": "display: none"
+          "ul.tree .row .kind": "font-family: var(--mono); font-size: .63rem; letter-spacing: var(--tracking); text-transform: uppercase; color: var(--faint); text-align: right; overflow: hidden; text-overflow: ellipsis"
+          "ul.tree summary.row > .kind": "color: var(--ink)"
+          "ul.tree .row .id": "font-family: var(--mono); font-size: .78em; color: var(--faint); text-align: right"
+          "ul.tree .row .label": "color: var(--ink); overflow: hidden; text-overflow: ellipsis"
+          "ul.tree summary.row > .label": "font-weight: 600"
+          # The state in words, as a chip at the right-hand edge, wearing the hue the row's
+          # own node wears on the rail — one set of colours for both, so a reader never has
+          # to learn two. `--hue` is the row's, written in by the page; see `tree.ts`.
+          "ul.tree .row .state": "font-family: var(--mono); font-size: .68rem; padding: 0 .38rem; border-radius: 2px; border: 1px solid color-mix(in srgb, var(--hue, currentColor) 32%, transparent); background: color-mix(in srgb, var(--hue, currentColor) 13%, var(--raised)); color: color-mix(in srgb, var(--hue, currentColor) 62%, var(--ink))"
+        tasks:
+          # The page's own name and its filter, above the two columns. The heading is an h2
+          # for the reason the projects page's is: the h1 is the shell's banner.
+          "section.tasks": "display: grid; gap: .9rem"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.tasks > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
+          # One row of chips, ruled off from the list the way the mockup rules a strip off.
+          "section.tasks .filter": "display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: baseline; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding: .55rem 0"
+          "section.tasks .filter .says": "color: var(--faint); font-size: .75rem; text-transform: uppercase; letter-spacing: var(--tracking)"
+          "section.tasks .filter .tag": "border: 1px solid var(--rule); border-radius: 3px; padding: 0 .45rem; color: var(--faint); font-family: var(--mono); font-size: .92em; text-decoration: none; max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
+          "section.tasks .filter a.tag:hover": "color: var(--ink); background: var(--raised)"
+          # The chip the target is holding, marked in the same colour a picked row is.
+          "section.tasks .filter a.tag.on": "color: var(--ink); border-color: var(--mark); box-shadow: inset 0 -2px 0 var(--mark)"
+          # An axis the record offers nothing to narrow on: drawn, and visibly not a link.
+          "section.tasks .filter .tag.none": "border-style: dashed; opacity: .7"
+          "div.inbox": "display: grid; grid-template-columns: minmax(0, 18rem) minmax(0, 1fr); gap: 1.25rem; align-items: start"
+          # One column when there is not room for two: a list and a detail side by side on a
+          # phone is two columns of nothing.
+          "@media (max-width: 48rem)":
+            "div.inbox": "grid-template-columns: minmax(0, 1fr)"
+          "ul.inbox": "list-style: none; margin: 0; padding: 0; max-height: 70vh; overflow-y: auto"
+          "ul.inbox li": "min-width: 0"
+          # A row is one line, which is the budget the definition gives `tasks.list.item`:
+          # a row is what a task is noticed by, and the whole brief is the detail's. A long
+          # label is clipped here rather than cut in the markup, so the row keeps the
+          # record's own words and the reader gets the rest by picking it.
+          "ul.inbox a": "display: flex; gap: .5rem; align-items: baseline; padding: .35rem .4rem; color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--rule); box-shadow: inset 0 0 0 transparent; white-space: nowrap; overflow: hidden"
+          "ul.inbox .label": "flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis"
+          "ul.inbox a:hover": "background: var(--raised)"
+          "ul.inbox li.picked a": "box-shadow: inset 3px 0 0 var(--good); padding-left: .75rem; background: var(--raised)"
+          "ul.inbox .id": "color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "ul.inbox .state": "color: var(--mark); font-weight: 600; margin-left: auto"
+          "section.detail": "background: var(--raised); border: 1px solid var(--rule); border-radius: 4px; padding: .8rem 1.25rem; min-width: 0"
+          "section.detail h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; margin: 0 0 .5rem; overflow-wrap: anywhere"
+          "section.detail h2 .id": "color: var(--faint); font-family: var(--mono); font-size: .8em; margin-right: .6rem"
+          "section.detail dl": "display: grid; grid-template-columns: 6rem 1fr; gap: .2rem .75rem; margin: 0"
+          "section.detail dt": "color: var(--faint); font-size: .85em; text-transform: uppercase; letter-spacing: var(--tracking)"
+          "section.detail dd": "margin: 0; min-width: 0; overflow-wrap: anywhere"
+          "section.detail dd.none": "color: var(--faint)"
+          "section.detail dd ul": "list-style: none; margin: 0; padding: 0"
+          "section.detail dd .state": "color: var(--mark); font-weight: 600"
+        projects:
+          # The page's own heading is an h2 directly in the document's one element: the h1 is
+          # the shell's banner, and this page is the long form of one box of the board.
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "main > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
+          "ul.strip": "list-style: none; margin: 0; display: flex; flex-wrap: wrap; gap: .75rem 2.5rem; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding: .9rem 0"
+          "ul.strip li": "display: flex; gap: .4rem; align-items: baseline"
+          "ul.strip .mark": "color: var(--mark)"
+          # The strip is the mockup's: the number large in the serif, and what it counts
+          # underneath it in small capitals.
+          "ul.strip .title": "color: var(--faint); font-size: .75rem; text-transform: uppercase; letter-spacing: var(--tracking)"
+          "ul.strip .count": "color: var(--ink); font-family: var(--serif); font-size: 1.75rem; line-height: 1.1"
+          "ul.strip li.none .count, ul.strip li.none .title": "color: var(--faint); opacity: .6"
+          "ul.cards": "list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr))"
+          "ul.cards li": "background: var(--raised); border: 1px solid var(--rule); border-radius: 4px; padding: .8rem 1.25rem; display: grid; gap: .3rem; min-width: 0"
+          "ul.cards .name": "font-family: var(--serif); font-size: 1.1rem; font-weight: 500; overflow-wrap: anywhere"
+          "ul.cards .code": "color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "ul.cards .state": "color: var(--mark); font-weight: 600"
+          "ul.cards .stories": "color: var(--faint)"
+          "ul.cards .meter": "height: .3rem; background: var(--rule); border-radius: .15rem; overflow: hidden"
+          "ul.cards .meter span": "display: block; height: 100%; background: var(--good)"
+          "ul.cards .pulse": "color: var(--faint); display: flex; gap: .5rem; min-width: 0"
+          "ul.cards .pulse .spark": "color: var(--good); letter-spacing: .05em"
+        agents:
+          # One card per worker, its seats hanging under it. The card is the projects
+          # page's card, because it is the same thing — a thing with a name, a state and a
+          # list — and a second shape for it would be a second surface.
+          "section.agents ul.agents": "list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr))"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.agents > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
+          "section.agents ul.agents > li.worker": "background: var(--raised); border: 1px solid var(--rule); border-radius: 4px; padding: .8rem 1.25rem; display: grid; grid-template-columns: 1fr auto auto; gap: .2rem .75rem; align-items: baseline; min-width: 0"
+          "section.agents ul.agents > li.worker > span.name": "font-family: var(--serif); font-size: 1.1rem; font-weight: 500; overflow-wrap: anywhere"
+          "section.agents ul.agents > li.worker > span.seats": "color: var(--faint)"
+          "section.agents ul.agents > li.worker > span.cost": "color: var(--mark); font-family: var(--mono); font-size: .92em; font-weight: 600"
+          "section.agents ul.agents > li.worker > span.age": "color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "section.agents ul.agents ul.seats": "grid-column: 1 / -1; list-style: none; margin: .3rem 0 0; padding: 0; border-top: 1px solid var(--rule)"
+          "section.agents ul.agents ul.seats li": "display: flex; flex-wrap: wrap; gap: .1rem .6rem; padding: .15rem 0; min-width: 0"
+          "section.agents ul.agents ul.seats li .id, section.agents ul.agents ul.seats li .age, section.agents ul.agents ul.seats li .cost, section.agents ul.agents ul.seats li .model, section.agents ul.agents ul.seats li .effort, section.agents ul.agents ul.seats li .harness": "color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "section.agents ul.agents ul.seats li .what": "flex: 1 1 8rem; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; text-overflow: ellipsis"
+          "section.agents ul.agents ul.seats li .phase": "color: var(--mark); font-weight: 600"
+        cooking:
+          # A group per why. The one group that is not a refusal is marked in the good
+          # colour, so the page reads as *these are moving, these are not* at a glance.
+          "section.cooking": "border-top: 2px solid var(--rule); padding-top: .6rem"
+          "section.cooking h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; letter-spacing: -.01em; margin: 0 0 .4rem; display: flex; gap: .5rem; align-items: baseline"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.cooking[data-ui] > h2 + p.empty": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.cooking[data-ui] > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
+          "section.cooking h2 .mark": "color: var(--mark)"
+          "section.cooking h2 .count": "margin-left: auto; color: var(--faint); font-family: var(--mono); font-size: .8em"
+          "section.cooking.moving h2 .mark": "color: var(--good)"
+          "section.cooking ul": "list-style: none; margin: 0; padding: 0"
+          "section.cooking li": "display: flex; flex-wrap: wrap; gap: .1rem .75rem; padding: .1rem 0; min-width: 0"
+          "section.cooking li .code": "flex: 0 0 9rem; color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "section.cooking li .state": "flex: 0 0 9rem; color: var(--mark); font-weight: 600"
+          "section.cooking li .what": "flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere"
+          # The why is on every row and the heading says it too, so on a row it is quiet.
+          "section.cooking li .why": "color: var(--faint); font-size: .85em"
+          "section.cooking.moving li .state": "color: var(--good)"
+        ledger:
+          # Three sections, read top to bottom: what it bought, what it is taking, what
+          # bought nothing. The last is not coloured as an alarm — the page names the
+          # failures so they can be read, not so they can be winced at.
+          "section.ledger": "border-top: 2px solid var(--rule); padding-top: .6rem"
+          "section.ledger h2": "font-family: var(--serif); font-size: 1.25rem; font-weight: 500; letter-spacing: -.01em; margin: 0 0 .4rem"
+          "section.ledger p.total": "margin: 0 0 .5rem; color: var(--faint); display: flex; flex-wrap: wrap; gap: .5rem"
+          "section.ledger p.total .apiece": "margin-left: auto; font-family: var(--mono); font-size: .92em"
+          "section.ledger ol": "list-style: none; margin: 0; padding: 0"
+          "section.ledger li": "display: flex; flex-wrap: wrap; gap: .1rem .75rem; padding: .1rem 0; min-width: 0"
+          "section.ledger li .code": "flex: 0 0 9rem; color: var(--faint); font-family: var(--mono); font-size: .92em"
+          "section.ledger li .what": "flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere"
+          "section.ledger li .sum": "flex: 0 0 7rem; color: var(--mark); font-weight: 600"
+          "section.ledger li .why": "flex: 1 1 100%; color: var(--faint); font-size: .85em; overflow-wrap: anywhere"
+        sketches:
+          # A list you scan, and above it one bar of what a tick lets you do. Every row is a
+          # row and not a card, because the question a reader arrives with is "which of these
+          # did I draw", which is answered by reading down a column.
+          "section.sketches": "display: grid; gap: .9rem"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.sketches > h2": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
+          # Kept in the document and off the screen. The row of names already says which
+          # page this is, and repeating it cost a band of every window on every page.
+          # Hidden rather than deleted: it is still the heading a screen reader lands on,
+          # and a page whose only name is a highlighted tab has no name at all to anyone
+          # not looking at it.
+          "section.sketches > p.q": "position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0"
+          # The bar, ruled off above the list the way the mockup rules a strip off. The count
+          # of what is ticked pushes the buttons to the right, so the two acts sit together.
+          "section.sketches .bar": "display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; border-top: 2px solid var(--rule); padding-top: .6rem"
+          "section.sketches .bar .picked": "margin-right: auto; color: var(--faint); font-family: var(--mono); font-size: .9em"
+          "section.sketches .bar button": "font: inherit; font-size: .92em; border: 1px solid var(--rule); border-radius: 3px; background: var(--raised); color: var(--ink); padding: .25rem .7rem; cursor: pointer"
+          # The one act that makes something is the marked one. Removal is the plain button
+          # beside it: the mockup draws it in a red the signed palette does not hold, and a
+          # colour spelled here would be a colour nobody signed.
+          "section.sketches .bar button.primary": "border-color: var(--mark); color: var(--mark); font-weight: 600"
+          "section.sketches .bar button:hover": "background: var(--page)"
+          # Nothing ticked is nothing to act on, and the bar says so rather than acting on
+          # nothing: the script turns this off as soon as a tick goes on.
+          "section.sketches .bar button:disabled": "color: var(--faint); border-color: var(--rule); background: var(--raised); cursor: default"
+          # What a person is told when rows went. The list is shorter by exactly what they
+          # ticked, and a list being shorter is not a message — so the page says it.
+          "section.sketches p.removed": "display: flex; align-items: baseline; gap: .75rem; margin: 0; padding: .45rem .8rem; border: 1px solid var(--mark); border-radius: 3px; background: var(--raised); color: var(--mark)"
+          "section.sketches p.removed a": "margin-left: auto; color: var(--faint); font-family: var(--mono); font-size: .85em"
+          "section.sketches .hint": "color: var(--faint); font-size: .9em"
+          "section.sketches ul.sketches": "list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule)"
+          # The columns the mockup lines up: the tick, the id, the name and what it says, the
+          # kind, the state, when it was touched, and the way in.
+          "section.sketches ul.sketches li": "display: grid; grid-template-columns: auto 3.5rem minmax(0, 1fr) 6rem 11rem 8rem auto; gap: .9rem; align-items: baseline; padding: .65rem .2rem; border-bottom: 1px solid var(--rule); min-width: 0"
+          "section.sketches ul.sketches li:hover": "background: var(--raised)"
+          "section.sketches ul.sketches li.head": "padding-bottom: .35rem; color: var(--faint); font-size: .85em; font-weight: 600; text-transform: uppercase; letter-spacing: var(--tracking)"
+          "section.sketches ul.sketches li.head:hover": "background: none"
+          "section.sketches input[type=checkbox]": "accent-color: var(--mark); width: .95rem; height: .95rem"
+          "section.sketches .id": "color: var(--faint); font-family: var(--mono); font-size: .88em"
+          "section.sketches .name": "font-weight: 600; overflow-wrap: anywhere"
+          "section.sketches .name a": "color: var(--ink); text-decoration: none"
+          "section.sketches .name a:hover": "color: var(--mark); text-decoration: underline"
+          # What a sketch says of itself, cut to two lines. It is one line in the record, but
+          # one line of somebody's prose is three of a column this narrow, and a list whose
+          # rows are three deep is not a list you scan. Cut by the look and not in the markup,
+          # so the row keeps the record's own words and a reader gets the rest by opening it.
+          "section.sketches .name .says": "display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-weight: 400; color: var(--faint); font-size: .92em"
+          "section.sketches .kind": "color: var(--mark); font-family: var(--mono); font-size: .88em"
+          "section.sketches .state": "color: var(--faint); font-family: var(--mono); font-size: .88em"
+          # A sketch that earned a story, which is the one thing the column is read for.
+          "section.sketches .state.signed": "color: var(--good)"
+          "section.sketches .when": "color: var(--faint); font-family: var(--mono); font-size: .88em"
+          # The first of the two ways into a sketch, at the end of the row: the acts `ui.yaml`
+          # declares under `sketches.row`, which say what they say and go where they go
+          # there. Two of them — `view` and `edit` — so what separates them is one gap said
+          # once on the row of them rather than a margin each act carries, and the dot
+          # between is the look's own and not a character the page spells. The column never
+          # wraps: two short words that broke across two lines would make one row taller than
+          # the rest of the list for no reason a reader could see.
+          #
+          # Both stay quiet until they are pointed at, and neither is louder than the other.
+          # The signed sketch draws `edit` in the mark and in bold, which is a proposal
+          # calling out the word it is adding; on the page itself they are peers on every
+          # row, and a list of thirty rows with thirty bold links down it is a list nobody
+          # reads down.
+          "section.sketches .row-acts": "display: flex; gap: .4rem; align-items: baseline; white-space: nowrap"
+          "section.sketches .row-acts a": "color: var(--faint); text-decoration: none; font-size: .9em"
+          "section.sketches .row-acts a + a::before": 'content: "·"; margin-right: .4rem; color: var(--rule)'
+          "section.sketches .row-acts a:hover": "color: var(--mark); text-decoration: underline"
+          # …and the one that is open: the list gives way to it, so the drawing has the whole
+          # width, with the way back above it where a reader looks for it.
+          # An opened sketch is the page, not a panel on one. A drawing is a mockup or a
+          # reading and it was being shown through a letterbox: a frame of its own height
+          # inside a column inside a padded body, so it scrolled in a box that scrolled in a
+          # page — two bars for one document, and the mockup never wide enough to read as the
+          # thing it is drawing. So while one is open the surface gets out of the way. The
+          # banner, the title, the line it says of itself and its meta row are all in the list
+          # you came from; what is not there is the drawing.
+          #
+          # `:has()` rather than a class the page sets, because which document this is is
+          # already in the markup — `sketches.open` is only ever in it when one is open — and a
+          # second way of saying so is a second thing to keep true.
+          #
+          # padding-right is deliberately not touched: `html.docked body` keeps the dock's own
+          # column clear, and zeroing it here would put the drawing under the terminal.
+          "section.sketches .open": "display: block; gap: 0; border-top: 0; padding-top: 0"
+          # The other way in, and the second thing `ui.yaml` declares under this page: the
+          # switch the opened header wears, on its own line above the name. The line's own
+          # spacing is the design's and not the browser's — the box above is a grid that
+          # rules its rows apart, and a paragraph that kept the margin a browser gives a
+          # paragraph would space itself twice. Every other line of the open view already
+          # says so; this one did not, and said it in the browser's words instead.
+          # Everything the list already says, said again above the drawing. Gone while one is
+          # open — and gone by display rather than by not being written, so the words stay in
+          # the document for anything reading it rather than looking at it.
+          # Floated over the drawing rather than sitting above it: it holds the view/edit
+          # switch, so it has to stay reachable, but it must cost no height. Quiet until
+          # pointed at — it lies on somebody else's mockup.
+          "section.sketches .open .opened-head": "display: flex; align-items: center; gap: .6rem; position: fixed; top: .6rem; right: .6rem; z-index: 5; margin: 0; padding: .25rem .5rem; border: 1px solid var(--rule); border-radius: 999px; background: var(--raised); opacity: .55"
+          "section.sketches .open .opened-head:hover": "opacity: 1"
+          "section.sketches .open .opened-head h3": "display: none"
+          "section.sketches .open p.says": "display: none"
+          "section.sketches .open p.meta": "display: none"
+          # The body's own gutter, which is the frame's and right for a page of rows. A drawing
+          # is not rows. Top, left and bottom go; the right stays, because that is the dock's.
+          # The way back, floated over the drawing so it costs no height. Quiet until pointed
+          # at: it sits on somebody's mockup and must not be read as part of it.
+          "section.sketches .open p.back a": "display: inline-block; padding: .3rem .7rem; border-radius: 999px; border: 1px solid var(--rule); background: var(--raised); color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .8em; opacity: .55"
+          "section.sketches .open p.back": "position: fixed; top: .6rem; left: .6rem; z-index: 5; margin: 0; display: flex; align-items: center; gap: .5rem"
+          "section.sketches .open p.back .row-acts": "display: flex; gap: .5rem"
+          "section.sketches .open p.back a:hover": "opacity: 1; color: var(--mark); border-color: var(--mark); text-decoration: none"
+          # The second of the two ways into a sketch, and the one an opened sketch wears: the
+          # switch `ui.yaml` declares under `sketches.open.modes`. The header is the line it
+          # sits on, so the header is a row — the name reads from the left and the switch is
+          # pushed to the far end of it, where a control that changes the whole view belongs
+          # and where it is out of the way of a name long enough to wrap.
+          # One box in two halves, ruled down the middle, so the pair reads as a single switch
+          # with a side held rather than as two links that happen to sit beside each other.
+          # Set in the mono and in capitals, which is what this surface already does to a word
+          # that labels a thing instead of being read as prose.
+          "section.sketches .open .modes": "display: inline-flex; margin-left: auto; border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; background: var(--raised)"
+          "section.sketches .open .modes a": "padding: .25rem .7rem; color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .76rem; text-transform: uppercase; letter-spacing: var(--tracking)"
+          "section.sketches .open .modes a + a": "border-left: 1px solid var(--rule)"
+          "section.sketches .open .modes a:hover": "color: var(--mark)"
+          # The reading being shown, which the page marks `aria-current="page"`. Filled rather
+          # than merely coloured: the question the switch answers is which of the two you are
+          # in, and a reader should get that from the shape before they read the word. It
+          # comes last, so the side being shown keeps its fill under a pointer instead of
+          # offering to become what it already is. The fill is the mark and the word on it is
+          # the surface's own paper — no colour here the palette does not already hold.
+          "section.sketches .open .modes a[aria-current]": "background: var(--mark); color: var(--page)"
+          # In the list you came from, and in the drawing itself.
+          "section.sketches .open h3": "display: none"
+          "section.sketches .open h3 .id": "margin-right: .6rem; font-size: .8em"
+          "section.sketches .open p.meta .mono": "color: var(--faint); font-family: var(--mono); font-size: .88em; overflow-wrap: anywhere"
+          # The drawing itself, in a frame and at the width of the page. Tall, because a
+          # sketch of a surface is a surface: a box the height of a thumbnail shows a reader
+          # the top of it and asks them to guess the rest.
+          "section.sketches .open iframe.drawing": "display: block; width: 100%; height: 100vh; border: 0; border-radius: 0; background: var(--raised)"
+          # A row whose file is not on this machine. The record holds the path and the
+          # directory holds the picture, and the two can part company.
+          "section.sketches .open p.gone": "margin: 0; padding: 2rem; border: 1px dashed var(--rule); border-radius: 4px; color: var(--faint); font-family: var(--mono); font-size: .9em; text-align: center; overflow-wrap: anywhere"
+    # There is no bar. Every key the cockpit's bar names is a verb or a move, and the web
+    # surface offers neither: it is read, and what changes wecode is the cli's.
+    bars: none
 
-# The tree's own page, declared here for the same reason the detail page is: the cockpit
-# and a record both had a design and the outline had none, so what a row of the tree is
-# supposed to say was whatever outline.tsx happened to say it said — and what it says today
-# is the description first, with the id, the entity and the state buried behind however
-# long that description ran and the description itself cut at the right edge.
-#
-# A reader scanning fifty rows is looking for one of three things — a number, a kind or a
-# state — and all three are short and all three are where the prose has pushed them. So the
-# three that are scanned lead the row, in the order they narrow it, and the one that varies
-# in width is last and keeps whatever width is left. This is the same rule the board's four
-# columns already follow.
-outline:
-  chrome: border
-  # What a row is made of, in the order it is written. The three lead columns are fixed to
-  # their own longest value; the description is what is left of the line.
-  row:
-    order: [id, entity, state, description]
-    entry: "{id}  {entity}  {state}  {description}"
-    leads_with: id
-    columns:
-      id: { width: longest, align: right }
-      entity: { width: longest, align: left }
-      state: { width: longest, align: left }
-      description: { width: rest, align: left }
-    # The line is a sentence once the three columns are past, so it is not cut: what will
-    # not fit continues under where the description began, never under the columns.
-    overflow: wrap
-    wrap_under: description
-    truncate: false
+  # The SVG projection of the same tree, which is how a design is shown to a person before
+  # any of it is drawn in a terminal. It draws one rectangle per box and the box's own
+  # name, and it draws nothing else — so every statement the terminal half makes is one it
+  # cannot honour and is not asked to. A rule filled to the width is a line; capitals are a
+  # way of making a head louder in a medium with one typeface; a bar pinned to the last
+  # line is a box at the bottom. Saying so here is what stops a renderer being marked down
+  # for declining to be a terminal.
+  wireframe:
+    chrome: outline
+    draws: [box, title]
+    glyphs: none
+    fill: none
+    case: as_written
+    bars: as_boxes
 
-  # Depth is drawn, not counted. A row hangs off its parent by a tee, or by an elbow when
-  # it is the last of its siblings, and every level above it carries a rail exactly where
-  # that branch is still going. Indentation alone says the same thing only to a reader
-  # willing to count spaces, which at depth nine nobody is.
-  depth:
-    as: connector
-    in: description
-    every_row: true
-    indent: 2
-    tee: "├─"
-    elbow: "└─"
-    rail: "│ "
-    clear: "  "
-    # Sibling roots are separate trees rather than one branch, so nothing hangs off a root.
-    root: flush
+shared:
+  page: &page
+    # Drawn above the boxes: a dead runner or an unreadable schema is the reason every box
+    # under it is wrong, so it is read before the board and not after it.
+    lead: services
+    # The rest of the page, in order, is views.yaml `page.order`. It is not copied here.
+    boxes: views.yaml#page.order
 
-# The last line is the bar, and the one line the App has to say anything on sits directly
-# above it. Both always have to be readable, which is why the body states its height rather
-# than flexing into whatever is left.
-bars:
-  key_bar: last
-  status: above_key_bar
+  # What a record's own screen looks like, declared beside the cockpit rather than left in
+  # screens.tsx. The cockpit answers what is happening; a detail page answers what one
+  # record is, and until now the only way to ask what it is supposed to show was to read
+  # the code that shows it. Two screens are records — a node and an assignment — and they
+  # share one block so the blocks line up with each other instead of each choosing its own
+  # gutter.
+  detail: &detail
+    screens: [node, assignment]
+    chrome: border
+    # A page is named after its work and its state, never after its key: the reader who
+    # pressed enter already knows the id, so a title of `task #3` spends its line saying
+    # what they just typed. The assignment is the one record with no work of its own to be
+    # named by, so it falls back to the id.
+    title:
+      node: "{what} · {state}"
+      assignment: "assignment #{id} · {state}"
+    # The block: `name  value`, names left-aligned into a gutter as wide as the longest of
+    # them, and a value nobody wrote reading as a dash rather than as a gap.
+    block:
+      entry: "{name}  {value}"
+      gutter: longest_name
+      align: left
+      empty: "—"
+      # A page given the whole terminal wraps; a block sized to its own fields clips,
+      # because it has no line to wrap onto. A wrapped value continues under the value,
+      # never under the name.
+      overflow:
+        node: clip
+        assignment: wrap
+      wrap_under: value
+    # What each record says about itself. Neither list restates the other's half: the board
+    # already decided what a row is worth saying, and what the four columns had no room for
+    # is the rest.
+    fields:
+      node: [entity, id, title, state, children]
+      assignment: [entity, id, objective, state, budget, beat, worktree, detail]
+    # A node is a branch, so its screen carries the list under it. An assignment is a leaf
+    # and carries none.
+    children:
+      of: node
+      title: "children ({count}) · {tally}"
+      columns: ["#", what, state, detail]
+      empty: "nothing under it"
+    # The four rungs the outline stops short of. They are proof, not work: they say what a
+    # story owes and what a task was accepted on, and the only moment that answer is wanted
+    # is the moment someone is looking at that story or that task. So they are a second
+    # section on the node page, under the children and read the same way — the page the row
+    # already opens to, not a page of their own, because proof with its subject off-screen
+    # is a statement about nothing.
+    proof:
+      of: node
+      under: children
+      # A story owes a requirement, which owes its criteria, which owe their tests; a task
+      # is proven by its own tests. Both are one section, and the nesting is the same
+      # indent the outline spends on depth rather than three titled sub-sections.
+      entities:
+        story: [requirement, acceptance_criteria, acceptance_test]
+        task: [task_test]
+      nesting: indent
+      indent: 2
+      title: "proof ({count}) · {tally}"
+      columns: [mark, statement, state]
+      empty: "nothing proves it yet"
 
-# Every key the screen answers, in the order a reader scans them. A key the bar omits is a
-# way in nobody can find, so a key is dropped only where the screen refuses it: the
-# dashboard has nothing to pop, and only the outline folds.
-key_bar:
-  gap: "  "
-  entry: "{key} {does}"
-  keys:
-    - { key: "j/k", does: move }
-    - { key: "g/G", does: top/end }
-    - { key: "+/-", does: fold, only_on: [outline] }
-    - { key: "enter", does: open }
-    - { key: "esc", does: back, except_on: [dashboard] }
-    - { key: "v", does: box }
-    - { key: "v t", does: outline }
-    - { key: "a", does: act }
-    - { key: "r", does: refresh }
-    - { key: "q", does: quit }
+    # A page drawing past its own border overwrites the two lines that must stay readable,
+    # so what will not fit is dropped and counted rather than drawn.
+    overrun: "… and {count} more"
 
-# The signed-off screen. Every element the proposal shows is named here, so the board can
-# be gated against a picture the code did not write.
-proposal:
-  # One frame around the whole cockpit, and the two rails of that frame are the only
-  # chrome that is allowed to hold anything: what workspace this is and whether the
-  # machine is alive above, how to move below.
-  frame:
-    outer: border
-    top_rail: [workspace, projects, beat]
-    bottom_rail: [keys]
-    top_rail_entry: "{workspace}  {projects} projects  beat {beat}"
-    bottom_rail_entry: "{key} {does}"
+    # The foot of a detail page is two lines, not one. The cockpit's bar is a flat list
+    # because every key on it does the same thing wherever the cursor is; a record's page
+    # answers two different questions at once — what can be done to this record, and how to
+    # get back out — and a single line runs them together, so the key that acts on the
+    # record sits between the key that leaves the page and the key that quits the program.
+    # The two levels split them, and nothing else about the bar changes: same gap, same
+    # entry.
+    footer:
+      lines: 2
+      sits: last
+      gap: "  "
+      entry: "{key} {does}"
+      # The global level is drawn last, on the terminal's final line, because that is where
+      # it is on every other screen: a key whose position moves with the page is a key the
+      # reader has to look for. The record level is the one that changes, so it is the one
+      # that moves, and it sits above.
+      order: [record, global]
+      global_level: last_line
+      levels:
+        # What this page can do to the record it is showing, including moving the cursor
+        # through the children it lists.
+        - level: record
+          keys: ["j/k", "g/G", enter, a]
+        # What means the same thing on every screen, in the order the cockpit's bar already
+        # names them.
+        - level: global
+          keys: [esc, v, "v t", r, q]
+      # Neither level invents a key. Every key here is one `key_bar` already declares, and
+      # a key `key_bar` withholds from this screen is withheld here too — the detail page
+      # does not fold, so `+/-` appears on neither level.
+      keys_from: key_bar
+      omits: ["+/-"]
 
-  # One line per project, read before any section. It answers how fast the project is
-  # moving and what is blocking it without opening anything.
-  pulse:
-    per: project
-    line: "{tag} {name} {version}  {seats}  {throughput} {rate}  {flags} {crosses}"
-    parts: [tag, name, version, seats, throughput, rate, flags, crosses]
-    seats: { as: dots, held: "●", free: "○" }
-    throughput: { as: sparkline, blocks: 10, glyphs: "▁▂▃▄▅▆▇█" }
-    rate: "{done}/h"
-    flags: { of: needs_you, mark: "⚑", key: n }
-    crosses: { of: failed, mark: "✗", key: f }
-    # A count carries the key that opens it, raised, so the number and the way in are one
-    # token and neither costs a word.
-    count: "{count}{key}"
-    key_as: superscript
+    # An approval is an assignment whose objective is a design, and the operator is being
+    # asked to sign a picture. The page names the design and stops there, so the signature
+    # is asked for with no way to look at what is being signed. It is the assignment page
+    # with one line added — the path the mockup was written to — and that line is a path
+    # because the operator opens the file in something that can draw an SVG.
+    approval:
+      of: assignment
+      adds: [mockup]
+      # Not a second rendering. A terminal cannot draw an SVG, and a text projection beside
+      # the file would be a second answer to what the design looks like — the one the
+      # operator signed would then be whichever they happened to read.
+      projection: none
+      projects_inline: false
+      forbidden: [wireframe, svg, ascii, thumbnail]
+      # One entry of the same block every other field is drawn in: no gutter of its own, no
+      # alignment of its own, the path as its value. A design nobody has projected yet has
+      # no path, and says so rather than offering a line that opens nothing.
+      mockup:
+        name: mockup
+        value: path
+        entry: "{name}  {path}"
+        opens: file
+        empty: "not projected yet"
 
-  # Each section's mark is its state in one glyph. A head opens with that glyph in column
-  # zero — no dashes before it, none after — and pushes its count to the right edge.
-  marks:
-    needs_you: "⚑"
-    running: "●"
-    queue: "⧖"
-    cooking: "✳"
-    planned: "○"
-    delivered: "✓"
-    dropped: "✗"
-  head:
-    opens_with: mark
-    begins_at_column: 0
-    dashes: none
-    case: upper
-    line: "{mark} {title}"
-    count_at: right
-    count: "{count}{key}"
-    key_as: superscript
+  # The tree's own page, declared here for the same reason the detail page is: the cockpit
+  # and a record both had a design and the outline had none, so what a row of the tree is
+  # supposed to say was whatever outline.tsx happened to say it said — and what it says
+  # today is the description first, with the id, the entity and the state buried behind
+  # however long that description ran and the description itself cut at the right edge.
+  #
+  # A column is a shallow row paying the deepest row's width. Four of them — a tree cell, an
+  # id, a kind and a state — spent the tree's whole width on every row, and bought a line
+  # that is mostly blank; the kind and the state only fit their columns once they were cut
+  # to four characters, which is the same cost again paid by the reader. So the row is one
+  # string: the label leads because the label is what the row is, and its particulars follow
+  # it in full words, joined by the separator the rest of the screen's prose already uses.
+  # Nothing is padded, so a line is as long as it has something to say and no longer.
+  outline: &outline
+    chrome: border
+    # What a row is made of. `order` is the order the one string is written in, not a set of
+    # columns — there are none.
+    row:
+      as: sentence
+      order: [marker, label, id, kind, state, rollup]
+      entry: "{marker} {label} · #{id} · {kind} · {state} · {rollup}"
+      leads_with: label
+      join: " · "
+      # A column is the thing this row is not. Nothing is padded to anything.
+      columns: none
+      pad: false
+      # A row is a sentence, so it is not cut at the right edge: what will not fit continues
+      # under where the label began. Three lines is where that stops — a row allowed to run
+      # on is a row that can push the rest of the tree off the page — and the third line
+      # ends in the elision rather than mid-word.
+      overflow: wrap
+      wrap_under: label
+      truncate: false
+      max_lines: 3
+      elide: "…"
+      # A part with nothing to say is dropped with its separator, never written empty.
+      omit_empty: true
 
-  # A row is a sentence, so it is not cut: what will not fit continues on the next line,
-  # indented to where the text began and never under the mark. What it cost sits at the
-  # end as a gauge, because a number alone does not say how near the end it is.
-  row:
-    leads_with: mark
-    overflow: wrap
-    wrap_under: text
-    truncate: false
-    spend:
-      as: gauge
-      blocks: 8
-      glyphs: "█░"
-      shows: [tokens, scope]
-      entry: "{gauge} {tokens} {scope}"
+    # How far down the tree goes. The ledger is nine levels deep, and four of them are not
+    # work at all — a requirement, its criteria, the tests that accept it and the tests a
+    # task is proven by are the proof that a story was done, not things being done. Drawn as
+    # rows they outnumber the work: one story with three requirements carries a dozen rows
+    # under it before a single task appears, and the operator scrolling for what is moving
+    # scrolls past all of them. So the tree stops at the five levels that are work, and the
+    # proof is read on the page of the row it proves, where it is being asked for.
+    levels:
+      count: 5
+      shows: [project, release, epic, story, task]
+      # Not hidden behind a fold. A folded row still costs its line and still says there is
+      # something under it; these are on another page entirely.
+      omits: [requirement, acceptance_criteria, acceptance_test, task_test]
+      omitted_to: detail
+      fold_reaches: task
+      # What the *web* tree does with those same four, which is not what a terminal can
+      # afford to do with them. The cockpit's outline is one box of a screen that is a
+      # fixed number of rows tall, so a proof row drawn there is a work row taken away; a
+      # page in a browser is as long as it needs to be, and a row inside a shut fold costs
+      # the reader nothing at all until they open it.
+      #
+      # So on the web the four are levels the tree shows: in the record's own order, under
+      # the story they prove, each folding like the levels above it. And they arrive open,
+      # so the page lands at task level — the task is the row somebody is at, and a page
+      # that arrives at the story asks every reader to click three times to reach the one
+      # thing that is being worked. The disclosures are still there to shut.
+      web:
+        # The web tree is anchored at the story; the cockpit's cannot be. The cockpit is one
+        # box of a fixed height and needs the whole shape in it. A page in a browser is opened
+        # to work a story, and project, release and epic answer where a story lives — a
+        # question asked once above the tree, not answered again on every row.
+        #
+        # So the rungs here are the story, the criterion, the test that proves it and the task
+        # that must make it pass. The requirement is left out because 502 of 583 hold exactly
+        # one criterion, so it is a rung wrapping a single child. The task_test is left out
+        # because it is the ninth and is read on the task's own page.
+        #
+        # `shared.outline.levels` above is unchanged, and the cockpit still shows its five —
+        # packages/tui/test/the-tree-is-five-levels.test.ts holds it to them.
+        shows: [story, acceptance_criteria, acceptance_test, task]
+        omits: [project, release, epic, requirement, task_test]
+        # Nothing arrives shut, which is what makes the task the level the page lands at. An
+        # empty list is an answer here and an absent key is still a refusal: a tree folded to
+        # a depth nothing declared is a tree nothing gates. Name a level and it arrives shut,
+        # with everything above it — so `[acceptance_criteria]` would land the page on the
+        # stories again.
+        folds: []
 
-  # Queue and cooking are each one row deep. Two heads for two rows is chrome outspending
-  # content, so they share the one head line and split it.
-  shared_heads:
-    - sections: [queue, cooking]
-      head: one_line
-      rows_each: 1
+    # Depth is the indent and nothing else. The rail said what the indent was already
+    # saying, at two columns a level on every level above the row — at depth nine that is
+    # eighteen columns of the label's width spent repeating the label's position.
+    depth:
+      as: indent
+      every_row: true
+      indent: 2
+      # Sibling roots are separate trees rather than one branch, so a root is not indented.
+      root: flush
 
-  # The foot of the board is the whole tree in one line: what is planned, what came out,
-  # what was dropped, and the two ways in to all of it.
-  tally:
-    line: one
-    entries: [planned, delivered, dropped, tree, all]
-    entry: "{title} {count}{key}"
-    key_as: superscript
-    keys: { planned: p, delivered: d, dropped: x, tree: t, all: a }
+    # The one mark a row carries, and it is carried only by the rows it says something
+    # about: a row with children can be opened or closed, so it shows which of the two it is
+    # and therefore what pressing the fold key does. A row with no children has nothing to
+    # fold, so it is marked with nothing — a mark on every row would say only "this is a
+    # row", which the row already says.
+    marker:
+      on: parents
+      leads_row: true
+      width: 1
+      open: "-"
+      closed: "+"
+      leaf: " "
+      says: fold_key
+
+  # Every key the screen answers, in the order a reader scans them. A key the bar omits is a
+  # way in nobody can find, so a key is dropped only where the screen refuses it: the
+  # dashboard has nothing to pop, and only the outline folds. Which keys a screen answers is
+  # the screen, not the drawing of it — a picture that left one out would be a picture of a
+  # different product — so the list is shared and only the two strings that write it out on
+  # a line of characters are the terminal's.
+  key_bar: &key_bar
+    gap: "  "
+    entry: "{key} {does}"
+    keys:
+      - { key: "j/k", does: move }
+      - { key: "g/G", does: top/end }
+      - { key: "+/-", does: fold, only_on: [outline] }
+      - { key: "enter", does: open }
+      - { key: "esc", does: back, except_on: [dashboard] }
+      - { key: "v", does: box }
+      - { key: "v t", does: outline }
+      - { key: "a", does: act }
+      - { key: "r", does: refresh }
+      - { key: "q", does: quit }
+
+  # The signed-off screen. Every element the proposal shows is named here, so the board can
+  # be gated against a picture the code did not write. It is shared because it is what was
+  # signed: the operator put their name to the screen, not to one renderer's way of getting
+  # there, and a proposal filed under a renderer would be a signature on a drawing.
+  proposal: &proposal
+    # One frame around the whole cockpit, and the two rails of that frame are the only
+    # chrome that is allowed to hold anything: what workspace this is and whether the
+    # machine is alive above, how to move below.
+    frame:
+      outer: border
+      top_rail: [workspace, projects, beat]
+      bottom_rail: [keys]
+      top_rail_entry: "{workspace}  {projects} projects  beat {beat}"
+      bottom_rail_entry: "{key} {does}"
+
+    # One line per project, read before any section. It answers how fast the project is
+    # moving and what is blocking it without opening anything.
+    pulse:
+      per: project
+      line: "{tag} {name} {version}  {seats}  {throughput} {rate}  {flags} {crosses}"
+      parts: [tag, name, version, seats, throughput, rate, flags, crosses]
+      seats: { as: dots, held: "●", free: "○" }
+      throughput: { as: sparkline, blocks: 10, glyphs: "▁▂▃▄▅▆▇█" }
+      rate: "{done}/h"
+      flags: { of: needs_you, mark: "⚑", key: n }
+      crosses: { of: failed, mark: "✗", key: f }
+      # A count carries the key that opens it, raised, so the number and the way in are one
+      # token and neither costs a word.
+      count: "{count}{key}"
+      key_as: superscript
+
+    # Each section's mark is its state in one glyph. A head opens with that glyph in column
+    # zero — no dashes before it, none after — and pushes its count to the right edge.
+    marks:
+      needs_you: "⚑"
+      running: "●"
+      queue: "⧖"
+      cooking: "✳"
+      planned: "○"
+      delivered: "✓"
+      dropped: "✗"
+    head:
+      opens_with: mark
+      begins_at_column: 0
+      dashes: none
+      case: upper
+      line: "{mark} {title}"
+      count_at: right
+      count: "{count}{key}"
+      key_as: superscript
+      # The lead section is no filter over the board and `v` does not open it, so it is the
+      # one head with neither a count nor a letter: it is the line and nothing else.
+      countless: [services]
+      # One box's count is a fraction, because its rows are not just rows: a running row is
+      # holding one of the fleet's seats. `3` says how much is moving and nothing about
+      # whether the machine is full — three of four seats is a workspace with nothing spare,
+      # three of twenty is nineteen workers standing idle, and the operator's next move is
+      # different in each. So the seated box's `{count}` is `held/seats`, and every other
+      # box's is the plain number. A workspace with no workers has no seats to be short of
+      # and falls back to the count.
+      seated:
+        box: running
+        of: workers
+        count: "{held}/{seats}"
+      # The hint is on every head, not on the heads whose count happened to be worth
+      # raising. A head with no letter on it is a section the operator can see and cannot
+      # open, and which sections those are would then be decided by which ones had rows
+      # that day.
+      hint_on: every_head
+      hint: "{key}"
+      # Which letter is not decided here. views.yaml already gave each box one, and a second
+      # copy of the seven letters is two lists that must agree with nothing checking them.
+      # The proposal names two sections in shorter words than the board does, so what is
+      # written here is which box each head is — the letter is read from there.
+      keys:
+        from: views.yaml#views.*.key
+        sections:
+          needs_you: needs_human
+          running: running
+          queue: queued
+          cooking: cooking
+          planned: planned
+          delivered: delivered
+          dropped: dropped
+
+    # A row is a sentence, so it is not cut: what will not fit continues on the next line,
+    # indented to where the text began and never under the mark. What it cost sits at the
+    # end as a gauge, because a number alone does not say how near the end it is.
+    row:
+      leads_with: mark
+      overflow: wrap
+      wrap_under: text
+      truncate: false
+      spend:
+        as: gauge
+        blocks: 8
+        glyphs: "█░"
+        shows: [tokens, scope]
+        entry: "{gauge} {tokens} {scope}"
+
+    # Every section gets its own head. Queue and cooking used to share one line to save the
+    # line, and what that line cost was the pair's two counts and two hints collapsed into
+    # one: `q` and `c` open different boxes, and a head that names both sections can only
+    # carry one of the letters, so half the pair was unopenable from the head that named it.
+    # Waiting for a slot and being stuck are also two different questions, and a shared head
+    # reads as one. A hint on every head is what a head is for, so no two sections share one.
+    heads: per_section
+    shared_heads: []
+
+    # The foot of the board is the whole tree in one line: what is planned, what came out,
+    # what was dropped, and the two ways in to all of it.
+    tally:
+      line: one
+      entries: [planned, delivered, dropped, tree, all]
+      entry: "{title} {count}{key}"
+      key_as: superscript
+      keys: { planned: p, delivered: d, dropped: x, tree: t, all: a }
+
+# The names the gate's tests still reach a block by. Aliases of the one definition above,
+# never a second copy of it: `page:` here and `shared.page` are the same node, so an edit to
+# either is an edit to both and the two can never drift. They stay until the files that read
+# them are in a scope that can rename them.
+page: *page
+detail: *detail
+outline: *outline
+key_bar: *key_bar
+proposal: *proposal
+dashboard: *dashboard
+pages: *pages
+bars: *bars

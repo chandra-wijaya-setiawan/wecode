@@ -1,6 +1,7 @@
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Maker, open } from "@wecode/core";
 import {
@@ -10,6 +11,7 @@ import {
   type WorkerAdapter,
   type Work,
 } from "../src/index.js";
+import { choreBrief, NO_TESTS, type BriefContext } from "../src/foreman/prompt.js";
 import { tmp } from "../../core/test/tmpdir.js";
 
 /** An adapter that reports whatever the test queued, so the foreman can be exercised
@@ -581,5 +583,59 @@ describe("the lessons in a brief", () => {
 
     const brief = fake.work.find((w) => w.id === id);
     expect(brief?.lessons).toBeUndefined();
+  });
+});
+
+/** The dispatch prompt is its own module.
+ *
+ *  What a worker reads changes for reasons that have nothing to do with sessions,
+ *  worktrees or phases, so the words live in `foreman/prompt.ts` and the foreman only
+ *  looks the chore up. These hold the module to what the foreman used to say, and hold
+ *  the foreman to no longer saying it. */
+describe("the dispatch prompt", () => {
+  const context = (over: Partial<BriefContext> = {}): BriefContext => ({
+    kind: "merge",
+    check: "story/password-reset merges cleanly",
+    target_type: "story",
+    target: "password-reset",
+    branch: "story/password-reset",
+    base: "master",
+    ...over,
+  });
+
+  it("is reachable without the foreman, so the words can be changed on their own", () => {
+    expect(typeof choreBrief).toBe("function");
+    expect(choreBrief(context())).toContain("This is a merge chore for story/password-reset.");
+  });
+
+  it("says each kind's own reason, because a merge and a refresh run the same commands", () => {
+    expect(choreBrief(context({ kind: "merge" }))).toContain("was delivered and will not merge into master");
+    expect(choreBrief(context({ kind: "refresh" }))).toContain("is still in flight and has fallen behind master");
+    expect(choreBrief(context({ kind: "sweep" }))).toContain("This is a sweep chore for story password-reset.");
+  });
+
+  it("carries the check the record stores, so the worker is judged by what it was told", () => {
+    expect(choreBrief(context({ check: "no branch is behind" }))).toContain('The record carries it as "no branch is behind".');
+  });
+
+  it("gives a kind with no brief of its own a usable one rather than nothing", () => {
+    expect(choreBrief(context({ kind: "tidy", check: "the tree is clean" })).split("\n")[0]).toBe(
+      "tidy story password-reset. The check: the tree is clean.",
+    );
+  });
+
+  it("ends every kind on the line that countermands 'write the tests that prove your work'", () => {
+    for (const kind of ["merge", "refresh", "sweep", "tidy"]) {
+      const said = choreBrief(context({ kind })).split("\n");
+      expect(said[said.length - 1], kind).toBe(NO_TESTS);
+    }
+    expect(NO_TESTS).toContain("Write no new tests");
+  });
+
+  it("is no longer written in foreman.ts, which is what the move means", () => {
+    const foreman = readFileSync(fileURLToPath(new URL("../src/foreman.ts", import.meta.url)), "utf8");
+    expect(foreman).not.toContain("This is a merge chore for");
+    expect(foreman).not.toContain("Write no new tests");
+    expect(foreman).toContain('from "./foreman/prompt.js"');
   });
 });

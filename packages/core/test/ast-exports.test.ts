@@ -1,8 +1,27 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readExports, type ExportedSymbol } from "../src/ast.js";
 import { tmp } from "./tmpdir.js";
+import { spawn } from "node:child_process";
+
+/** Runs `body` with the host deliberately busy, so a verdict reached here is the verdict the
+ *  test means rather than one that only holds on an idle machine. */
+async function underLoad<T>(body: () => Promise<T> | T): Promise<T> {
+  const spin = Array.from({ length: 4 }, () =>
+    spawn(process.execPath, ["-e", "for (;;) Math.sqrt(Math.random());"], { stdio: "ignore" }),
+  );
+  try {
+    return await body();
+  } finally {
+    for (const p of spin) p.kill("SIGKILL");
+  }
+}
+
+/** Nothing here means a duration: every assertion is about what the parse says, so the test
+ *  waits for the parse to finish however loaded the host is. A deadline would only turn a
+ *  busy machine into a failure. */
+vi.setConfig({ testTimeout: 0, hookTimeout: 0 });
 
 /** Writes `files` into a fresh directory and returns the path of the first one, which is
  *  the module under test. */
@@ -87,5 +106,18 @@ describe("readExports", () => {
   it("refuses a file that does not parse rather than reporting the exports it can see", () => {
     const file = module({ "a.ts": `export const good = 1;\nfunction broken( {` });
     expect(() => readExports(file)).toThrow(/does not parse/);
+  });
+
+  it("reaches the same verdicts with the host under load, because it waits for the parse", async () => {
+    const good = module({
+      "a.ts": `export * from "./other.js";\nexport const own = 1;`,
+      "other.ts": `export function borrowed(): void {}`,
+    });
+    const bad = module({ "a.ts": `export const good = 1;\nfunction broken( {` });
+
+    await underLoad(() => {
+      expect(kinds(readExports(good))).toEqual({ own: "variable", borrowed: "function" });
+      expect(() => readExports(bad)).toThrow(/does not parse/);
+    });
   });
 });

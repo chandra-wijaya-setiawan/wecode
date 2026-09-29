@@ -7,10 +7,27 @@ let db: DatabaseSync;
 let tree: ReturnType<typeof seed>;
 let engine: Engine;
 
+/** The attempt record `task.finish` reads: a branch of the task's own carrying a commit.
+ *  Since the second guard on `every_task_test_settled` went in, settled tests alone do not
+ *  finish a task — the record has to name work, and only an attempt writes a sha. */
+const wroteACommit = (task: number, sha = "c0ffee0"): void => {
+  db.prepare(
+    "INSERT OR IGNORE INTO worker (id,slug,name,role,kind,created_at,updated_at) VALUES (1,'w','w','engineer','agent','t','t')",
+  ).run();
+  db.prepare(
+    `INSERT INTO assignment (slug,objective_type,objective_id,worker_id,scope,budget,worktree,phase,kind,commit_sha,spent,created_at,updated_at)
+     VALUES (?,'task',?,1,'{}','{}','/tmp','succeeded','work',?,'{}','t','t')`,
+  ).run(sha, task, sha);
+};
+
 beforeEach(() => {
   db = freshDb();
   tree = seed(db);
   engine = new Engine(db);
+  // These are tests about the cascade, not about the branch: the task's attempt wrote a
+  // commit, so `finish` turns on the tests alone. What the other guard refuses is the
+  // subject of "a task finishes on its own work" below.
+  wroteACommit(tree.task);
   // These are tests about the cascade, not about `test_has_been_red`: the acceptance_test
   // has been watched failing at its base, so passing it is legal and what follows is the
   // cascade. What that guard refuses is red-at-base.test.ts's subject.
@@ -95,6 +112,42 @@ describe("the cascade", () => {
     engine.apply("story", tree.story, "deliver", "chief");
     expect(db.prepare("SELECT count(*) AS n FROM ledger").get()).toEqual(before);
     expect(stateOf(db, "story", tree.story)).toBe("in_progress");
+  });
+});
+
+describe("a task finishes on its own work", () => {
+  /** The rule that replaced the unconditional pass → done cascade. A passing task_test
+   *  still fires `finish`, but only where the record says something was written. */
+  it("does not finish a task whose branch holds no commit of its own", () => {
+    db.prepare("DELETE FROM assignment").run();
+    engine.apply("task", tree.task, "start", "chief");
+    const r = engine.apply("task_test", tree.taskTest, "pass", "runner");
+
+    expect(r.ok).toBe(true);
+    expect(stateOf(db, "task_test", tree.taskTest)).toBe("passed");
+    expect(stateOf(db, "task", tree.task)).toBe("ready");
+    expect(r.ok && r.changes.map((c) => c.entity)).toEqual(["task_test"]);
+  });
+
+  it("does not finish it in the sweep either", () => {
+    db.prepare("DELETE FROM assignment").run();
+    engine.apply("task", tree.task, "start", "chief");
+    engine.apply("task_test", tree.taskTest, "pass", "runner");
+    expect(engine.settle()).toEqual([]);
+    expect(stateOf(db, "task", tree.task)).toBe("ready");
+  });
+
+  it("finishes it once an attempt records one, and says why it refused before", () => {
+    db.prepare("DELETE FROM assignment").run();
+    engine.apply("task", tree.task, "start", "chief");
+    engine.apply("task_test", tree.taskTest, "pass", "runner");
+
+    const refused = engine.apply("task", tree.task, "finish", "chief");
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.why).toContain("holds no commit of its own");
+
+    wroteACommit(tree.task);
+    expect(engine.settle().map((c) => `${c.entity}:${c.to}`)).toEqual(["task:done"]);
   });
 });
 

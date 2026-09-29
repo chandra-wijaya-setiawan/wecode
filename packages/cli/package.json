@@ -10,7 +10,9 @@
   },
   "dependencies": {
     "@wecode/core": "workspace:*",
-    "@wecode/explorer": "workspace:*"
+    "@wecode/explorer": "workspace:*",
+    "@wecode/painter": "workspace:*",
+    "yaml": "^2.9.1"
   },
   "bin": {
     "wecode": "./dist/bin.js"

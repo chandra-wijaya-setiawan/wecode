@@ -35,6 +35,19 @@ beforeEach(() => {
   }
 });
 
+/** The attempt record `task.finish` reads: a branch of the task's own carrying a commit.
+ *  Settled task_tests alone no longer finish a task — `every_task_test_settled` asks the
+ *  record for work too — so a fixture that means to see a task done has to write one. */
+function wroteACommit(task: number, sha: string): void {
+  db.prepare(
+    "INSERT OR IGNORE INTO worker (id,slug,name,role,kind,created_at,updated_at) VALUES (1,'w','w','engineer','agent','t','t')",
+  ).run();
+  db.prepare(
+    `INSERT INTO assignment (slug,objective_type,objective_id,worker_id,scope,budget,worktree,phase,kind,commit_sha,spent,created_at,updated_at)
+     VALUES (?,'task',?,1,'{}','{}','/tmp','succeeded','work',?,'{}','t','t')`,
+  ).run(sha, task, sha);
+}
+
 function readyTask(artefact: string, acceptance = "true"): { task: number; taskTest: number; acceptance: number } {
   const at = make.acceptanceTest(criteria, `proof-${artefact}`, "script", acceptance);
   const task = make.task(at, `do-${artefact}`, { role: "engineer", scope: { write: ["src/**"], tools: [] } });
@@ -45,6 +58,7 @@ function readyTask(artefact: string, acceptance = "true"): { task: number; taskT
   // Somebody watched it fail at the base before the work began; without that record
   // `test_has_been_red` refuses the pass these tests are about.
   recordRed(db, at);
+  wroteACommit(task, `c0ffee${task}`);
   return { task, taskTest, acceptance: at };
 }
 

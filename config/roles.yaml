@@ -15,7 +15,7 @@ roles:
       # packages/core/test/ceilings-cover-the-schema.test.ts, which refuses any source
       # directory this list cannot reach.
       write:
-        ["packages/*/src/**", "packages/*/test/**", "packages/*/config/**", "packages/*/sql/**", "src/**", "tests/**"]
+        ["packages/*/src/**", "packages/*/test/**", "packages/*/config/**", "packages/*/sql/**", "src/**", "tests/**", "pnpm-lock.yaml", "packages/*/package.json"]
       tools: ["bash", "read", "edit", "write"]
 
   # docs/design/18. The role a chore runs under, and the only one that may write anywhere:
@@ -55,3 +55,13 @@ roles:
       write: ["packages/*/test/**", "tests/acceptance/**"]
       tools: ["bash", "read", "edit", "write"]
     budget: { tokens: 120000, seconds: 1800 }
+
+  # docs/design/25. The designer designs with the operator, in a painter session, and never
+  # writes source: the mockup and the renderer block of design.yaml are what the engineer's
+  # task is gated against, so the hand that draws the target is not the hand that hits it.
+  designer:
+    worker_kind: agent
+    scope:
+      write: ["packages/*/design/**", "packages/*/config/design.yaml", "docs/design/mockups/**", "packages/*/config/ui.yaml"]
+      tools: ["bash", "read", "edit", "write"]
+    budget: { tokens: 250000, seconds: 3600 }

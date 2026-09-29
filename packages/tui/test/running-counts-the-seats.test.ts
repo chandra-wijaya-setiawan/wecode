@@ -9,7 +9,10 @@
  *  apart.
  *
  *  Asserted off the rendered frame, and against the words config/design.yaml says the head
- *  is written in, so the drawing and the design cannot drift apart quietly. */
+ *  is written in, so the drawing and the design cannot drift apart quietly. Those words are
+ *  `proposal.head` — the head that opens with the section's mark in column zero and ends in
+ *  the count with the box's letter raised onto it. The `── ` head this test used to look
+ *  for, and the top-level `head:` block it read, are both retired. */
 import { plain } from "./force-color.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -20,21 +23,34 @@ import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
 import { loadMachines, open } from "@wecode/core";
 import { App } from "../src/app.js";
-import { Cockpit } from "../src/screens.js";
+import { Cockpit, raised } from "../src/screens.js";
+import { sectionMark } from "../src/list.js";
 import { loadViews } from "../src/views.js";
 import { seed, T, ins } from "./seed.js";
 
 interface Design {
-  readonly head: {
-    readonly glyph: string;
-    readonly count: string;
-    readonly seated: { readonly box: string; readonly of: string; readonly count: string };
+  readonly proposal: {
+    readonly head: {
+      readonly case: string;
+      readonly line: string;
+      readonly count: string;
+      readonly seated: { readonly box: string; readonly of: string; readonly count: string };
+      readonly keys: { readonly sections: Record<string, string> };
+    };
   };
 }
 
 const design = parse(
   readFileSync(fileURLToPath(new URL("../config/design.yaml", import.meta.url)), "utf8"),
 ) as Design;
+
+const HEAD = design.proposal.head;
+
+/** The proposal names two sections in shorter words than views.yaml does, so the box the
+ *  fraction is on is read through that mapping rather than assumed to be a view's name. */
+const boxed = (box: string): string => HEAD.keys.sections[box] ?? box;
+
+const SEATED = boxed(HEAD.seated.box);
 
 const views = loadViews();
 const machines = loadMachines();
@@ -56,18 +72,24 @@ const WIDTH = 100;
 const lines = (): string[] =>
   plain(render(createElement(Cockpit, { app, width: WIDTH, height: 90 })).lastFrame() ?? "").split("\n");
 
-/** The head of the section whose title is `title`, in the capitals a rule says it in. */
-const head = (title: string): string => {
-  const at = lines().find((l) => l.startsWith("──") && l.includes(` ${title.toUpperCase()} `));
-  expect(at, `no section titled ${title}`).toBeDefined();
+/** How the design opens a head: the section's mark in column zero, then its name in
+ *  capitals. There are no dashes on either side of it any more. */
+const opening = (name: string, title: string): string =>
+  HEAD.line
+    .replace("{mark}", sectionMark(name))
+    .replace("{title}", HEAD.case === "upper" ? title.toUpperCase() : title);
+
+/** The head of the box named `name`, found by that opening. */
+const head = (name: string): string => {
+  const view = views.find((v) => v.name === name);
+  expect(view, `no view ${name}`).toBeDefined();
+  const opens = opening(name, view?.title ?? "");
+  const at = lines().find((l) => l.startsWith(opens));
+  expect(at, `no section headed ${opens}`).toBeDefined();
   return at as string;
 };
 
-const titleOf = (name: string): string => {
-  const view = views.find((v) => v.name === name);
-  expect(view, `no view ${name}`).toBeDefined();
-  return view?.title ?? "";
-};
+const keyOf = (name: string): string => views.find((v) => v.name === name)?.key ?? "";
 
 /** A worker is a seat, whatever role it is of and whatever it is doing. */
 const worker = (slug: string, role = "engineer"): number =>
@@ -81,14 +103,16 @@ const running = (slug: string, workerId: number): number =>
     slug, "task", tree.task, workerId, "{}", "{}", `/tmp/${slug}`, "running", "{}", T, T,
   );
 
-/** What the head ends in when it says `held` of `seats`, filled to the width by the rule. */
+/** What a head ends in: the count, with the letter that opens the box raised onto it. */
+const ends = (name: string, count: string): string =>
+  HEAD.count.replace("{count}", count).replace("{key}", raised(keyOf(name)));
+
+/** What the seated head ends in when it says `held` of `seats`. */
 const fraction = (held: number, seats: number): string =>
-  design.head.glyph +
-  design.head.seated.count.replace("{held}", String(held)).replace("{seats}", String(seats));
+  ends(SEATED, HEAD.seated.count.replace("{held}", String(held)).replace("{seats}", String(seats)));
 
 /** What a plain head ends in: the one number every other box says. */
-const plainCount = (n: number): string =>
-  design.head.glyph + design.head.count.replace("{count}", String(n));
+const plainCount = (name: string, n: number): string => ends(name, String(n));
 
 const held = (name: string): number => {
   const view = views.find((v) => v.name === name);
@@ -105,8 +129,8 @@ describe("the running head", () => {
     running("b", worker("eng-4"));
     app.refresh();
 
-    expect(held(design.head.seated.box)).toBe(2);
-    const line = head(titleOf(design.head.seated.box));
+    expect(held(SEATED)).toBe(2);
+    const line = head(SEATED);
     expect(line).toHaveLength(WIDTH);
     expect(line.endsWith(fraction(2, 5)), line).toBe(true);
   });
@@ -116,8 +140,8 @@ describe("the running head", () => {
     worker("eng-2");
     app.refresh();
 
-    expect(held(design.head.seated.box)).toBe(0);
-    expect(head(titleOf(design.head.seated.box)).endsWith(fraction(0, 2))).toBe(true);
+    expect(held(SEATED)).toBe(0);
+    expect(head(SEATED).endsWith(fraction(0, 2))).toBe(true);
   });
 
   it("counts every seat, whatever role it is of — a seat is a worker", () => {
@@ -127,7 +151,7 @@ describe("the running head", () => {
     running("a", worker("eng-2"));
     app.refresh();
 
-    expect(head(titleOf(design.head.seated.box)).endsWith(fraction(1, 4))).toBe(true);
+    expect(head(SEATED).endsWith(fraction(1, 4))).toBe(true);
   });
 
   it("falls back to the plain count where there is no fleet to be short of", () => {
@@ -135,7 +159,7 @@ describe("the running head", () => {
     // `0/0`, which reads as a workspace at capacity rather than one with no workers.
     app.refresh();
 
-    expect(head(titleOf(design.head.seated.box)).endsWith(plainCount(held(design.head.seated.box)))).toBe(true);
+    expect(head(SEATED).endsWith(plainCount(SEATED, held(SEATED)))).toBe(true);
   });
 
   it("is the only head that says a fraction: every other box's rows hold no seat", () => {
@@ -144,9 +168,9 @@ describe("the running head", () => {
     app.refresh();
 
     for (const view of views) {
-      if (view.name === design.head.seated.box) continue;
-      const line = head(view.title);
-      expect(line.endsWith(plainCount(held(view.name))), `${view.title}: ${line}`).toBe(true);
+      if (view.name === SEATED) continue;
+      const line = head(view.name);
+      expect(line.endsWith(plainCount(view.name, held(view.name))), `${view.title}: ${line}`).toBe(true);
     }
   });
 });

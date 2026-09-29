@@ -8,7 +8,7 @@ import type { Invariant } from "./doctor.js";
 /** docs/design/19, applied to what a screen drew rather than to what the record says.
  *
  *  Six layout defects reached master in a week and a person found every one of them by
- *  looking at a screenshot. `packages/ui/src/check.ts` answered the first half of that: it
+ *  looking at a screenshot. `packages/lens/src/check.ts` answered the first half of that: it
  *  states the rules that hold for every screen — a row drawn in two boxes, a box that
  *  leaves its parent, a key bound twice, a box that collapsed to a frame — and reports them
  *  against a capture. What it does not do is tell anybody. A rule nobody runs on the tick
@@ -43,7 +43,7 @@ export interface Finding {
 
 /** One capture, as the doctor holds it: the name to report it under and the tree, which it
  *  passes on without reading. `T` is the checker's own capture type — the runner does not
- *  depend on `@wecode/ui` and so does not restate its shape. */
+ *  depend on `@wecode/lens` and so does not restate its shape. */
 export interface Screen<T> {
   /** The screen's name, taken from the file: `board.json` is `board`. */
   readonly name: string;
@@ -153,7 +153,7 @@ const entries = (dir: string): readonly string[] => {
  *  the record, and reading a tree is reading the world.
  *
  *  `check` has no default, and that is the honest state of this slice. The rules live in
- *  `packages/ui/src/check.ts` and `packages/runner` does not depend on `@wecode/ui`, so the
+ *  `packages/lens/src/check.ts` and `packages/runner` does not depend on `@wecode/lens`, so the
  *  day this runs on the tick is the day a task that may touch `packages/runner/package.json`
  *  and `doctor.ts` hands `check` in. A default that silently reported nothing would look
  *  wired and be dead.

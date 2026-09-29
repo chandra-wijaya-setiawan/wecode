@@ -4,7 +4,16 @@
  *  `── ⟐ QUEUE (1) [q] ───────` — so eight of them down the page were eight phrases, each
  *  starting in a different column, and comparing two meant reading both. It is pushed to
  *  the width instead: the names are a column down the left, the counts a column down the
- *  right, and the rule between is the fill that keeps them there.
+ *  right, and the space between is the fill that keeps them there.
+ *
+ *  The fill is space and not rule. The `── ` a head opened with went the same way as the
+ *  dashes out to the width — see test/a-heading-is-a-mark-and-a-name.test.ts — so a head is
+ *  found by the glyph in column zero that config/design.yaml's `proposal.head` opens it
+ *  with. What this file still decides is unchanged: where the number goes.
+ *
+ *  And the letter rides the number. `1 [q]` was a count, a bracket and a letter for the eye
+ *  to put back together; `1q` is one token. So the last thing on a head is the raised
+ *  letter, and the count is what stands immediately before it.
  *
  *  And a tally's counts ride on their own words. `ready 2 · done 1` is four tokens the eye
  *  has to pair up, and the space between `ready` and `2` is the same space that separates
@@ -17,11 +26,14 @@ import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
 import { loadMachines, open } from "@wecode/core";
 import { App } from "../src/app.js";
-import { Cockpit, tally } from "../src/screens.js";
+import { Cockpit, raised, tally } from "../src/screens.js";
+import { sectionMark } from "../src/list.js";
 import { loadViews } from "../src/views.js";
+import { loadServices } from "../src/services.js";
 import { seed, T, ins } from "./seed.js";
 
 const views = loadViews();
+const services = loadServices();
 const machines = loadMachines();
 
 let db: DatabaseSync;
@@ -39,12 +51,23 @@ afterEach(cleanup);
 const lines = (width = 100, height = 60): string[] =>
   plain(render(createElement(Cockpit, { app, width, height })).lastFrame() ?? "").split("\n");
 
-/** Every rule on the page. A section is the only thing that draws one. */
-const heads = (out: string[]): string[] => out.filter((l) => l.startsWith("──"));
+/** How the design opens a head: the section's glyph in column zero, then its name in
+ *  capitals. A section is the only thing on the page that draws one. */
+const opening = (name: string, title: string): string => `${sectionMark(name)} ${title.toUpperCase()}`;
 
-/** The head of the section named `title`, in the capitals a rule says it in. */
+const OPENINGS = [
+  opening("services", services.title),
+  ...views.map((v) => opening(v.name, v.title)),
+];
+
+/** Every head on the page. */
+const heads = (out: string[]): string[] => out.filter((l) => OPENINGS.some((o) => l.startsWith(o)));
+
+/** The head of the section named `title`, in the capitals a head says it in. */
 const head = (out: string[], title: string): string => {
-  const at = heads(out).find((l) => l.includes(` ${title.toUpperCase()} `));
+  const view = views.find((v) => v.title === title);
+  const opens = opening(view?.name ?? "services", title);
+  const at = out.find((l) => l.startsWith(opens));
   expect(at, `no section titled ${title}`).toBeDefined();
   return at as string;
 };
@@ -57,11 +80,16 @@ const held = (name: string): number => {
   return (board[view?.filter ?? ""] ?? []).length;
 };
 
+/** What a head's count ends in: the number, with the letter `v` opens the box by raised
+ *  onto it. The seed hires nobody, so the seated box's fraction never shows here. */
+const tail = (name: string): string =>
+  `${held(name)}${raised(views.find((v) => v.name === name)?.key)}`;
+
 describe("a section's count", () => {
-  it("is the last thing on the rule, against the right edge", () => {
+  it("is the last thing on the head, against the right edge", () => {
     const out = lines();
-    expect(head(out, "Queue")).toMatch(/─ 1$/);
-    expect(head(out, "Needs you")).toMatch(/─ 0$/);
+    expect(head(out, "Queue").endsWith(` 1${raised("q")}`)).toBe(true);
+    expect(head(out, "Needs you").endsWith(` 0${raised("n")}`)).toBe(true);
   });
 
   it("is out of the name: the head reads as a name, not as a phrase with a number in it", () => {
@@ -71,9 +99,11 @@ describe("a section's count", () => {
       expect(line, `${view.title} still names its count`).not.toContain(
         `(${held(view.name)})`,
       );
-      // The name, its letter, and then nothing but rule until the number.
+      // The mark, the name, and then nothing but space until the number and its letter.
       expect(line).toMatch(
-        new RegExp(`^── \\S+ ${view.title.toUpperCase()} \\[${view.key ?? ""}\\] ─+ \\d+$`),
+        new RegExp(
+          `^${sectionMark(view.name)} ${view.title.toUpperCase()} +\\d+${raised(view.key)}$`,
+        ),
       );
     }
   });
@@ -85,9 +115,9 @@ describe("a section's count", () => {
     app.refresh();
     const out = lines();
     for (const view of views) {
-      expect(head(out, view.title).trimEnd().split(" ").at(-1)).toBe(String(held(view.name)));
+      expect(head(out, view.title).trimEnd().split(" ").at(-1)).toBe(tail(view.name));
     }
-    expect(head(out, "Planned")).toMatch(/─ 3$/);
+    expect(head(out, "Planned").endsWith(` 3${raised("p")}`)).toBe(true);
   });
 
   /** The point of pushing it to the width: a count is compared with the one above it. */
@@ -97,28 +127,32 @@ describe("a section's count", () => {
     }
     app.refresh();
     const out = lines();
-    const counted = heads(out).filter((l) => /\d$/.test(l));
+    const counted = heads(out).filter((l) => /\d/.test(l));
     expect(counted).toHaveLength(views.length);
     // Two digits in Planned's count and one in the rest, and all of them end at the width.
-    expect(head(out, "Planned")).toMatch(/─ 12$/);
+    expect(head(out, "Planned").endsWith(` 12${raised("p")}`)).toBe(true);
     expect(new Set(counted.map((l) => l.length))).toEqual(new Set([100]));
   });
 
   /** The services section counts nothing: its rows are one runner, one schema, one fleet
-   *  and one doctor, and a `4` on that rule would be a number nobody asked a question of. */
+   *  and one doctor, and a `4` on that head would be a number nobody asked a question of.
+   *  `v` does not open it either, so it is the one head that ends in its own name. */
   it("is absent from the section that holds no rows", () => {
-    expect(head(lines(), "Services")).toMatch(/─$/);
+    expect(head(lines(), "Services")).toBe(opening("services", services.title));
   });
 
   it("keeps its place when the name no longer fits, rather than going off the edge", () => {
     for (const width of [16, 20, 28]) {
       const ruled = heads(lines(width, 40));
-      expect(ruled.length, `no rules at ${width}`).toBeGreaterThan(views.length);
+      expect(ruled.length, `no heads at ${width}`).toBeGreaterThan(views.length);
       for (const line of ruled) {
-        expect(line.length, `the rule overran ${width}`).toBe(width);
+        // The countless head is as long as its name and no longer; a counted one is held
+        // out to the width by the number standing at its right edge.
+        if (/\d/.test(line)) expect(line.length, `the head overran ${width}`).toBe(width);
+        else expect(line.length, `the head overran ${width}`).toBeLessThanOrEqual(width);
       }
-      // The name is what gives way — every box still ends in its number.
-      expect(ruled.filter((l) => /\d$/.test(l)), `a count fell off at ${width}`).toHaveLength(
+      // The name is what gives way — every box still ends in its number and its letter.
+      expect(ruled.filter((l) => /\d/.test(l)), `a count fell off at ${width}`).toHaveLength(
         views.length,
       );
     }

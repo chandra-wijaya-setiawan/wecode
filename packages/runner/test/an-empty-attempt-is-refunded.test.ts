@@ -107,24 +107,23 @@ describe("an attempt that committed nothing", () => {
     expect(attemptsOf(task)).toBe(0);
   });
 
-  it("is refunded every tick, so an untouched task never exhausts itself", async () => {
-    db.prepare("UPDATE task SET max_retry = 2 WHERE id = ?").run(task);
-    const r = runner(new Idle());
+  it("costs the task no retry on the tick it exhausts on either", async () => {
+    db.prepare("UPDATE task SET max_retry = 1 WHERE id = ?").run(task);
 
-    for (let i = 0; i < 4; i += 1) {
-      const tick = await r.tick();
-      expect(tick.exhausted).not.toContain(task);
-    }
+    const tick = await runner(new Idle()).tick();
 
+    expect(tick.exhausted).not.toContain(task);
     expect(attemptsOf(task)).toBe(0);
   });
 
   it("never refunds below zero", async () => {
     await runner(new Idle()).tick();
-    await runner(new Idle()).tick();
 
-    expect(attemptsOf(task)).toBe(0);
+    expect(attemptsOf(task)).toBeGreaterThanOrEqual(0);
   });
+
+  // The second empty attempt at the same tip is counted, not refunded:
+  // see an-empty-attempt-is-refunded-once.test.ts.
 });
 
 describe("an attempt that committed", () => {

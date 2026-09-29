@@ -10,6 +10,93 @@
  *  should be run in, and merges nothing. This module is the rule alone: no git, no clock, no
  *  filesystem, so the command half and the runner half can be held to the same words. */
 
+/** Where a story landed when it did not land here: the repository, and the commit in that
+ *  repository when anybody recorded one. `sha` is null for a landing somebody knows the
+ *  repository of and not the commit — by hand, after the fact, which is how most of them
+ *  are recorded. */
+export interface ForeignLanding {
+  readonly repo: string;
+  readonly sha: string | null;
+}
+
+/** A tail is read as a commit only when it looks like one. `git@github.com:org/repo` is a
+ *  repository whose name contains an `@`, and splitting it as `repo@sha` names a repository
+ *  called `git` that nobody has. */
+const LOOKS_LIKE_A_SHA = /^[0-9a-f]{7,40}$/;
+
+/** The marker a story carries when its work shipped in another repository, read.
+ *
+ *  Not every story a workspace tracks lands in the repository the workspace sits in: the
+ *  change is made in a downstream repo, a vendored copy, a fork somebody else owns. Until
+ *  this, such a story was delivered forever with no `landed_sha`, so the record accused it
+ *  of never having reached the base — true of this base and false of the work — and every
+ *  tick offered it to the lander again, which refused it again, because `story/<slug>` is
+ *  not here.
+ *
+ *  So the marker is a second kind of landing rather than a second kind of sha. It is written
+ *  `<repo>` or `<repo>@<sha>`, and it is kept out of `landed_sha` on purpose: that column
+ *  names a commit in *this* repository — the doctor heals it from `land story/x` and every
+ *  reader slices it to twelve characters and prints it — and a foreign sha put there is a
+ *  commit `git show` cannot find, reported as if it could. */
+export function foreignLanding(marker: string | null | undefined): ForeignLanding | null {
+  const text = (marker ?? "").trim();
+  if (text === "") return null;
+  const at = text.lastIndexOf("@");
+  const tail = at === -1 ? "" : text.slice(at + 1).trim();
+  if (at > 0 && LOOKS_LIKE_A_SHA.test(tail)) {
+    const repo = text.slice(0, at).trim();
+    if (repo !== "") return { repo, sha: tail };
+  }
+  return { repo: text, sha: null };
+}
+
+/** Whether a story's marker says it landed somewhere other than here. The question the
+ *  record asks: a story that shipped in another repository has reached no base of ours and
+ *  never will, so neither the unlanded accusation nor the lander's list is about it. */
+export const landedElsewhere = (marker: string | null | undefined): boolean => foreignLanding(marker) !== null;
+
+/** What to say about such a story where a local landing would name its commit, or null when
+ *  no marker says it landed elsewhere. */
+export function landedElsewhereNote(marker: string | null | undefined): string | null {
+  const landing = foreignLanding(marker);
+  return landing === null ? null : saidLandedElsewhere(landing);
+}
+
+/** The marker to write, and the sentence for the ledger, for a landing made elsewhere. The
+ *  pair `landingRecord` returns for a landing made here, so the two are recorded alike. */
+export function markLandedElsewhere(repo: string, sha?: string | null): {
+  readonly marker: string;
+  readonly note: string;
+} {
+  const name = repo.trim();
+  const commit = (sha ?? "").trim();
+  const landing: ForeignLanding = { repo: name, sha: commit === "" ? null : commit };
+  return { marker: commit === "" ? name : `${name}@${commit}`, note: saidLandedElsewhere(landing) };
+}
+
+/** What such a story is called, wherever it is said. The `not in this repository` half is
+ *  not decoration: "landed in acme-web" beside a board of local landings reads like a branch
+ *  name, and an operator who then looks for the merge in `git log` finds nothing and files a
+ *  bug against the lander. */
+export function saidLandedElsewhere(landing: ForeignLanding): string {
+  const as = landing.sha === null ? "" : ` as ${landing.sha.slice(0, 12)}`;
+  return `landed in ${landing.repo}${as}, not in this repository`;
+}
+
+/** Why this story may not be landed here at all, or null when no marker says it landed
+ *  elsewhere. Asked before `refuseLand`, because where the merge would be run is the wrong
+ *  argument to have with an operator about work that is not in this repository to merge. */
+export function refuseForeignLand(place: LandingPlace, marker: string | null | undefined): string | null {
+  const landing = foreignLanding(marker);
+  if (landing === null) return null;
+  return (
+    `land ${place.branch} refused in ${place.here}: the record says it ${saidLandedElsewhere(landing)}.\n` +
+    `  there is nothing here to merge into ${place.base}, and a branch of that name here ` +
+    `would be a second copy of work that has already shipped.\n` +
+    `  if the marker is wrong, clear it, then land again.`
+  );
+}
+
 /** One entry of `git worktree list --porcelain`. `branch` is null for a detached checkout. */
 export interface Checkout {
   readonly path: string;
@@ -25,6 +112,22 @@ export interface LandingPlace {
   readonly base: string;
   /** Every checkout of this repository, the invoking one included. */
   readonly trees: readonly Checkout[];
+}
+
+/** A branch the landing may be allowed to remove. The ref is safe to delete only when
+ * the merge actually carried it; an unmerged branch may still be somebody's unread work. */
+export interface LandedBranch {
+  readonly branch: string;
+  readonly merged: boolean;
+}
+
+/** The refs cleanup may remove after the landing. Git cleanup is performed by the runner;
+ * this pure rule keeps it from turning "under this story" into permission to delete work. */
+export function branchesToRemoveAfterLanding(
+  storyBranch: string,
+  tasks: readonly LandedBranch[],
+): readonly string[] {
+  return [...new Set([storyBranch, ...tasks.filter((task) => task.merged).map((task) => task.branch)])];
 }
 
 /** Why this tree may not land the story, or null when it may.
@@ -221,10 +324,10 @@ export interface PrimaryDrift {
 
 /** Either the primary checkout is already showing the landing, or it is clean at the old
  *  tip and wecode brings it forward itself, or it holds something of the operator's and
- *  they are told the command. Never silence. */
+ *  they are told the command. Never a stale tree left without either. */
 export type PrimaryUpdate =
   | { readonly kind: "current" }
-  | { readonly kind: "sync" }
+  | { readonly kind: "forward" }
   | { readonly kind: "tell"; readonly instruction: string };
 
 /** docs/design/14. A landing merge made in a tree of wecode's own moves `refs/heads/<base>`
@@ -234,15 +337,20 @@ export type PrimaryUpdate =
  *  landed paths reading as staged deletions, because HEAD moved under an index that never
  *  saw them. It reads exactly like lost work.
  *
- *  So the ref moving is never the end of it. A checkout that is on the base, behind, and
- *  still exactly the commit the base was landed from holds nothing of anybody's: bringing
- *  it forward can lose nothing, and leaving it stale is the surprise. That one is synced.
- *  Every other drift — operator work in the tree, or a tree at some commit the landing was
- *  not made from — is words, naming the command in full and the path it is to be run in,
- *  because there wecode writing the files is the surprise. The one thing not allowed is
- *  neither.
+ *  So the ref moving is never the end of it — but what is owed depends on what is there.
+ *  A checkout clean at the old tip holds nothing of anybody's: its index and working files
+ *  are the pre-land tree exactly, so bringing it to the new tip loses nothing and stages
+ *  nothing, and there is no instruction worth writing about a folder wecode can simply make
+ *  correct. Leaving it stale instead is the expensive half: the operator is handed a staged
+ *  diff they did not make, a command to run before they may commit, and the shape lost work
+ *  has — over a tree git itself says is untouched.
  *
- *  What the words have to carry is the index. A behind checkout is not merely showing old
+ *  Everything else is words. The moment the checkout differs from the old tip at all —
+ *  tracked edits, staged ones, an untracked file on a path the landing wrote — it is theirs
+ *  and wecode writes none of it: it is told what moved, what of theirs is in the way, and
+ *  the command in full with the path to run it in.
+ *
+ *  What those words have to carry is the index. A behind checkout is not merely showing old
  *  files: its index still holds the pre-land tree while HEAD holds the landing, so every
  *  path the story touched reads as staged there — the added ones as staged deletions. That
  *  is the shape lost work has, it is the reason the silence frightened somebody, and an
@@ -252,7 +360,9 @@ export type PrimaryUpdate =
 export function updatePrimary(drift: PrimaryDrift): PrimaryUpdate {
   const { path, base, onBase, alreadyCurrent, wasTheOldTip, ownWork } = drift;
   if (!onBase || alreadyCurrent) return { kind: "current" };
-  if (ownWork.length === 0 && wasTheOldTip) return { kind: "sync" };
+  // Clean at the old tip, with nothing of the operator's in the way: the tree is the
+  // pre-land tree, so wecode puts it on the new tip itself and leaves no staged diff behind.
+  if (wasTheOldTip && ownWork.length === 0) return { kind: "forward" };
   const what =
     ownWork.length > 0
       ? `${path} has work of yours that bringing it forward would write over:\n${indent(ownWork)}`

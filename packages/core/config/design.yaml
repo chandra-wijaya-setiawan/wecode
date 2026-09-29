@@ -1,0 +1,64 @@
+# What a design is, as data.
+#
+# A design says what a change must become, before the change exists. It is read by a gate,
+# so it is YAML and not prose: `docs/design/25. Design to Test.md` argues why these fields
+# are the fields, and nothing in it is parsed.
+#
+# One entity covers every kind. A design for the cockpit and a design for the allocator are
+# the same record with a different `crosses` — that is what selects the reader that judges
+# it, so a UI design is typed rather than filed in the right directory.
+
+# Where a design lives. One file per story, named by its slug, under the package whose work
+# it governs — so a design travels with the code it is about and a stale one is visible in
+# the same diff.
+location: "packages/<package>/design/<story-slug>.yaml"
+
+# The fields every design carries, whatever it crosses.
+fields:
+  story:     { required: true,  is: id,            says: the one story this design is for }
+  statement: { required: true,  is: prose,         says: the shape of the change, in words a person reads }
+  crosses:   { required: true,  is: [port],        says: the ports the change reaches through; empty is a change inside one component }
+  touches:   { required: true,  is: [component],   says: component addresses the change is expected to reach }
+  promises:  { required: false, is: [symbol],      says: symbols to be added or changed, with kinds }
+  uses:      { required: false, is: [claim],       says: the stack claims it relies on, including any it is asking for }
+  spec:      { required: false, is: map,           says: the shape the reader checks, in the reader's own vocabulary }
+  provenance_sha: { required: true, is: sha,       says: the tree the design was read against }
+  state:     { required: true,  is: state,         says: drafted, accepted, superseded or dropped }
+
+# A port is closed vocabulary: a design may not invent one.
+ports: ["!ui", "!cli", "!db", "!agent"]
+
+# Which reader judges a design, chosen by what it crosses. First match wins, and `none` is
+# a reader too — an ordinary change is judged by its acceptance test and nothing more.
+readers:
+  - when: { crosses: "!ui" }
+    reader: wecode-ui
+    reads: spec
+    how: "expected(spec) → capture the screen → diff and check; reports gone, arrived, moved, changed"
+  - when: { crosses: "!db" }
+    reader: schema-shapes
+    reads: spec
+    how: "the table set the code believes in, against the migrations"
+  - when: { touches: "*" }
+    reader: reflexion
+    reads: touches
+    how: "model, map and source compared: convergence, divergence, absence"
+  - when: {}
+    reader: none
+    how: "the acceptance test the criteria names, and nothing else"
+
+# A design is accepted only after its reader has reported divergence at the base: a design
+# whose gate is already green is a transcript of the code, for the same reason a test that
+# has never failed cannot pass.
+accept:
+  requires:
+    - every component in `touches` exists in the component map
+    - every claim in `uses` is approved
+    - the reader reported divergence at `provenance_sha`
+    - no other accepted design on this story
+
+# What reaches a person. A design inside one component, crossing nothing and asking for
+# nothing, is accepted by the gate; a port or a library is a standing commitment.
+signature:
+  operator: ["crosses is not empty", "uses names an unapproved claim"]
+  gate:     ["everything else"]

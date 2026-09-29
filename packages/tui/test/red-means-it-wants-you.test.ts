@@ -15,6 +15,14 @@
  *  row of each of the three at once, because which line on the screen is red is the whole
  *  of what this story decides; and asserted against views.yaml too, because the colours are
  *  configuration and a screen that hard-coded the right answer would pass the first half.
+ *
+ *  "The board" is the seven box sections and not the whole dashboard. Nothing is boxed any
+ *  more — a row used to be found by the `│` it sat between, and there is none — so a row is
+ *  found by the section head above it instead, the glyph-and-capitals head
+ *  config/design.yaml's `proposal.head` writes. That draws the line in the right place as
+ *  well as being the only one left: the lead section holds each project's pulse, and a
+ *  pulse is red when the project has stopped moving, which is a-project-has-a-pulse's
+ *  decision and not this file's. A pulse is a project, not a row anybody can open.
  */
 import { GREEN, RED, coloured, plain } from "./force-color.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -26,7 +34,7 @@ import { cleanup, render } from "ink-testing-library";
 import { ASK_KINDS, loadMachines, open } from "@wecode/core";
 import { App } from "../src/app.js";
 import { Cockpit } from "../src/screens.js";
-import { cooking, cookingLines, forgetCooking, mark, stateColour } from "../src/list.js";
+import { cooking, cookingLines, forgetCooking, mark, sectionMark, stateColour } from "../src/list.js";
 import { loadViews } from "../src/views.js";
 import { ins, seed, T } from "./seed.js";
 
@@ -87,6 +95,9 @@ beforeEach(() => {
     "ask-ada", "task", tree.task, person, "{}", "{}", "/tmp/wt", "waiting", "approval", "land it?", "{}", T, ago(1),
   );
   wants = `task #${tree.task}`;
+  // The kind of question the assignment asks is the word the Needs you box puts in its
+  // state column, and so the word the colour is a fact about.
+  STATE[wants] = "approval";
 
   app = new App(db, views, machines);
 });
@@ -100,18 +111,45 @@ afterEach(() => {
 const frame = (): string =>
   render(createElement(Cockpit, { app, width: 100, height: 90 })).lastFrame() ?? "";
 
-/** The one drawn line holding `what`, without its border or its padding. */
-function lineFor(out: string, what: string): string {
-  const found = plain(out)
-    .split("\n")
-    .filter((l) => l.startsWith("│") && l.includes(what));
-  expect(found.length, `${what} is drawn on ${found.length} lines`).toBe(1);
-  return (found[0] ?? "").replace(/^│|│$/g, "").trim();
+/** How the design opens a section's head: its glyph in column zero, its name in capitals. */
+const opening = (name: string, title: string): string => `${sectionMark(name)} ${title.toUpperCase()}`;
+
+const OPENINGS = views.map((v) => opening(v.name, v.title));
+
+const isHead = (line: string): boolean => OPENINGS.some((o) => line.startsWith(o));
+
+/** Every row the seven boxes draw, from the first box head to the end of the page. The
+ *  lines above it are the lead section's — four services and a pulse per project — and
+ *  none of them is a row of the board. */
+function boardRows(out: string): string[] {
+  const all = plain(out).split("\n");
+  const first = all.findIndex(isHead);
+  expect(first, "no box is headed").toBeGreaterThanOrEqual(0);
+  return all.slice(first).filter((l) => !isHead(l) && l.trim() !== "");
 }
 
-/** Whether any run the terminal painted in `code` is the line holding `what`. */
-const painted = (out: string, code: number, what: string): boolean =>
-  coloured(out, code).some((run) => run.includes(what));
+/** The one drawn row holding `what`, without its padding. */
+function lineFor(out: string, what: string): string {
+  const found = boardRows(out).filter((l) => l.includes(what));
+  expect(found.length, `${what} is drawn on ${found.length} lines`).toBe(1);
+  return (found[0] ?? "").trim();
+}
+
+/** Whether the row holding `what` carries `code` — which, since only the state word is
+ *  coloured (see test/only-the-state-word-is-coloured.test.ts), means the state word on
+ *  that row stands in a run the terminal painted in `code`. The three rows here are in
+ *  three different states on purpose, so a run naming one names no other. */
+function painted(out: string, code: number, what: string): boolean {
+  const state = STATE[what] as string;
+  expect(lineFor(out, what), `${what} does not say ${state}`).toContain(state);
+  return coloured(out, code).includes(state);
+}
+
+/** The state word each of the three rows is drawn under. */
+const STATE: Record<string, string> = {
+  [GAVE_UP]: "failed",
+  [SETTLED]: "delivered",
+};
 
 describe("red is spent on the row that wants a person", () => {
   it("paints the needs you row red", () => {
@@ -120,14 +158,18 @@ describe("red is spent on the row that wants a person", () => {
     expect(painted(out, RED, wants), `${wants} is not red`).toBe(true);
   });
 
+  /** Every red run the terminal painted, against the rows of the seven boxes. A run that
+   *  lands on no row of the board is the pulse's alarm and is not this file's to judge. */
   it("paints nothing else on the board red", () => {
     const out = frame();
-    const rows = plain(out).split("\n").filter((l) => l.startsWith("│"));
+    const rows = boardRows(out);
     for (const run of coloured(out, RED)) {
-      const on = rows.filter((l) => l.includes(run.trim()));
-      expect(on.length, `nothing on the board is drawn as ${JSON.stringify(run)}`).toBeGreaterThan(0);
-      for (const line of on) expect(line, `${run.trim()} is red`).toContain(wants);
+      for (const line of rows.filter((l) => l.includes(run.trim()))) {
+        expect(line, `${run.trim()} is red`).toContain(wants);
+      }
     }
+    // And the row that does want a person is one of them, so the loop above judged something.
+    expect(rows.filter((l) => l.includes(wants))).toHaveLength(1);
   });
 });
 
@@ -159,7 +201,11 @@ describe("the machine's own buckets do not shout", () => {
   });
 
   it("paints nothing on the board green", () => {
-    expect(coloured(frame(), GREEN)).toEqual([]);
+    const out = frame();
+    const rows = boardRows(out);
+    for (const run of coloured(out, GREEN)) {
+      expect(rows.filter((l) => l.includes(run.trim())), `${run.trim()} is green`).toEqual([]);
+    }
   });
 });
 

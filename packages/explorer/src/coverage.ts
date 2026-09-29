@@ -39,6 +39,24 @@ export interface Verdict {
   readonly reason: string;
 }
 
+/** A recorded number of modules the map is allowed to leave unclaimed, and what a tree
+ *  measured against it did. The ceiling is carried beside the map rather than recomputed,
+ *  so a repository that is behind is held where it was found and no further. */
+export interface CeilingVerdict {
+  readonly refused: boolean;
+  /** The number that was recorded before the change. */
+  readonly ceiling: number;
+  /** The number of unclaimed modules after it. */
+  readonly unmapped: number;
+  /** What the ceiling becomes: the tree's own number when it is lower, else the ceiling.
+   *  It never rises, which is the whole of the rule. */
+  readonly lowered: number;
+  /** Every module nothing claims, sorted. Named on a refusal, because a number is not
+   *  something a person can act on and a list of modules is. Empty on an acceptance. */
+  readonly loose: readonly string[];
+  readonly reason: string;
+}
+
 const sorted = (modules: Iterable<string>): readonly string[] => [...new Set(modules)].sort();
 
 const pct = (ratio: number): string => `${(ratio * 100).toFixed(1)}%`;
@@ -73,6 +91,37 @@ export function judge(before: Coverage, after: Coverage): Verdict {
     before: before.ratio,
     after: after.ratio,
     exposed: refused ? exposed : [],
+    reason,
+  };
+}
+
+/** The number a tree records: how many of its modules the map leaves unclaimed. This is
+ *  what is written back beside the map once a change is accepted. */
+export const ceilingOf = (coverage: Coverage): number => coverage.unclaimed.length;
+
+/** Judges a tree against a recorded ceiling. Refuses when, and only when, more modules are
+ *  unclaimed than the ceiling allows; and reports the ceiling the accepted tree leaves
+ *  behind, which is the lower of the two and so only ever falls.
+ *
+ *  A negative or absent ceiling is read as "none recorded yet": nothing to fall from, so
+ *  the tree's own number is adopted and the change stands. */
+export function against(ceiling: number, after: Coverage): CeilingVerdict {
+  const unmapped = ceilingOf(after);
+  const recorded = Number.isFinite(ceiling) && ceiling >= 0 ? Math.floor(ceiling) : unmapped;
+  const refused = unmapped > recorded;
+  const lowered = Math.min(recorded, unmapped);
+  const reason = refused
+    ? `the map leaves ${unmapped} modules unclaimed, over its ceiling of ${recorded}: ` +
+      `nothing claims ${after.unclaimed.join(", ")}. Add a row to components.yaml.`
+    : unmapped < recorded
+      ? `the unmapped ceiling falls from ${recorded} to ${unmapped}.`
+      : `the map leaves ${unmapped} modules unclaimed, at its ceiling.`;
+  return {
+    refused,
+    ceiling: recorded,
+    unmapped,
+    lowered,
+    loose: refused ? after.unclaimed : [],
     reason,
   };
 }

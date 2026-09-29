@@ -10,16 +10,19 @@
  *  Two things are proved here.
  *
  *  The first is that the string call is gone where the compiler could have been reading it:
- *  `plan.ts` holds none at all, and `run.ts` holds exactly one — the `wecode <entity> <verb>`
- *  surface, where both words arrive from argv and the facade may genuinely have no method
- *  for them, which is a case the port must not answer differently than before.
+ *  `plan.ts` holds none at all, and the dispatching half of the cli — `run.ts` together with
+ *  the verb modules the split moved its bodies into — holds exactly one, the
+ *  `wecode <entity> <verb>` surface, where both words arrive from argv and the facade may
+ *  genuinely have no method for them, which is a case the port must not answer differently
+ *  than before. Reading `run.ts` alone would have let a string call ride into `verbs/` and
+ *  still leave this green, so every module under `verbs/` is read with it.
  *
  *  The second is that it answers no differently. The port is behaviour-preserving or it is
  *  nothing, so every refusal, every printed line, every cascade and the actor that rides on
  *  the ledger are pinned against the commands an operator actually types.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
@@ -37,6 +40,19 @@ const read = (module: string): string =>
  *  gone is the call that runs. */
 const code = (module: string): string =>
   read(module).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+
+/** Every module under `src/verbs/`, listed off the directory rather than written down here,
+ *  so a module added tomorrow is held to the same rule without anyone remembering to add it. */
+const VERB_MODULES: string[] = readdirSync(fileURLToPath(new URL("../src/verbs", import.meta.url)))
+  .filter((f) => f.endsWith(".ts"))
+  .sort()
+  .map((f) => `verbs/${f}`);
+
+/** The dispatching half of the cli: the argv reader and the verb bodies the split moved out
+ *  of it. The verbs did not stop being run.ts's work by moving house. */
+const DISPATCH: string[] = ["run.ts", ...VERB_MODULES];
+
+const dispatch = (): string => DISPATCH.map(code).join("\n");
 
 let out: string[];
 let err: string[];
@@ -116,18 +132,27 @@ describe("the string call is gone from where the compiler could read it", () => 
     expect(code("plan.ts")).not.toMatch(/\.apply\(/);
   });
 
-  it("leaves exactly one in run.ts, and it is the surface argv spells both words of", () => {
-    const calls = [...code("run.ts").matchAll(/\.apply\(/g)];
-    expect(calls).toHaveLength(1);
+  it("reads the verb modules the split moved run.ts's bodies into", () => {
+    // The guard on every assertion below: were this list empty or stale, reading it would
+    // prove nothing at all, so the modules the verbs actually live in are named here.
+    expect(VERB_MODULES).toEqual(expect.arrayContaining(["verbs/act.ts", "verbs/entity.ts"]));
+    expect(VERB_MODULES.length).toBeGreaterThan(5);
+  });
+
+  it("leaves exactly one across the dispatch, and it is the surface argv spells both words of", () => {
+    expect([...dispatch().matchAll(/\.apply\(/g)]).toHaveLength(1);
+    // In run.ts, and nowhere the split could have carried one off to.
+    expect([...code("run.ts").matchAll(/\.apply\(/g)]).toHaveLength(1);
+    for (const module of VERB_MODULES) expect(code(module), module).not.toMatch(/\.apply\(/);
     // And it is reached only when the facade answered with no method for those two words.
     expect(code("run.ts")).toContain("invoke === null ? engine.apply(entity, id, name, actor) : invoke(id, actor)");
   });
 
   it("names the verbs it invokes as methods rather than as strings", () => {
-    // The two files together hold every verb the operator's commands reach. Spelled as a
-    // method, each one is a name the build resolves.
+    // The dispatch and plan.ts together hold every verb the operator's commands reach.
+    // Spelled as a method, each one is a name the build resolves.
     for (const method of ["startProject", "startRelease", "retryTask"]) {
-      expect(code("run.ts")).toContain(method);
+      expect(dispatch()).toContain(method);
     }
     for (const method of ["startStory", "startRequirement", "startTask", "deliverAcceptanceTest", "deliverTaskTest"]) {
       expect(code("plan.ts")).toContain(method);

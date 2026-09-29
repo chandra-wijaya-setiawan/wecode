@@ -118,20 +118,24 @@ const optionsOf = (stored: string | null): readonly string[] | null => {
   return Array.isArray(parsed) && parsed.every((o) => typeof o === "string") ? (parsed as string[]) : null;
 };
 
-/** The three objective kinds an assignment may hang on, and the column each one keeps its
- *  words in. `task` says `title` and the two test tables say `statement`; that difference
- *  is the schema's, and it is spelled once here rather than at every call site. */
-const titled = table<{ id: number; title: string; state: string }>("task", ["id", "title", "state"]);
+/** The objective kinds an assignment may hang on, and the column each one keeps its words
+ *  in. `task` and `story` say `title` and the two test tables say `statement`; that
+ *  difference is the schema's, and it is spelled once here rather than at every call site. */
+const titled = (name: string) =>
+  table<{ id: number; title: string; state: string }>(name, ["id", "title", "state"]);
 const stated = (name: string) =>
   table<{ id: number; statement: string; state: string }>(name, ["id", "statement", "state"]);
 
 type Said = { statement: string; state: string } | null;
 
+const byTitle = (name: string) => (db: DatabaseSync, id: number): Said => {
+  const row = queries(db).selectFrom(titled(name)).where("id", "=", id).get();
+  return row === null ? null : { statement: row.title, state: row.state };
+};
+
 const objectives: { readonly [K in ObjectiveType]: (db: DatabaseSync, id: number) => Said } = {
-  task: (db, id) => {
-    const row = queries(db).selectFrom(titled).where("id", "=", id).get();
-    return row === null ? null : { statement: row.title, state: row.state };
-  },
+  task: byTitle("task"),
+  story: byTitle("story"),
   acceptance_test: (db, id) => queries(db).selectFrom(stated("acceptance_test")).where("id", "=", id).get(),
   task_test: (db, id) => queries(db).selectFrom(stated("task_test")).where("id", "=", id).get(),
 };

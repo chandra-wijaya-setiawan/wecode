@@ -19,6 +19,19 @@ import {
 // core builds it to, the one specifier that resolves without widening that barrel.
 import { excluded, queries, table, type Dialect } from "@wecode/core/dist/db.js";
 import { fileCeilingInvariant } from "./ceiling.js";
+import {
+  builtTree,
+  DIST_CHECK,
+  distIsBuiltFromSource,
+  newestUnder,
+  staleDists,
+  type Built,
+  type Newest,
+} from "./doctor/trees.js";
+// The examiner already reads a failing file off the runner's own failure banner and never
+// off the lines it ran and passed. One reading of it, so a tally and a re-run cannot
+// disagree about which file is red.
+import { failingFilesOf } from "./examiner.js";
 import { execFileSync } from "node:child_process";
 import type { DatabaseSync } from "node:sqlite";
 
@@ -64,6 +77,108 @@ export const readyTaskCanBeDispatched: Invariant = {
   },
 };
 
+/** A task the record calls done whose work is in no commit.
+ *
+ *  `task.finish` is guarded on the branch holding a commit the task wrote, but a guard only
+ *  ever ran on the finishes that came after it: a task finished before it existed, or moved
+ *  by a hand that wrote the state, leaves the record reporting work no commit carries. Read
+ *  off `assignment.commit_sha` — the same fact `taskFinishesOnItsOwnWork` reads, so the two
+ *  cannot disagree, and a refresh merge nobody attempted is never mistaken for the task's
+ *  own work. Built per record rather than listed in the pure set, because the snapshot
+ *  carries no attempt: like the ceiling check, it is the Doctor's own default. */
+export const WORK_CHECK = "done_task_has_a_commit";
+
+const assignment = table<{ objective_type: string; objective_id: number; commit_sha: string | null }>("assignment", [
+  "objective_type",
+  "objective_id",
+  "commit_sha",
+]);
+
+/** Every task some attempt committed against. A blank sha is no sha: the column is text, and
+ *  an attempt that wrote nothing has been seen to leave it empty rather than null. */
+function committedTasks(db: DatabaseSync): ReadonlySet<number> {
+  if (!hasTable(db, "assignment")) return new Set();
+  const rows = queries(db)
+    .selectFrom(assignment)
+    .select(["objective_id", "commit_sha"])
+    .where("objective_type", "=", "task")
+    .all();
+  return new Set(rows.filter((r) => (r.commit_sha ?? "").trim() !== "").map((r) => r.objective_id));
+}
+
+export const taskWorkIsCommitted = (db: DatabaseSync): Invariant => ({
+  name: WORK_CHECK,
+  check: (s: Snapshot): readonly Violation[] => {
+    const committed = committedTasks(db);
+    return s.nodes
+      .filter((n) => n.entity === "task" && n.state === "done" && !committed.has(n.id))
+      .map((n) => ({
+        invariant: WORK_CHECK,
+        entity: n.entity,
+        id: n.id,
+        slug: n.slug,
+        detail:
+          `done, and task/${n.slug} holds no commit of its own — no attempt on it recorded a ` +
+          `sha, so the work the record reports is in no commit`,
+      }));
+  },
+});
+
+/** A task branch its story branch has already got, merged at every tick for ever.
+ *
+ *  The lander retries a done task's merge until `landed_branch` records it, and remembers a
+ *  conflict only by the pair of tips it happened between — so a branch the story has taken
+ *  by another route (cherry-picked, recut, landed by hand) is merged again every time either
+ *  tip moves, and git refuses it every time. Nothing on the branch the story does not already
+ *  hold is what superseded means, which is `ancestryOf`'s `in` read against the story branch
+ *  rather than against the base of the repository. Named, so the answer is the sentence and
+ *  not another merge. Like the ceiling and the dist check it reads the world, so it is the
+ *  Doctor's own default and not in the pure set. */
+export const SUPERSEDED_CHECK = "task_branch_is_not_superseded";
+
+/** Every task the lander has recorded a merge for. Its own table, keyed by task. */
+function landedTasks(db: DatabaseSync): ReadonlySet<number> {
+  if (!hasTable(db, "landed_branch")) return new Set();
+  return new Set(queries(db).selectFrom(landedBranch).select(["task_id"]).all().map((r) => r.task_id));
+}
+
+export const taskBranchIsNotSuperseded = (db: DatabaseSync, git: Git): Invariant => ({
+  name: SUPERSEDED_CHECK,
+  check: (s: Snapshot): readonly Violation[] => {
+    // Exactly the set the lander retries: done, something committed against it, no marker.
+    const landed = landedTasks(db);
+    const committed = committedTasks(db);
+    const owner = storyOfTask(queries(db));
+    const slugOfStory = new Map(s.nodes.filter((n) => n.entity === "story").map((n) => [n.id, n.slug]));
+    return s.nodes
+      .filter((n) => n.entity === "task" && n.state === "done" && committed.has(n.id) && !landed.has(n.id))
+      .flatMap((n) => {
+        const story = slugOfStory.get(owner.get(n.id) ?? -1);
+        if (story === undefined) return [];
+        const base = storyBranch(story);
+        const branch = `task/${n.slug}`;
+        // `no-branch` is a branch that is gone, which is a different fact and not this one.
+        if (ancestryOf(git, base)(branch) !== "in") return [];
+        return [
+          {
+            invariant: SUPERSEDED_CHECK,
+            entity: n.entity,
+            id: n.id,
+            slug: n.slug,
+            detail:
+              `done, and ${base} already holds every commit on ${branch} — the merge is ` +
+              `retried every tick and can move nothing: the branch is superseded, not unmerged`,
+          },
+        ];
+      });
+  },
+});
+
+/** The tree checks live in `doctor/trees.ts` — the ones whose subject is a build on disk
+ *  rather than the record. Re-exported here because this module is the doctor's face: a
+ *  caller asks the doctor for its checks, not for the file one of them happens to be in. */
+export { builtTree, DIST_CHECK, distIsBuiltFromSource, newestUnder, staleDists, type Built, type Newest };
+
 /** The pure set: core's, plus the checks that are the runner's own. The file-length check is
  *  not here — it reads a tree rather than the record, so it is built per repository and added
  *  to the Doctor's own default below. `runChecks` and `checksOf` still default to core's set. */
@@ -73,30 +188,10 @@ export const RUNNER_INVARIANTS: readonly Invariant[] = [...INVARIANTS, readyTask
  *  of the schema: it is the ask, and `typed-runner-doctor.test.ts` holds each list against
  *  `PRAGMA table_info` so a column renamed out from under it fails a test. */
 const release = table<{ id: number; slug: string; state: string }>("release", ["id", "slug", "state"]);
-const epic = table<{ id: number; slug: string; state: string; release_id: number }>("epic", [
-  "id",
-  "slug",
-  "state",
-  "release_id",
-]);
-const story = table<{ id: number; slug: string; state: string; epic_id: number }>("story", [
-  "id",
-  "slug",
-  "state",
-  "epic_id",
-]);
-const requirement = table<{ id: number; slug: string; state: string; story_id: number }>("requirement", [
-  "id",
-  "slug",
-  "state",
-  "story_id",
-]);
-const criteria = table<{ id: number; slug: string; state: string; requirement_id: number }>("acceptance_criteria", [
-  "id",
-  "slug",
-  "state",
-  "requirement_id",
-]);
+const epic = table<{ id: number; slug: string; state: string; release_id: number }>("epic", ["id", "slug", "state", "release_id"]);
+const story = table<{ id: number; slug: string; state: string; epic_id: number }>("story", ["id", "slug", "state", "epic_id"]);
+const requirement = table<{ id: number; slug: string; state: string; story_id: number }>("requirement", ["id", "slug", "state", "story_id"]);
+const criteria = table<{ id: number; slug: string; state: string; requirement_id: number }>("acceptance_criteria", ["id", "slug", "state", "requirement_id"]);
 const acceptanceTest = table<{
   id: number;
   slug: string;
@@ -105,19 +200,8 @@ const acceptanceTest = table<{
   red_at_base_sha: string | null;
   script_path: string | null;
 }>("acceptance_test", ["id", "slug", "state", "parent_id", "red_at_base_sha", "script_path"]);
-const taskTable = table<{
-  id: number;
-  slug: string;
-  state: string;
-  acceptance_test_id: number;
-  role: string;
-}>("task", ["id", "slug", "state", "acceptance_test_id", "role"]);
-const taskTest = table<{ id: number; slug: string; state: string; parent_id: number }>("task_test", [
-  "id",
-  "slug",
-  "state",
-  "parent_id",
-]);
+const taskTable = table<{ id: number; slug: string; state: string; acceptance_test_id: number; role: string }>("task", ["id", "slug", "state", "acceptance_test_id", "role"]);
+const taskTest = table<{ id: number; slug: string; state: string; parent_id: number }>("task_test", ["id", "slug", "state", "parent_id"]);
 const worker = table<{ id: number; slug: string; role: string }>("worker", ["id", "slug", "role"]);
 const schemaVersion = table<{ version: number }>("schema_version", ["version"]);
 const project = table<{ id: number; repo: string }>("project", ["id", "repo"]);
@@ -154,15 +238,7 @@ interface ViolationRow {
   detail: string;
   found_at: string;
 }
-const doctorViolation = table<ViolationRow>("doctor_violation", [
-  "rowid",
-  "invariant",
-  "entity",
-  "entity_id",
-  "slug",
-  "detail",
-  "found_at",
-]);
+const doctorViolation = table<ViolationRow>("doctor_violation", ["rowid", "invariant", "entity", "entity_id", "slug", "detail", "found_at"]);
 
 /** One check a pass ran, as the pass recorded it. Rewritten whole every tick beside the
  *  violations, and in the same transaction: a report and the list of what produced it that
@@ -178,6 +254,19 @@ interface PassRow {
   at: string;
 }
 const doctorPass = table<PassRow>("doctor_pass", ["rowid", "invariant", "world", "reachable", "found", "at"]);
+
+/** One whole-suite run, as the pass recorded it. One row: "how red is the tip" is answered
+ *  by the last run and no other. `files` is the failures' files newline-joined, kept in the
+ *  row that counted them so the number and the names cannot come from two different runs. */
+interface SuiteRow {
+  tip: string;
+  failed: number;
+  passed: number;
+  skipped: number;
+  files: string;
+  at: string;
+}
+const doctorSuite = table<SuiteRow>("doctor_suite", ["tip", "failed", "passed", "skipped", "files", "at"]);
 
 const sqliteMaster = table<{ type: string; name: string }>("sqlite_master", ["type", "name"]);
 
@@ -200,22 +289,10 @@ type Node = Omit<RecordNode, "entity">;
 
 const TABLES: readonly { entity: RecordNode["entity"]; nodes: (q: Dialect) => readonly Node[] }[] = [
   { entity: "release", nodes: (q) => q.selectFrom(release).all().map((r) => ({ ...r, parent_id: null })) },
-  {
-    entity: "epic",
-    nodes: (q) => q.selectFrom(epic).all().map(({ release_id, ...r }) => ({ ...r, parent_id: release_id })),
-  },
-  {
-    entity: "story",
-    nodes: (q) => q.selectFrom(story).all().map(({ epic_id, ...r }) => ({ ...r, parent_id: epic_id })),
-  },
-  {
-    entity: "requirement",
-    nodes: (q) => q.selectFrom(requirement).all().map(({ story_id, ...r }) => ({ ...r, parent_id: story_id })),
-  },
-  {
-    entity: "acceptance_criteria",
-    nodes: (q) => q.selectFrom(criteria).all().map(({ requirement_id, ...r }) => ({ ...r, parent_id: requirement_id })),
-  },
+  { entity: "epic", nodes: (q) => q.selectFrom(epic).all().map(({ release_id, ...r }) => ({ ...r, parent_id: release_id })) },
+  { entity: "story", nodes: (q) => q.selectFrom(story).all().map(({ epic_id, ...r }) => ({ ...r, parent_id: epic_id })) },
+  { entity: "requirement", nodes: (q) => q.selectFrom(requirement).all().map(({ story_id, ...r }) => ({ ...r, parent_id: story_id })) },
+  { entity: "acceptance_criteria", nodes: (q) => q.selectFrom(criteria).all().map(({ requirement_id, ...r }) => ({ ...r, parent_id: requirement_id })) },
   { entity: "acceptance_test", nodes: (q) => q.selectFrom(acceptanceTest).all() },
   {
     entity: "task",
@@ -346,7 +423,13 @@ export class Doctor {
     private readonly db: DatabaseSync,
     /** The tick's set: the pure ones, plus the tree read against the repository the record
      *  names. A caller passes its own only to test the boundary itself. */
-    private readonly invariants: readonly Invariant[] = [...RUNNER_INVARIANTS, fileCeilingInvariant(repoOf(db))],
+    private readonly invariants: readonly Invariant[] = [
+      ...RUNNER_INVARIANTS,
+      fileCeilingInvariant(repoOf(db)),
+      distIsBuiltFromSource(repoOf(db)),
+      taskWorkIsCommitted(db),
+      taskBranchIsNotSuperseded(db, gitIn(repoOf(db))),
+    ],
     /** How the ancestry question gets asked. The runner is the half that may read the
      *  world, so `delivered_story_has_landed` is only ever reported here after git has
      *  been asked whether the branch is in the base. */
@@ -370,6 +453,16 @@ export class Doctor {
          reachable INTEGER NOT NULL,
          found     INTEGER NOT NULL,
          at        TEXT    NOT NULL
+       )`,
+    );
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS doctor_suite (
+         tip     TEXT    NOT NULL,
+         failed  INTEGER NOT NULL,
+         passed  INTEGER NOT NULL,
+         skipped INTEGER NOT NULL,
+         files   TEXT    NOT NULL,
+         at      TEXT    NOT NULL
        )`,
     );
   }
@@ -755,4 +848,76 @@ export function redAtBase(db: DatabaseSync): readonly RedFile[] {
     found.set(t.script_path, { file: t.script_path, test: t.slug, sha: t.red_at_base_sha });
   }
   return [...found.values()];
+}
+
+/** docs/design/19, applied to the tree the pass ran against rather than to the record.
+ *
+ *  The watch called master green for hours off `the-cockpit-matches-its-design` alone while
+ *  the whole suite was red on about a hundred tests: a run narrowed to one file answers for
+ *  that file and nothing else, and no count of the record can find that out. So the suite is
+ *  run whole, at the tip it ran against, and `failed` is the number the board puts beside
+ *  the branch. `files` is the failures' files in the order the runner named them, empty for
+ *  a green run, because a number nobody can act on gets argued with instead. */
+export interface Tally {
+  /** The commit the suite ran against. A tally with no tip is a number about nothing. */
+  readonly tip: string;
+  readonly failed: number;
+  readonly passed: number;
+  readonly skipped: number;
+  readonly files: readonly string[];
+}
+
+/** The runner's summary, read off the line counting tests and not the one above it counting
+ *  files: one red file holding a hundred red tests is a hundred, and `Test Files 1 failed
+ *  (1)` would call it one. A word the summary omits is nought of that kind, which is how
+ *  vitest prints a run with nothing skipped. `null` is output carrying no summary at all — a
+ *  suite that died before it counted anything, which must never read as green. */
+export function tallyOf(coloured: string, tip: string): Tally | null {
+  // A runner that believes it is talking to a terminal writes its counts in escape codes,
+  // and a pass that read only the plain spelling would call such a run uncountable.
+  const output = coloured.replace(/\u001b\[[0-9;]*m/g, "");
+  const line = /^[^\S\n]*Tests[^\S\n]+(.*)$/m.exec(output)?.[1];
+  if (line === undefined) return null;
+  const n = (word: string): number => Number(new RegExp(`(\\d+) ${word}`).exec(line)?.[1] ?? 0);
+  return { tip, failed: n("failed"), passed: n("passed"), skipped: n("skipped"), files: failingFilesOf(output) };
+}
+
+/** The suite as the pass may see it: a tree in, everything the runner printed out. Both
+ *  streams, because vitest counts on stdout and names its failing files on stderr. */
+export type Suite = (cwd: string) => string;
+
+/** A red suite exits non-zero. That is the answer, not an error, so the output is taken off
+ *  the failure exactly as off the success. */
+export const runSuite: Suite = (cwd: string): string => {
+  try {
+    return execFileSync("pnpm", ["exec", "vitest", "run"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string };
+    return `${e.stdout ?? ""}\n${e.stderr ?? ""}`;
+  }
+};
+
+/** Run the whole suite over a tree and say what it came to. The runner is a seam so a test
+ *  can hand in a tree of its own; the default is the one the watch and the tick would use. */
+export const suiteTally = (cwd: string, tip: string, suite: Suite = runSuite): Tally | null => tallyOf(suite(cwd), tip);
+
+/** Written as the doctor's other rows are: replaced, never appended — two rows would leave
+ *  a view to guess which of them the branch is at. A run with no tally to record writes
+ *  nothing and clears nothing: the last real count is still true of the tip it names. */
+export function recordSuite(db: DatabaseSync, tally: Tally | null): void {
+  if (tally === null) return;
+  const q = queries(db);
+  transact(db, () => {
+    q.deleteFrom(doctorSuite).run();
+    q.insertInto(doctorSuite, { ...tally, files: tally.files.join("\n"), at: now() }).run();
+  });
+}
+
+/** What the board reads to say how red the tip is. `null` is no suite has been run against
+ *  this record at all, which is not the same fact as a suite that found nothing. */
+export function lastSuite(db: DatabaseSync): (Tally & { readonly at: string }) | null {
+  if (!hasTable(db, "doctor_suite")) return null;
+  const row = queries(db).selectFrom(doctorSuite).all()[0];
+  if (row === undefined) return null;
+  return { ...row, files: row.files === "" ? [] : row.files.split("\n") };
 }

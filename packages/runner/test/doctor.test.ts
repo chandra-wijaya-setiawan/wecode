@@ -1,11 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import { INVARIANTS, Maker, open, type Snapshot, type Violation } from "@wecode/core";
 import { DEFAULT_BUDGET, Runner, type RunnerOptions } from "../src/index.js";
+import * as doctorModule from "../src/doctor.js";
+import * as trees from "../src/doctor/trees.js";
 import {
   checksOf,
   Doctor,
@@ -312,5 +315,69 @@ describe("the check for a ready task no pass can dispatch", () => {
     expect(RUNNER_INVARIANTS.map((i) => i.name)).toEqual([...INVARIANTS.map((i) => i.name), READY_TASK_CHECK]);
     expect(INVARIANTS.map((i) => i.name)).not.toContain(READY_TASK_CHECK);
     expect(checksOf().map((c) => c.name)).not.toContain(READY_TASK_CHECK);
+  });
+});
+
+/** The invariants whose subject is a tree on disk are the ones no snapshot can answer, and
+ *  they are now a module of their own. Read off the source text as well as the bindings: a
+ *  re-export keeps every caller working, which is exactly what would hide the move having
+ *  been undone. */
+describe("the doctor's tree invariants", () => {
+  const src = (path: string): string => readFileSync(fileURLToPath(new URL(`../src/${path}`, import.meta.url)), "utf8");
+
+  it("are declared in doctor/trees.ts", () => {
+    const text = src("doctor/trees.ts");
+    expect(text).toContain("export const DIST_CHECK");
+    expect(text).toContain("export function builtTree");
+    expect(text).toContain("export function newestUnder");
+    expect(text).toContain("export function staleDists");
+    expect(text).toContain("export const distIsBuiltFromSource");
+  });
+
+  it("are not declared in doctor.ts any more", () => {
+    const text = src("doctor.ts");
+    for (const declaration of [
+      "export const DIST_CHECK",
+      "export function builtTree",
+      "export function newestUnder",
+      "export function staleDists",
+      "export const distIsBuiltFromSource",
+    ]) {
+      expect(text, declaration).not.toContain(declaration);
+    }
+  });
+
+  /** The doctor walked the workspace itself; that reading now has one home. */
+  it("leave doctor.ts reading no directory of its own", () => {
+    expect(src("doctor.ts")).not.toContain("readdirSync");
+    expect(src("doctor/trees.ts")).toContain("readdirSync");
+  });
+
+  /** A tree check needs a repository and nothing else. A module that reached for the record
+   *  would be back where it started. */
+  it("read the tree and never the record", () => {
+    const text = src("doctor/trees.ts");
+    expect(text).not.toContain("node:sqlite");
+    expect(text).not.toContain("@wecode/core/dist/db.js");
+  });
+
+  it("are still the same bindings the doctor's face offers", () => {
+    expect(doctorModule.distIsBuiltFromSource).toBe(trees.distIsBuiltFromSource);
+    expect(doctorModule.builtTree).toBe(trees.builtTree);
+    expect(doctorModule.newestUnder).toBe(trees.newestUnder);
+    expect(doctorModule.staleDists).toBe(trees.staleDists);
+    expect(doctorModule.DIST_CHECK).toBe(trees.DIST_CHECK);
+  });
+
+  it("still name the check the report names", () => {
+    expect(trees.DIST_CHECK).toBe("dist_is_built_from_its_source");
+    expect(trees.distIsBuiltFromSource(repo).name).toBe(trees.DIST_CHECK);
+  });
+
+  /** The move is a move, not a promotion: the check still needs a root to be bound to, so
+   *  it stays out of the pure set. */
+  it("are still out of the pure set", () => {
+    expect(RUNNER_INVARIANTS.map((i) => i.name)).not.toContain(trees.DIST_CHECK);
+    expect(checksOf().map((c) => c.name)).not.toContain(trees.DIST_CHECK);
   });
 });

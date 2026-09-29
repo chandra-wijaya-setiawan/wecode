@@ -2,7 +2,7 @@
  *  all declared in config/views.yaml — so what is proved here is twice over: that a row is
  *  drawn grouped, marked and with its why, and that none of the words doing it live in a
  *  .tsx file. */
-import { GREEN, RED, YELLOW, coloured, plain } from "./force-color.js";
+import { GREEN, RED, YELLOW, coloured } from "./force-color.js";
 
 /** chalk's `gray` is the bright-black foreground, closed by the same reset any other
  *  colour is — so `coloured` reads it like the rest. */
@@ -190,10 +190,13 @@ describe("the colours are configuration", () => {
     const out = render(
       createElement(List, { rows, height: 3, cursor: null, width: 40 }),
     ).lastFrame() ?? "";
-    // Red is the ask, dim is the settled row, and green is nowhere on the board.
-    expect(coloured(out, RED)).toEqual([plain(out).split("\n")[0]]);
-    expect(coloured(out, YELLOW)).toEqual([plain(out).split("\n")[1]]);
-    expect(coloured(out, DIM)).toEqual([plain(out).split("\n")[2]]);
+    // Red is the ask, dim is the settled row, and green is nowhere on the board. The
+    // colour is spent on the state cell alone — a whole row in red says the row is the
+    // ask, where the board's claim is that its *state* is, and the label beside it is a
+    // title that means the same in every column.
+    expect(coloured(out, RED)).toEqual(["approval"]);
+    expect(coloured(out, YELLOW)).toEqual(["waiting"]);
+    expect(coloured(out, DIM)).toEqual(["delivered"]);
     expect(coloured(out, GREEN)).toEqual([]);
   });
 

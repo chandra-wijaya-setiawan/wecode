@@ -1,8 +1,11 @@
 packages:
   - "packages/*"
 
-# vitest pulls esbuild, whose install script pnpm refuses to run unless it is told to.
+# vitest pulls esbuild, whose install script pnpm refuses to run unless it is told.
 # Without this a fresh worktree cannot install at all: --frozen-lockfile turns the warning
-# into ERR_PNPM_IGNORED_BUILDS, and every acceptance test fails before it runs.
+# into ERR_PNPM_IGNORED_BUILDS, and every acceptance test fails before it runs. node-pty is
+# the same story one level deeper: it compiles a C++ addon with node-gyp, and without this
+# line the addon is never built and every spawn fails to load it.
 allowBuilds:
   esbuild: true
+  node-pty: true

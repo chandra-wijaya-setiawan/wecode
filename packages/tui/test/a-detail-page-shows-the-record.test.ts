@@ -145,8 +145,8 @@ describe("the page a record's title and state lead", () => {
   it("leaves how the children stand on the children box, next to the count it refines", () => {
     descendTo("storefront");
     const out = lines();
-    expect(out.join("\n")).toContain("─ children (1) · in_progress 1");
-    expect(out[0]).not.toContain("in_progress 1");
+    expect(out.join("\n")).toContain("─ children (1) · in_progress¹");
+    expect(out[0]).not.toContain("in_progress¹");
   });
 
   it("clips the title to the terminal rather than drawing past it", () => {

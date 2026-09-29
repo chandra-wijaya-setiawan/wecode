@@ -25,14 +25,22 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { cleanup, render } from "ink-testing-library";
-import { loadMachines, open } from "@wecode/core";
-import { check, type CapturedNode } from "@wecode/ui";
-// By path, the way the cockpit's own gate reaches it: index.ts re-exports `check` and not
-// yet the design half beside it.
-import { against, expected, type Design } from "@wecode/ui/dist/expected.js";
+import { loadMachines, open, SCHEMA_VERSION } from "@wecode/core";
+// Through the package entry, the one door: `@wecode/lens` names the design half beside
+// `check`, so the gate reaches the loader the projector reaches and a reader of this file
+// does not have to know that `expected` lives in expected.js.
+import { against, check, expected, type CapturedNode } from "@wecode/lens";
 import { App } from "../src/app.js";
-import { Cockpit } from "../src/screens.js";
-import { cockpitDesign, loadViews, ViewError } from "../src/views.js";
+import { Cockpit, raised } from "../src/screens.js";
+import {
+  cockpitDesign,
+  detailDesign,
+  loadViews,
+  outlineDesign,
+  screenDesign,
+  screenNames,
+  ViewError,
+} from "../src/views.js";
 import { seed, T } from "./seed.js";
 
 const WIDTH = 80;
@@ -83,13 +91,20 @@ const frame = (): string[] =>
 
 /** The same capture the cockpit's own gate takes: a section owns the full width from its
  *  head down to the next one, the bar is the last line, and the blank the body stops short
- *  of it belongs to nobody. */
-const HEAD = /^──\s(?:\S\s)?(.+?)\s(?:\[(\S)\]\s)?─/;
+ *  of it belongs to nobody. A head is `proposal.head`'s line — the section's glyph in
+ *  column zero, the name in capitals, and the count with its raised letter at the right
+ *  edge, which the countless lead section does without. */
+const HEAD = /^(\S) ([A-Z][A-Z ]*?)(?:\s{2,}(\d+(?:\/\d+)?)(\S))?$/;
+
+const LETTERS = "abcdefghijklmnopqrstuvwxyz";
+const unraised = (glyph: string | undefined): string | undefined =>
+  glyph === undefined ? undefined : (LETTERS.split("").find((l) => raised(l) === glyph) ?? glyph);
 
 function capture(out: readonly string[]): CapturedNode {
   const heads = out.flatMap((line, at) => (HEAD.test(line) ? [at] : []));
   const children = heads.map((at, i): CapturedNode => {
-    const [, name = "", key] = HEAD.exec(out[at] ?? "") ?? [];
+    const [, , name = "", , glyph] = HEAD.exec(out[at] ?? "") ?? [];
+    const key = unraised(glyph);
     const under = out.slice(at + 1, heads[i + 1] ?? out.length);
     const blank = under.indexOf("");
     const body = blank === -1 ? under : under.slice(0, blank);
@@ -122,7 +137,7 @@ const HOLDS = {
   services: [
     "pulse   storefront  still      0 running · 1 queued · 0 stuck · moved 2h0m ago",
     "runner  workspace   none       no runner holds this workspace · 1 queued",
-    "schema  workspace   current    database 14 · this build understands 14",
+    `schema  workspace   current    database ${SCHEMA_VERSION} · this build understands ${SCHEMA_VERSION}`,
     "fleet   workspace   short      no engineer for 1 ready",
     "doctor  workspace   not built  0.0.2 · healing and collection",
   ],
@@ -131,7 +146,7 @@ const HOLDS = {
 
 describe("the tree is built out of the two files", () => {
   it("is a capture the four rules read clean, like any design", () => {
-    expect(check(expected(cockpitDesign(SCREEN, HOLDS) as Design))).toEqual([]);
+    expect(check(expected(cockpitDesign(SCREEN, HOLDS)))).toEqual([]);
   });
 
   it("names the boxes views.yaml names, in its order, in the case design.yaml asks for", () => {
@@ -160,7 +175,7 @@ describe("the tree is built out of the two files", () => {
   });
 
   it("stacks the boxes by what they hold, a section costing design.yaml's one line", () => {
-    const placed = expected(cockpitDesign(SCREEN, HOLDS) as Design).children ?? [];
+    const placed = expected(cockpitDesign(SCREEN, HOLDS)).children ?? [];
     expect(placed.map((box) => [box.name, box.at.y, box.at.height])).toEqual([
       ["SERVICES", 0, 6],
       ["NEEDS YOU", 6, 2],
@@ -203,7 +218,7 @@ describe("an edit to either file moves the tree", () => {
 
   it("grows every box when design.yaml spends two lines of chrome on a section", () => {
     const paths = edited({ design: ["chrome_lines_per_section: 1", "chrome_lines_per_section: 2"] });
-    const placed = expected(cockpitDesign(SCREEN, HOLDS, paths) as Design).children ?? [];
+    const placed = expected(cockpitDesign(SCREEN, HOLDS, paths)).children ?? [];
     expect(placed.slice(0, 3).map((b) => [b.name, b.at.y, b.at.height])).toEqual([
       ["SERVICES", 0, 7],
       ["NEEDS YOU", 7, 3],
@@ -227,9 +242,109 @@ describe("an edit to either file moves the tree", () => {
   });
 });
 
+/** The cockpit was the only screen with a translation, and design.yaml declares three.
+ *  A screen with no translation is a screen the gate cannot hold the code to and the
+ *  projector cannot draw, which is how the detail page and the outline came to be argued
+ *  out in a config file nothing reads. */
+describe("the other two screens the design declares", () => {
+  it("writes the detail page's block out of design.yaml's fields, into its own gutter", () => {
+    const rows = (detailDesign("node", SCREEN).parts ?? [])[0]?.rows ?? [];
+    expect(rows).toEqual([
+      "entity    —",
+      "id        —",
+      "title     —",
+      "state     —",
+      "children  —",
+    ]);
+  });
+
+  it("carries the sections design.yaml declares `of` the record, and no others", () => {
+    const named = (record: string): string[] =>
+      (detailDesign(record, SCREEN).parts ?? []).map((p) => p.name);
+    expect(named("node")).toContain("children ({count}) · {tally}");
+    expect(named("node")).toContain("proof ({count}) · {tally}");
+    expect(named("assignment")).not.toContain("children ({count}) · {tally}");
+    expect(detailDesign("assignment", SCREEN).name).toBe("assignment #{id} · {state}");
+  });
+
+  it("foots the page with two levels, the global one on the terminal's last line", () => {
+    const feet = (detailDesign("node", SCREEN).parts ?? []).slice(-2);
+    expect(feet.map((f) => [f.name, f.at?.y])).toEqual([
+      ["record", HEIGHT - 2],
+      ["global", HEIGHT - 1],
+    ]);
+    // Every word beside a letter is key_bar's own, and the key it withholds is withheld.
+    expect(feet[0]?.rows).toEqual(["j/k move  g/G top/end  enter open  a act"]);
+    expect(feet[1]?.rows?.[0]).not.toContain("fold");
+  });
+
+  it("refuses a record design.yaml does not declare a detail page for", () => {
+    expect(() => detailDesign("weather", SCREEN)).toThrow(ViewError);
+    expect(() => detailDesign("weather", SCREEN)).toThrow(
+      "detail.screens does not name weather — it names node, assignment",
+    );
+  });
+
+  it("draws one outline row per rung design.yaml shows, indented by its depth", () => {
+    const tree = (outlineDesign(SCREEN).parts ?? [])[0];
+    expect(tree?.rows).toEqual([
+      "- {label} · #{id} · project · {state} · {rollup}",
+      "  - {label} · #{id} · release · {state} · {rollup}",
+      "    - {label} · #{id} · epic · {state} · {rollup}",
+      "      - {label} · #{id} · story · {state} · {rollup}",
+      // The deepest rung folds nothing, so design.yaml marks it with a space and the row
+      // keeps the column rather than closing up under the one above it.
+      "          {label} · #{id} · task · {state} · {rollup}",
+    ]);
+  });
+
+  it("gives the outline the title and letter views.yaml gives it, and room for a border", () => {
+    const box = outlineDesign(SCREEN);
+    expect([box.name, box.key]).toEqual(["Outline", "t"]);
+    expect((box.parts ?? [])[0]?.at).toEqual({ x: 1, y: 1 });
+    expect((box.parts ?? [])[0]?.width).toBe(WIDTH - 2);
+  });
+
+  it("puts the outline's own key on its bar, which the dashboard's withholds", () => {
+    expect((outlineDesign(SCREEN).parts ?? []).at(-1)?.rows?.[0]).toContain("+/- fold");
+    expect((cockpitDesign(SCREEN).parts ?? []).at(-1)?.rows?.[0]).not.toContain("fold");
+  });
+
+  it("re-titles the outline when views.yaml re-titles it, with no edit here", () => {
+    const paths = edited({ views: ["title: Outline", "title: Everything"] });
+    expect(outlineDesign(SCREEN, {}, paths).name).toBe("Everything");
+  });
+});
+
+describe("one door onto all three", () => {
+  it("names the screens the files declare, the page and each record it is drawn for", () => {
+    expect(screenNames()).toEqual(["cockpit", "detail", "outline", "node", "assignment"]);
+  });
+
+  it("hands each name to the translation that owns it", () => {
+    expect(screenDesign("cockpit", SCREEN, HOLDS)).toEqual(cockpitDesign(SCREEN, HOLDS));
+    expect(screenDesign("outline", SCREEN)).toEqual(outlineDesign(SCREEN));
+    expect(screenDesign("assignment", SCREEN)).toEqual(detailDesign("assignment", SCREEN));
+  });
+
+  it("reads `detail` as the first record design.yaml declares the page for", () => {
+    expect(screenDesign("detail", SCREEN)).toEqual(detailDesign("node", SCREEN));
+  });
+
+  it("is a clean capture for every screen it knows, like any design", () => {
+    for (const name of screenNames()) expect(check(expected(screenDesign(name, SCREEN)))).toEqual([]);
+  });
+
+  it("names them all when asked for one nobody declared", () => {
+    expect(() => screenDesign("weather", SCREEN)).toThrow(
+      "no such screen weather — the design declares cockpit, detail, outline, node, assignment",
+    );
+  });
+});
+
 describe("the real cockpit against the derived tree", () => {
   it("is the screen the two files ask for, box for box and row for row", () => {
-    expect(against(cockpitDesign(SCREEN, HOLDS) as Design, capture(frame()))).toEqual([]);
+    expect(against(cockpitDesign(SCREEN, HOLDS), capture(frame()))).toEqual([]);
   });
 
   it("still catches a box drawn somewhere other than where the design puts it", () => {
@@ -238,7 +353,7 @@ describe("the real cockpit against the derived tree", () => {
       box.name === "QUEUE" ? { ...box, at: { ...box.at, y: box.at.y + 1 } } : box,
     );
     expect(
-      against(cockpitDesign(SCREEN, HOLDS) as Design, { ...moved, children: boxes }),
+      against(cockpitDesign(SCREEN, HOLDS), { ...moved, children: boxes }),
     ).toEqual([
       { kind: "moved", node: "Cockpit > QUEUE", says: `was at 0,10 ${WIDTH}x2, now 0,11 ${WIDTH}x2` },
     ]);

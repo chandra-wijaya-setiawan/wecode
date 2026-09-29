@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 80 30">
+<rect x="0" y="0" width="80" height="30" fill="none" stroke="#000" data-depth="0"/>
+<text x="0" y="0.8" font-family="monospace" font-size="0.8" textLength="7" lengthAdjust="spacingAndGlyphs" data-row="0">Cockpit</text>
+<rect x="0" y="0" width="80" height="2" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="0.8" font-family="monospace" font-size="0.8" textLength="8" lengthAdjust="spacingAndGlyphs" data-row="0">SERVICES</text>
+<text x="0" y="1.8" font-family="monospace" font-size="0.8" data-row="1"></text>
+<rect x="0" y="2" width="80" height="2" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="2.8" font-family="monospace" font-size="0.8" textLength="9" lengthAdjust="spacingAndGlyphs" data-row="0">NEEDS YOU</text>
+<text x="0" y="3.8" font-family="monospace" font-size="0.8" textLength="20" lengthAdjust="spacingAndGlyphs" data-row="1">nothing waits on you</text>
+<rect x="0" y="4" width="80" height="2" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="4.8" font-family="monospace" font-size="0.8" textLength="7" lengthAdjust="spacingAndGlyphs" data-row="0">RUNNING</text>
+<text x="0" y="5.8" font-family="monospace" font-size="0.8" textLength="18" lengthAdjust="spacingAndGlyphs" data-row="1">nothing is running</text>
+<rect x="0" y="6" width="80" height="2" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="6.8" font-family="monospace" font-size="0.8" textLength="5" lengthAdjust="spacingAndGlyphs" data-row="0">QUEUE</text>
+<text x="0" y="7.8" font-family="monospace" font-size="0.8" textLength="29" lengthAdjust="spacingAndGlyphs" data-row="1">nothing is waiting for a slot</text>
+<rect x="0" y="8" width="80" height="2" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="8.8" font-family="monospace" font-size="0.8" textLength="7" lengthAdjust="spacingAndGlyphs" data-row="0">COOKING</text>
+<text x="0" y="9.8" font-family="monospace" font-size="0.8" textLength="16" lengthAdjust="spacingAndGlyphs" data-row="1">nothing is stuck</text>
+<rect x="0" y="10" width="80" height="2" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="10.8" font-family="monospace" font-size="0.8" textLength="7" lengthAdjust="spacingAndGlyphs" data-row="0">PLANNED</text>
+<text x="0" y="11.8" font-family="monospace" font-size="0.8" textLength="18" lengthAdjust="spacingAndGlyphs" data-row="1">nothing is planned</text>
+<rect x="0" y="12" width="80" height="2" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="12.8" font-family="monospace" font-size="0.8" textLength="9" lengthAdjust="spacingAndGlyphs" data-row="0">DELIVERED</text>
+<text x="0" y="13.8" font-family="monospace" font-size="0.8" textLength="26" lengthAdjust="spacingAndGlyphs" data-row="1">nothing is waiting to land</text>
+<rect x="0" y="14" width="80" height="2" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="14.8" font-family="monospace" font-size="0.8" textLength="7" lengthAdjust="spacingAndGlyphs" data-row="0">DROPPED</text>
+<text x="0" y="15.8" font-family="monospace" font-size="0.8" textLength="24" lengthAdjust="spacingAndGlyphs" data-row="1">nothing has been dropped</text>
+<rect x="0" y="29" width="80" height="1" fill="none" stroke="#000" data-depth="1"/>
+<text x="0" y="29.8" font-family="monospace" font-size="0.8" textLength="7" lengthAdjust="spacingAndGlyphs" data-row="0">Key bar</text>
+<text x="0" y="30.8" font-family="monospace" font-size="0.8" textLength="79" lengthAdjust="spacingAndGlyphs" data-row="1">j/k move  g/G top/end  enter open  v box  v t outline  a act  r refresh  q quit</text>
+</svg>

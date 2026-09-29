@@ -26,13 +26,32 @@ components:
     layer: gate
     component: true
     owns: apply a verb, fire the cascade it unblocks, settle anything whose guard came true
-    modules: [apply, approval, create, edit, bulk, cascade, chore, lease, lessons]
+    modules:
+      [
+        apply,
+        approval,
+        create,
+        edit,
+        bulk,
+        cascade,
+        chore,
+        chore/allocation,
+        chore/raise,
+        chore/reads,
+        chore/record,
+        chore/refusal,
+        chore/rows,
+        chore/view,
+        lease,
+        lessons,
+        sketch,
+      ]
 
   model:
     package: core
     layer: gate
     component: true
-    owns: the entities, their state machines as data, and one named guard per constrained transition
+    owns: the entities, their state machines as data, one named guard per constrained transition, and which landed branches are safe to remove
     modules: [types, entities, machines, guards, checks, invariants, land, facade, facade-gen]
 
   views:
@@ -40,7 +59,7 @@ components:
     layer: presentation
     component: true
     owns: the filters over the record, the walk down the tree, and what is next up
-    modules: [board, tree, order, delivered]
+    modules: [board, board/facts, board/panels, board/pulse, board/row, board/rows, board/walk, tree, order, delivered]
 
   ledger:
     package: core
@@ -81,8 +100,8 @@ components:
     package: runner
     layer: service
     component: true
-    owns: takes an assignment and makes it real — the session it runs in, and what the last attempt left
-    modules: [foreman, ports]
+    owns: takes an assignment and makes it real — the session it runs in, what the last attempt left, and the words a chore's worker is dispatched with
+    modules: [foreman, foreman/prompt, ports]
 
   trees:
     package: runner
@@ -103,7 +122,7 @@ components:
     layer: service
     component: true
     owns: writes what was observed back to the core, so the record and reality agree on every tick
-    modules: [daemon, land-chore, premerge]
+    modules: [daemon, land-chore, premerge, tick/perform-chores, tick/prove-stories, tick/red-at-base, tick/refresh, tick/settle, tick/story-chores]
 
   worker adapter:
     package: runner
@@ -117,7 +136,7 @@ components:
     layer: service
     component: true
     owns: checks wecode against itself, heals what it safely can, and proposes the rest as a chore
-    modules: [doctor, healer, ceiling, screens-check]
+    modules: [doctor, doctor/trees, healer, ceiling, screens-check]
 
   heartbeat:
     package: runner
@@ -138,7 +157,7 @@ components:
     layer: client
     component: true
     owns: every verb, as a command. The only way an agent reaches wecode
-    modules: [bin, capabilities, delivered, doctor, explore, index, plan, run, scope-proposal, ui, unimported]
+    modules: [bin, capabilities, delivered, doctor, explore, index, paint, plan, plan/refusals, run, scope-proposal, ui, unimported, verbs/act, verbs/entity, verbs/make, verbs/read, verbs/run-and-see, verbs/see, verbs/tree, verbs/usage, verbs/wait, verbs/work]
 
   repo-explorer:
     package: explorer
@@ -148,10 +167,10 @@ components:
     modules: [adapters/codegraph, architecture, coverage, index, ports, propose, reflexion]
 
   view-index:
-    package: ui
+    package: lens
     layer: client
     component: true
-    owns: the screens a person reads stated as ports — what the index of boxes must say, said once and without naming a renderer. The renderers behind it — ink for a terminal, CDP for a web page, wireframe for a picture — draw those lines and decide nothing
+    owns: the screens a person reads stated as ports — what the index of boxes must say, said once and without naming a renderer. The renderers behind it — ink for a terminal, CDP for a web page, wireframe for a picture — draw those lines and decide nothing. It also judges what was drawn — whether one capture of a screen is self-consistent, and what is different between two of them
     modules: [adapters/cdp, adapters/ink, check, diff, expected, index, ports, wireframe]
 
   tui:
@@ -159,4 +178,53 @@ components:
     layer: client
     component: true
     owns: the board, and the few verbs worth typing while looking at a row
-    modules: [app, bin, index, list, outline, screens, services, views]
+    modules: [app, bin, index, keys, list, outline, screens, services, views]
+
+  webapp:
+    package: webapp
+    layer: client
+    component: true
+    owns: the same board in a browser — one page per question, drawn from the boxes views.yaml declares and wrapped in the shell design.yaml declares, served over http. It reads the record, and answers an approval in the operator's own name; that one verb is the exception, because every other verb that changes wecode is an agent's or the cli's. Behind the dock it runs one shell — the operator's own login shell, in the painter's pty, in the directory of the workspace being served, on this surface's own socket and no other — and the painter's terminal is the pane on it; the shell is not wecode's to decide, so nothing here reads what is typed
+    modules: [answer, drawing, drop, picker, rail, pages/agents, pages/board, pages/cooking, pages/decisions, pages/discover, pages/ledger, pages/projects, pages/shell, pages/sketches, pages/tasks, pages/tree, server]
+
+  webapp dock:
+    package: webapp
+    layer: client
+    component: true
+    owns: all of the terminal in the dock bar the markup of it — the names the markup and the script agree on, the pane that opens an emulator on them, the open-or-shut state the root's class is, and the four files a browser is sent so that any of it runs, with the one line in a served document that asks for the first. It runs in the page and decides nothing the pages have not already drawn; the pane and the turning are handed to a browser as their own source rather than written out twice
+    modules: [browser/dock]
+
+  webapp review:
+    package: webapp
+    layer: client
+    component: true
+    owns: what a browser is sent for reviewing a sketch — the painter's own pick, annotate and queue machine, served as the files it already is — where a round of notes goes when the reviewer sends it, and the drawing half that machine deliberately leaves out. A round is typed at the shell the dock is already holding, on the route that already carries the keystrokes, as one line an agent can act on. The review loop is the painter's and is not written a second time here; what this decides is only the wording of a round, the far end it lands on, and how `view()` is put on a page and a click or a keypress handed back
+    modules: [browser/annotate, browser/overlay-dom, browser/round]
+
+  painter:
+    package: painter
+    layer: client
+    component: true
+    owns: the surface a person reviews an artefact on — one session per artefact, the prompts the browser queues against it, the poll a waiting agent is woken by, and the chrome the artefact is framed in before it is served. It holds no opinion about what an artefact says
+    modules: [frame, pty, server, session]
+
+  painter overlay:
+    package: painter
+    layer: client
+    component: true
+    owns: what the reviewer sees and does in the browser — picking an element, queueing a prompt against it, the terminal the session is driven from, and the styling of the chrome around them. It runs in the page and decides nothing the server has not already offered
+    modules: [client/overlay, client/overlay.css, client/pick, client/queue, client/terminal]
+
+  painter surface:
+    package: painter
+    layer: surface
+    component: false
+    owns: what a client of the painter package may import
+    modules: [index]
+
+  webapp surface:
+    package: webapp
+    layer: surface
+    component: false
+    owns: the web server's executable and what a client of the package may import
+    modules: [bin, index]

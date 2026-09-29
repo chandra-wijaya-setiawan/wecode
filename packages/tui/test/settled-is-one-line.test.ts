@@ -17,6 +17,7 @@ import {
   SectionList,
   cooking,
   forgetCooking,
+  groupOf,
   isSettled,
   sectionLines,
   type Row,
@@ -43,6 +44,12 @@ const texts = (
   width = 80,
   empty = "nothing is waiting to land",
 ): string[] => sectionLines(rows, height, cursor, width, empty).map((l) => l.text);
+
+/** An open row leads with its own state's mark in its first two columns — views.yaml's
+ *  cooking groups, the same vocabulary the heads are marked in. A state no group claims
+ *  leads with a space. Written here so the expectations below say what a row says and not
+ *  what its state's glyph happens to be today. */
+const led = (state: string, rest: string): string => `${groupOf(state)?.mark ?? " "} ${rest}`;
 
 /** The frame as written, escapes and all. */
 const frame = (rows: readonly Row[], height: number, cursor: number | null = null): string =>
@@ -101,16 +108,19 @@ describe("the settled rows are one tally", () => {
     ];
 
     expect(texts(rows, 6)).toEqual([
-      "#1  approval  land it?",
-      "#3  running   going",
+      led("approval", "#1  approval  land it?"),
+      led("running", "#3  running   going"),
       "+ 2 settled",
     ]);
   });
 
+  /** List colour is applied to the state cell alone, so what the dim holds is the tally's
+   *  own word — the mark and the number stand undimmed beside it. */
   it("is dim, because it is the one thing nobody has to look at again", () => {
     const out = frame([row(1, "going", "running"), row(2, "shipped", "delivered")], 4);
 
-    expect(coloured(out, DIM)).toEqual(["+ 1 settled"]);
+    expect(coloured(out, DIM)).toEqual(["settled"]);
+    expect(plain(out).split("\n").at(-1)).toBe("+ 1 settled");
   });
 
   it("is what fourteen lines of finished work come to", () => {
@@ -120,7 +130,7 @@ describe("the settled rows are one tally", () => {
   });
 
   it("is not drawn at all when there is nothing settled", () => {
-    expect(texts([row(1, "going", "running")], 4)).toEqual(["#1  running  going"]);
+    expect(texts([row(1, "going", "running")], 4)).toEqual([led("running", "#1  running  going")]);
   });
 });
 
@@ -158,9 +168,9 @@ describe("the height the tally gives back", () => {
     ];
 
     expect(texts(rows, 4)).toEqual([
-      "#1  running  open 1",
-      "#2  running  open 2",
-      "#3  running  open 3",
+      led("running", "#1  running  open 1"),
+      led("running", "#2  running  open 2"),
+      led("running", "#3  running  open 3"),
       "+ 1 settled",
     ]);
   });
@@ -172,7 +182,7 @@ describe("the height the tally gives back", () => {
     ];
 
     expect(texts(rows, 3)).toEqual([
-      "#1  running  open 1",
+      led("running", "#1  running  open 1"),
       "… and 3 more",
       "+ 1 settled",
     ]);
@@ -181,7 +191,7 @@ describe("the height the tally gives back", () => {
   it("gives the last line to the open rows when there is only one to give", () => {
     const rows = [row(1, "open", "running"), row(9, "shipped", "delivered")];
 
-    expect(texts(rows, 1)).toEqual(["#1  running  open"]);
+    expect(texts(rows, 1)).toEqual([led("running", "#1  running  open")]);
   });
 });
 
@@ -196,11 +206,11 @@ describe("the cursor over a sectioned list", () => {
     const out = frame(rows, 4, 1);
 
     expect(plain(out).split("\n")).toEqual([
-      "#2  running  going",
-      "#4  waiting  waits",
+      led("running", "#2  running  going"),
+      led("waiting", "#4  waiting  waits"),
       "+ 2 settled",
     ]);
-    expect(inverted(out)).toEqual(["#4  waiting  waits"]);
+    expect(inverted(out)).toEqual([led("waiting", "#4  waiting  waits")]);
   });
 
   it("never lands on the tally, whatever it is set to", () => {

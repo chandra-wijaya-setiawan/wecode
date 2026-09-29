@@ -9,7 +9,14 @@
  *  So: needs you, running, queue, cooking, planned, delivered, dropped. The fold keeps only
  *  what is stuck. Asserted against the rendered lines rather than against `loadViews()` or
  *  `board()`, because a test over the functions that feed the screen passes on a screen
- *  that draws nothing: the box a person can see is the border with the title in it.
+ *  that draws nothing: the box a person can see is the head with the title in it.
+ *
+ *  "Box" is the older word for it. Nothing on the dashboard is boxed now — see
+ *  test/no-section-is-boxed.test.ts — and a head is no longer a rule with a title sat in
+ *  it either. config/design.yaml's `proposal.head` writes one as the section's glyph in
+ *  column zero, its name in capitals, and at the far right what it holds with the letter
+ *  `v` opens it by raised onto the number. So a section is found by that opening and not by
+ *  a `── ` that is gone; the count there is seven all the same.
  *
  *  Unlike the four-panel test this replaces, the titles *are* written out here. Which boxes
  *  the page spends its height on is the decision this test exists to hold — a test that
@@ -26,7 +33,8 @@ import { loadMachines, open } from "@wecode/core";
 // board.ts's own, and the three have to be read from one place or they answer from two.
 import { MACHINE_SIDE, board, cooking } from "../../core/src/board.js";
 import { App } from "../src/app.js";
-import { Cockpit } from "../src/screens.js";
+import { Cockpit, raised } from "../src/screens.js";
+import { sectionMark } from "../src/list.js";
 import { loadOffPage, loadViews } from "../src/views.js";
 import { loadServices } from "../src/services.js";
 import { ins, seed, T } from "./seed.js";
@@ -120,26 +128,42 @@ afterEach(cleanup);
 const lines = (width = 100, height = 90): string[] =>
   plain(render(createElement(Cockpit, { app, width, height })).lastFrame() ?? "").split("\n");
 
-/** Every region the frame draws, titled, top to bottom. A region is a rule with its title
- *  sat in it — `── Cooking (1) [c] ─────` — and the count and the letter come off. The
- *  borders these titles used to sit in are gone; see test/no-section-is-boxed.test.ts. */
-const drawn = (out: readonly string[]): string[] =>
-  out
-    .filter((l) => l.startsWith("──"))
-    .map((l) => /─ (.*?) ─/.exec(l)?.[1] ?? "")
-    .map((t) => t.replace(/ \(\d+\)/, "").replace(/ \[.\]$/, "").trim());
+/** How the design writes the opening of a section's head: its glyph in column zero, then
+ *  its name in capitals. Read off views.yaml through `sectionMark` rather than written
+ *  here, so a renamed glyph is one edit and not two. */
+const opening = (name: string, title: string): string => `${sectionMark(name)} ${title.toUpperCase()}`;
 
-/** The services box sits on the dashboard and is not a box of the board: it is no filter,
- *  `v` does not open it, and it holds no row the cursor can reach. */
+/** Every section the dashboard can draw, in page order, with the opening that finds it. */
+const SECTIONS = [
+  { title: services.title, open: opening("services", services.title) },
+  ...views.map((v) => ({ title: v.title, open: opening(v.name, v.title) })),
+];
+
+/** Every region the frame draws, titled, top to bottom. */
+const drawn = (out: readonly string[]): string[] =>
+  out.flatMap((l) => {
+    const head = SECTIONS.find((s) => l.startsWith(s.open));
+    return head === undefined ? [] : [head.title];
+  });
+
+/** The services section sits on the dashboard and is not a box of the board: it is no
+ *  filter, `v` does not open it, and it holds no row the cursor can reach. */
 const boxes = (out: readonly string[]): string[] =>
   drawn(out).filter((t) => t !== services.title);
 
-/** The lines under the rule titled `title`, down to the next rule or the end of the page. */
+/** Where the head of the section titled `title` is drawn, or -1. */
+const headAt = (out: readonly string[], title: string): number => {
+  const head = SECTIONS.find((s) => s.title === title);
+  expect(head, `no section titled ${title}`).toBeDefined();
+  return out.findIndex((l) => l.startsWith(head?.open ?? "\u0000"));
+};
+
+/** The lines under the head titled `title`, down to the next head or the end of the page. */
 function inside(out: readonly string[], title: string): string {
-  const at = out.findIndex((l) => l.startsWith(`── ${title} (`));
+  const at = headAt(out, title);
   expect(at, `no box titled ${title}`).toBeGreaterThanOrEqual(0);
   const rest = out.slice(at + 1);
-  const end = rest.findIndex((l) => l.startsWith("──") || l.trim() === "");
+  const end = rest.findIndex((l) => drawn([l]).length > 0 || l.trim() === "");
   return (end < 0 ? rest : rest.slice(0, end)).join("\n");
 }
 
@@ -182,16 +206,22 @@ describe("the board draws seven boxes, in order", () => {
     expect(app.screen).toMatchObject({ kind: "box", view: { name: "open" } });
   });
 
-  /** Each is ruled off rather than boxed in, and the rule carries everything the border
-   *  carried: the title, the count, and the letter `v` opens it by. */
-  it("rules each of them off, titled, with its count and its key", () => {
+  /** Each is headed rather than boxed in, and the head carries everything the border
+   *  carried: the mark, the title, the count, and the letter `v` opens it by. The seated
+   *  box's count is a fraction — `1/2ʳ` — because a running row holds one of the fleet's
+   *  seats; every other box's is the plain number. */
+  it("heads each of them, marked and titled, with its count and its key", () => {
     const out = lines();
     for (const view of views) {
-      const at = out.findIndex((l) => l.startsWith(`── ${view.title} (`));
+      const at = headAt(out, view.title);
       expect(at, `no box titled ${view.title}`).toBeGreaterThanOrEqual(0);
-      expect(out[at]).toMatch(new RegExp(`^── ${view.title} \\(\\d+\\) \\[.\\] ─+$`));
+      expect(out[at]).toMatch(
+        new RegExp(
+          `^${sectionMark(view.name)} ${view.title.toUpperCase()} +\\d+(/\\d+)?${raised(view.key)}$`,
+        ),
+      );
       expect((out[at] as string).length).toBe(100);
-      // And the rows under it are rows, not the sides of a box the rule replaced.
+      // And the rows under it are rows, not the sides of a box the head replaced.
       expect(inside(out, view.title)).not.toMatch(/[│┌┐└┘]/);
     }
   });
@@ -205,7 +235,7 @@ describe("the board draws seven boxes, in order", () => {
   });
 
   it("draws each row once, on one box and no other", () => {
-    const body = lines().filter((l) => !l.startsWith("──") && l.trim() !== "");
+    const body = lines().filter((l) => drawn([l]).length === 0 && l.trim() !== "");
     for (const what of Object.values(rows)) {
       const holding = body.filter((l) => l.includes(what));
       expect(holding.length, `${what} is drawn on ${holding.length} boxes`).toBe(1);
