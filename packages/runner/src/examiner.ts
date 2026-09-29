@@ -188,6 +188,67 @@ export function scriptPathOf(artefact: string): string | null {
   return looksLikeAPath ? candidate : null;
 }
 
+/** Written where the board reads a run's output when the run was killed at its limit. A
+ *  killed command exits non-zero exactly as a broken one does, so without this a suite that
+ *  simply needed longer is recorded as work that does not build, with no way to tell the two
+ *  apart. It is still a failure — an artefact that overruns the budget it asked for has not
+ *  proved anything — but it is a failure that says so. */
+export const TIMED_OUT = "timed out: it did not finish inside the budget it declared";
+
+/** How long one artefact is given before it is killed. A ten-minute default suits a unit
+ *  test and starves a full suite on a cold tree; the same default, raised for that suite,
+ *  lets a hung test hold a tick for ten minutes. Only the artefact knows which it is. */
+export interface TimeBudget {
+  /** What identifies the artefact: any command carrying this is given `seconds`. */
+  readonly proof: string;
+  /** Its whole run, in seconds. */
+  readonly seconds: number;
+}
+
+/** The `timeout:` list of the tree being examined. Declared in the project's own config
+ *  beside `prepare:` and `entry:`, so the person who owns the build changes what the build
+ *  is allowed to take without opening a `.ts`, and a tree that declares none is run on the
+ *  runner's default exactly as before. */
+export function budgetsOf(cwd: string): readonly TimeBudget[] {
+  const raw = projectConfig(cwd)["timeout"];
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((b) => {
+    const { proof, seconds } = (b ?? {}) as Record<string, unknown>;
+    return typeof proof === "string" && proof !== "" && typeof seconds === "number" && seconds > 0
+      ? [{ proof, seconds }]
+      : [];
+  });
+}
+
+/** What an artefact that declares nothing is given, where the tree declares nothing either.
+ *  A last resort, not a policy: ten minutes suits a unit test and starves a cold full suite,
+ *  which is the whole reason a tree gets to say otherwise. */
+export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** The tree's own default, in milliseconds, or null where it names none. `timeout:` covers
+ *  the artefacts worth naming one by one; a tree whose every proof is slow — a cold monorepo,
+ *  an emulator — should not have to list them all to say so, and the person who owns the
+ *  build says it here rather than in a `.ts`.
+ *
+ *  Anything but a positive number is no declaration at all: a typo leaves the built-in limit
+ *  in place rather than running every proof with no budget. */
+export function defaultTimeoutOf(cwd: string): number | null {
+  const raw = projectConfig(cwd)["timeout_default"];
+  return typeof raw === "number" && raw > 0 ? raw * 1000 : null;
+}
+
+/** The milliseconds an artefact declared for itself, or `fallback` where it declared none.
+ *  Matched by name, the way `entry:` is: a `proof` is a substring the command carries, so
+ *  one declaration covers the narrowed re-run of that same command too — it is the artefact
+ *  plus the files it named, and it deserves no less time than the run it is re-running.
+ *
+ *  First match wins, so a config reads top to bottom. A malformed or absent entry is never a
+ *  verdict: it simply leaves the runner's own limit in place. */
+export function timeoutFor(artefact: string, budgets: readonly TimeBudget[], fallback: number): number {
+  const declared = budgets.find((b) => artefact.includes(b.proof));
+  return declared === undefined ? fallback : declared.seconds * 1000;
+}
+
 /** What a verdict was reached against. A test that already passed or failed is only worth
  *  running again when one of these has moved. */
 export interface RunAgainst {
@@ -308,7 +369,11 @@ export class Examiner {
 
   constructor(
     private readonly db: DatabaseSync,
-    private readonly timeoutMs = 10 * 60 * 1000,
+    /** An explicit limit from the caller, which beats anything the tree declares by default:
+     *  a caller that names a number has a reason the tree cannot know. Left undefined — as
+     *  the daemon leaves it — the tree's `timeout_default:` decides, and the built-in only
+     *  where the tree is silent. */
+    private readonly timeoutMs?: number,
   ) {
     this.verbs = new Verbs(new Engine(db));
     // Runner-owned, beside the record rather than in it: the ledger says what is true of the
@@ -588,17 +653,25 @@ export class Examiner {
     }
   }
 
+  /** Runs one artefact under the limit that artefact asked for. The budget is read off the
+   *  tree being examined, not off this runner's checkout, for the same reason `prepare:` is:
+   *  it is a fact about the work in that tree. */
   private async runOne(artefact: string, cwd: string): Promise<{ ok: boolean; output: string }> {
+    const fallback = this.timeoutMs ?? defaultTimeoutOf(cwd) ?? DEFAULT_TIMEOUT_MS;
+    const timeout = timeoutFor(artefact, budgetsOf(cwd), fallback);
     try {
       const { stdout, stderr } = await exec("bash", ["-lc", artefact], {
         cwd,
-        timeout: this.timeoutMs,
+        timeout,
         maxBuffer: 4 * 1024 * 1024,
       });
       return { ok: true, output: `${stdout}${stderr}` };
     } catch (err) {
-      const e = err as { stdout?: string; stderr?: string; message?: string };
-      return { ok: false, output: `${e.stdout ?? ""}${e.stderr ?? ""}${e.message ?? ""}` };
+      const e = err as { stdout?: string; stderr?: string; message?: string; killed?: boolean };
+      const body = `${e.stdout ?? ""}${e.stderr ?? ""}${e.message ?? ""}`;
+      // `killed` is set by the child_process timeout and by nothing else here: a command
+      // that exits on its own is never killed, however long it took.
+      return { ok: false, output: e.killed === true ? `${TIMED_OUT}: ${timeout}ms\n${body}` : body };
     }
   }
 }
