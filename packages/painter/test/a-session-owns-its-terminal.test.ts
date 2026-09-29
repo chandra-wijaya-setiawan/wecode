@@ -10,7 +10,7 @@
  *
  *  The second half is the constraint that makes the first half safe to land: a session
  *  opened with no command keeps the prompt queue and the poll exactly as they were,
- *  because that is how lavish-axi reaches its agent today, and it must not break while
+ *  because that is what a caller with its own agent already running needs, and both shapes
  *  painter replaces it. */
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -169,7 +169,7 @@ describe("a session opened with a command", () => {
 });
 
 describe("a session opened with no command", () => {
-  it("keeps the queue and the poll, because that is how lavish-axi works today", async () => {
+  it("keeps the queue and the poll for a session opened with no command of its own", async () => {
     const held = store();
     const id = opened(held);
     expect(sessionOf(held, id)?.terminal).toBe(false);

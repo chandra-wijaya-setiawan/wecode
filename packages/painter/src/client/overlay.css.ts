@@ -11,9 +11,9 @@
  *  stylesheet is generated from the same record the markup is built from, so a rename is
  *  one edit and a rule can never be left pointing at a class nobody writes any more.
  *
- *  There is no whiteboard here. Lavish styles an embedded Excalidraw canvas and the
- *  diagram viewport that hosts it; the painter overlay picks, annotates, queues and sends,
- *  so none of those rules are ported. */
+ *  There is no whiteboard here, so there is nothing to style for one: no embedded canvas and
+ *  no diagram viewport. The overlay picks, annotates, queues and sends, and those are all the
+ *  classes below. */
 
 /** Every class the overlay writes. The single definition: overlay.ts builds markup from
  *  these and `overlayCss` builds the rules from them. */

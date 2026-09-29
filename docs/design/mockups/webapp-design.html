@@ -236,7 +236,12 @@ header.hdr{position:sticky;top:0;z-index:5;box-shadow:0 1px 0 rgba(0,0,0,.08)}
   </details>
 </section>
 
-<form class="ask" data-lavish-question="webapp" onsubmit="event.preventDefault();const f=new FormData(event.currentTarget);const v=f.get('v');const n=(f.get('note')||'').trim();if(!v)return;window.lavish.queuePrompt('Webapp design: '+v+(n?' — '+n:''),{tag:'decision',text:'Webapp: '+v,element:event.currentTarget,data:{answer:v,note:n}});">
+<!-- The question this drawing asks its reader. It carried an inline handler that queued the
+     answer into the review tool wecode used before it had its own; that tool is gone, so the
+     call went nowhere. Answering a mockup is the painter overlay's job now — it is laid over
+     the drawing and does the picking and the queueing, so the drawing needs no script of its
+     own. The form is left as the question it is. -->
+<form class="ask" data-question="webapp" onsubmit="event.preventDefault();">
 <b>Chandra, this is the webapp design I propose.</b><div class="small">proposed. Eight pages, one per question you asked tonight, plus a terminal dock on the right that runs the orchestrator session on the machine serving the page. Real data from the record.</div><div class="small">Click a page above to look at it. Then choose one and press Send: approve and I declare it in design.yaml and plan the pages; change and I edit the design first.</div>
 <label><input type="radio" name="v" value="approve all seven pages"> Approve all seven pages — declare them in design.yaml and plan them, Projects, Tree and Decisions first</label>
 <label><input type="radio" name="v" value="approve Tree Decisions Cooking Agents only"> Approve Tree, Decisions, Cooking, Agents, Projects and Tasks; hold Story and Ledger</label>

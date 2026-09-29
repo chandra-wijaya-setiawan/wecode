@@ -45,9 +45,9 @@ export function lineOf(item: QueuedPrompt): string {
  *  `about` is what was being reviewed — the notes are all selectors within it, and a selector
  *  with nothing to hold it is ambiguous the moment there are two sketches.
  *
- *  `end` is Lavish's "Send & End": the round goes as it would have anyway, and the agent is
- *  told in the same breath that nothing further is coming, rather than being left waiting for
- *  a reviewer who has gone. */
+ *  `end` is send-and-end: the round goes as it would have anyway, and the agent is told in the
+ *  same breath that nothing further is coming, rather than being left waiting for a reviewer
+ *  who has gone. */
 export function noteOf(prompts: readonly QueuedPrompt[], about: string, end = false): string {
   const many = prompts.length === 1 ? "1 note" : `${prompts.length} notes`;
   const notes = prompts.map((item, at) => `(${at + 1}) ${lineOf(item)}`).join(" ");

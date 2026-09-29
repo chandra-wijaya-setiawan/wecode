@@ -57,6 +57,7 @@ When two of these collide, the earlier one wins.
 
 1. **Never write the feature code yourself.** Create the work and let the runner dispatch
    an agent. Your edits are to records, config and plans, never to the code under test.
+   The one thing you do draw is a mockup — see below — and a drawing is not code.
 2. **Never fix a failing test by hand.** A failing test is the answer, not an obstacle:
    read it, then make another task.
 3. **Nothing is done because an agent said so.** A task is done when its tests pass; a
@@ -69,6 +70,9 @@ When two of these collide, the earlier one wins.
    Give each task its own files.
 7. **Leave no record sitting.** Anything you create, you walk to the state that runs, in
    the same breath.
+8. **Every verb is wecode's.** If a job looks like it needs another tool, the verb for it
+   is in `wecode --help` — drawing included. Reaching outside leaves work the record
+   cannot see.
 
 ## If the project is not set up yet
 
@@ -81,6 +85,41 @@ Onboarding detects the stack, records the test command in `config/project.yaml`,
 `config/roles.yaml` with scopes that are real paths, registers the project, and installs
 this file as the wecode skill so the next session reads it. Every test and scope then
 defaults to what it learned.
+
+## Drawing, before there is work
+
+A user interface is designed before it is planned. wecode has its own two verbs for that
+and **no other tool is involved** — not a whiteboard, not a design service, not whatever
+else happens to be installed on the machine. A drawing made anywhere else is a drawing no
+gate can read and no task can be built from.
+
+```bash
+wecode sketch create "<name>" --kind design --says "<one line: what it proposes>"
+wecode sketch list [--limit <n>]     # every drawing, newest first, with its path
+wecode sketch drop <id>              # the record goes, the file stays
+```
+
+`sketch create` prints the path it expects the drawing at, inside the workspace. Write a
+**self-contained** HTML file there: one file, styles inline, images as `data:` URIs. A
+sketch that pulls in a neighbouring asset is a sketch that is blank wherever it is opened
+next.
+
+Then **get it signed before planning the build.** Raise an approval on the drawing and
+stop on that thread; a mockup nobody agreed to is a mockup the tasks will be re-planned
+against. Once it is signed, the drawing is what the tasks are gated on: name it in the
+story, and transcribe what it decides into the renderer's own config — `design.yaml`,
+`ui.yaml` — so a test can read the decision rather than the picture.
+
+A signed mockup a gate depends on belongs **in the repository**, under
+`docs/design/mockups/`, which is the path `config/roles.yaml` gives the designer. One kept
+outside it is one the gate cannot find on a fresh clone, and a gate that cannot find what
+it checks says nothing and is counted as passing.
+
+`wecode paint open|poll|end|export <file>` puts a drawing in front of a person and reports
+what they said, against the painter at `$WECODE_PAINTER_URL`. Check the painter is up
+before you reach for it: it serves `/session/<id>` for a session that exists and has no
+route that creates one, so `open` has nothing to talk to until that is written. Until then
+sketch, then ask.
 
 ## Making work
 

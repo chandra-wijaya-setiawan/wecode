@@ -193,7 +193,7 @@ renderers:
         mark: "#2f6f77"
         good: "#3d6b4f"
         # The other three the shell mockup signed and the transcription dropped: its `--amber`,
-        # `--red` and `--vio`. `.lavish/webapp-design.html` declares ten colours in its `:root`
+        # `--red` and `--vio`. `docs/design/mockups/webapp-design.html` declares ten in its `:root`
         # and only these seven were ever lifted out of it, which is the whole of story #561 —
         # so `failed` took plain ink for want of a red that was sitting in the file, and what
         # was moving took the mark, which already means something else.

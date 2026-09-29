@@ -13,9 +13,9 @@
  *  A session opened with a command runs its agent inside a terminal of its own, started
  *  the moment the session opens (`pty.ts` is that terminal): the prompts the person sends
  *  are written into it, so the agent is inside the review rather than somewhere else
- *  polling it. A session opened with no command keeps the queue and the poll, because
- *  that is how lavish-axi reaches its agent today and it must not break while painter
- *  replaces it. */
+ *  polling it. A session opened with no command keeps the queue and the poll anyway, for
+ *  the caller that has its own agent already running and only wants somewhere to put the
+ *  notes. Both shapes are the painter's; nothing outside it is served here. */
 import { Session as Terminal, type SessionOptions } from "./pty.js";
 
 /** One thing the person sent from the browser. `tag` is what kind of feedback it is —

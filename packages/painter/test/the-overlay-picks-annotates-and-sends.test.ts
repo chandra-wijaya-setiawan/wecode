@@ -393,7 +393,7 @@ describe("the overlay's stylesheet", () => {
   it("has no whiteboard in it", () => {
     const everything = `${overlayCss()} ${pickingCss()}`.toLowerCase();
     for (const word of ["mermaid", "excalidraw", "whiteboard", "canvas", "scene"]) {
-      expect(everything, `${word} should not have come across from Lavish`).not.toContain(word);
+      expect(everything, `${word} is a whiteboard's word and this overlay has no whiteboard`).not.toContain(word);
     }
   });
 });

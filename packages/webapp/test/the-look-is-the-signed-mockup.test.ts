@@ -31,7 +31,7 @@ const SHEET = stylesheet();
 /** The mockups' `:root`, transcribed. The name on the left is what the colour is for on this
  *  surface; the name in the comment is what the mockup calls it.
  *
- *  Two signed mockups. The shell's — `.lavish/webapp-design.html` — signed **ten** colours,
+ *  Two signed mockups. The shell's — `docs/design/mockups/webapp-design.html` — signed **ten** colours,
  *  and for a long time only seven of them were ever lifted out of it: `--amber`, `--red` and
  *  `--vio` were dropped in transcription, which is story #561 in full. The tree then spent the
  *  seven on questions they cannot answer, so `failed` took plain ink for want of a red that was
@@ -85,7 +85,7 @@ const SIGNED_TYPE: Readonly<Record<string, string>> = {
  *  CI and in every worktree — one relative path, no searching, and no way for this file to skip
  *  itself because the artifact was somewhere else.
  *
- *  It used to be looked for at `.lavish/webapp-design.html`, in three guesses at where the
+ *  It used to be looked for outside the checkout, in three guesses at where the
  *  checkout's parent might be, and found in none of them. So the check below never ran and the
  *  transcription went unverified — which is how three signed colours stayed lost. An artifact a
  *  gate depends on belongs beside the code, and `config/roles.yaml` gives the designer

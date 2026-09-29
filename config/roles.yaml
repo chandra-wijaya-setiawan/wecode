@@ -62,6 +62,6 @@ roles:
   designer:
     worker_kind: agent
     scope:
-      write: ["packages/*/design/**", "packages/*/config/design.yaml", ".lavish/**", "docs/design/mockups/**", "packages/*/config/ui.yaml"]
+      write: ["packages/*/design/**", "packages/*/config/design.yaml", "docs/design/mockups/**", "packages/*/config/ui.yaml"]
       tools: ["bash", "read", "edit", "write"]
     budget: { tokens: 250000, seconds: 3600 }
