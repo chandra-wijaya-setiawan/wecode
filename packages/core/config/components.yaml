@@ -149,8 +149,8 @@ components:
     package: runner
     layer: surface
     component: false
-    owns: the daemon's executable and what a client of the package may import
-    modules: [bin, index]
+    owns: the daemon's executable, the worker it builds out of what the operator declared, and what a client of the package may import
+    modules: [adapter-for, bin, index]
 
   cli:
     package: cli

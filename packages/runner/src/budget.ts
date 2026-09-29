@@ -28,6 +28,14 @@ export interface BudgetConfig {
   /** The effort every worker is spawned with. One setting, not one per role: a role that
    *  needs less thinking needs a smaller scope. */
   readonly effort: Effort;
+  /** The model every worker is spawned on, when the assignment does not name one of its
+   *  own. Absent when the operator has not chosen: the adapter's declared default then
+   *  stands, which is still a declaration rather than whatever the machine defaults to.
+   *
+   *  Not validated against a list of names here. Which models exist is Anthropic's to
+   *  change and a refusal written into this file would be the reason a working model could
+   *  not be used; an unreachable name fails loudly on the first attempt instead. */
+  readonly model?: string;
 }
 
 export const DEFAULT_BUDGET: BudgetConfig = {
@@ -45,7 +53,7 @@ export function loadBudget(path: string): BudgetConfig {
   const top = raw as Record<string, unknown>;
 
   for (const key of Object.keys(top)) {
-    if (!["max_open", "max_open_per_role", "order", "collision", "effort"].includes(key)) {
+    if (!["max_open", "max_open_per_role", "order", "collision", "effort", "model"].includes(key)) {
       throw new BudgetConfigError(`unknown key: ${key}`);
     }
   }
@@ -72,8 +80,17 @@ export function loadBudget(path: string): BudgetConfig {
     throw new BudgetConfigError(`effort must be one of ${EFFORTS.join(", ")}`);
   }
 
+  // A name, not a level: anything that is not a string with something in it would reach the
+  // harness as a `--model` flag nobody meant — `model:` on its own is null, and `model: 5`
+  // is a number — and be discovered one failed attempt later.
+  const model = top["model"];
+  if (model !== undefined && (typeof model !== "string" || model.trim() === "")) {
+    throw new BudgetConfigError("model must be a non-empty string");
+  }
+
   const order = (top["order"] ?? {}) as Record<string, unknown>;
   return {
+    ...(model === undefined ? {} : { model: model as string }),
     effort: effort === undefined ? DEFAULT_BUDGET.effort : (effort as Effort),
     max_open: typeof max_open === "number" ? max_open : DEFAULT_BUDGET.max_open,
     max_open_per_role: perRole,
