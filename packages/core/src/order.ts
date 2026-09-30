@@ -1,10 +1,13 @@
 /** Why a candidate was passed over is the same fact as why a bulk action declined an
  *  id, so Refusal has one definition, in types. */
-import type { Refusal } from "./types.js";
+import type { Refusal, StatefulEntity } from "./types.js";
 import type { DatabaseSync } from "node:sqlite";
 import { CHORE_KIND_DEFS, choreCandidates, clearChoreRefusal, recordChoreRefusal, type ChoreKind } from "./chore.js";
 import { queries, table } from "./db.js";
+import { NO_DEPENDENCIES, prerequisitesOf, type Dependencies } from "./depends.js";
 import type { Budget, Scope } from "./entities.js";
+import { successOf } from "./invariants.js";
+import { Repo } from "./repo.js";
 import type { RoleConfig } from "./roles.js";
 
 /** The columns this module reads, and only those. A narrow declaration is not a second copy
@@ -113,25 +116,135 @@ export function collides(a: readonly string[], b: readonly string[]): boolean {
   );
 }
 
-/** Ready tasks with no assignment attempting them, in id order.
+/** **What a story is waiting on, and which of the ones that are not waiting to do first.**
+ *
+ *  Two facts, and they are the two halves of one question, kept in separate fields for the
+ *  reason migration 017 gives: a dependency is a fact about the work — checkout genuinely
+ *  cannot be written before the cart — and a priority is a preference about it. Apart, a
+ *  preference cannot claim a story is blocked.
+ *
+ *  Both arrive as a value rather than being read here, for the reason `depends.ts` gives:
+ *  the rule is the part worth having exactly once, and it is the same rule whether the edges
+ *  came from a plan file, from a form, or one day from rows. It is also the only shape
+ *  available to this module — `typed-order.test.ts` holds the tables declared above to the
+ *  four the allocator already speaks about, so `story` and `story_depends_on` cannot be
+ *  asked here directly.
+ *
+ *  A prerequisite's *state* is the exception, and deliberately: it is read from the record,
+ *  through Repo, every time the question is asked. A caller may say what the shape of the
+ *  work is; it may not hand over a claim that the thing being waited for has finished. */
+export interface StoryQueue {
+  /** Every prerequisite edge declared so far, in the shape `depends.ts` holds them. */
+  readonly depends: Dependencies;
+  /** Priority per story id, lower first, as migration 017 spells the column. A story with
+   *  no entry is 0 — "nobody has ranked this" — which sorts it in among the others rather
+   *  than at one end. */
+  readonly priority: Readonly<Record<number, number>>;
+}
+
+/** Nothing waits on anything and nobody has ranked anything: the queue as it stood before
+ *  either fact could be stated, and the default.
+ *
+ *  It has to be inert. `board`'s queued panel is held against `readyCandidates(db)` id for
+ *  id by `queue-completeness.test.ts`, so the bare call must answer exactly what it always
+ *  did — a queue is something a caller opts into, not a new opinion of its own. */
+export const UNORDERED: StoryQueue = { depends: NO_DEPENDENCIES, priority: {} };
+
+/** Finished with, either way: the two states `invariants.ts` calls settled, with the success
+ *  one read back through `successOf` rather than spelled a second time.
+ *
+ *  `dropped` counts, and that is the whole of why the rule is *settled* and not *delivered*:
+ *  a story that was dropped is never going to be delivered, so a queue that kept waiting for
+ *  it would hold everything behind it for ever. */
+const SETTLED: readonly string[] = ["dropped", successOf("story")];
+
+/** The story a task hangs under, by the containment climb — task, acceptance_test,
+ *  acceptance_criteria, requirement, story. Null when the chain is broken, which is the same
+ *  answer this module already gives an assignment pointing at a row that is gone.
+ *
+ *  Memoised, because the sort asks for one task's story once per comparison and every answer
+ *  is four lookups. */
+function storyOf(repo: Repo, id: number, cache: Map<number, number | null>): number | null {
+  const hit = cache.get(id);
+  if (hit !== undefined) return hit;
+  let at: { entity: StatefulEntity; id: number } | null = { entity: "task", id };
+  while (at !== null && at.entity !== "story") at = repo.parentOf(at.entity, at.id);
+  const found = at === null ? null : at.id;
+  cache.set(id, found);
+  return found;
+}
+
+/** Whether anything this story declared it needs has yet to settle.
+ *
+ *  Direct prerequisites only, as `depends.ts` holds them: if 3 needs 2 and 2 needs 1, then 3
+ *  is held up by 2 and by nothing else — 2 cannot settle before 1 does, so 1 is already
+ *  accounted for by the time the question is asked again.
+ *
+ *  A prerequisite with no row at all counts as unsettled. It can never settle, so the only
+ *  alternative is to start work on the strength of a story nobody can find, and "no such
+ *  story" reads exactly like "not finished yet" — which is what it is. */
+const isWaiting = (repo: Repo, declared: Dependencies, story: number): boolean =>
+  prerequisitesOf(declared, story).some((p) => {
+    const state = repo.stateOf("story", p);
+    return state === null || !SETTLED.includes(state);
+  });
+
+/** Ready tasks with no assignment attempting them and nothing unsettled in front of them, in
+ *  priority then id order.
  *
  *  The exclusion is a set difference rather than a `NOT EXISTS`, and the order is applied
  *  here rather than in the query: the dialect spells neither, and both are cheap on a list
- *  the allocator is about to walk one at a time anyway. */
-export function readyCandidates(db: DatabaseSync): readonly Candidate[] {
+ *  the allocator is about to walk one at a time anyway.
+ *
+ *  Priority decides first and id still decides after it, so two candidates never tie and the
+ *  same record always yields the same first choice. Under the default queue every priority is
+ *  0 and this is the plain id order it has always been.
+ *
+ *  A task is dropped for a waiting story, not refused with a reason. `Refusal` is an id and a
+ *  sentence about a candidate, and a task held back by a dependency never became one — the
+ *  allocator's pass drops it at step 3, before scope and role are looked at.
+ *
+ *  **What this does not reach, named rather than half-done.** `nextUp` calls this without a
+ *  queue, and `ordered` re-sorts what it gets by rank, attempts and id — so a priority
+ *  established here would not survive that second sort. Carrying it would need a field on
+ *  `Candidate`, whose shape `typed-order.test.ts` holds to six. Nothing yet loads
+ *  `story_depends_on` or `story.priority` into a `StoryQueue` either; that loader is the
+ *  queue task's. Dropping a waiting task *does* carry through `nextUp` once it is given a
+ *  queue, because a candidate left out of this list stays left out. */
+export function readyCandidates(db: DatabaseSync, queue: StoryQueue = UNORDERED): readonly Candidate[] {
   const attempted = new Set(
     openAssignments(db)
       .filter((a) => a.objective_type === "task")
       .map((a) => a.objective_id),
   );
 
+  // Neither half of the queue is asked of the record when the queue has nothing to say: with
+  // no edges declared nothing can be waiting, and with nothing ranked every priority is 0.
+  // The climb to a story is four lookups per task, and the common case pays for none of them.
+  const asked = queue.depends.length > 0;
+  const ranked = Object.keys(queue.priority).length > 0;
+  const repo = new Repo(db);
+  const climbed = new Map<number, number | null>();
+  const under = (id: number): number | null => storyOf(repo, id, climbed);
+
+  const waiting = (id: number): boolean => {
+    if (!asked) return false;
+    const story = under(id);
+    return story !== null && isWaiting(repo, queue.depends, story);
+  };
+  const rank = (id: number): number => {
+    if (!ranked) return 0;
+    const story = under(id);
+    return story === null ? 0 : queue.priority[story] ?? 0;
+  };
+
   return queries(db)
     .selectFrom(task)
     .select(["id", "title", "role", "scope", "budget", "attempts"])
     .where("state", "=", "ready")
     .all()
-    .filter((r) => !attempted.has(r.id))
-    .sort((a, b) => a.id - b.id)
+    .filter((r) => !attempted.has(r.id) && !waiting(r.id))
+    .sort((a, b) => rank(a.id) - rank(b.id) || a.id - b.id)
     .map((r) => ({
       id: r.id,
       title: r.title,
