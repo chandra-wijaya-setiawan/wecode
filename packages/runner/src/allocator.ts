@@ -9,6 +9,7 @@ import {
   nextUp,
   openAssignments,
   ordered as inOrder,
+  queueOf,
   readyCandidates,
   type Candidate,
   type Refusal,
@@ -42,9 +43,15 @@ export interface Placement {
  *  hope the allocator picks the same one. */
 export type Place = (c: Candidate) => Promise<Placement | { why: string }>;
 
-/** Tasks that are ready and have nothing attempting them. */
+/** Tasks that are ready, have nothing attempting them, and are not waiting on a story that
+ *  has not finished.
+ *
+ *  The queue is passed rather than defaulted, because `readyCandidates`' own default is inert
+ *  on purpose: the bare call is held to the board's queued panel id for id, so it must answer
+ *  what it always did. This is the caller that opts in — docs/design/10 gives the allocator
+ *  the step "drop any whose prerequisite has not finished", and this is where it happens. */
 export function candidates(db: DatabaseSync): readonly Candidate[] {
-  return readyCandidates(db);
+  return readyCandidates(db, queueOf(db));
 }
 
 /** The words core refuses an overlapping candidate with. Matched, not re-derived: this

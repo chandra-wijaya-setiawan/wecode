@@ -27,6 +27,7 @@ import { queries } from "@wecode/core/dist/db.js";
 // What a record is: the tables, the shape of the tree, and the verbs that amend one row —
 // scope, artefact, retry. Namespaced because `task`, `project` and `scope` are all words
 // this file uses for something else.
+import * as dep from "./depends-verbs.js";
 import * as ent from "./verbs/entity.js";
 // The making verbs: create's help, and the artefact a test is proved by.
 import * as make from "./verbs/make.js";
@@ -279,21 +280,21 @@ function verb(entity: string, rest: readonly string[]): number {
   const [name, ...args] = rest;
   if (name === undefined) return fail(`wecode ${entity} <verb> …`);
 
-  // `design` is the one word that names both a record and a drawing. `show` is the
-  // drawing — a screen declared in a file, projected to an svg, no ledger involved — and
-  // every other verb, `create` first, is the row, so it goes on down this function.
-  // The split is here rather than in dispatch() so the row stays the default and the
-  // drawing the exception, both read in one place.
+  // `design` names both a record and a drawing: `show` is the drawing — declared in a file,
+  // projected to an svg, no ledger — and every other verb is the row. The split is here, not
+  // in dispatch(), so the row stays the default and the drawing the exception.
   if (entity === "design" && name === "show") return later(see.design([name, ...args]));
 
-  // parseArgs would call --help an unknown option. It is the one place a newcomer looks
-  // for create's flags, so answer it here, before the flags are parsed at all.
+  // parseArgs would call --help an unknown option, and this is where a newcomer looks for
+  // create's flags, so answer it before the flags are parsed at all.
   const asked = args.some((a) => a === "--help" || a === "-h");
   if (name === "create") return asked ? make.createHelp(at, entity) : create(entity, args);
   if (name === "scope") return asked ? ent.scopeHelp() : ent.scope(at, entity, args);
   if (name === "artefact") return asked ? make.artefactHelp() : make.artefact(at, entity, args);
   if (name === "restate") return asked ? use.restateHelp() : restateVerb(entity, args);
   if (name === "retry" && entity === "task") return ent.retry(at, args);
+  // Neither is a transition, so both are routed here rather than reaching the machine.
+  if (entity === "story" && (name === "depends" || name === "priority")) return dep[name](at, args);
 
   if (!isStateful(entity)) return fail(`${entity} has no states; its only verb is create`);
   const id = Number(args[0]);
@@ -342,7 +343,6 @@ function restateVerb(entity: string, args: readonly string[]): number {
   const id = Number(positionals[0]);
   if (!Number.isInteger(id) || values.to === undefined) return fail(how);
 
-  // The same guard scope and artefact have: ids are global, and this one writes.
   const wrong = ent.elsewhere(at, entity, id);
   if (wrong !== null) return fail(wrong);
 

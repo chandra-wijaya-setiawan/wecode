@@ -83,6 +83,8 @@ const INTRINSIC: Readonly<Record<string, string>> = {
   artefact: "the command a test is proved by — `wecode <test> artefact <id> --set \"<cmd>\"`",
   restate: "fix the wording, keeping the slug — `wecode <entity> restate <id> --to \"<words>\"`",
   retry: "the way back from failed, with a reason — `wecode task retry <id> --reason \"<why>\"`",
+  depends: "what a story waits on — `wecode story depends <id> --on <id>`; the queue drops it until that one settles",
+  priority: "which of the unblocked goes first, lower first — `wecode story priority <id> --to <n>`",
 };
 
 const source = (path: string): string => readFileSync(path, "utf8");

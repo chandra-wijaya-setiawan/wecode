@@ -22,6 +22,7 @@ export * from "./sketch.js";
 export * from "./lease.js";
 export * from "./bulk.js";
 export * from "./invariants.js";
+export { dependentsOf, dependsOn, NO_DEPENDENCIES, prerequisitesOf, queueOf, type Dependencies, type Dependency } from "./depends.js";
 export * from "./order.js";
 export * from "./delivered.js";
 export * from "./facade-gen.js";

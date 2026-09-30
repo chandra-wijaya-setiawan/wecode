@@ -1,3 +1,6 @@
+import type { DatabaseSync } from "node:sqlite";
+import { queries, table } from "./db.js";
+
 /** What a story needs before it can start, and the one rule that keeps the answer finite.
  *
  *  docs/design/10 gives the allocator a step it has nothing to run: *drop any whose
@@ -27,6 +30,11 @@ export class DependsError extends Error {}
  *  Both ends are story ids. The names are the two roles rather than `from` and `to`,
  *  because which way the arrow points is the one thing a reader of a dependency graph gets
  *  wrong, and `from` does not say. */
+const dependsTable = table<{ story_id: number; depends_on_id: number }>("story_depends_on", [
+  "story_id", "depends_on_id",
+]);
+const rankTable = table<{ id: number; priority: number }>("story", ["id", "priority"]);
+
 export interface Dependency {
   readonly dependent: number;
   readonly prerequisite: number;
@@ -134,4 +142,31 @@ export function dependsOn(
   }
 
   return [...declared, { dependent, prerequisite }];
+}
+
+/** The edges and the ranks as the record holds them, for the one caller that cannot be given
+ *  them: the runner.
+ *
+ *  The module above is deliberately a value and not a table, and `readyCandidates`'
+ *  `UNORDERED` default is deliberately inert — `queue-completeness.test.ts` holds the bare
+ *  `readyCandidates(db)` to the board's queued panel id for id, and a queue is something a
+ *  caller opts into. Both of those are right, and together they left the allocator with no way
+ *  to opt in: `order.ts` may not read `story` or `story_depends_on` (its table list is gated),
+ *  and nothing else offered to load them. So the loader lives here, beside the rule it feeds,
+ *  and the allocator passes what it returns.
+ *
+ *  A story with no rank is absent from `priority` rather than present as 0, so "nobody has
+ *  ranked this" and "ranked zero" stay the same answer the way `order.ts` already reads them,
+ *  and a story that has never been ranked costs no row. */
+export function queueOf(db: DatabaseSync): { depends: Dependencies; priority: Record<number, number> } {
+  const edges = queries(db)
+    .selectFrom(dependsTable)
+    .select(["story_id", "depends_on_id"])
+    .all()
+    .map((r) => ({ dependent: r.story_id, prerequisite: r.depends_on_id }));
+  const priority: Record<number, number> = {};
+  for (const r of queries(db).selectFrom(rankTable).select(["id", "priority"]).all()) {
+    if (r.priority !== 0) priority[r.id] = r.priority;
+  }
+  return { depends: edges, priority };
 }

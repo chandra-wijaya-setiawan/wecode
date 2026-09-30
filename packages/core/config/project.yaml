@@ -47,7 +47,10 @@ over:
   packages/runner/src/git.ts: 625
   packages/runner/src/foreman.ts: 624
   packages/core/test/typed-chore.test.ts: 631
-  packages/runner/src/examiner.ts: 604
+  # 604 → 677 when story #255's per-proof timeout work was merged by hand: examiner.ts is
+  # where a proof declares its own cost, which is the whole of that story. Restated at what
+  # the file is, per the paragraph above — the next change to it is weighed against the truth.
+  packages/runner/src/examiner.ts: 677
   packages/cli/test/run.test.ts: 578
   packages/runner/src/healer.ts: 567
   packages/cli/test/plan.test.ts: 556

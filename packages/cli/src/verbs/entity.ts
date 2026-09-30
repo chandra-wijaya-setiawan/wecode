@@ -83,11 +83,8 @@ const release = table<ReleaseRow>("release", [
   "id", "slug", "project_id", "version", "released_at", "state", "created_at", "updated_at",
 ]);
 const epic = table<EpicRow>("epic", ["id", "slug", "release_id", "title", "state", "created_at", "updated_at"]);
-// `priority` is last because `ALTER TABLE ADD COLUMN` appends, and this list is held to
-// `PRAGMA table_info` in the order the database declares them — see 017-story-depends-on.sql.
-export const story = table<StoryRow>("story", [
-  "id", "slug", "epic_id", "title", "state", "created_at", "updated_at", "priority",
-]);
+// `priority` last: ADD COLUMN appends, and this list is PRAGMA table_info's own order.
+export const story = table<StoryRow>("story", ["id", "slug", "epic_id", "title", "state", "created_at", "updated_at", "priority"]);
 export const requirement = table<RequirementRow>("requirement", [
   "id", "slug", "story_id", "statement", "state", "created_at", "updated_at",
 ]);
