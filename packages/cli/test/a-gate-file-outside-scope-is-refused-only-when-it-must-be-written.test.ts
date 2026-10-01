@@ -158,7 +158,7 @@ describe("a gate file outside scope is refused only when it must be written", ()
     project();
     wrote("src/list.ts", "export const list = [];\n");
     wrote("vitest.config.ts", "export default {};\n");
-    const test = "pnpm exec vitest run --config vitest.config.ts";
+    const test = "pnpm exec vitest run --config vitest.config.ts src/list.ts";
     expect(run(["plan", file(plan('["src/list.ts"]', test))])).toBe(0);
     expect(count("task")).toBe(1);
   });

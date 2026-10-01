@@ -95,7 +95,7 @@ describe("a plan's artefact must match a test file", () => {
     project();
     mkdirSync(join(repo, "test"));
     writeFileSync(join(repo, "test", "list.test.ts"), "");
-    expect(run(["plan", file(plan("pnpm exec vitest run test/list.test.ts", "pnpm test"))])).toBe(0);
+    expect(run(["plan", file(plan("pnpm exec vitest run test/list.test.ts", "pnpm exec vitest run src/list.ts"))])).toBe(0);
     expect(count("acceptance_test")).toBe(1);
   });
 
@@ -114,9 +114,12 @@ describe("a plan's artefact must match a test file", () => {
     expect(complained()).toContain("no file matches test/list.test.ts");
   });
 
-  it("says nothing about a word that is not a file: a directory filter, or a bare command", () => {
+  // A criteria may run a package, so its directory filter is no file for this rule to judge.
+  // The task half this case used to hold — a bare command as a task's gate — is refused now, and
+  // `a-task-gate-names-one-file.test.ts` is where that is held.
+  it("says nothing about a criteria's directory filter, which is not a file", () => {
     project();
-    expect(run(["plan", file(plan("pnpm exec vitest run packages/tui", "pnpm test -- --reporter dot"))])).toBe(0);
+    expect(run(["plan", file(plan("pnpm exec vitest run packages/tui", "pnpm test -- --reporter dot src/list.ts"))])).toBe(0);
     expect(complained()).toBe("");
   });
 

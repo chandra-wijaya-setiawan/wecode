@@ -202,3 +202,21 @@ export function reach(test: string | null, scope: readonly string[], where: stri
     say.push(`${where}: test: runs ${dir}, which this scope cannot reach`);
   }
 }
+
+/** A task is graded by its test, so its test names the file that grades it.
+ *
+ *  A command naming no file — `vitest run packages/tui`, `vitest run packages/webapp/test/`, or
+ *  the project's whole-suite fallback when a task declares no test at all — grades the task on
+ *  every other test in the tree too. Of 1,382 lessons the record holds, 114 are that: a task
+ *  red, or green, for a reason its own scope could not reach — the repository-wide ceiling, a
+ *  suite red at base, a neighbour's file. The criteria above a task may run a package, because
+ *  a criterion is about the whole of a behaviour; a task is about one change.
+ *
+ *  "Names a file" is `files()`'s reading: a word carrying a slash whose last segment has an
+ *  extension. It is the same test for every runner — `test/list.test.ts`, `tests/test_x.py`,
+ *  `src/a_test.go` — and it does not decide what a test file is called, only that one is
+ *  named. */
+export function oneFile(test: string | null, where: string, say: string[]): void {
+  if (test === null || files(test).length > 0) return;
+  say.push(`${where}: test: \`${test}\` names no file — a task is graded by the one test it can turn green, so name it`);
+}

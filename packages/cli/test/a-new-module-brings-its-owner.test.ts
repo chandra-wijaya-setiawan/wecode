@@ -82,11 +82,15 @@ function count(table: string): number {
 
 /** One story, one criteria, and the tasks under examination — nothing else in the way. */
 function plan(...tasks: readonly { title: string; scope: string }[]): string {
+  // A task's gate names one file inside its own scope, so the gate refuses nothing and this file
+  // judges only what it is about: whether a new module arrives with an owner.
+  const gate = (scope: string): string =>
+    (/"([^"]+)"/.exec(scope)?.[1] ?? "test/x.test.ts").replace(/\*\*?.*$/, "x.test.ts");
   const rows = tasks
     .map(
       (t) => `          - title: ${t.title}
             scope: [${t.scope}]
-            test: pnpm exec vitest run
+            test: pnpm exec vitest run ${gate(t.scope)}
             role: engineer
 `,
     )

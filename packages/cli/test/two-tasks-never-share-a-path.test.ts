@@ -59,9 +59,14 @@ function count(table: string): number {
 
 /** One story, one requirement, one criteria, two tasks with the scopes given. */
 function plan(first: string, second: string, criteria = 1): string {
+  // A task's gate names one file it can turn green, and the one named here is inside its own
+  // scope — a literal as it is, a glob's directory with a file in it — so the gate refuses
+  // nothing and this file goes on judging only what it is about: the paths two tasks share.
+  const gate = (scope: string): string =>
+    (/"([^"]+)"/.exec(scope)?.[1] ?? "test/x.test.ts").replace(/\*\*?.*$/, "x.test.ts");
   const task = (title: string, scope: string): string => `          - title: ${title}
             scope: ${scope}
-            test: pnpm exec vitest run test
+            test: pnpm exec vitest run ${gate(scope)}
 `;
   const head = `story: the cockpit is one reusable list
 epic: 1

@@ -26,7 +26,7 @@ import { queries, table, type Dialect } from "@wecode/core/dist/db.js";
 import { openCodegraph, type RepoIndex } from "@wecode/explorer";
 // Every rule that refuses a plan for what its scopes and tests say, kept whole in one
 // module: they are read together, and none of them touches the ledger.
-import { artefacts, collisions, needs, OWNERS, owners, reach } from "./plan/refusals.js";
+import { artefacts, collisions, needs, oneFile, OWNERS, owners, reach } from "./plan/refusals.js";
 import { promised, proposeScope, type Promised, type Proposal } from "./scope-proposal.js";
 
 // yaml is @wecode/core's dependency, and this package declares none of its own. Resolving it
@@ -504,7 +504,7 @@ function task(v: unknown, where: string, config: ProjectConfig | null, roles: Ro
 
   // Unlike the path check above, this one judges the fallback test too: a project-wide command
   // that narrows to one package is as unreachable as one the file spells out.
-  if (scope !== null) reach(test, scope, where, say);
+  if (scope !== null) { reach(test, scope, where, say); if (m["test"] !== undefined) oneFile(test, where, say); }
 
   const promises = promise(m["promises"], `${where}: promises`, say);
 

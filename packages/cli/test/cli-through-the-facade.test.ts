@@ -115,7 +115,7 @@ requirements:
         test: pnpm test -- mail
         tasks:
           - title: send the mail
-            test: pnpm test -- send
+            test: pnpm test -- test/send.test.ts
 `;
 
 function planned(): void {

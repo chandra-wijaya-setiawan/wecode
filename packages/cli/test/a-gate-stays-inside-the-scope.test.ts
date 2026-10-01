@@ -133,22 +133,27 @@ describe("a gate stays inside the scope", () => {
   it("allows a test that runs the package the scope writes", () => {
     project();
     workspace();
-    expect(run(["plan", plan('"packages/cli/src/**"', "pnpm --filter @wecode/cli test")])).toBe(0);
+    expect(run(["plan", plan('"packages/cli/src/**"', "pnpm --filter @wecode/cli exec vitest run packages/cli/src/a.test.ts")])).toBe(0);
     expect(count("task")).toBe(1);
   });
 
   it("allows a scope whose wildcard covers every package", () => {
     project();
     workspace();
-    expect(run(["plan", plan('"packages/*/src/**"', "pnpm exec vitest run packages/core")])).toBe(0);
+    expect(run(["plan", plan('"packages/*/src/**"', "pnpm exec vitest run packages/core/src/a.test.ts")])).toBe(0);
     expect(count("task")).toBe(1);
   });
 
-  it("allows a command that narrows to no package at all", () => {
+  // It used to be allowed, and it is the commonest wrong gate there is: a task graded by the
+  // whole suite is red or green for reasons its own scope cannot reach. 114 of the record's
+  // 1,382 lessons are that. So a command that narrows to nothing is refused before reach is
+  // asked about it — not because it runs too far, but because it names nothing to turn green.
+  it("refuses a command that narrows to no file at all, because a task is graded by one", () => {
     project();
     workspace();
-    expect(run(["plan", plan('"packages/cli/src/**"', "pnpm exec vitest run")])).toBe(0);
-    expect(count("task")).toBe(1);
+    expect(run(["plan", plan('"packages/cli/src/**"', "pnpm exec vitest run")])).toBe(1);
+    expect(complained()).toContain("names no file");
+    expect(count("task")).toBe(0);
   });
 
   it("judges the test the project falls back to, not only the one the file spells", () => {
@@ -173,7 +178,7 @@ requirements:
 
   it("has nothing to refuse in a tree that declares no workspace", () => {
     project();
-    expect(run(["plan", plan('"packages/cli/src/**"', "pnpm --filter @wecode/core test")])).toBe(0);
+    expect(run(["plan", plan('"packages/cli/src/**"', "pnpm --filter @wecode/core exec vitest run packages/cli/src/a.test.ts")])).toBe(0);
     expect(count("task")).toBe(1);
   });
 });

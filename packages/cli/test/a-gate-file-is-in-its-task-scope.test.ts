@@ -136,21 +136,23 @@ describe("a gate file is in its task's scope", () => {
   it("says nothing about a source file the command names, which is not a gate", () => {
     project();
     existing("src/list.ts", "vitest.config.ts");
-    expect(run(["plan", file(plan('["src/list.ts"]', "pnpm exec vitest run --config vitest.config.ts"))])).toBe(0);
+    // The gate also names the scope's own file, because a task's gate names one; the case is
+    // still that the config path beside it is nobody's to write.
+    expect(run(["plan", file(plan('["src/list.ts"]', "pnpm exec vitest run --config vitest.config.ts src/list.ts"))])).toBe(0);
     expect(count("task")).toBe(1);
   });
 
   it("says nothing about a directory the command narrows to, which is not a file", () => {
     project();
     existing("test/list.test.ts");
-    expect(run(["plan", file(plan('["src/list.ts"]', "pnpm exec vitest run test"))])).toBe(0);
+    expect(run(["plan", file(plan('["src/list.ts"]', "pnpm exec vitest run test src/list.ts"))])).toBe(0);
     expect(count("task")).toBe(1);
   });
 
   it("leaves the criteria's test alone: a criteria has no scope of its own to judge it by", () => {
     project();
     existing("test/list.test.ts");
-    const body = plan('["src/list.ts"]', "pnpm test", "pnpm exec vitest run test/list.test.ts");
+    const body = plan('["src/list.ts"]', "pnpm exec vitest run src/list.ts", "pnpm exec vitest run test/list.test.ts");
     expect(run(["plan", file(body)])).toBe(0);
     expect(count("acceptance_test")).toBe(1);
   });
